@@ -14,7 +14,9 @@ import {
   ChevronUp,
   LogOut,
   CheckCircle2,
+  Languages,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { AppConfig } from "../types/config";
 import { AudioDevice } from "../types/audio";
 import { PlexServerResource } from "../types/plex";
@@ -28,11 +30,13 @@ interface Props {
 }
 
 export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
+  const { t, i18n } = useTranslation();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [selectedLang, setSelectedLang] = useState(i18n.language || "pt-BR");
 
   // Estados do Fluxo de Login Plex (PIN)
   const [pinCode, setPinCode] = useState<string | null>(null);
@@ -42,11 +46,10 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
   const [loadingServers, setLoadingServers] = useState(false);
   const [showManualPlex, setShowManualPlex] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
-  
+
   useEffect(() => {
     Promise.all([configService.getConfig(), configService.getAudioDevices()])
       .then(([cfg, devs]) => {
-        // Se a config não tiver dispositivo ou o dispositivo antigo foi desconectado, seleciona o primeiro disponível
         if (devs.length > 0 && (!cfg.alsa_device || !devs.some((d) => d.id === cfg.alsa_device))) {
           cfg.alsa_device = devs[0].id;
         }
@@ -64,6 +67,12 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
       .catch(console.error)
       .finally(() => setLoading(false));
   }, []);
+
+  const handleLanguageChange = (lang: string) => {
+    setSelectedLang(lang);
+    i18n.changeLanguage(lang);
+    localStorage.setItem("sonante_lang", lang);
+  };
 
   const handleAddFolder = async () => {
     if (!config) return;
@@ -99,7 +108,6 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
     }
   };
 
-  // Iniciar autenticação Plex via PIN
   const handleStartPlexAuth = async () => {
     setIsPollingPin(true);
     setPinCode(null);
@@ -111,7 +119,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
     } catch (err) {
       console.error("Erro ao gerar PIN do Plex:", err);
       setIsPollingPin(false);
-      alert("Não foi possível conectar aos servidores do Plex. Verifique sua conexão à internet.");
+      alert("Não foi possível conectar aos servidores do Plex.");
     }
   };
 
@@ -122,7 +130,6 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
   };
 
-  // Desconectar / Fazer Logout da conta Plex
   const handleDisconnectPlex = () => {
     if (!config) return;
     setConfig({
@@ -183,7 +190,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
   if (loading || !config) return null;
 
   const isSelectedInList = devices.some((d) => d.id === config.alsa_device);
-  const isPlexConnected = config.plex_token && config.plex_token.trim().length > 0;
+  const isPlexConnected = Boolean(config.plex_token && config.plex_token.trim().length > 0);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs select-none p-4">
@@ -192,7 +199,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
         <div className="px-6 py-4 border-b border-[#262626] flex items-center justify-between bg-[#1D1D1D]">
           <div className="flex items-center space-x-2.5">
             <Sliders size={20} className="text-[#E5A00D]" />
-            <h2 className="text-base font-bold text-white tracking-wide">Preferências do Sistema</h2>
+            <h2 className="text-base font-bold text-white tracking-wide">{t("settings.title")}</h2>
           </div>
           <button
             onClick={onClose}
@@ -204,14 +211,47 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
 
         {/* Corpo com Scroll */}
         <div className="p-6 overflow-y-auto space-y-6 flex-1 text-xs">
-          {/* Seção 1: Saída de Áudio ALSA */}
+          {/* Seção 0: Idioma da Interface */}
           <div className="space-y-3">
+            <h3 className="text-[11px] font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1.5">
+              <Languages size={14} />
+              <span>{t("settings.language")}</span>
+            </h3>
+            <div className="flex space-x-3">
+              <button
+                type="button"
+                onClick={() => handleLanguageChange("pt-BR")}
+                className={`flex-1 py-2.5 px-4 rounded-xl border font-semibold text-xs transition-all cursor-pointer ${
+                  selectedLang.startsWith("pt")
+                    ? "border-[#E5A00D] bg-[#221B0E] text-[#E5A00D]"
+                    : "border-[#2B2B2B] bg-[#121212] text-[#888888] hover:text-white"
+                }`}
+              >
+                Português (Brasil)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleLanguageChange("en")}
+                className={`flex-1 py-2.5 px-4 rounded-xl border font-semibold text-xs transition-all cursor-pointer ${
+                  selectedLang.startsWith("en")
+                    ? "border-[#E5A00D] bg-[#221B0E] text-[#E5A00D]"
+                    : "border-[#2B2B2B] bg-[#121212] text-[#888888] hover:text-white"
+                }`}
+              >
+                English (US)
+              </button>
+            </div>
+          </div>
+
+          {/* Seção 1: Saída de Áudio ALSA */}
+          <div className="space-y-3 pt-3 border-t border-[#242424]">
             <h3 className="text-[11px] font-bold text-[#E5A00D] uppercase tracking-wider">
-              Dispositivo de Saída de Áudio
+              {t("settings.audioOutput")}
             </h3>
             <div>
               <label className="block text-[#CCCCCC] font-semibold mb-1.5">
-                Placa de Som ALSA (Bit-Perfect)
+                {t("settings.alsaBitPerfect")}
               </label>
               <select
                 value={config.alsa_device}
@@ -220,7 +260,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
               >
                 {!isSelectedInList && config.alsa_device && (
                   <option value={config.alsa_device} className="bg-[#1A1A1A] text-white py-1">
-                    Dispositivo Atual ({config.alsa_device})
+                    {t("settings.currentDevice", { id: config.alsa_device })}
                   </option>
                 )}
                 {devices.map((dev) => (
@@ -232,12 +272,12 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
             </div>
           </div>
 
-          {/* Seção 2: Gerenciamento de Pastas Locais */}
+          {/* Seção 2: Pastas Locais */}
           <div className="space-y-3 pt-3 border-t border-[#242424]">
             <div className="flex items-center justify-between">
               <h3 className="text-[11px] font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1.5">
                 <HardDrive size={14} />
-                <span>Pastas de Armazenamento Local</span>
+                <span>{t("settings.localFolders")}</span>
               </h3>
 
               <div className="flex items-center space-x-2">
@@ -246,10 +286,10 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                   onClick={handleForceRescan}
                   disabled={scanning}
                   className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-[#242424] hover:bg-[#2C2C2C] text-[#CCCCCC] hover:text-white transition-colors cursor-pointer"
-                  title="Verificar novas músicas"
+                  title={t("settings.checkNew")}
                 >
                   <RefreshCw size={12} className={scanning ? "animate-spin text-[#E5A00D]" : ""} />
-                  <span>Verificar Novidades</span>
+                  <span>{t("settings.checkNew")}</span>
                 </button>
 
                 <button
@@ -258,7 +298,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                   className="flex items-center space-x-1.5 px-3 py-1 rounded bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold transition-transform active:scale-95 cursor-pointer"
                 >
                   <FolderPlus size={13} />
-                  <span>Adicionar</span>
+                  <span>{t("settings.addFolder")}</span>
                 </button>
               </div>
             </div>
@@ -266,7 +306,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
             <div className="bg-[#121212] border border-[#2B2B2B] rounded-lg p-2.5 max-h-36 overflow-y-auto space-y-1.5">
               {config.local_folders.length === 0 ? (
                 <span className="text-[11px] text-[#666666] block text-center py-2">
-                  Nenhuma pasta local configurada.
+                  {t("settings.noFolders")}
                 </span>
               ) : (
                 config.local_folders.map((f, idx) => (
@@ -290,18 +330,18 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
             </div>
           </div>
 
-          {/* Seção 3: Motor de Áudio & Bit-Perfect */}
+          {/* Seção 3: Motor de Áudio */}
           <div className="space-y-3 pt-3 border-t border-[#242424]">
             <h3 className="text-[11px] font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1.5">
               <ShieldCheck size={14} />
-              <span>Motor de Áudio & Fidelidade Bit-Perfect</span>
+              <span>{t("settings.audioEngine")}</span>
             </h3>
 
             <div className="flex items-center justify-between bg-[#141414] p-3 rounded-lg border border-[#262626]">
               <div className="flex flex-col pr-4">
-                <span className="text-white font-semibold">DSD over PCM (DoP)</span>
+                <span className="text-white font-semibold">{t("settings.dop")}</span>
                 <span className="text-[11px] text-[#777777] mt-0.5">
-                  Encapsula fluxos DSD nativos em pacotes PCM para envio direto a DACs compatíveis sem conversão.
+                  {t("settings.dopDesc")}
                 </span>
               </div>
               <input
@@ -314,7 +354,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-[#CCCCCC] font-semibold mb-1">Buffer RAM</label>
+                <label className="block text-[#CCCCCC] font-semibold mb-1">{t("settings.ramBuffer")}</label>
                 <select
                   value={config.audio_buffer_size_kb}
                   onChange={(e) =>
@@ -322,15 +362,15 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                   }
                   className="w-full bg-[#121212] border border-[#333333] rounded-lg px-3 py-2 text-white outline-none focus:border-[#E5A00D] cursor-pointer"
                 >
-                  <option value={4096}>4 MB (Padrão)</option>
+                  <option value={4096}>4 MB</option>
                   <option value={8192}>8 MB</option>
-                  <option value={16384}>16 MB (Recomendado Hi-Res)</option>
-                  <option value={32768}>32 MB (Ultra Buffer)</option>
+                  <option value={16384}>16 MB</option>
+                  <option value={32768}>32 MB</option>
                 </select>
               </div>
 
               <div>
-                <label className="block text-[#CCCCCC] font-semibold mb-1">ReplayGain</label>
+                <label className="block text-[#CCCCCC] font-semibold mb-1">{t("settings.replayGain")}</label>
                 <select
                   value={config.replay_gain}
                   onChange={(e) =>
@@ -341,20 +381,20 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                   }
                   className="w-full bg-[#121212] border border-[#333333] rounded-lg px-3 py-2 text-white outline-none focus:border-[#E5A00D] cursor-pointer"
                 >
-                  <option value="off">Desativado (Bit-Perfect Puro)</option>
-                  <option value="album">Por Álbum (Preserva Dinâmica)</option>
-                  <option value="track">Por Faixa</option>
+                  <option value="off">{t("settings.rgOff")}</option>
+                  <option value="album">{t("settings.rgAlbum")}</option>
+                  <option value="track">{t("settings.rgTrack")}</option>
                 </select>
               </div>
             </div>
           </div>
 
-          {/* Seção 4: Conexão Plex Media Server com Login OAuth & Logout */}
+          {/* Seção 4: Conexão Plex */}
           <div className="space-y-3 pt-3 border-t border-[#242424]">
             <div className="flex items-center justify-between">
               <h3 className="text-[11px] font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1.5">
                 <Server size={14} />
-                <span>Conexão Plex Media Server</span>
+                <span>{t("settings.plexConnection")}</span>
               </h3>
 
               {isPlexConnected && (
@@ -362,10 +402,9 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                   type="button"
                   onClick={handleDisconnectPlex}
                   className="flex items-center space-x-1 text-[11px] text-[#FF4D4D] hover:text-[#FF6666] font-semibold transition-colors cursor-pointer"
-                  title="Encerrar sessão Plex"
                 >
                   <LogOut size={13} />
-                  <span>Desconectar Conta</span>
+                  <span>{t("settings.disconnect")}</span>
                 </button>
               )}
             </div>
@@ -376,7 +415,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                   <div className="flex flex-col items-center space-y-2.5">
                     <div className="flex items-center space-x-2 text-[#E5A00D]">
                       <RefreshCw size={18} className="animate-spin" />
-                      <span className="font-bold text-white">Aguardando autorização no navegador...</span>
+                      <span className="font-bold text-white">{t("settings.waitingBrowser")}</span>
                     </div>
 
                     {pinCode && (
@@ -390,19 +429,19 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                       onClick={handleCancelPlexAuth}
                       className="text-[11px] text-[#888888] hover:text-white underline cursor-pointer pt-1"
                     >
-                      Cancelar
+                      {t("settings.cancel")}
                     </button>
                   </div>
                 ) : (
                   <>
-                    <span className="text-[#888888]">Nenhuma conta Plex conectada no momento.</span>
+                    <span className="text-[#888888]">{t("settings.noPlexConnected")}</span>
                     <button
                       type="button"
                       onClick={handleStartPlexAuth}
                       className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs transition-transform active:scale-95 cursor-pointer shadow"
                     >
                       <ExternalLink size={14} />
-                      <span>Conectar Conta Plex</span>
+                      <span>{t("settings.connectPlex")}</span>
                     </button>
                   </>
                 )}
@@ -412,16 +451,16 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                 <div className="flex items-center justify-between p-2.5 rounded-lg bg-[#141F14] border border-[#4BB543]/40 text-xs">
                   <div className="flex items-center space-x-2 text-[#4BB543]">
                     <CheckCircle2 size={16} />
-                    <span className="font-bold">Sessão ativa e autenticada</span>
+                    <span className="font-bold">{t("settings.sessionActive")}</span>
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <label className="block text-[#CCCCCC] font-semibold">Servidor de Áudio Ativo:</label>
+                  <label className="block text-[#CCCCCC] font-semibold">{t("settings.activeServer")}</label>
                   {loadingServers ? (
                     <div className="text-[#888888] flex items-center space-x-2 py-2">
                       <RefreshCw size={13} className="animate-spin text-[#E5A00D]" />
-                      <span>Buscando servidores na rede...</span>
+                      <span>{t("settings.searchingServers")}</span>
                     </div>
                   ) : discoveredServers.length === 0 ? (
                     <div className="text-[#888888] p-2 bg-[#121212] rounded-lg border border-[#262626]">
@@ -463,7 +502,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
               </div>
             )}
 
-            {/* Configuração Manual Recolhível */}
+            {/* Ajustes Manuais */}
             <div className="pt-2">
               <button
                 type="button"
@@ -471,13 +510,13 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                 className="flex items-center space-x-1.5 text-[11px] text-[#777777] hover:text-[#CCCCCC] transition-colors cursor-pointer"
               >
                 {showManualPlex ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-                <span>Configuração Manual (Avançado)</span>
+                <span>{t("settings.manualConfig")}</span>
               </button>
 
               {showManualPlex && (
                 <div className="grid grid-cols-2 gap-3 pt-2 animate-in fade-in duration-100">
                   <div>
-                    <label className="block text-[11px] text-[#999999] mb-1">URL do Servidor</label>
+                    <label className="block text-[11px] text-[#999999] mb-1">{t("settings.serverUrl")}</label>
                     <input
                       type="text"
                       value={config.plex_url}
@@ -487,7 +526,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] text-[#999999] mb-1">X-Plex-Token</label>
+                    <label className="block text-[11px] text-[#999999] mb-1">{t("settings.plexToken")}</label>
                     <input
                       type="password"
                       value={config.plex_token}
@@ -508,7 +547,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
             onClick={onClose}
             className="px-4 py-2 rounded-lg text-xs font-semibold text-[#888888] hover:text-white hover:bg-[#262626] transition-colors cursor-pointer"
           >
-            Cancelar
+            {t("settings.cancel")}
           </button>
 
           <button
@@ -517,7 +556,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
             className="flex items-center space-x-2 px-5 py-2 rounded-lg bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-md transition-transform active:scale-95 cursor-pointer disabled:opacity-50"
           >
             <Check size={15} />
-            <span>{saving ? "Gravando..." : "Gravar Preferências"}</span>
+            <span>{saving ? t("wizard.starting") : t("settings.save")}</span>
           </button>
         </div>
       </div>

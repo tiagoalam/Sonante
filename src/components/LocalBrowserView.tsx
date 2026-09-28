@@ -12,12 +12,12 @@ import {
   Sparkles,
   Heart,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { LocalItem, LocalAlbum } from "../types/local";
 import { FavoriteAlbum } from "../types/favorite";
 import { audioService } from "../services/audio";
 import { favoritesService } from "../services/favorites";
 
-// Cache em memória com política LRU (limita a 150 capas recentes para proteger o consumo de RAM)
 class LruMemoryCache {
   private maxSize: number;
   private map: Map<string, string>;
@@ -30,7 +30,6 @@ class LruMemoryCache {
   get(key: string): string | undefined {
     const val = this.map.get(key);
     if (val !== undefined) {
-      // Move para o final (mais recentemente usado)
       this.map.delete(key);
       this.map.set(key, val);
     }
@@ -41,7 +40,6 @@ class LruMemoryCache {
     if (this.map.has(key)) {
       this.map.delete(key);
     } else if (this.map.size >= this.maxSize) {
-      // Remove o item mais antigo (primeira chave)
       const oldestKey = this.map.keys().next().value;
       if (oldestKey !== undefined) {
         this.map.delete(oldestKey);
@@ -122,7 +120,6 @@ const LocalAlbumCard: React.FC<{
               ? "bg-black/60 text-[#E5A00D]"
               : "bg-black/40 text-white/70 hover:text-white opacity-0 group-hover:opacity-100"
           }`}
-          title={isFavorite ? "Remover dos favoritos" : "Adicionar aos favoritos"}
         >
           <Heart size={14} fill={isFavorite ? "#E5A00D" : "none"} />
         </button>
@@ -131,7 +128,6 @@ const LocalAlbumCard: React.FC<{
           <button
             onClick={onPlayQuick}
             className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer"
-            title="Tocar Álbum Completo"
           >
             <Play size={20} className="ml-1" fill="black" />
           </button>
@@ -153,6 +149,7 @@ const LocalAlbumCard: React.FC<{
 };
 
 export const LocalBrowserView: React.FC = () => {
+  const { t } = useTranslation();
   const [viewMode, setViewMode] = useState<"albums" | "folders">("albums");
   const [albums, setAlbums] = useState<LocalAlbum[]>([]);
   const [loadingAlbums, setLoadingAlbums] = useState(false);
@@ -290,7 +287,7 @@ export const LocalBrowserView: React.FC = () => {
             <button
               onClick={() => setSelectedAlbum(null)}
               className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
-              title="Voltar aos Álbuns"
+              title={t("localBrowser.back")}
             >
               <ArrowLeft size={16} />
             </button>
@@ -301,15 +298,15 @@ export const LocalBrowserView: React.FC = () => {
               {selectedAlbum
                 ? selectedAlbum.title
                 : viewMode === "albums"
-                ? "Álbuns Locais"
-                : "Navegador de Pastas"}
+                ? t("localBrowser.albumsTitle")
+                : t("localBrowser.foldersTitle")}
             </h2>
             <p className="text-xs text-[#888888] mt-0.5">
               {selectedAlbum
                 ? selectedAlbum.artist
                 : viewMode === "albums"
-                ? `${filteredAlbums.length} álbuns disponíveis`
-                : currentPath || "Raiz da Biblioteca"}
+                ? t("localBrowser.albumsCount", { count: filteredAlbums.length })
+                : currentPath || t("localBrowser.root")}
             </p>
           </div>
         </div>
@@ -323,7 +320,7 @@ export const LocalBrowserView: React.FC = () => {
                   type="text"
                   value={albumSearch}
                   onChange={(e) => setAlbumSearch(e.target.value)}
-                  placeholder="Filtrar por álbum ou artista..."
+                  placeholder={t("localBrowser.filterPlaceholder")}
                   className="w-full bg-[#1A1A1A] border border-[#2B2B2B] rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D] transition-colors"
                 />
               </div>
@@ -342,7 +339,7 @@ export const LocalBrowserView: React.FC = () => {
                 }`}
               >
                 <Grid size={14} />
-                <span>Álbuns</span>
+                <span>{t("localBrowser.tabAlbums")}</span>
               </button>
 
               <button
@@ -357,7 +354,7 @@ export const LocalBrowserView: React.FC = () => {
                 }`}
               >
                 <ListTree size={14} />
-                <span>Pastas</span>
+                <span>{t("localBrowser.tabFolders")}</span>
               </button>
             </div>
           </div>
@@ -379,13 +376,13 @@ export const LocalBrowserView: React.FC = () => {
               <div className="space-y-3">
                 <span className="text-xs font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1">
                   <Sparkles size={13} />
-                  <span>Álbum Local</span>
+                  <span>{t("localBrowser.albumsTitle")}</span>
                 </span>
                 <h1 className="text-3xl font-black text-white">{selectedAlbum.title}</h1>
                 <p className="text-base text-[#CCCCCC] font-medium">{selectedAlbum.artist}</p>
                 <p className="text-xs text-[#777777]">
                   {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
-                  {albumTracks.length} faixas
+                  {albumTracks.length} {t("favorites.tracks")}
                 </p>
 
                 <div className="pt-2 flex items-center space-x-3">
@@ -394,13 +391,13 @@ export const LocalBrowserView: React.FC = () => {
                     className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer"
                   >
                     <Play size={16} fill="black" />
-                    <span>Tocar Álbum</span>
+                    <span>{t("localBrowser.playAlbum")}</span>
                   </button>
 
                   <button
                     onClick={(e) => handleToggleFavoriteLocal(e, selectedAlbum, albumCover)}
                     className="p-2.5 rounded-xl bg-[#1E1E1E] border border-[#2B2B2B] hover:bg-[#282828] text-white transition-colors cursor-pointer"
-                    title={favoriteIds.has(selectedAlbum.folder_path) ? "Remover dos favoritos" : "Favoritar"}
+                    title={favoriteIds.has(selectedAlbum.folder_path) ? t("favorites.removeFavorite") : t("favorites.title")}
                   >
                     <Heart
                       size={16}
@@ -415,10 +412,10 @@ export const LocalBrowserView: React.FC = () => {
             <div className="bg-[#141414] border border-[#222222] rounded-xl overflow-hidden divide-y divide-[#1D1D1D]">
               <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[#666666] uppercase tracking-wider bg-[#181818]">
                 <span className="col-span-1 text-center">#</span>
-                <span className="col-span-8">Título</span>
+                <span className="col-span-8">{t("plex.tracks")}</span>
                 <span className="col-span-3 text-right flex items-center justify-end space-x-1">
                   <Clock size={12} />
-                  <span>Duração</span>
+                  <span>{t("player.queue")}</span>
                 </span>
               </div>
 
@@ -449,12 +446,12 @@ export const LocalBrowserView: React.FC = () => {
         ) : viewMode === "albums" ? (
           loadingAlbums ? (
             <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
-              Organizando coleção...
+              {t("localBrowser.organizing")}
             </div>
           ) : filteredAlbums.length === 0 ? (
             <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
               <Disc3 size={40} className="opacity-40" />
-              <span className="text-xs">Nenhum álbum encontrado.</span>
+              <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
             </div>
           ) : (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
@@ -485,17 +482,17 @@ export const LocalBrowserView: React.FC = () => {
                 className="flex items-center space-x-2 text-xs font-semibold text-[#888888] hover:text-white transition-colors cursor-pointer mb-2"
               >
                 <ArrowLeft size={14} />
-                <span>Subir um nível</span>
+                <span>{t("localBrowser.upOneLevel")}</span>
               </button>
             )}
 
             {loadingFolders ? (
               <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
-                Carregando pasta...
+                {t("localBrowser.loadingFolder")}
               </div>
             ) : items.length === 0 ? (
               <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
-                Pasta vazia.
+                {t("localBrowser.emptyFolder")}
               </div>
             ) : (
               <div className="divide-y divide-[#1D1D1D] bg-[#141414] rounded-xl border border-[#222222]">

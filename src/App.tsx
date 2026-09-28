@@ -18,6 +18,7 @@ import {
   Heart,
   ExternalLink,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { PlayerBar } from "./components/PlayerBar";
 import { AlbumView } from "./components/AlbumView";
 import { ArtistView } from "./components/ArtistView";
@@ -43,6 +44,7 @@ import { AppConfig } from "./types/config";
 import { FavoriteAlbum } from "./types/favorite";
 
 export function App() {
+  const { t } = useTranslation();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [mediaSource, setMediaSource] = useState<"plex" | "local" | "favorites">("local");
@@ -97,7 +99,6 @@ export function App() {
 
   const [loading, setLoading] = useState(false);
 
-  // Recarregar os IDs dos favoritos garantindo consistência
   const refreshPlexFavorites = useCallback(() => {
     favoritesService
       .getFavorites()
@@ -110,7 +111,6 @@ export function App() {
       .catch(console.error);
   }, []);
 
-  // Carregar Configurações e Dispositivos
   useEffect(() => {
     Promise.all([configService.getConfig(), configService.getAudioDevices()])
       .then(([cfg, devs]) => {
@@ -127,7 +127,6 @@ export function App() {
     refreshPlexFavorites();
   }, [refreshPlexFavorites]);
 
-  // Atualizar a lista de favoritos sempre que mudar a fonte de mídia
   useEffect(() => {
     refreshPlexFavorites();
   }, [mediaSource, refreshPlexFavorites]);
@@ -401,7 +400,7 @@ export function App() {
                 ? "bg-black/60 text-[#E5A00D]"
                 : "bg-black/40 text-white/70 hover:text-white opacity-0 group-hover:opacity-100"
             }`}
-            title={isFav ? "Remover dos favoritos" : "Adicionar aos favoritos"}
+            title={isFav ? t("favorites.removeFavorite") : t("favorites.title")}
           >
             <Heart size={14} fill={isFav ? "#E5A00D" : "none"} />
           </button>
@@ -410,7 +409,7 @@ export function App() {
             <button
               onClick={(e) => handlePlayQuick(e, album)}
               className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer pointer-events-auto"
-              title="Tocar Álbum"
+              title={t("plex.playAlbum")}
             >
               <Play size={20} className="ml-1" fill="black" />
             </button>
@@ -470,7 +469,7 @@ export function App() {
           </div>
 
           <div className="text-[11px] font-bold text-[#666666] tracking-wider uppercase px-2 mb-2">
-            Fontes de Mídia
+            {t("sidebar.mediaSources")}
           </div>
 
           <nav className="space-y-1 mb-6">
@@ -488,15 +487,21 @@ export function App() {
             >
               <div className="flex items-center space-x-3">
                 <Folder size={16} className={mediaSource === "local" ? "text-[#E5A00D]" : ""} />
-                <span>Armazenamento Local</span>
+                <span>{t("sidebar.local")}</span>
               </div>
 
               {playbackStatus.is_updating ? (
-                <div className="flex items-center space-x-1 text-[#E5A00D]" title="Indexando pastas locais...">
+                <div
+                  className="flex items-center space-x-1 text-[#E5A00D]"
+                  title={t("sidebar.indexingTooltip")}
+                >
                   <RefreshCw size={13} className="animate-spin" />
                 </div>
               ) : (
-                <div className="flex items-center text-[#4BB543]/80" title="Biblioteca Sincronizada">
+                <div
+                  className="flex items-center text-[#4BB543]/80"
+                  title={t("sidebar.syncedTooltip")}
+                >
                   <CheckCircle2 size={13} />
                 </div>
               )}
@@ -515,7 +520,7 @@ export function App() {
               }`}
             >
               <Server size={16} className={mediaSource === "plex" ? "text-[#E5A00D]" : ""} />
-              <span>Servidor Plex</span>
+              <span>{t("sidebar.plex")}</span>
             </button>
 
             <button
@@ -535,30 +540,30 @@ export function App() {
                 className={mediaSource === "favorites" ? "text-[#E5A00D]" : ""}
                 fill={mediaSource === "favorites" ? "#E5A00D" : "none"}
               />
-              <span>Favoritos</span>
+              <span>{t("sidebar.favorites")}</span>
             </button>
           </nav>
 
           {mediaSource === "plex" && (
             <>
               <div className="text-[11px] font-bold text-[#666666] tracking-wider uppercase px-2 mb-2">
-                Bibliotecas de áudio Plex
+                {t("sidebar.plexAudioLibraries")}
               </div>
 
               {!isPlexConnected ? (
                 <div className="px-3 py-3.5 bg-[#141414] border border-[#242424] rounded-xl text-center space-y-2">
-                  <span className="text-[11px] text-[#777777] block">Nenhuma conta conectada</span>
+                  <span className="text-[11px] text-[#777777] block">{t("sidebar.noAccountConnected")}</span>
                   <button
                     onClick={() => setShowSettings(true)}
                     className="w-full py-1.5 px-3 bg-[#242424] hover:bg-[#2D2D2D] text-[#E5A00D] rounded-lg text-xs font-bold transition-colors cursor-pointer"
                   >
-                    Conectar agora
+                    {t("sidebar.connectNow")}
                   </button>
                 </div>
               ) : (
                 <div className="flex-1 overflow-y-auto space-y-1 pr-1 text-sm">
                   {libraries.length === 0 ? (
-                    <span className="text-xs text-[#666666] px-2 block">Nenhuma biblioteca encontrada.</span>
+                    <span className="text-xs text-[#666666] px-2 block">{t("sidebar.noLibraries")}</span>
                   ) : (
                     libraries.map((lib) => {
                       const isSelected = selectedLibrary?.key === lib.key;
@@ -596,7 +601,7 @@ export function App() {
               className="w-full flex items-center space-x-3 px-3 py-2 rounded-md text-xs font-semibold text-[#888888] hover:bg-[#202020] hover:text-white transition-colors cursor-pointer"
             >
               <Settings size={15} />
-              <span>Preferências</span>
+              <span>{t("sidebar.preferences")}</span>
             </button>
 
             <button
@@ -604,7 +609,7 @@ export function App() {
               className="w-full flex items-center space-x-3 px-3 py-2 rounded-md text-xs font-semibold text-[#888888] hover:bg-[#202020] hover:text-[#E5A00D] transition-colors cursor-pointer"
             >
               <Info size={15} />
-              <span>Sobre o Sonante</span>
+              <span>{t("sidebar.about")}</span>
             </button>
           </div>
         </aside>
@@ -619,16 +624,16 @@ export function App() {
             <div className="w-16 h-16 rounded-2xl bg-[#E5A00D]/10 border border-[#E5A00D]/20 flex items-center justify-center text-[#E5A00D] mb-4 shadow-xl">
               <Server size={32} />
             </div>
-            <h2 className="text-xl font-bold text-white mb-2">Servidor Plex Desconectado</h2>
+            <h2 className="text-xl font-bold text-white mb-2">{t("plex.disconnectedTitle")}</h2>
             <p className="text-xs text-[#888888] max-w-md mb-6 leading-relaxed">
-              Conecte sua conta do Plex para sincronizar e reproduzir suas bibliotecas de áudio, álbuns e faixas Hi-Res com fidelidade bit-perfect.
+              {t("plex.disconnectedDesc")}
             </p>
             <button
               onClick={() => setShowSettings(true)}
               className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer"
             >
               <ExternalLink size={15} />
-              <span>Conectar Conta Plex</span>
+              <span>{t("plex.connectBtn")}</span>
             </button>
           </main>
         ) : activeArtist ? (
@@ -655,7 +660,7 @@ export function App() {
                   <button
                     onClick={() => setActiveCollection(null)}
                     className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
-                    title="Voltar para Coleções"
+                    title={t("plex.backToCollections")}
                   >
                     <ArrowLeft size={16} />
                   </button>
@@ -663,10 +668,10 @@ export function App() {
                 <div>
                   <h2 className="text-2xl font-bold text-white tracking-tight">
                     {searchQuery.trim().length > 0
-                      ? `Resultados para "${searchQuery}"`
+                      ? t("plex.resultsFor", { query: searchQuery })
                       : activeCollection
                       ? activeCollection.title
-                      : selectedLibrary?.title || "Carregando..."}
+                      : selectedLibrary?.title || t("plex.loading")}
                   </h2>
                 </div>
               </div>
@@ -679,7 +684,7 @@ export function App() {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Pesquisar artistas, álbuns... (Ctrl+F)"
+                    placeholder={t("plex.searchPlaceholder")}
                     className="w-full bg-[#1A1A1A] border border-[#2B2B2B] rounded-lg pl-9 pr-8 py-1.5 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D] transition-colors"
                   />
                   {searchQuery && (
@@ -702,9 +707,9 @@ export function App() {
                           onChange={(e) => setSortBy(e.target.value)}
                           className="bg-transparent border-none outline-none text-white cursor-pointer"
                         >
-                          <option value="added">Adicionados Recentemente</option>
-                          <option value="title">Título (A-Z)</option>
-                          <option value="year">Ano de Lançamento</option>
+                          <option value="added">{t("plex.sortAdded")}</option>
+                          <option value="title">{t("plex.sortTitle")}</option>
+                          <option value="year">{t("plex.sortYear")}</option>
                         </select>
                       </div>
                     )}
@@ -721,7 +726,7 @@ export function App() {
                             : "text-[#999999] hover:text-white"
                         }`}
                       >
-                        Biblioteca
+                        {t("plex.tabLibrary")}
                       </button>
 
                       {hasCollections && (
@@ -736,7 +741,7 @@ export function App() {
                               : "text-[#999999] hover:text-white"
                           }`}
                         >
-                          Coleções
+                          {t("plex.tabCollections")}
                         </button>
                       )}
                     </div>
@@ -749,7 +754,7 @@ export function App() {
               {searchQuery.trim().length > 0 ? (
                 isSearching ? (
                   <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
-                    Buscando na biblioteca...
+                    {t("plex.searching")}
                   </div>
                 ) : searchResults &&
                   (searchResults.artists.length > 0 ||
@@ -759,7 +764,7 @@ export function App() {
                     {searchResults.artists.length > 0 && (
                       <div>
                         <h3 className="text-sm font-bold text-[#888888] uppercase tracking-wider mb-3">
-                          Artistas
+                          {t("plex.artists")}
                         </h3>
                         <div className="flex flex-wrap gap-3">
                           {searchResults.artists.map((art) => (
@@ -787,7 +792,7 @@ export function App() {
                     {searchResults.albums.length > 0 && (
                       <div>
                         <h3 className="text-sm font-bold text-[#888888] uppercase tracking-wider mb-3">
-                          Álbuns
+                          {t("plex.albums")}
                         </h3>
                         <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
                           {searchResults.albums.map(renderAlbumCard)}
@@ -798,7 +803,7 @@ export function App() {
                     {searchResults.tracks.length > 0 && (
                       <div>
                         <h3 className="text-sm font-bold text-[#888888] uppercase tracking-wider mb-3">
-                          Faixas
+                          {t("plex.tracks")}
                         </h3>
                         <div className="divide-y divide-[#1A1A1A] bg-[#141414] rounded-xl border border-[#222222] p-2">
                           {searchResults.tracks.map((track) => (
@@ -848,12 +853,12 @@ export function App() {
                   </div>
                 ) : (
                   <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
-                    Nenhum resultado encontrado para "{searchQuery}"
+                    {t("plex.noResults", { query: searchQuery })}
                   </div>
                 )
               ) : loading ? (
                 <div className="h-full flex items-center justify-center text-[#666666]">
-                  Carregando mídias...
+                  {t("plex.loading")}
                 </div>
               ) : activeCollection ? (
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
@@ -893,7 +898,7 @@ export function App() {
                         {col.title}
                       </span>
                       <span className="text-xs text-[#E5A00D] font-bold mt-0.5">
-                        {col.child_count} {col.child_count === 1 ? "álbum" : "itens"}
+                        {t("plex.itemsCount", { count: col.child_count })}
                       </span>
                     </div>
                   ))}

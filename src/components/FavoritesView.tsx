@@ -10,6 +10,7 @@ import {
   Clock,
   AlertTriangle,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { FavoriteAlbum } from "../types/favorite";
 import { favoritesService } from "../services/favorites";
 import { audioService } from "../services/audio";
@@ -20,6 +21,7 @@ interface Props {
 }
 
 export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
+  const { t } = useTranslation();
   const [favorites, setFavorites] = useState<FavoriteAlbum[]>([]);
   const [activeTab, setActiveTab] = useState<"local" | "plex">("local");
   const [search, setSearch] = useState("");
@@ -62,7 +64,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
 
   const handleOpenAlbum = async (fav: FavoriteAlbum) => {
     if (fav.source === "local" && fav.exists === false) {
-      alert("A pasta deste álbum não foi encontrada no disco.");
+      alert(t("favorites.missingDiskAlert"));
       return;
     }
 
@@ -113,7 +115,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
   const handleQuickPlayCard = async (e: React.MouseEvent, fav: FavoriteAlbum) => {
     e.stopPropagation();
     if (fav.source === "local" && fav.exists === false) {
-      alert("A pasta deste álbum não foi encontrada no disco.");
+      alert(t("favorites.missingDiskAlert"));
       return;
     }
 
@@ -167,7 +169,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
             <button
               onClick={() => setSelectedAlbum(null)}
               className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
-              title="Voltar aos Favoritos"
+              title={t("favorites.back")}
             >
               <ArrowLeft size={16} />
             </button>
@@ -176,12 +178,12 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
           <div>
             <h2 className="text-2xl font-bold text-white tracking-tight flex items-center space-x-2">
               <Heart size={22} className="text-[#E5A00D]" fill="#E5A00D" />
-              <span>{selectedAlbum ? selectedAlbum.title : "Álbuns Favoritos"}</span>
+              <span>{selectedAlbum ? selectedAlbum.title : t("favorites.title")}</span>
             </h2>
             <p className="text-xs text-[#888888] mt-0.5">
               {selectedAlbum
                 ? selectedAlbum.artist
-                : `${filtered.length} álbum(ns) favoritados nesta fonte`}
+                : t("favorites.count", { count: filtered.length })}
             </p>
           </div>
         </div>
@@ -194,7 +196,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Filtrar favoritos..."
+                placeholder={t("favorites.filterPlaceholder")}
                 className="w-full bg-[#1A1A1A] border border-[#2B2B2B] rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D] transition-colors"
               />
             </div>
@@ -212,7 +214,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                 }`}
               >
                 <HardDrive size={13} />
-                <span>Locais</span>
+                <span>{t("favorites.tabLocal")}</span>
               </button>
 
               <button
@@ -227,7 +229,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                 }`}
               >
                 <Server size={13} />
-                <span>Plex</span>
+                <span>{t("favorites.tabPlex")}</span>
               </button>
             </div>
           </div>
@@ -249,13 +251,19 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
               <div className="space-y-3">
                 <span className="text-xs font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1">
                   <Heart size={13} fill="#E5A00D" />
-                  <span>Álbum Favorito ({selectedAlbum.source === "local" ? "Local" : "Plex"})</span>
+                  <span>
+                    {selectedAlbum.title} (
+                    {selectedAlbum.source === "local"
+                      ? t("favorites.tabLocal")
+                      : t("favorites.tabPlex")}
+                    )
+                  </span>
                 </span>
                 <h1 className="text-3xl font-black text-white">{selectedAlbum.title}</h1>
                 <p className="text-base text-[#CCCCCC] font-medium">{selectedAlbum.artist}</p>
                 <p className="text-xs text-[#777777]">
                   {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
-                  {tracks.length} faixas
+                  {tracks.length} {t("favorites.tracks")}
                 </p>
 
                 <div className="pt-2 flex items-center space-x-3">
@@ -265,7 +273,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                     className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50"
                   >
                     <Play size={16} fill="black" />
-                    <span>Tocar Álbum</span>
+                    <span>{t("favorites.playAlbum")}</span>
                   </button>
 
                   <button
@@ -273,7 +281,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                     className="flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-[#222222] hover:bg-[#2A2A2A] text-xs font-semibold text-[#E5A00D] border border-[#333333] transition-colors cursor-pointer"
                   >
                     <Heart size={15} fill="#E5A00D" />
-                    <span>Remover dos Favoritos</span>
+                    <span>{t("favorites.removeFavorite")}</span>
                   </button>
                 </div>
               </div>
@@ -281,22 +289,22 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
 
             {loadingTracks ? (
               <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
-                Carregando faixas...
+                {t("plex.loading")}
               </div>
             ) : (
               <div className="bg-[#141414] border border-[#222222] rounded-xl overflow-hidden divide-y divide-[#1D1D1D]">
                 <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[#666666] uppercase tracking-wider bg-[#181818]">
                   <span className="col-span-1 text-center">#</span>
-                  <span className="col-span-8">Título</span>
+                  <span className="col-span-8">{t("plex.tracks")}</span>
                   <span className="col-span-3 text-right flex items-center justify-end space-x-1">
                     <Clock size={12} />
-                    <span>Duração</span>
+                    <span>{t("player.queue")}</span>
                   </span>
                 </div>
 
-                {tracks.map((t, idx) => (
+                {tracks.map((tItem, idx) => (
                   <div
-                    key={t.uri}
+                    key={tItem.uri}
                     onClick={() => handlePlayAll(idx)}
                     className="grid grid-cols-12 px-4 py-3 text-xs items-center hover:bg-[#1E1E1E] transition-colors cursor-pointer group"
                   >
@@ -305,12 +313,12 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                     </span>
                     <div className="col-span-8 flex flex-col pr-2">
                       <span className="font-semibold text-white group-hover:text-[#E5A00D] transition-colors truncate">
-                        {t.title}
+                        {tItem.title}
                       </span>
-                      <span className="text-[11px] text-[#777777] truncate">{t.artist}</span>
+                      <span className="text-[11px] text-[#777777] truncate">{tItem.artist}</span>
                     </div>
                     <span className="col-span-3 text-right font-mono text-[#888888]">
-                      {formatDuration(t.duration)}
+                      {formatDuration(tItem.duration)}
                     </span>
                   </div>
                 ))}
@@ -319,14 +327,15 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
           </div>
         ) : loading ? (
           <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
-            Carregando favoritos...
+            {t("plex.loading")}
           </div>
         ) : filtered.length === 0 ? (
           <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
             <Heart size={36} className="opacity-30 text-[#E5A00D]" />
             <span className="text-xs">
-              Nenhum álbum favorito em {activeTab === "local" ? "Armazenamento Local" : "Servidor Plex"}.
+              {activeTab === "local" ? t("favorites.emptyLocal") : t("favorites.emptyPlex")}
             </span>
+            <span className="text-[11px] text-[#555555]">{t("favorites.emptyHint")}</span>
           </div>
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
@@ -355,7 +364,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                     <button
                       onClick={(e) => handleToggleFav(e, fav)}
                       className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-[#E5A00D] transition-transform active:scale-90 cursor-pointer shadow"
-                      title="Remover dos favoritos"
+                      title={t("favorites.removeFavorite")}
                     >
                       <Heart size={14} fill="#E5A00D" />
                     </button>
@@ -363,7 +372,9 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                     {isMissing && (
                       <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center p-3 text-center">
                         <AlertTriangle size={24} className="text-[#FFB020] mb-1" />
-                        <span className="text-[11px] font-bold text-white">Disco Ausente</span>
+                        <span className="text-[11px] font-bold text-white">
+                          {t("favorites.missingDisk")}
+                        </span>
                       </div>
                     )}
 
@@ -372,7 +383,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                         <button
                           onClick={(e) => handleQuickPlayCard(e, fav)}
                           className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer"
-                          title="Tocar Álbum"
+                          title={t("favorites.playAlbum")}
                         >
                           <Play size={20} className="ml-1" fill="black" />
                         </button>
@@ -388,7 +399,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                   </span>
                   <span className="text-[11px] text-[#666666] mt-0.5">
                     {fav.year ? `${fav.year} • ` : ""}
-                    {fav.source === "local" ? "Local" : "Plex"}
+                    {fav.source === "local" ? t("favorites.tabLocal") : t("favorites.tabPlex")}
                   </span>
                 </div>
               );
