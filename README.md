@@ -198,7 +198,7 @@ Sonante organizes all user data, socket endpoints, and configurations within the
 
 ## License
 
-Copyright (c) 2024-present Tiago Alam. All rights reserved.
+Copyright (c) 2026 - present Tiago Alam. All rights reserved.
 
 **Sonante is Free-to-Use Software (Source-Available):**
 * You are free to download, install, build, and use this software on your personal machines at no cost.

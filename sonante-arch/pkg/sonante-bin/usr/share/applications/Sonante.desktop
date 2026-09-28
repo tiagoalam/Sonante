@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=
+Comment=A Tauri App
+Exec=sonante
+StartupWMClass=sonante
+Icon=sonante
+Name=Sonante
+Terminal=false
+Type=Application

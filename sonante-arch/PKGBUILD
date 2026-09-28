@@ -1,0 +1,21 @@
+# Maintainer: Tiago Alam <seu-email@exemplo.com>
+pkgname=sonante-bin
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="Audiophile Bit-Perfect Player for Linux (ALSA Direct Exclusive & Plex Streaming)"
+arch=('x86_64')
+url="https://github.com/tiagoalam/sonante"
+license=('MIT')
+depends=('gtk3' 'webkit2gtk-4.1' 'libayatana-appindicator' 'alsa-lib' 'mpd')
+provides=('sonante')
+conflicts=('sonante')
+
+# Puxa o .deb publicado na Release do seu GitHub
+source=("https://github.com/tiagoalam/sonante/releases/download/v${pkgver}/Sonante_${pkgver}_amd64.deb")
+# Rode 'sha256sum sonante_*.deb' para gerar a hash correspondente ou use 'SKIP' para testes
+sha256sums=('SKIP')
+
+package() {
+    # Extrai o arquivo de dados do .deb
+    bsdtar -xf data.tar.* -C "${pkgdir}/"
+}
