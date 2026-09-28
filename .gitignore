@@ -1,13 +1,34 @@
-# Dependências e caches
+# Dependências e caches web
 node_modules/
 dist/
 .vite/
 
-# Compilação Rust
+# Compilação Rust e Tauri
 src-tauri/target/
+target/
+**/*.rs.bk
 
-# Arquivos do SO e editores
+# Variáveis de ambiente e segredos
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Arquivos temporários e backups
+*.bak
+*.tmp
+*.temp
+
+# Editores e SO
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
 *.swp
 *.swo
 *~
