@@ -201,8 +201,8 @@ export const ArtistView: React.FC<Props> = ({ artist, onBack, onSelectAlbum }) =
 
                       {/* Duração */}
                       <span className={`text-right font-mono text-[11px] ${active ? "text-[#E5A00D]" : "text-[#777777]"}`}>
-                        {formatTime(track.duration_ms)}
-                      </span>
+                      {formatTime(track.duration_ms || 0)}
+		      </span>
                     </div>
                   );
                 })}

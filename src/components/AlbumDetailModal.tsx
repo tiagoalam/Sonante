@@ -99,7 +99,7 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
                 </div>
                 <div className="flex items-center space-x-3 text-xs text-[#777777] font-mono">
                   <Clock size={12} />
-                  <span>{formatDuration(track.duration_ms)}</span>
+		  <span>{formatDuration(track.duration_ms || 0)}</span>
                 </div>
               </div>
             ))

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { AppConfig, AudioDevice } from "../types/config";
+import { AppConfig } from "../types/config";
+import { AudioDevice } from "../types/audio";
 
 export const configService = {
   getConfig: (): Promise<AppConfig> => invoke<AppConfig>("get_config"),

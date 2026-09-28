@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { X, Trash2, Disc3, Play, Volume2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { QueueTrack, PlaybackStatus } from "../types/audio";
+import { TrackMetadata, PlaybackStatus } from "../types/audio";
 import { audioService } from "../services/audio";
 
 interface Props {
@@ -12,7 +12,7 @@ interface Props {
 
 export const QueueDrawer: React.FC<Props> = ({ isOpen, onClose, status }) => {
   const { t } = useTranslation();
-  const [queue, setQueue] = useState<QueueTrack[]>([]);
+  const [queue, setQueue] = useState<TrackMetadata[]>([]);
   const [loading, setLoading] = useState(false);
 
   const fetchQueue = async () => {
@@ -90,15 +90,16 @@ export const QueueDrawer: React.FC<Props> = ({ isOpen, onClose, status }) => {
           </button>
         </div>
       </div>
+
       {/* Lista de Faixas */}
       <div className="flex-1 overflow-y-auto divide-y divide-[#1D1D1D] p-1">
         {queue.length === 0 ? (
           <div className="h-48 flex flex-col items-center justify-center text-[#666666] space-y-2">
             <Disc3 size={32} className="opacity-40" />
             <span className="text-xs">{t("queue.empty")}</span>
-	    </div>
+          </div>
         ) : (
-          queue.map((item) => {
+          queue.map((item, idx) => {
             const isCurrent =
               status.state === "play" &&
               status.title &&
@@ -107,8 +108,8 @@ export const QueueDrawer: React.FC<Props> = ({ isOpen, onClose, status }) => {
 
             return (
               <div
-                key={item.id}
-                onClick={() => handlePlayIndex(item.pos)}
+                key={`${item.uri}-${idx}`}
+                onClick={() => handlePlayIndex(idx)}
                 className={`flex items-center justify-between p-2.5 rounded-lg transition-colors cursor-pointer group ${
                   isCurrent ? "bg-[#252014] text-[#E5A00D]" : "hover:bg-[#1C1C1C] text-white"
                 }`}
@@ -118,12 +119,12 @@ export const QueueDrawer: React.FC<Props> = ({ isOpen, onClose, status }) => {
                     {isCurrent ? (
                       <Volume2 size={13} className="text-[#E5A00D] animate-pulse" />
                     ) : (
-                      item.pos + 1
+                      idx + 1
                     )}
                   </span>
 
                   <div className="flex flex-col min-w-0">
-                    <span className="text-xs font-medium truncate">{item.title || item.file}</span>
+                    <span className="text-xs font-medium truncate">{item.title || item.uri}</span>
                     {item.artist && (
                       <span className="text-[11px] text-[#777777] truncate">{item.artist}</span>
                     )}

@@ -23,10 +23,13 @@ export interface PlexTrack {
   rating_key: string;
   title: string;
   album_title?: string;
-  thumb?: string;
-  track_index: number;
-  duration_ms: number;
+  artist?: string;
+  thumb?: string | null;
   play_uri: string;
+  duration?: number;
+  duration_ms?: number;
+  index?: number;
+  track_index?: number;
 }
 
 export interface SelectedArtist {
@@ -48,7 +51,8 @@ export interface PlexSearchResults {
 
 export interface PlexPin {
   id: number;
-  code: String;
+  code: string;
+  expires_at: string;
   auth_url: string;
 }
 

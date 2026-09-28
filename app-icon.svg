@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Gradiente de Fundo Premium Dark -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E1E1E" />
+      <stop offset="50%" stop-color="#141414" />
+      <stop offset="100%" stop-color="#0A0A0A" />
+    </linearGradient>
+
+    <!-- Brilho Dourado Âmbar Central -->
+    <radialGradient id="amberGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#E5A00D" stop-opacity="0.18" />
+      <stop offset="60%" stop-color="#E5A00D" stop-opacity="0.04" />
+      <stop offset="100%" stop-color="#E5A00D" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Borda Suave Dourada -->
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E5A00D" stop-opacity="0.45" />
+      <stop offset="50%" stop-color="#E5A00D" stop-opacity="0.15" />
+      <stop offset="100%" stop-color="#E5A00D" stop-opacity="0.30" />
+    </linearGradient>
+  </defs>
+
+  <!-- Squircle Base Escuro -->
+  <rect x="64" y="64" width="896" height="896" rx="200" ry="200" fill="url(#bgGrad)" stroke="#2B2B2B" stroke-width="8" />
+
+  <!-- Borda Dourada Interna Sutil -->
+  <rect x="76" y="76" width="872" height="872" rx="188" ry="188" fill="none" stroke="url(#borderGrad)" stroke-width="4" />
+
+  <!-- Glow Âmbar Central -->
+  <circle cx="512" cy="512" r="380" fill="url(#amberGlow)" />
+
+  <!-- Ícone Sparkles Oficial do Sonante (Lucide) em Dourado #E5A00D -->
+  <g transform="translate(512, 512) scale(26) translate(-12, -12)" fill="none" stroke="#E5A00D" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
+    <path d="M5 3v4" />
+    <path d="M19 17v4" />
+    <path d="M3 5h4" />
+    <path d="M17 19h4" />
+  </g>
+</svg>
+

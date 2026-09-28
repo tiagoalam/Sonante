@@ -4,6 +4,7 @@ export interface TrackMetadata {
   album: string;
   thumb?: string | null;
   uri: string;
+  duration?: number;
 }
 
 export interface AudioDevice {
@@ -24,4 +25,14 @@ export interface PlaybackStatus {
   thumb?: string | null;
   volume: number;
   is_updating: boolean; // <-- Necessário para o ícone de indexação/sincronização
+}
+
+export interface QueueTrack {
+  id: number;
+  pos: number;
+  file: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  duration?: number;
 }

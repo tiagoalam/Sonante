@@ -216,8 +216,8 @@ export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist, onTo
                 </div>
 
                 <span className="col-span-3 text-right font-mono text-[#888888]">
-                  {formatDuration(track.duration)}
-                </span>
+                {formatDuration(track.duration || 0)}
+		</span>
               </div>
             ))
           )}

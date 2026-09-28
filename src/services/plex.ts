@@ -1,5 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
-import { PlexLibrary, PlexAlbum, PlexCollection, PlexTrack } from "../types/plex";
+
+import {
+  PlexLibrary,
+  PlexAlbum,
+  PlexCollection,
+  PlexTrack,
+  PlexSearchResults,
+  PlexPin,
+  PlexServerResource,
+} from "../types/plex";
 
 export const plexService = {
   getLibraries: (): Promise<PlexLibrary[]> =>
