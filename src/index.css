@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  --color-plex-dark: #121212;
+  --color-plex-surface: #181818;
+  --color-plex-card: #202020;
+  --color-plex-hover: #282828;
+  --color-plex-gold: #E5A00D;
+  --color-plex-gold-hover: #F5B01D;
+  --color-plex-muted: #999999;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-plex-dark);
+  color: #E0E0E0;
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* Força fundo escuro e texto claro em todos os menus dropdown nativos */
+select {
+  color-scheme: dark;
+  background-color: #1e1e1e !important;
+  color: #ffffff !important;
+}
+
+select option {
+  background-color: #1e1e1e !important;
+  color: #ffffff !important;
+}
+
+select option:checked {
+  background-color: #332b15 !important;
+  color: #e5a00d !important;
+}

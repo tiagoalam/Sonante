@@ -1,0 +1,13 @@
+# Dependências e caches
+node_modules/
+dist/
+.vite/
+
+# Compilação Rust
+src-tauri/target/
+
+# Arquivos do SO e editores
+.DS_Store
+*.swp
+*.swo
+*~
