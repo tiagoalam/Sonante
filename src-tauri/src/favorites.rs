@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FavoriteAlbum {
-    pub id: String,                 // folder_path para local ou rating_key para plex
-    pub source: String,             // "local" ou "plex"
+    pub id: String,
+    pub source: String,
     pub title: String,
     pub artist: String,
     #[serde(default, deserialize_with = "deserialize_flexible_string")]
@@ -20,7 +20,6 @@ fn default_exists() -> bool {
     true
 }
 
-// Aceita tanto número (1996) quanto string ("1996") ou null vindos do Plex / Local
 fn deserialize_flexible_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -70,7 +69,9 @@ impl FavoriteAlbum {
 
         let mut list: Vec<FavoriteAlbum> = serde_json::from_str(&content).unwrap_or_default();
 
-        // Checagem de existência no caminho correto da biblioteca
+        // Remove entradas fantasmas ou corrompidas com ID em branco
+        list.retain(|fav| !fav.id.trim().is_empty() && !fav.source.trim().is_empty());
+
         for fav in &mut list {
             if fav.source == "local" {
                 fav.exists = check_local_path_exists(&fav.path_or_key);
@@ -93,8 +94,13 @@ impl FavoriteAlbum {
     }
 
     pub fn toggle(album: FavoriteAlbum) -> Result<bool, String> {
+        let clean_id = album.id.trim().to_string();
+        if clean_id.is_empty() {
+            return Err("ID do álbum inválido".to_string());
+        }
+
         let mut list = Self::load_all();
-        let exists_index = list.iter().position(|item| item.id == album.id && item.source == album.source);
+        let exists_index = list.iter().position(|item| item.id == clean_id && item.source == album.source);
 
         if let Some(idx) = exists_index {
             list.remove(idx);
@@ -102,6 +108,7 @@ impl FavoriteAlbum {
             Ok(false)
         } else {
             let mut new_fav = album;
+            new_fav.id = clean_id;
             if new_fav.source == "local" {
                 new_fav.exists = check_local_path_exists(&new_fav.path_or_key);
             }

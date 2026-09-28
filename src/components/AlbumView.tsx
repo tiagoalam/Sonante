@@ -18,17 +18,20 @@ interface Props {
   album: PlexAlbum;
   onBack: () => void;
   onSelectArtist?: (artist: SelectedArtist) => void;
+  onToggleFavorite?: () => void;
 }
 
-export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist }) => {
+export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist, onToggleFavorite }) => {
   const [tracks, setTracks] = useState<PlexTrack[]>([]);
   const [loading, setLoading] = useState(true);
   const [isFavorite, setIsFavorite] = useState(false);
 
+  const albumKey = String(album.rating_key || "");
+
   useEffect(() => {
     setLoading(true);
     plexService
-      .getAlbumTracks(album.rating_key)
+      .getAlbumTracks(albumKey)
       .then(setTracks)
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -36,25 +39,30 @@ export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist }) =>
     favoritesService
       .getFavorites()
       .then((favs) => {
-        setIsFavorite(favs.some((f) => f.source === "plex" && f.id === album.rating_key));
+        setIsFavorite(favs.some((f) => f.source === "plex" && String(f.id) === albumKey));
       })
       .catch(console.error);
-  }, [album.rating_key]);
+  }, [albumKey]);
+
   const handleToggleFav = async () => {
+    if (!albumKey) return;
     const favItem: FavoriteAlbum = {
-      id: album.rating_key,
+      id: albumKey,
       source: "plex",
       title: album.title,
       artist: album.artist,
-      year: album.year != null ? String(album.year) : undefined, // <-- Conversão segura
+      year: album.year != null ? String(album.year) : undefined,
       thumb: album.thumb || null,
-      path_or_key: album.rating_key,
+      path_or_key: albumKey,
       exists: true,
     };
 
     try {
       const added = await favoritesService.toggleFavorite(favItem);
       setIsFavorite(added);
+      if (onToggleFavorite) {
+        onToggleFavorite();
+      }
     } catch (err) {
       console.error("Erro ao favoritar álbum Plex:", err);
     }
@@ -83,7 +91,6 @@ export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist }) =>
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#121212] overflow-hidden select-none">
-      {/* Barra Superior / Voltar */}
       <div className="p-8 pb-4 border-b border-[#222222] flex items-center">
         <button
           onClick={onBack}
@@ -95,7 +102,6 @@ export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist }) =>
       </div>
 
       <div className="flex-1 overflow-y-auto p-8 space-y-8">
-        {/* Cabeçalho do Álbum */}
         <div className="flex items-end space-x-6">
           <div className="w-56 h-56 rounded-xl bg-[#202020] border border-[#2B2B2B] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
             {album.thumb ? (
@@ -171,7 +177,6 @@ export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist }) =>
           </div>
         </div>
 
-        {/* Tabela de Faixas */}
         <div className="bg-[#141414] border border-[#222222] rounded-xl overflow-hidden divide-y divide-[#1D1D1D]">
           <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[#666666] uppercase tracking-wider bg-[#181818]">
             <span className="col-span-1 text-center">#</span>

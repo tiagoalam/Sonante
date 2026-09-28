@@ -30,7 +30,7 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
               <div className="flex items-center space-x-2">
                 <h2 className="text-lg font-black tracking-wider text-white">SONANTE</h2>
                 <span className="text-[10px] font-mono font-bold bg-[#E5A00D] text-black px-1.5 py-0.5 rounded-sm">
-                  v0.2.0
+                  v0.3.0
                 </span>
               </div>
               <p className="text-xs text-[#888888] mt-0.5">

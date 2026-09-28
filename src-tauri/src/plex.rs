@@ -2,6 +2,169 @@ use crate::config::AppConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+const PLEX_CLIENT_ID: &str = "sonante-audio-player";
+const PLEX_PRODUCT_NAME: &str = "Sonante";
+const PLEX_VERSION: &str = "0.2.0";
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PlexPin {
+    pub id: u64,
+    pub code: String,
+    pub auth_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PlexConnection {
+    pub uri: String,
+    pub local: bool,
+    pub address: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PlexServerResource {
+    pub name: String,
+    pub client_identifier: String,
+    pub connections: Vec<PlexConnection>,
+    pub chosen_uri: String,
+}
+
+pub async fn request_plex_pin() -> Result<PlexPin, String> {
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://plex.tv/api/v2/pins")
+        .header("X-Plex-Product", PLEX_PRODUCT_NAME)
+        .header("X-Plex-Version", PLEX_VERSION)
+        .header("X-Plex-Client-Identifier", PLEX_CLIENT_ID)
+        .header("X-Plex-Platform", "Linux")
+        .header("X-Plex-Device", "PC")
+        .header("X-Plex-Device-Name", "Sonante (Linux)")
+        .header("Accept", "application/json")
+        .query(&[("strong", "true")])
+        .send()
+        .await
+        .map_err(|e| format!("Erro ao solicitar PIN do Plex: {}", e))?;
+
+    #[derive(Deserialize)]
+    struct RawPin {
+        id: u64,
+        code: String,
+    }
+
+    let pin: RawPin = res
+        .json()
+        .await
+        .map_err(|e| format!("Resposta inválida do Plex ao criar PIN: {}", e))?;
+
+    // URL oficial moderna do Plex OAuth (usa '#?' sem exclamação e parâmetros estritamente alinhados)
+    let auth_url = format!(
+        "https://app.plex.tv/auth#?clientID={}&code={}&context%5Bdevice%5D%5Bproduct%5D={}&context%5Bdevice%5D%5Bplatform%5D=Linux&context%5Bdevice%5D%5Bdevice%5D=PC",
+        PLEX_CLIENT_ID, pin.code, PLEX_PRODUCT_NAME
+    );
+
+    Ok(PlexPin {
+        id: pin.id,
+        code: pin.code,
+        auth_url,
+    })
+}
+
+pub async fn check_plex_pin(pin_id: u64) -> Result<Option<String>, String> {
+    let client = reqwest::Client::new();
+    let url = format!("https://plex.tv/api/v2/pins/{}", pin_id);
+    let res = client
+        .get(&url)
+        .header("X-Plex-Product", PLEX_PRODUCT_NAME)
+        .header("X-Plex-Version", PLEX_VERSION)
+        .header("X-Plex-Client-Identifier", PLEX_CLIENT_ID)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Erro ao checar status do PIN: {}", e))?;
+
+    #[derive(Deserialize)]
+    struct RawPinCheck {
+        #[serde(rename = "authToken")]
+        auth_token: Option<String>,
+    }
+
+    let data: RawPinCheck = res
+        .json()
+        .await
+        .map_err(|e| format!("Erro ao decodificar resposta do PIN: {}", e))?;
+
+    Ok(data.auth_token)
+}
+
+pub async fn get_plex_servers(auth_token: &str) -> Result<Vec<PlexServerResource>, String> {
+    let client = reqwest::Client::new();
+    let res = client
+        .get("https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1")
+        .header("X-Plex-Client-Identifier", PLEX_CLIENT_ID)
+        .header("X-Plex-Token", auth_token)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Erro ao consultar servidores Plex: {}", e))?;
+
+    #[derive(Deserialize)]
+    struct RawConnection {
+        uri: String,
+        #[serde(default)]
+        local: bool,
+        address: String,
+        port: u16,
+    }
+
+    #[derive(Deserialize)]
+    struct RawResource {
+        name: String,
+        #[serde(rename = "clientIdentifier")]
+        client_identifier: String,
+        provides: String,
+        #[serde(default)]
+        connections: Vec<RawConnection>,
+    }
+
+    let resources: Vec<RawResource> = res
+        .json()
+        .await
+        .map_err(|e| format!("Erro ao ler recursos Plex: {}", e))?;
+
+    let mut servers = Vec::new();
+    for r in resources {
+        if r.provides.split(',').any(|p| p.trim() == "server") {
+            let mut connections: Vec<PlexConnection> = r
+                .connections
+                .into_iter()
+                .map(|c| PlexConnection {
+                    uri: c.uri,
+                    local: c.local,
+                    address: c.address,
+                    port: c.port,
+                })
+                .collect();
+
+            // Prioriza conexões de rede local (IP da LAN em vez de conexões remotas/relay)
+            connections.sort_by_key(|c| if c.local { 0 } else { 1 });
+
+            let chosen_uri = connections
+                .first()
+                .map(|c| c.uri.clone())
+                .unwrap_or_default();
+
+            servers.push(PlexServerResource {
+                name: r.name,
+                client_identifier: r.client_identifier,
+                connections,
+                chosen_uri,
+            });
+        }
+    }
+
+    Ok(servers)
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlexArtistResult {
     pub rating_key: String,

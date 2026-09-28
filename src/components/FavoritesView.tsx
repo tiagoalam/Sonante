@@ -15,7 +15,11 @@ import { favoritesService } from "../services/favorites";
 import { audioService } from "../services/audio";
 import { plexService } from "../services/plex";
 
-export const FavoritesView: React.FC = () => {
+interface Props {
+  onFavoritesChanged?: () => void;
+}
+
+export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
   const [favorites, setFavorites] = useState<FavoriteAlbum[]>([]);
   const [activeTab, setActiveTab] = useState<"local" | "plex">("local");
   const [search, setSearch] = useState("");
@@ -48,6 +52,9 @@ export const FavoritesView: React.FC = () => {
       if (selectedAlbum?.id === fav.id && selectedAlbum?.source === fav.source) {
         setSelectedAlbum(null);
       }
+      if (onFavoritesChanged) {
+        onFavoritesChanged();
+      }
     } catch (err) {
       console.error("Erro ao alterar favorito:", err);
     }
@@ -55,7 +62,7 @@ export const FavoritesView: React.FC = () => {
 
   const handleOpenAlbum = async (fav: FavoriteAlbum) => {
     if (fav.source === "local" && fav.exists === false) {
-      alert("A pasta deste álbum não foi encontrada no disco. Verifique se o HD/pendrive está conectado.");
+      alert("A pasta deste álbum não foi encontrada no disco.");
       return;
     }
 
@@ -145,11 +152,11 @@ export const FavoritesView: React.FC = () => {
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
-  const currentList = favorites.filter((f) => f.source === activeTab);
+  const currentList = favorites.filter((f) => f.source === activeTab && Boolean(f.id));
   const filtered = currentList.filter(
     (f) =>
-      f.title.toLowerCase().includes(search.toLowerCase()) ||
-      f.artist.toLowerCase().includes(search.toLowerCase())
+      (f.title || "").toLowerCase().includes(search.toLowerCase()) ||
+      (f.artist || "").toLowerCase().includes(search.toLowerCase())
   );
 
   return (

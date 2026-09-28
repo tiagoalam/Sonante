@@ -45,3 +45,23 @@ export interface PlexSearchResults {
   albums: PlexAlbum[];
   tracks: PlexTrack[];
 }
+
+export interface PlexPin {
+  id: number;
+  code: String;
+  auth_url: string;
+}
+
+export interface PlexConnection {
+  uri: string;
+  local: boolean;
+  address: string;
+  port: number;
+}
+
+export interface PlexServerResource {
+  name: string;
+  client_identifier: string;
+  connections: PlexConnection[];
+  chosen_uri: string;
+}

@@ -141,6 +141,30 @@ fn get_audio_devices() -> Vec<AudioDevice> {
 }
 
 #[tauri::command]
+async fn plex_create_pin() -> Result<plex::PlexPin, String> {
+    plex::request_plex_pin().await
+}
+
+#[tauri::command]
+async fn plex_check_pin(pin_id: u64) -> Result<Option<String>, String> {
+    plex::check_plex_pin(pin_id).await
+}
+
+#[tauri::command]
+async fn plex_get_servers(auth_token: String) -> Result<Vec<plex::PlexServerResource>, String> {
+    plex::get_plex_servers(&auth_token).await
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(&url)
+        .spawn()
+        .map_err(|e| format!("Falha ao abrir navegador: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn save_config(
     new_config: AppConfig,
     config_state: State<ConfigState>,
@@ -311,6 +335,10 @@ pub fn run() {
             get_artist_top_tracks,
             get_album_tracks,
             search_plex,
+            plex_create_pin,
+            plex_check_pin,
+            plex_get_servers,
+            open_external_url,
         ])
         .build(tauri::generate_context!())
         .expect("Erro ao compilar o contexto do Tauri");

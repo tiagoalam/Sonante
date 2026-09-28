@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import {
   Disc3,
   Folder,
@@ -16,6 +16,7 @@ import {
   RefreshCw,
   CheckCircle2,
   Heart,
+  ExternalLink,
 } from "lucide-react";
 import { PlayerBar } from "./components/PlayerBar";
 import { AlbumView } from "./components/AlbumView";
@@ -54,7 +55,7 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
 
-  // Favoritos Plex (IDs em cache para marcação rápida nos cards)
+  // Favoritos Plex (IDs válidos em cache)
   const [plexFavIds, setPlexFavIds] = useState<Set<string>>(new Set());
 
   // Fila e status global
@@ -96,6 +97,19 @@ export function App() {
 
   const [loading, setLoading] = useState(false);
 
+  // Recarregar os IDs dos favoritos garantindo consistência
+  const refreshPlexFavorites = useCallback(() => {
+    favoritesService
+      .getFavorites()
+      .then((favs) => {
+        const ids = favs
+          .filter((f) => f.source === "plex" && f.id && f.id.trim().length > 0)
+          .map((f) => String(f.id));
+        setPlexFavIds(new Set(ids));
+      })
+      .catch(console.error);
+  }, []);
+
   // Carregar Configurações e Dispositivos
   useEffect(() => {
     Promise.all([configService.getConfig(), configService.getAudioDevices()])
@@ -110,13 +124,13 @@ export function App() {
       })
       .catch(console.error);
 
-    favoritesService
-      .getFavorites()
-      .then((favs) => {
-        setPlexFavIds(new Set(favs.filter((f) => f.source === "plex").map((f) => f.id)));
-      })
-      .catch(console.error);
-  }, []);
+    refreshPlexFavorites();
+  }, [refreshPlexFavorites]);
+
+  // Atualizar a lista de favoritos sempre que mudar a fonte de mídia
+  useEffect(() => {
+    refreshPlexFavorites();
+  }, [mediaSource, refreshPlexFavorites]);
 
   // Telemetria global (1s)
   useEffect(() => {
@@ -208,9 +222,19 @@ export function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [showSettings, showAbout, showQueue, searchQuery]);
 
-  // Carregar bibliotecas do Plex
+  // Carregar ou Limpar Bibliotecas do Plex
   useEffect(() => {
-    if (!config?.plex_token) return;
+    if (!config?.plex_token || config.plex_token.trim().length === 0) {
+      setLibraries([]);
+      setSelectedLibrary(null);
+      setAlbums([]);
+      setCollections([]);
+      setActiveAlbum(null);
+      setActiveCollection(null);
+      setActiveArtist(null);
+      return;
+    }
+
     plexService
       .getLibraries()
       .then((libs) => {
@@ -315,25 +339,29 @@ export function App() {
       console.error("Falha na reprodução rápida:", err);
     }
   };
-  
+
   const handleTogglePlexCardFav = async (e: React.MouseEvent, album: PlexAlbum) => {
     e.stopPropagation();
+    const albumKey = String(album.rating_key || "");
+    if (!albumKey) return;
+
     const favItem: FavoriteAlbum = {
-      id: album.rating_key,
+      id: albumKey,
       source: "plex",
       title: album.title,
       artist: album.artist,
-      year: album.year != null ? String(album.year) : undefined, // <-- Conversão segura para string
+      year: album.year != null ? String(album.year) : undefined,
       thumb: album.thumb || null,
-      path_or_key: album.rating_key,
+      path_or_key: albumKey,
       exists: true,
     };
+
     try {
       const added = await favoritesService.toggleFavorite(favItem);
       setPlexFavIds((prev) => {
         const next = new Set(prev);
-        if (added) next.add(album.rating_key);
-        else next.delete(album.rating_key);
+        if (added) next.add(albumKey);
+        else next.delete(albumKey);
         return next;
       });
     } catch (err) {
@@ -342,10 +370,12 @@ export function App() {
   };
 
   const renderAlbumCard = (album: PlexAlbum) => {
-    const isFav = plexFavIds.has(album.rating_key);
+    const albumKey = String(album.rating_key || "");
+    const isFav = albumKey ? plexFavIds.has(albumKey) : false;
+
     return (
       <div
-        key={album.rating_key}
+        key={albumKey || album.title}
         onClick={() => setActiveAlbum(album)}
         className="group flex flex-col cursor-pointer relative"
       >
@@ -362,28 +392,29 @@ export function App() {
               <Disc3 size={40} />
             </div>
           )}
-	{/* Botão de Coração sobre a Capa */}
-        <button
-          onClick={(e) => handleTogglePlexCardFav(e, album)}
-          className={`absolute top-2 right-2 p-1.5 rounded-full backdrop-blur-xs transition-transform active:scale-90 cursor-pointer shadow z-20 ${
-            isFav
-              ? "bg-black/60 text-[#E5A00D]"
-              : "bg-black/40 text-white/70 hover:text-white opacity-0 group-hover:opacity-100"
-          }`}
-          title={isFav ? "Remover dos favoritos" : "Adicionar aos favoritos"}
-        >
-          <Heart size={14} fill={isFav ? "#E5A00D" : "none"} />
-        </button>
 
-        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+          {/* Botão de Coração sobre a Capa */}
           <button
-            onClick={(e) => handlePlayQuick(e, album)}
-            className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer pointer-events-auto"
-            title="Tocar Álbum"
+            onClick={(e) => handleTogglePlexCardFav(e, album)}
+            className={`absolute top-2 right-2 p-1.5 rounded-full backdrop-blur-xs transition-transform active:scale-90 cursor-pointer shadow z-20 ${
+              isFav
+                ? "bg-black/60 text-[#E5A00D]"
+                : "bg-black/40 text-white/70 hover:text-white opacity-0 group-hover:opacity-100"
+            }`}
+            title={isFav ? "Remover dos favoritos" : "Adicionar aos favoritos"}
           >
-            <Play size={20} className="ml-1" fill="black" />
+            <Heart size={14} fill={isFav ? "#E5A00D" : "none"} />
           </button>
-        </div>
+
+          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+            <button
+              onClick={(e) => handlePlayQuick(e, album)}
+              className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer pointer-events-auto"
+              title="Tocar Álbum"
+            >
+              <Play size={20} className="ml-1" fill="black" />
+            </button>
+          </div>
         </div>
 
         <span className="text-sm font-semibold text-white truncate" title={album.title}>
@@ -409,7 +440,8 @@ export function App() {
     );
   };
 
-  // Se for o primeiro acesso, renderiza o Wizard
+  const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
+
   if (config && config.first_run) {
     return (
       <WelcomeWizard
@@ -442,7 +474,6 @@ export function App() {
           </div>
 
           <nav className="space-y-1 mb-6">
-            {/* Opção Armazenamento Local com Indicador de Sincronização */}
             <button
               onClick={() => {
                 setMediaSource("local");
@@ -471,7 +502,6 @@ export function App() {
               )}
             </button>
 
-            {/* Opção Servidor Plex */}
             <button
               onClick={() => {
                 setMediaSource("plex");
@@ -488,7 +518,6 @@ export function App() {
               <span>Servidor Plex</span>
             </button>
 
-            {/* Opção Favoritos */}
             <button
               onClick={() => {
                 setMediaSource("favorites");
@@ -510,47 +539,57 @@ export function App() {
             </button>
           </nav>
 
-          {/* Bibliotecas de áudio Plex */}
           {mediaSource === "plex" && (
             <>
               <div className="text-[11px] font-bold text-[#666666] tracking-wider uppercase px-2 mb-2">
                 Bibliotecas de áudio Plex
               </div>
 
-              <div className="flex-1 overflow-y-auto space-y-1 pr-1 text-sm">
-                {libraries.length === 0 ? (
-                  <span className="text-xs text-[#666666] px-2 block">Nenhuma biblioteca encontrada.</span>
-                ) : (
-                  libraries.map((lib) => {
-                    const isSelected = selectedLibrary?.key === lib.key;
-                    return (
-                      <button
-                        key={lib.key}
-                        onClick={() => {
-                          setSelectedLibrary(lib);
-                          setActiveAlbum(null);
-                          setActiveCollection(null);
-                          setActiveArtist(null);
-                          setSearchQuery("");
-                        }}
-                        className={`w-full text-left px-3 py-2 rounded-md truncate transition-colors cursor-pointer ${
-                          isSelected
-                            ? "bg-[#332B15] text-[#E5A00D] font-bold"
-                            : "text-[#CCCCCC] hover:bg-[#202020] hover:text-white"
-                        }`}
-                      >
-                        {lib.title}
-                      </button>
-                    );
-                  })
-                )}
-              </div>
+              {!isPlexConnected ? (
+                <div className="px-3 py-3.5 bg-[#141414] border border-[#242424] rounded-xl text-center space-y-2">
+                  <span className="text-[11px] text-[#777777] block">Nenhuma conta conectada</span>
+                  <button
+                    onClick={() => setShowSettings(true)}
+                    className="w-full py-1.5 px-3 bg-[#242424] hover:bg-[#2D2D2D] text-[#E5A00D] rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    Conectar agora
+                  </button>
+                </div>
+              ) : (
+                <div className="flex-1 overflow-y-auto space-y-1 pr-1 text-sm">
+                  {libraries.length === 0 ? (
+                    <span className="text-xs text-[#666666] px-2 block">Nenhuma biblioteca encontrada.</span>
+                  ) : (
+                    libraries.map((lib) => {
+                      const isSelected = selectedLibrary?.key === lib.key;
+                      return (
+                        <button
+                          key={lib.key}
+                          onClick={() => {
+                            setSelectedLibrary(lib);
+                            setActiveAlbum(null);
+                            setActiveCollection(null);
+                            setActiveArtist(null);
+                            setSearchQuery("");
+                          }}
+                          className={`w-full text-left px-3 py-2 rounded-md truncate transition-colors cursor-pointer ${
+                            isSelected
+                              ? "bg-[#332B15] text-[#E5A00D] font-bold"
+                              : "text-[#CCCCCC] hover:bg-[#202020] hover:text-white"
+                          }`}
+                        >
+                          {lib.title}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              )}
             </>
           )}
 
           {mediaSource !== "plex" && <div className="flex-1" />}
 
-          {/* Rodapé Lateral: Preferências & Sobre */}
           <div className="pt-3 border-t border-[#262626] mt-auto space-y-1">
             <button
               onClick={() => setShowSettings(true)}
@@ -572,9 +611,26 @@ export function App() {
 
         {/* Painel Central */}
         {mediaSource === "favorites" ? (
-          <FavoritesView />
+          <FavoritesView onFavoritesChanged={refreshPlexFavorites} />
         ) : mediaSource === "local" ? (
           <LocalBrowserView />
+        ) : !isPlexConnected ? (
+          <main className="flex-1 flex flex-col items-center justify-center bg-[#121212] select-none p-8 text-center animate-in fade-in duration-200">
+            <div className="w-16 h-16 rounded-2xl bg-[#E5A00D]/10 border border-[#E5A00D]/20 flex items-center justify-center text-[#E5A00D] mb-4 shadow-xl">
+              <Server size={32} />
+            </div>
+            <h2 className="text-xl font-bold text-white mb-2">Servidor Plex Desconectado</h2>
+            <p className="text-xs text-[#888888] max-w-md mb-6 leading-relaxed">
+              Conecte sua conta do Plex para sincronizar e reproduzir suas bibliotecas de áudio, álbuns e faixas Hi-Res com fidelidade bit-perfect.
+            </p>
+            <button
+              onClick={() => setShowSettings(true)}
+              className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer"
+            >
+              <ExternalLink size={15} />
+              <span>Conectar Conta Plex</span>
+            </button>
+          </main>
         ) : activeArtist ? (
           <ArtistView
             artist={activeArtist}
@@ -589,10 +645,10 @@ export function App() {
               setActiveAlbum(null);
               setActiveArtist(art);
             }}
+            onToggleFavorite={refreshPlexFavorites}
           />
         ) : (
           <main className="flex-1 flex flex-col overflow-hidden bg-[#121212]">
-            {/* Topo com Título e Barra de Busca */}
             <div className="flex items-center justify-between p-8 pb-4 border-b border-[#222222]">
               <div className="flex items-center space-x-3">
                 {activeCollection && (
@@ -615,7 +671,6 @@ export function App() {
                 </div>
               </div>
 
-              {/* Barra de Pesquisa */}
               <div className="flex items-center space-x-4">
                 <div className="relative flex items-center w-72">
                   <Search size={15} className="absolute left-3 text-[#666666]" />
@@ -678,7 +733,7 @@ export function App() {
                           className={`px-4 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
                             activeTab === "collections"
                               ? "bg-[#E5A00D] text-black shadow"
-                            : "text-[#999999] hover:text-white"
+                              : "text-[#999999] hover:text-white"
                           }`}
                         >
                           Coleções
@@ -690,7 +745,6 @@ export function App() {
               </div>
             </div>
 
-            {/* Grid Principal */}
             <div className="flex-1 overflow-y-auto p-8">
               {searchQuery.trim().length > 0 ? (
                 isSearching ? (
@@ -866,7 +920,7 @@ export function App() {
           onClose={() => setShowSettings(false)}
           onSaved={() => {
             configService.getConfig().then(setConfig).catch(console.error);
-            plexService.getLibraries().then(setLibraries).catch(console.error);
+            refreshPlexFavorites();
           }}
         />
       )}

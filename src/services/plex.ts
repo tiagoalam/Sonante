@@ -22,7 +22,18 @@ export const plexService = {
 
   search: (query: string, sectionKey?: string): Promise<PlexSearchResults> =>
     invoke<PlexSearchResults>("search_plex", { query, sectionKey }),
+ 
+  createPin: (): Promise<PlexPin> => invoke<PlexPin>("plex_create_pin"),
   
+  checkPin: (pinId: number): Promise<string | null> =>
+    invoke<string | null>("plex_check_pin", { pinId }),
+  
+  getServers: (authToken: string): Promise<PlexServerResource[]> =>
+    invoke<PlexServerResource[]>("plex_get_servers", { authToken }),
+  
+  openExternalUrl: (url: string): Promise<void> =>
+    invoke<void>("open_external_url", { url }),
+ 
   getAlbumTracks: (ratingKey: string): Promise<PlexTrack[]> =>
     invoke<PlexTrack[]>("get_album_tracks", { ratingKey }),
 };
