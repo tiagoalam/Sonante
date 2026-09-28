@@ -17,7 +17,45 @@ import { FavoriteAlbum } from "../types/favorite";
 import { audioService } from "../services/audio";
 import { favoritesService } from "../services/favorites";
 
-const coverMemoryCache = new Map<string, string>();
+// Cache em memória com política LRU (limita a 150 capas recentes para proteger o consumo de RAM)
+class LruMemoryCache {
+  private maxSize: number;
+  private map: Map<string, string>;
+
+  constructor(maxSize = 150) {
+    this.maxSize = maxSize;
+    this.map = new Map();
+  }
+
+  get(key: string): string | undefined {
+    const val = this.map.get(key);
+    if (val !== undefined) {
+      // Move para o final (mais recentemente usado)
+      this.map.delete(key);
+      this.map.set(key, val);
+    }
+    return val;
+  }
+
+  set(key: string, val: string): void {
+    if (this.map.has(key)) {
+      this.map.delete(key);
+    } else if (this.map.size >= this.maxSize) {
+      // Remove o item mais antigo (primeira chave)
+      const oldestKey = this.map.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.map.delete(oldestKey);
+      }
+    }
+    this.map.set(key, val);
+  }
+
+  has(key: string): boolean {
+    return this.map.has(key);
+  }
+}
+
+const coverMemoryCache = new LruMemoryCache(150);
 
 const LocalAlbumCard: React.FC<{
   album: LocalAlbum;

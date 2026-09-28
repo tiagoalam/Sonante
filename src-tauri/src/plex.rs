@@ -1,10 +1,24 @@
 use crate::config::AppConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 const PLEX_CLIENT_ID: &str = "sonante-audio-player";
 const PLEX_PRODUCT_NAME: &str = "Sonante";
 const PLEX_VERSION: &str = "0.2.0";
+
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(10)
+            .build()
+            .unwrap_or_default()
+    })
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlexPin {
@@ -30,7 +44,7 @@ pub struct PlexServerResource {
 }
 
 pub async fn request_plex_pin() -> Result<PlexPin, String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let res = client
         .post("https://plex.tv/api/v2/pins")
         .header("X-Plex-Product", PLEX_PRODUCT_NAME)
@@ -70,7 +84,7 @@ pub async fn request_plex_pin() -> Result<PlexPin, String> {
 }
 
 pub async fn check_plex_pin(pin_id: u64) -> Result<Option<String>, String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = format!("https://plex.tv/api/v2/pins/{}", pin_id);
     let res = client
         .get(&url)
@@ -97,7 +111,7 @@ pub async fn check_plex_pin(pin_id: u64) -> Result<Option<String>, String> {
 }
 
 pub async fn get_plex_servers(auth_token: &str) -> Result<Vec<PlexServerResource>, String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let res = client
         .get("https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1")
         .header("X-Plex-Client-Identifier", PLEX_CLIENT_ID)
@@ -301,12 +315,11 @@ impl PlexClient {
                 cfg.local_mount_path.clone(),
             );
         }
-
         Self {
             base_url: cfg.plex_url.trim_end_matches('/').to_string(),
             token: cfg.plex_token.clone(),
             playback_mode: cfg.playback_mode.clone(),
-            http: reqwest::Client::new(),
+            http: http_client().clone(),
             path_mappings,
         }
     }

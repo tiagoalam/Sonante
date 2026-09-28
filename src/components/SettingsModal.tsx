@@ -42,10 +42,14 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
   const [loadingServers, setLoadingServers] = useState(false);
   const [showManualPlex, setShowManualPlex] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
-
+  
   useEffect(() => {
     Promise.all([configService.getConfig(), configService.getAudioDevices()])
       .then(([cfg, devs]) => {
+        // Se a config não tiver dispositivo ou o dispositivo antigo foi desconectado, seleciona o primeiro disponível
+        if (devs.length > 0 && (!cfg.alsa_device || !devs.some((d) => d.id === cfg.alsa_device))) {
+          cfg.alsa_device = devs[0].id;
+        }
         setConfig(cfg);
         setDevices(devs);
         if (cfg.plex_token && cfg.plex_token.trim().length > 0) {

@@ -85,14 +85,20 @@ impl AppConfig {
         }
         Self::default()
     }
-
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
+
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(&path, json).map_err(|e| e.to_string())?;
+        
+        // Grava primeiramente em arquivo temporário no mesmo diretório/sistema de arquivos
+        let tmp_path = path.with_extension("tmp");
+        fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
+
+        // Operação atômica no nível do kernel (POSIX rename)
+        fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
         Ok(())
     }
 }

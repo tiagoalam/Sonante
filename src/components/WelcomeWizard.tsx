@@ -33,6 +33,16 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   const [step, setStep] = useState<number>(1);
   const [config, setConfig] = useState<AppConfig>({ ...initialConfig });
 
+  // Garante que o primeiro DAC detectado seja gravado se o campo estiver vazio
+  useEffect(() => {
+    if (devices.length > 0) {
+      const exists = devices.some((d) => d.id === config.alsa_device);
+      if (!config.alsa_device || !exists) {
+        setConfig((prev) => ({ ...prev, alsa_device: devices[0].id }));
+      }
+    }
+  }, [devices]);
+
   const [useLocal, setUseLocal] = useState<boolean>(true);
   const [usePlex, setUsePlex] = useState<boolean>(false);
   const [isFinishing, setIsFinishing] = useState<boolean>(false);

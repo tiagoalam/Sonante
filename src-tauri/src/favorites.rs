@@ -88,8 +88,15 @@ impl FavoriteAlbum {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
+
         let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
-        fs::write(&path, json).map_err(|e| e.to_string())?;
+
+        // Grava no arquivo temporário antes de substituir o arquivo real
+        let tmp_path = path.with_extension("tmp");
+        fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
+
+        // Troca atômica (impede que o arquivo favorites.json fique zerado ou quebrado)
+        fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
         Ok(())
     }
 
