@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { PlaybackStatus, TrackMetadata } from "../types/audio";
-import { LocalItem } from "../types/local";
+import { LocalItem, LocalAlbum } from "../types/local";
 
 export const audioService = {
   getStatus: (): Promise<PlaybackStatus> => invoke<PlaybackStatus>("get_playback_status"),
@@ -21,6 +21,7 @@ export const audioService = {
     invoke<LocalItem[]>("list_local_directory", { path }),
   getLocalCover: (path: string): Promise<string | null> =>
     invoke<string | null>("get_local_cover", { path }),
+  getLocalAlbums: (): Promise<LocalAlbum[]> => invoke<LocalAlbum[]>("get_local_albums"),
   pickDirectory: (): Promise<string | null> => invoke<string | null>("pick_directory"),
   rescanLibrary: (): Promise<void> => invoke<void>("rescan_library"),
 };

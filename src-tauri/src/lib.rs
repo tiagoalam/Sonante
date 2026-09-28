@@ -1,10 +1,12 @@
 mod audio;
 mod config;
+mod favorites;
 mod plex;
 mod supervisor;
 
 use audio::{list_audio_devices, AudioDevice, AudioEngine, AudioState, PlaybackStatus, TrackMetadata};
 use config::AppConfig;
+use favorites::FavoriteAlbum;
 use plex::{PlexAlbum, PlexClient, PlexCollection, PlexLibrary, PlexSearchResults, PlexTrack};
 use supervisor::MpdSupervisor;
 use std::sync::Mutex;
@@ -87,8 +89,32 @@ fn list_local_directory(
 }
 
 #[tauri::command]
-fn get_local_cover(path: String, state: State<AudioState>) -> Result<Option<String>, String> {
-    Ok(state.0.lock().unwrap().resolve_cover(&path))
+fn get_favorites() -> Vec<FavoriteAlbum> {
+    FavoriteAlbum::load_all()
+}
+
+#[tauri::command]
+fn toggle_favorite(album: FavoriteAlbum) -> Result<bool, String> {
+    FavoriteAlbum::toggle(album)
+}
+
+#[tauri::command]
+fn get_local_cover(path: String) -> Option<String> {
+    let lib_dir = supervisor::MpdSupervisor::library_dir();
+    let p = std::path::Path::new(&path);
+    let full_path = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        lib_dir.join(p)
+    };
+
+    if full_path.is_dir() {
+        audio::find_folder_cover_path(&full_path)
+    } else if let Some(parent) = full_path.parent() {
+        audio::find_folder_cover_path(parent)
+    } else {
+        None
+    }
 }
 
 #[tauri::command]
@@ -153,6 +179,11 @@ fn save_config(
 
     *current_cfg = new_config;
     Ok(())
+}
+
+#[tauri::command]
+fn get_local_albums(state: State<AudioState>) -> Result<Vec<audio::LocalAlbum>, String> {
+    state.0.lock().unwrap().get_local_albums()
 }
 
 #[tauri::command]
@@ -264,6 +295,9 @@ pub fn run() {
             set_window_title,
             list_local_directory,
             get_local_cover,
+            get_local_albums,
+            get_favorites,
+            toggle_favorite,
             pick_directory,
             rescan_library,
             get_config,

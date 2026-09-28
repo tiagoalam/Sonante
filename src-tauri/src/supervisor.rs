@@ -30,12 +30,11 @@ impl MpdSupervisor {
         Self::sonante_config_dir().join("library")
     }
 
-    /// Atualiza os links simbólicos dentro de ~/.config/sonante/library
     pub fn sync_library_symlinks(folders: &[String]) -> Result<PathBuf, String> {
         let lib_dir = Self::library_dir();
         fs::create_dir_all(&lib_dir).map_err(|e| e.to_string())?;
 
-        // Limpa links existentes antigos
+        // 1. Limpa links existentes antigos
         if let Ok(entries) = fs::read_dir(&lib_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
@@ -47,16 +46,21 @@ impl MpdSupervisor {
             }
         }
 
+        // 2. Deduplica caminhos idênticos informados pelo usuário
+        let mut unique_folders = Vec::new();
+        for f in folders {
+            let p = Path::new(f);
+            if p.exists() && p.is_dir() {
+                let canonical = fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                if !unique_folders.contains(&canonical) {
+                    unique_folders.push(canonical);
+                }
+            }
+        }
+
         let mut used_names = HashSet::new();
 
-        for folder_str in folders {
-            let target_path = Path::new(folder_str);
-            // Ignora se o disco/pasta física não estiver montado
-            if !target_path.exists() || !target_path.is_dir() {
-                eprintln!("[Supervisor] Pasta ignorada (não encontrada ou disco desmontado): {}", folder_str);
-                continue;
-            }
-
+        for target_path in unique_folders {
             let base_name = target_path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -72,11 +76,7 @@ impl MpdSupervisor {
             used_names.insert(final_name.clone());
 
             let symlink_path = lib_dir.join(&final_name);
-            if let Err(e) = symlink(target_path, &symlink_path) {
-                eprintln!("[Supervisor] Falha ao criar link simbólico para {}: {}", folder_str, e);
-            } else {
-                println!("[Supervisor] Link montado: {} -> {}", symlink_path.display(), folder_str);
-            }
+            let _ = symlink(&target_path, &symlink_path);
         }
 
         Ok(lib_dir)

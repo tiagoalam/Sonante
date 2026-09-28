@@ -1,0 +1,113 @@
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FavoriteAlbum {
+    pub id: String,                 // folder_path para local ou rating_key para plex
+    pub source: String,             // "local" ou "plex"
+    pub title: String,
+    pub artist: String,
+    #[serde(default, deserialize_with = "deserialize_flexible_string")]
+    pub year: Option<String>,
+    pub thumb: Option<String>,
+    pub path_or_key: String,
+    #[serde(default = "default_exists")]
+    pub exists: bool,
+}
+
+fn default_exists() -> bool {
+    true
+}
+
+// Aceita tanto número (1996) quanto string ("1996") ou null vindos do Plex / Local
+fn deserialize_flexible_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match opt {
+        Some(serde_json::Value::String(s)) => {
+            if s.trim().is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(s))
+            }
+        }
+        Some(serde_json::Value::Number(n)) => Ok(Some(n.to_string())),
+        _ => Ok(None),
+    }
+}
+
+fn check_local_path_exists(path_str: &str) -> bool {
+    let p = Path::new(path_str);
+    let full_path = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        crate::supervisor::MpdSupervisor::library_dir().join(p)
+    };
+    full_path.is_dir()
+}
+
+impl FavoriteAlbum {
+    fn favorites_file_path() -> PathBuf {
+        let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        path.push("sonante");
+        path.push("favorites.json");
+        path
+    }
+
+    pub fn load_all() -> Vec<FavoriteAlbum> {
+        let path = Self::favorites_file_path();
+        if !path.exists() {
+            return Vec::new();
+        }
+
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut list: Vec<FavoriteAlbum> = serde_json::from_str(&content).unwrap_or_default();
+
+        // Checagem de existência no caminho correto da biblioteca
+        for fav in &mut list {
+            if fav.source == "local" {
+                fav.exists = check_local_path_exists(&fav.path_or_key);
+            } else {
+                fav.exists = true;
+            }
+        }
+
+        list
+    }
+
+    pub fn save_all(list: &[FavoriteAlbum]) -> Result<(), String> {
+        let path = Self::favorites_file_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
+        fs::write(&path, json).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn toggle(album: FavoriteAlbum) -> Result<bool, String> {
+        let mut list = Self::load_all();
+        let exists_index = list.iter().position(|item| item.id == album.id && item.source == album.source);
+
+        if let Some(idx) = exists_index {
+            list.remove(idx);
+            Self::save_all(&list)?;
+            Ok(false)
+        } else {
+            let mut new_fav = album;
+            if new_fav.source == "local" {
+                new_fav.exists = check_local_path_exists(&new_fav.path_or_key);
+            }
+            list.push(new_fav);
+            Self::save_all(&list)?;
+            Ok(true)
+        }
+    }
+}

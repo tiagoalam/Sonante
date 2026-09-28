@@ -1,44 +1,234 @@
-import React, { useEffect, useState } from "react";
-import { Folder, Music, Play, ArrowLeft, Disc3, Clock, Home } from "lucide-react";
-import { LocalItem } from "../types/local";
+import React, { useEffect, useState, useRef } from "react";
+import {
+  Folder,
+  Music,
+  Play,
+  ArrowLeft,
+  Disc3,
+  Search,
+  Grid,
+  ListTree,
+  Clock,
+  Sparkles,
+  Heart,
+} from "lucide-react";
+import { LocalItem, LocalAlbum } from "../types/local";
+import { FavoriteAlbum } from "../types/favorite";
 import { audioService } from "../services/audio";
+import { favoritesService } from "../services/favorites";
+
+const coverMemoryCache = new Map<string, string>();
+
+const LocalAlbumCard: React.FC<{
+  album: LocalAlbum;
+  isFavorite: boolean;
+  onToggleFavorite: (e: React.MouseEvent, album: LocalAlbum, cover: string | null) => void;
+  onClick: () => void;
+  onPlayQuick: (e: React.MouseEvent) => void;
+}> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick }) => {
+  const [cover, setCover] = useState<string | null>(() => coverMemoryCache.get(album.folder_path) || null);
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (coverMemoryCache.has(album.folder_path)) {
+      setCover(coverMemoryCache.get(album.folder_path)!);
+      return;
+    }
+
+    let isMounted = true;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          audioService.getLocalCover(album.folder_path).then((c) => {
+            if (isMounted && c) {
+              coverMemoryCache.set(album.folder_path, c);
+              setCover(c);
+            }
+          });
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "150px" }
+    );
+
+    if (cardRef.current) {
+      observer.observe(cardRef.current);
+    }
+
+    return () => {
+      isMounted = false;
+      observer.disconnect();
+    };
+  }, [album.folder_path]);
+
+  return (
+    <div ref={cardRef} onClick={onClick} className="group flex flex-col cursor-pointer relative">
+      <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
+        {cover ? (
+          <img
+            src={cover}
+            alt={album.title}
+            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            loading="lazy"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-[#444444]">
+            <Disc3 size={40} />
+          </div>
+        )}
+
+        <button
+          onClick={(e) => onToggleFavorite(e, album, cover)}
+          className={`absolute top-2 right-2 p-1.5 rounded-full backdrop-blur-xs transition-transform active:scale-90 cursor-pointer shadow z-10 ${
+            isFavorite
+              ? "bg-black/60 text-[#E5A00D]"
+              : "bg-black/40 text-white/70 hover:text-white opacity-0 group-hover:opacity-100"
+          }`}
+          title={isFavorite ? "Remover dos favoritos" : "Adicionar aos favoritos"}
+        >
+          <Heart size={14} fill={isFavorite ? "#E5A00D" : "none"} />
+        </button>
+
+        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+          <button
+            onClick={onPlayQuick}
+            className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer"
+            title="Tocar Álbum Completo"
+          >
+            <Play size={20} className="ml-1" fill="black" />
+          </button>
+        </div>
+      </div>
+
+      <span className="text-sm font-semibold text-white truncate" title={album.title}>
+        {album.title}
+      </span>
+      <span className="text-xs text-[#999999] truncate mt-0.5" title={album.artist}>
+        {album.artist}
+      </span>
+      <span className="text-[11px] text-[#666666] mt-0.5">
+        {album.year ? `${album.year} • ` : ""}
+        {album.track_count} {album.track_count === 1 ? "faixa" : "faixas"}
+      </span>
+    </div>
+  );
+};
 
 export const LocalBrowserView: React.FC = () => {
+  const [viewMode, setViewMode] = useState<"albums" | "folders">("albums");
+  const [albums, setAlbums] = useState<LocalAlbum[]>([]);
+  const [loadingAlbums, setLoadingAlbums] = useState(false);
+  const [albumSearch, setAlbumSearch] = useState("");
+  const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(null);
+  const [albumTracks, setAlbumTracks] = useState<LocalItem[]>([]);
+  const [albumCover, setAlbumCover] = useState<string | null>(null);
+  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
+
   const [currentPath, setCurrentPath] = useState<string>("");
   const [items, setItems] = useState<LocalItem[]>([]);
+  const [loadingFolders, setLoadingFolders] = useState<boolean>(false);
   const [folderCover, setFolderCover] = useState<string | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
 
-  const loadDirectory = async (path: string) => {
-    setLoading(true);
+  useEffect(() => {
+    let isMounted = true;
+    setLoadingAlbums(true);
+
+    audioService
+      .getLocalAlbums()
+      .then((data) => {
+        if (isMounted) setAlbums(data);
+      })
+      .catch(console.error)
+      .finally(() => {
+        if (isMounted) setLoadingAlbums(false);
+      });
+
+    favoritesService
+      .getFavorites()
+      .then((favs) => {
+        if (isMounted) {
+          setFavoriteIds(new Set(favs.filter((f) => f.source === "local").map((f) => f.id)));
+        }
+      })
+      .catch(console.error);
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (viewMode === "folders") {
+      setLoadingFolders(true);
+      Promise.all([
+        audioService.listLocalDirectory(currentPath),
+        audioService.getLocalCover(currentPath),
+      ])
+        .then(([data, cov]) => {
+          setItems(data);
+          setFolderCover(cov);
+        })
+        .catch(console.error)
+        .finally(() => setLoadingFolders(false));
+    }
+  }, [currentPath, viewMode]);
+
+  const handleToggleFavoriteLocal = async (e: React.MouseEvent, album: LocalAlbum, cov: string | null) => {
+    e.stopPropagation();
+    const favItem: FavoriteAlbum = {
+      id: album.folder_path,
+      source: "local",
+      title: album.title,
+      artist: album.artist,
+      year: album.year,
+      thumb: cov,
+      path_or_key: album.folder_path,
+      exists: true,
+    };
     try {
-      const [data, cover] = await Promise.all([
-        audioService.listLocalDirectory(path),
-        audioService.getLocalCover(path),
-      ]);
-      setItems(data);
-      setFolderCover(cover);
-      setCurrentPath(path);
+      const added = await favoritesService.toggleFavorite(favItem);
+      setFavoriteIds((prev) => {
+        const next = new Set(prev);
+        if (added) next.add(album.folder_path);
+        else next.delete(album.folder_path);
+        return next;
+      });
     } catch (err) {
-      console.error("Erro ao listar diretório local:", err);
-    } finally {
-      setLoading(false);
+      console.error("Erro ao favoritar:", err);
     }
   };
 
-  useEffect(() => {
-    loadDirectory("");
-  }, []);
+  const handleSelectAlbum = async (album: LocalAlbum) => {
+    setSelectedAlbum(album);
+    try {
+      const cov = coverMemoryCache.get(album.folder_path) || (await audioService.getLocalCover(album.folder_path));
+      if (cov) coverMemoryCache.set(album.folder_path, cov);
+      setAlbumCover(cov);
 
-  const handleGoUp = () => {
-    if (!currentPath) return;
-    const parts = currentPath.split("/").filter(Boolean);
-    parts.pop();
-    loadDirectory(parts.join("/"));
+      const trackList = await audioService.listLocalDirectory(album.folder_path);
+      setAlbumTracks(trackList.filter((i) => i.item_type === "file"));
+    } catch (err) {
+      console.error("Falha ao carregar faixas do álbum:", err);
+    }
   };
 
-  const handleFolderClick = (dirPath: string) => {
-    loadDirectory(dirPath);
+  const handlePlayEntireAlbum = async (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => {
+    try {
+      const files = trackItems || (await audioService.listLocalDirectory(album.folder_path)).filter((i) => i.item_type === "file");
+      const cov = albumCover || coverMemoryCache.get(album.folder_path) || (await audioService.getLocalCover(album.folder_path));
+      const meta = files.map((f) => ({
+        title: f.title || f.name,
+        artist: f.artist || album.artist,
+        album: f.album || album.title,
+        thumb: cov,
+        uri: f.path,
+      }));
+      if (meta.length > 0) {
+        audioService.playTracks(meta, startIdx);
+      }
+    } catch (err) {
+      console.error("Erro ao tocar álbum:", err);
+    }
   };
 
   const formatDuration = (secs?: number) => {
@@ -48,193 +238,271 @@ export const LocalBrowserView: React.FC = () => {
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
-  const folders = items.filter((i) => i.item_type === "directory");
-  const files = items.filter((i) => i.item_type === "file");
-
-  const handlePlayFile = (fileIndex: number) => {
-    const metaTracks = files.map((f) => ({
-      title: f.title || f.name,
-      artist: f.artist || "Arquivo Local",
-      album: f.album || (currentPath.split("/").pop() || "Armazenamento Local"),
-      thumb: folderCover || null,
-      uri: f.path,
-    }));
-
-    if (metaTracks.length > 0) {
-      audioService.playTracks(metaTracks, fileIndex).catch(console.error);
-    }
-  };
-
-  const handlePlayAll = () => {
-    if (files.length > 0) {
-      handlePlayFile(0);
-    }
-  };
-
-  const pathParts = currentPath ? currentPath.split("/").filter(Boolean) : [];
+  const filteredAlbums = albums.filter(
+    (a) =>
+      a.title.toLowerCase().includes(albumSearch.toLowerCase()) ||
+      a.artist.toLowerCase().includes(albumSearch.toLowerCase())
+  );
 
   return (
     <main className="flex-1 flex flex-col overflow-hidden bg-[#121212] select-none">
-      {/* Cabeçalho com Suporte a Capa do Álbum Local */}
-      <div className="p-8 pb-5 border-b border-[#222222] flex items-end justify-between gap-6">
-        <div className="flex items-center space-x-5 min-w-0">
-          {folderCover ? (
-            <div className="w-24 h-24 rounded-lg bg-[#1C1C1C] overflow-hidden border border-[#2B2B2B] shadow-lg shrink-0">
-              <img src={folderCover} alt="Capa" className="w-full h-full object-cover" />
-            </div>
-          ) : (
-            <div className="w-16 h-16 rounded-lg bg-[#1A1A1A] border border-[#262626] flex items-center justify-center text-[#E5A00D] shrink-0">
-              <Folder size={28} />
-            </div>
+      <div className="flex items-center justify-between p-8 pb-4 border-b border-[#222222]">
+        <div className="flex items-center space-x-3">
+          {selectedAlbum && (
+            <button
+              onClick={() => setSelectedAlbum(null)}
+              className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
+              title="Voltar aos Álbuns"
+            >
+              <ArrowLeft size={16} />
+            </button>
           )}
 
-          <div className="flex flex-col space-y-1.5 min-w-0">
-            <div className="flex items-center space-x-2 text-xs text-[#888888]">
-              <button
-                onClick={() => loadDirectory("")}
-                className="flex items-center space-x-1 hover:text-[#E5A00D] transition-colors cursor-pointer"
-              >
-                <Home size={14} />
-                <span>Raiz</span>
-              </button>
-
-              {pathParts.map((part, index) => {
-                const fullSubPath = pathParts.slice(0, index + 1).join("/");
-                const isLast = index === pathParts.length - 1;
-                return (
-                  <React.Fragment key={fullSubPath}>
-                    <span>/</span>
-                    <button
-                      onClick={() => loadDirectory(fullSubPath)}
-                      className={`hover:text-[#E5A00D] transition-colors truncate max-w-[150px] cursor-pointer ${
-                        isLast ? "text-white font-bold" : ""
-                      }`}
-                    >
-                      {part}
-                    </button>
-                  </React.Fragment>
-                );
-              })}
-            </div>
-
-            <h2 className="text-2xl font-bold text-white tracking-tight truncate">
-              {pathParts.length > 0 ? pathParts[pathParts.length - 1] : "Armazenamento Local"}
+          <div>
+            <h2 className="text-2xl font-bold text-white tracking-tight">
+              {selectedAlbum
+                ? selectedAlbum.title
+                : viewMode === "albums"
+                ? "Álbuns Locais"
+                : "Navegador de Pastas"}
             </h2>
-
-            {files.length > 0 && (
-              <span className="text-xs text-[#888888]">
-                {files.length} {files.length === 1 ? "faixa de áudio" : "faixas de áudio"}
-              </span>
-            )}
+            <p className="text-xs text-[#888888] mt-0.5">
+              {selectedAlbum
+                ? selectedAlbum.artist
+                : viewMode === "albums"
+                ? `${filteredAlbums.length} álbuns disponíveis`
+                : currentPath || "Raiz da Biblioteca"}
+            </p>
           </div>
         </div>
 
-        {files.length > 0 && (
-          <button
-            onClick={handlePlayAll}
-            className="flex items-center space-x-2 px-5 py-2.5 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-md transition-transform active:scale-95 cursor-pointer shrink-0"
-          >
-            <Play size={15} fill="black" className="ml-0.5" />
-            <span>Tocar Pasta</span>
-          </button>
-        )}
-      </div>
-
-      {/* Conteúdo */}
-      <div className="flex-1 overflow-y-auto p-8">
-        {loading ? (
-          <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
-            A carregar diretório...
-          </div>
-        ) : items.length === 0 ? (
-          <div className="h-40 flex flex-col items-center justify-center text-[#666666] space-y-2">
-            <Disc3 size={36} className="opacity-40" />
-            <span className="text-xs">Nenhum ficheiro de áudio ou subpasta encontrada.</span>
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {currentPath && (
-              <button
-                onClick={handleGoUp}
-                className="flex items-center space-x-2 px-3 py-2 rounded-lg bg-[#181818] hover:bg-[#222222] border border-[#2B2B2B] text-xs font-semibold text-[#CCCCCC] hover:text-white transition-colors cursor-pointer w-fit"
-              >
-                <ArrowLeft size={14} />
-                <span>Subir um nível (..)</span>
-              </button>
-            )}
-
-            {folders.length > 0 && (
-              <div>
-                <h3 className="text-xs font-bold text-[#888888] uppercase tracking-wider mb-3">
-                  Pastas ({folders.length})
-                </h3>
-                <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
-                  {folders.map((folder) => (
-                    <div
-                      key={folder.path}
-                      onClick={() => handleFolderClick(folder.path)}
-                      className="flex items-center space-x-3 p-3 rounded-lg bg-[#181818] border border-[#262626] hover:border-[#E5A00D]/60 hover:bg-[#1E1E1E] transition-all cursor-pointer group"
-                    >
-                      <div className="w-9 h-9 rounded bg-[#252525] flex items-center justify-center text-[#E5A00D] group-hover:scale-105 transition-transform shrink-0">
-                        <Folder size={18} />
-                      </div>
-                      <span className="text-xs font-semibold text-white truncate flex-1" title={folder.name}>
-                        {folder.name}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+        {!selectedAlbum && (
+          <div className="flex items-center space-x-4">
+            {viewMode === "albums" && (
+              <div className="relative flex items-center w-64">
+                <Search size={14} className="absolute left-3 text-[#666666]" />
+                <input
+                  type="text"
+                  value={albumSearch}
+                  onChange={(e) => setAlbumSearch(e.target.value)}
+                  placeholder="Filtrar por álbum ou artista..."
+                  className="w-full bg-[#1A1A1A] border border-[#2B2B2B] rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D] transition-colors"
+                />
               </div>
             )}
 
-            {files.length > 0 && (
-              <div>
-                <h3 className="text-xs font-bold text-[#888888] uppercase tracking-wider mb-3">
-                  Ficheiros de Áudio ({files.length})
-                </h3>
+            <div className="flex bg-[#1E1E1E] p-1 rounded-lg border border-[#333333]">
+              <button
+                onClick={() => {
+                  setViewMode("albums");
+                  setSelectedAlbum(null);
+                }}
+                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                  viewMode === "albums"
+                    ? "bg-[#E5A00D] text-black shadow"
+                    : "text-[#999999] hover:text-white"
+                }`}
+              >
+                <Grid size={14} />
+                <span>Álbuns</span>
+              </button>
 
-                <div className="w-full bg-[#161616] rounded-xl border border-[#222222] overflow-hidden divide-y divide-[#1F1F1F]">
-                  <div className="grid grid-cols-[40px_1fr_180px_70px] px-4 py-2.5 text-[11px] font-bold text-[#666666] uppercase tracking-wider bg-[#1A1A1A]">
-                    <span className="text-center">#</span>
-                    <span>Título</span>
-                    <span className="hidden sm:block">Artista / Álbum</span>
-                    <span className="text-right flex items-center justify-end">
-                      <Clock size={13} />
+              <button
+                onClick={() => {
+                  setViewMode("folders");
+                  setSelectedAlbum(null);
+                }}
+                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                  viewMode === "folders"
+                    ? "bg-[#E5A00D] text-black shadow"
+                    : "text-[#999999] hover:text-white"
+                }`}
+              >
+                <ListTree size={14} />
+                <span>Pastas</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-8">
+        {selectedAlbum ? (
+          <div className="space-y-8 animate-in fade-in duration-100">
+            <div className="flex items-end space-x-6">
+              <div className="w-52 h-52 rounded-xl bg-[#202020] border border-[#2B2B2B] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
+                {albumCover ? (
+                  <img src={albumCover} alt={selectedAlbum.title} className="w-full h-full object-cover" />
+                ) : (
+                  <Disc3 size={64} className="text-[#444444]" />
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <span className="text-xs font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1">
+                  <Sparkles size={13} />
+                  <span>Álbum Local</span>
+                </span>
+                <h1 className="text-3xl font-black text-white">{selectedAlbum.title}</h1>
+                <p className="text-base text-[#CCCCCC] font-medium">{selectedAlbum.artist}</p>
+                <p className="text-xs text-[#777777]">
+                  {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
+                  {albumTracks.length} faixas
+                </p>
+
+                <div className="pt-2 flex items-center space-x-3">
+                  <button
+                    onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, 0)}
+                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer"
+                  >
+                    <Play size={16} fill="black" />
+                    <span>Tocar Álbum</span>
+                  </button>
+
+                  <button
+                    onClick={(e) => handleToggleFavoriteLocal(e, selectedAlbum, albumCover)}
+                    className="p-2.5 rounded-xl bg-[#1E1E1E] border border-[#2B2B2B] hover:bg-[#282828] text-white transition-colors cursor-pointer"
+                    title={favoriteIds.has(selectedAlbum.folder_path) ? "Remover dos favoritos" : "Favoritar"}
+                  >
+                    <Heart
+                      size={16}
+                      className={favoriteIds.has(selectedAlbum.folder_path) ? "text-[#E5A00D]" : "text-[#888888]"}
+                      fill={favoriteIds.has(selectedAlbum.folder_path) ? "#E5A00D" : "none"}
+                    />
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-[#141414] border border-[#222222] rounded-xl overflow-hidden divide-y divide-[#1D1D1D]">
+              <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[#666666] uppercase tracking-wider bg-[#181818]">
+                <span className="col-span-1 text-center">#</span>
+                <span className="col-span-8">Título</span>
+                <span className="col-span-3 text-right flex items-center justify-end space-x-1">
+                  <Clock size={12} />
+                  <span>Duração</span>
+                </span>
+              </div>
+
+              {albumTracks.map((track, idx) => (
+                <div
+                  key={track.path}
+                  onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, idx)}
+                  className="grid grid-cols-12 px-4 py-3 text-xs items-center hover:bg-[#1E1E1E] transition-colors cursor-pointer group"
+                >
+                  <span className="col-span-1 text-center font-mono text-[#666666] group-hover:text-[#E5A00D]">
+                    {idx + 1}
+                  </span>
+                  <div className="col-span-8 flex flex-col pr-2">
+                    <span className="font-semibold text-white group-hover:text-[#E5A00D] transition-colors truncate">
+                      {track.title || track.name}
+                    </span>
+                    <span className="text-[11px] text-[#777777] truncate">
+                      {track.artist || selectedAlbum.artist}
                     </span>
                   </div>
-
-                  {files.map((file, idx) => (
-                    <div
-                      key={file.path}
-                      onClick={() => handlePlayFile(idx)}
-                      className="group grid grid-cols-[40px_1fr_180px_70px] items-center px-4 py-3 text-xs text-[#CCCCCC] hover:bg-[#202020] hover:text-white transition-colors cursor-pointer"
-                    >
-                      <div className="flex items-center justify-center">
-                        <span className="group-hover:hidden text-[#666666] font-mono text-[11px]">
-                          {idx + 1}
-                        </span>
-                        <Play size={13} className="hidden group-hover:block text-[#E5A00D]" fill="#E5A00D" />
-                      </div>
-
-                      <div className="flex items-center space-x-2.5 truncate pr-3">
-                        <Music size={14} className="text-[#666666] shrink-0" />
-                        <span className="truncate font-medium text-white group-hover:text-[#E5A00D] transition-colors">
-                          {file.title || file.name}
-                        </span>
-                      </div>
-
-                      <div className="hidden sm:block truncate text-[#777777] text-[11px] pr-2">
-                        {file.artist && file.album
-                          ? `${file.artist} — ${file.album}`
-                          : file.artist || file.album || "--"}
-                      </div>
-
-                      <span className="text-right font-mono text-[11px] text-[#666666]">
-                        {formatDuration(file.duration)}
-                      </span>
-                    </div>
-                  ))}
+                  <span className="col-span-3 text-right font-mono text-[#888888]">
+                    {formatDuration(track.duration)}
+                  </span>
                 </div>
+              ))}
+            </div>
+          </div>
+        ) : viewMode === "albums" ? (
+          loadingAlbums ? (
+            <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+              Organizando coleção...
+            </div>
+          ) : filteredAlbums.length === 0 ? (
+            <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
+              <Disc3 size={40} className="opacity-40" />
+              <span className="text-xs">Nenhum álbum encontrado.</span>
+            </div>
+          ) : (
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
+              {filteredAlbums.map((album) => (
+                <LocalAlbumCard
+                  key={album.id}
+                  album={album}
+                  isFavorite={favoriteIds.has(album.folder_path)}
+                  onToggleFavorite={handleToggleFavoriteLocal}
+                  onClick={() => handleSelectAlbum(album)}
+                  onPlayQuick={(e) => {
+                    e.stopPropagation();
+                    handlePlayEntireAlbum(album);
+                  }}
+                />
+              ))}
+            </div>
+          )
+        ) : (
+          <div className="space-y-4">
+            {currentPath && (
+              <button
+                onClick={() => {
+                  const parts = currentPath.split("/");
+                  parts.pop();
+                  setCurrentPath(parts.join("/"));
+                }}
+                className="flex items-center space-x-2 text-xs font-semibold text-[#888888] hover:text-white transition-colors cursor-pointer mb-2"
+              >
+                <ArrowLeft size={14} />
+                <span>Subir um nível</span>
+              </button>
+            )}
+
+            {loadingFolders ? (
+              <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
+                Carregando pasta...
+              </div>
+            ) : items.length === 0 ? (
+              <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
+                Pasta vazia.
+              </div>
+            ) : (
+              <div className="divide-y divide-[#1D1D1D] bg-[#141414] rounded-xl border border-[#222222]">
+                {items.map((item) => {
+                  const isDir = item.item_type === "directory";
+                  return (
+                    <div
+                      key={item.path}
+                      onClick={() => {
+                        if (isDir) {
+                          setCurrentPath(item.path);
+                        } else {
+                          const meta = [
+                            {
+                              title: item.title || item.name,
+                              artist: item.artist || "",
+                              album: item.album || "",
+                              thumb: folderCover,
+                              uri: item.path,
+                            },
+                          ];
+                          audioService.playTracks(meta, 0);
+                        }
+                      }}
+                      className="flex items-center justify-between p-3 hover:bg-[#1E1E1E] transition-colors cursor-pointer group"
+                    >
+                      <div className="flex items-center space-x-3 truncate mr-4">
+                        {isDir ? (
+                          <Folder size={18} className="text-[#E5A00D] shrink-0" />
+                        ) : (
+                          <Music size={18} className="text-[#888888] group-hover:text-white shrink-0" />
+                        )}
+                        <span className="text-xs font-medium text-white truncate">
+                          {item.title || item.name}
+                        </span>
+                      </div>
+
+                      {!isDir && (
+                        <span className="text-xs font-mono text-[#666666]">
+                          {formatDuration(item.duration)}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -243,3 +511,5 @@ export const LocalBrowserView: React.FC = () => {
     </main>
   );
 };
+
+export default LocalBrowserView;

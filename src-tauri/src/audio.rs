@@ -35,6 +35,16 @@ pub struct LocalItem {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalAlbum {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub year: Option<String>,
+    pub folder_path: String,
+    pub track_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlaybackStatus {
     pub state: String,         // "play", "pause", "stop", "disconnected"
     pub elapsed: f64,
@@ -49,8 +59,7 @@ pub struct PlaybackStatus {
     pub is_updating: bool,     // True quando o MPD está indexando pastas locais
 }
 
-/// Procura imagens de capa padrão dentro de um diretório e devolve como Data URL Base64
-fn find_folder_cover(dir: &Path) -> Option<String> {
+pub fn find_folder_cover_path(dir: &Path) -> Option<String> {
     let candidate_names = [
         "cover.jpg", "cover.jpeg", "cover.png",
         "Folder.jpg", "folder.jpg", "folder.jpeg", "folder.png",
@@ -62,7 +71,8 @@ fn find_folder_cover(dir: &Path) -> Option<String> {
         let p = dir.join(name);
         if p.is_file() {
             if let Ok(bytes) = std::fs::read(&p) {
-                if bytes.len() <= 15 * 1024 * 1024 {
+                // Limita capas a 8MB para não sobrecarregar a memória
+                if bytes.len() <= 8 * 1024 * 1024 {
                     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("jpeg").to_lowercase();
                     let mime = if ext == "png" { "image/png" } else { "image/jpeg" };
                     let b64 = BASE64.encode(&bytes);
@@ -221,6 +231,105 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
+    pub fn get_local_albums(&self) -> Result<Vec<LocalAlbum>, String> {
+        let lines = self.send_command("listallinfo")?;
+        use std::collections::HashMap;
+
+        #[derive(Default)]
+        struct AlbumCollector {
+            title: String,
+            artist: String,
+            year: Option<String>,
+            track_count: usize,
+            folder_path: String,
+        }
+
+        // Chave de deduplicação: (artista_normalizado, album_normalizado)
+        let mut map: HashMap<String, AlbumCollector> = HashMap::new();
+
+        let mut cur_file = String::new();
+        let mut cur_album = None;
+        let mut cur_artist = None;
+        let mut cur_album_artist = None;
+        let mut cur_date = None;
+
+        let commit_track = |map: &mut HashMap<String, AlbumCollector>,
+                           file: &str,
+                           album: Option<String>,
+                           artist: Option<String>,
+                           album_artist: Option<String>,
+                           date: Option<String>| {
+            if file.is_empty() {
+                return;
+            }
+            let p = Path::new(file);
+            let parent_dir = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+            let folder_name = p.parent()
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("Álbum Desconhecido")
+                .to_string();
+
+            let title = album.unwrap_or(folder_name);
+            let final_artist = album_artist.or(artist).unwrap_or_else(|| "Artista Desconhecido".to_string());
+
+            // Normaliza para fundir variações e duplicatas
+            let key = format!("{}:::{}", final_artist.trim().to_lowercase(), title.trim().to_lowercase());
+
+            let entry = map.entry(key).or_insert_with(|| AlbumCollector {
+                title: title.clone(),
+                artist: final_artist,
+                year: date.clone(),
+                track_count: 0,
+                folder_path: parent_dir,
+            });
+
+            entry.track_count += 1;
+            if entry.year.is_none() && date.is_some() {
+                entry.year = date;
+            }
+        };
+
+        for line in lines {
+            if let Some((k, v)) = line.split_once(": ") {
+                match k {
+                    "file" => {
+                        commit_track(&mut map, &cur_file, cur_album.take(), cur_artist.take(), cur_album_artist.take(), cur_date.take());
+                        cur_file = v.to_string();
+                    }
+                    "Album" => cur_album = Some(v.to_string()),
+                    "Artist" => cur_artist = Some(v.to_string()),
+                    "AlbumArtist" => cur_album_artist = Some(v.to_string()),
+                    "Date" => cur_date = Some(v.chars().take(4).collect::<String>()),
+                    _ => {}
+                }
+            }
+        }
+
+        commit_track(&mut map, &cur_file, cur_album, cur_artist, cur_album_artist, cur_date);
+
+        let mut albums: Vec<LocalAlbum> = map
+            .into_iter()
+            .filter(|(_, col)| col.track_count > 0 && !col.folder_path.is_empty())
+            .map(|(key, col)| LocalAlbum {
+                id: key,
+                title: col.title,
+                artist: col.artist,
+                year: col.year,
+                folder_path: col.folder_path,
+                track_count: col.track_count,
+            })
+            .collect();
+
+        albums.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        Ok(albums)
+    }
+
+    pub fn rescan_library(&self) -> Result<(), String> {
+        // "rescan" limpa caminhos fantasmas e atualiza modificações
+        self.send_command("rescan").map(|_| ())
+    }
+
     pub fn new(socket_path: &str, music_dir: &str) -> Self {
         Self {
             socket_path: socket_path.to_string(),
@@ -242,9 +351,9 @@ impl AudioEngine {
         };
 
         if full_path.is_dir() {
-            find_folder_cover(&full_path)
+            find_folder_cover_path(&full_path)
         } else if let Some(parent) = full_path.parent() {
-            find_folder_cover(parent)
+            find_folder_cover_path(parent)
         } else {
             None
         }
@@ -357,10 +466,6 @@ impl AudioEngine {
     pub fn clear_queue(&mut self) -> Result<(), String> {
         self.queue.clear();
         self.send_command("clear").map(|_| ())
-    }
-
-    pub fn rescan_library(&self) -> Result<(), String> {
-        self.send_command("update").map(|_| ())
     }
 
     pub fn list_directory(&self, path: &str) -> Result<Vec<LocalItem>, String> {
