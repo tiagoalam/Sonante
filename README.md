@@ -25,6 +25,20 @@ Sonante seamlessly unifies your offline high-resolution local collection (across
 
 ---
 
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/library-grid.png" width="100%" alt="Library Grid View" />
+  <br><em>Browsing Hi-Res / SACD library with real-time filters and responsive album grid.</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/album-queue.png" width="49%" alt="Album and Queue View" />
+  <img src="docs/screenshots/artist-view.png" width="49%" alt="Artist Discography" />
+  <br><em>Left: Album tracklist with slide-out Queue Drawer | Right: Full artist discography and top tracks.</em>
+</p>
+
 ## Key Features
 
 ### Audiophile Audio Engine
