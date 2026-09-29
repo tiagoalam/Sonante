@@ -48,7 +48,7 @@ export function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [mediaSource, setMediaSource] = useState<"plex" | "local" | "favorites">("local");
-
+  const [localSelectedArtist, setLocalSelectedArtist] = useState<string | null>(null);
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
   const [selectedLibrary, setSelectedLibrary] = useState<PlexLibrary | null>(null);
   const [activeTab, setActiveTab] = useState<"library" | "collections">("library");
@@ -476,6 +476,7 @@ export function App() {
             <button
               onClick={() => {
                 setMediaSource("local");
+                setLocalSelectedArtist(null);
                 setActiveAlbum(null);
                 setActiveArtist(null);
               }}
@@ -510,6 +511,7 @@ export function App() {
             <button
               onClick={() => {
                 setMediaSource("plex");
+                setLocalSelectedArtist(null);
                 setActiveAlbum(null);
                 setActiveArtist(null);
               }}
@@ -526,6 +528,7 @@ export function App() {
             <button
               onClick={() => {
                 setMediaSource("favorites");
+                setLocalSelectedArtist(null);
                 setActiveAlbum(null);
                 setActiveArtist(null);
               }}
@@ -575,6 +578,7 @@ export function App() {
                             setActiveAlbum(null);
                             setActiveCollection(null);
                             setActiveArtist(null);
+                            setLocalSelectedArtist(null);
                             setSearchQuery("");
                           }}
                           className={`w-full text-left px-3 py-2 rounded-md truncate transition-colors cursor-pointer ${
@@ -618,7 +622,10 @@ export function App() {
         {mediaSource === "favorites" ? (
           <FavoritesView onFavoritesChanged={refreshPlexFavorites} />
         ) : mediaSource === "local" ? (
-          <LocalBrowserView />
+          <LocalBrowserView
+            initialArtist={localSelectedArtist}
+            onClearInitialArtist={() => setLocalSelectedArtist(null)}
+          />
         ) : !isPlexConnected ? (
           <main className="flex-1 flex flex-col items-center justify-center bg-[#121212] select-none p-8 text-center animate-in fade-in duration-200">
             <div className="w-16 h-16 rounded-2xl bg-[#E5A00D]/10 border border-[#E5A00D]/20 flex items-center justify-center text-[#E5A00D] mb-4 shadow-xl">
@@ -912,6 +919,32 @@ export function App() {
       <PlayerBar
         onToggleQueue={() => setShowQueue(!showQueue)}
         isQueueOpen={showQueue}
+        onNavigateToArtist={(artistName) => {
+          if (!playbackStatus.current_file.startsWith("http")) {
+            setMediaSource("local");
+            setLocalSelectedArtist(artistName);
+            setActiveAlbum(null);
+            setActiveArtist(null);
+          } else {
+            setMediaSource("plex");
+            setActiveAlbum(null);
+            setActiveArtist(null);
+            setLocalSelectedArtist(null);
+            setSearchQuery(artistName);
+          }
+        }}
+        onNavigateToAlbum={() => {
+          if (!playbackStatus.current_file.startsWith("http")) {
+            setMediaSource("local");
+            setLocalSelectedArtist(null);
+          } else if (playbackStatus.album) {
+            setMediaSource("plex");
+            setActiveAlbum(null);
+            setActiveArtist(null);
+            setLocalSelectedArtist(null);
+            setSearchQuery(playbackStatus.album);
+          }
+        }}
       />
 
       <QueueDrawer

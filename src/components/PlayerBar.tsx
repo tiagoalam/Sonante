@@ -17,6 +17,8 @@ import { audioService } from "../services/audio";
 interface Props {
   onToggleQueue: () => void;
   isQueueOpen: boolean;
+  onNavigateToArtist?: (artistName: string) => void;
+  onNavigateToAlbum?: () => void;
 }
 
 export const PlayerBar: React.FC<Props> = ({ onToggleQueue, isQueueOpen }) => {

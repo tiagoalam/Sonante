@@ -148,13 +148,22 @@ const LocalAlbumCard: React.FC<{
   );
 };
 
-export const LocalBrowserView: React.FC = () => {
+export interface LocalBrowserViewProps {
+  initialArtist?: string | null;
+  onClearInitialArtist?: () => void;
+}
+
+export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
+  initialArtist,
+  onClearInitialArtist,
+}) => {
   const { t } = useTranslation();
   const [viewMode, setViewMode] = useState<"albums" | "folders">("albums");
   const [albums, setAlbums] = useState<LocalAlbum[]>([]);
   const [loadingAlbums, setLoadingAlbums] = useState(false);
   const [albumSearch, setAlbumSearch] = useState("");
   const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(null);
+  const [selectedArtist, setSelectedArtist] = useState<string | null>(initialArtist || null);
   const [albumTracks, setAlbumTracks] = useState<LocalItem[]>([]);
   const [albumCover, setAlbumCover] = useState<string | null>(null);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
@@ -191,6 +200,14 @@ export const LocalBrowserView: React.FC = () => {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (initialArtist) {
+      setSelectedArtist(initialArtist);
+      setSelectedAlbum(null);
+      setViewMode("albums");
+    }
+  }, [initialArtist]);
 
   useEffect(() => {
     if (viewMode === "folders") {
@@ -279,13 +296,28 @@ export const LocalBrowserView: React.FC = () => {
       a.artist.toLowerCase().includes(albumSearch.toLowerCase())
   );
 
+  const artistAlbums = selectedArtist
+    ? albums.filter(
+        (a) =>
+          a.artist &&
+          a.artist.trim().toLowerCase() === selectedArtist.trim().toLowerCase()
+      )
+    : [];
+
   return (
     <main className="flex-1 flex flex-col overflow-hidden bg-[#121212] select-none">
       <div className="flex items-center justify-between p-8 pb-4 border-b border-[#222222]">
         <div className="flex items-center space-x-3">
-          {selectedAlbum && (
+          {(selectedAlbum || selectedArtist) && (
             <button
-              onClick={() => setSelectedAlbum(null)}
+              onClick={() => {
+                if (selectedAlbum) {
+                  setSelectedAlbum(null);
+                } else if (selectedArtist) {
+                  setSelectedArtist(null);
+                  if (onClearInitialArtist) onClearInitialArtist();
+                }
+              }}
               className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
               title={t("localBrowser.back")}
             >
@@ -297,6 +329,8 @@ export const LocalBrowserView: React.FC = () => {
             <h2 className="text-2xl font-bold text-white tracking-tight">
               {selectedAlbum
                 ? selectedAlbum.title
+                : selectedArtist
+                ? selectedArtist
                 : viewMode === "albums"
                 ? t("localBrowser.albumsTitle")
                 : t("localBrowser.foldersTitle")}
@@ -304,6 +338,8 @@ export const LocalBrowserView: React.FC = () => {
             <p className="text-xs text-[#888888] mt-0.5">
               {selectedAlbum
                 ? selectedAlbum.artist
+                : selectedArtist
+                ? t("localBrowser.albumsCount", { count: artistAlbums.length })
                 : viewMode === "albums"
                 ? t("localBrowser.albumsCount", { count: filteredAlbums.length })
                 : currentPath || t("localBrowser.root")}
@@ -311,7 +347,7 @@ export const LocalBrowserView: React.FC = () => {
           </div>
         </div>
 
-        {!selectedAlbum && (
+        {!selectedAlbum && !selectedArtist && (
           <div className="flex items-center space-x-4">
             {viewMode === "albums" && (
               <div className="relative flex items-center w-64">
@@ -331,6 +367,7 @@ export const LocalBrowserView: React.FC = () => {
                 onClick={() => {
                   setViewMode("albums");
                   setSelectedAlbum(null);
+                  setSelectedArtist(null);
                 }}
                 className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
                   viewMode === "albums"
@@ -346,6 +383,7 @@ export const LocalBrowserView: React.FC = () => {
                 onClick={() => {
                   setViewMode("folders");
                   setSelectedAlbum(null);
+                  setSelectedArtist(null);
                 }}
                 className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
                   viewMode === "folders"
@@ -379,7 +417,17 @@ export const LocalBrowserView: React.FC = () => {
                   <span>{t("localBrowser.albumsTitle")}</span>
                 </span>
                 <h1 className="text-3xl font-black text-white">{selectedAlbum.title}</h1>
-                <p className="text-base text-[#CCCCCC] font-medium">{selectedAlbum.artist}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedArtist(selectedAlbum.artist);
+                    setSelectedAlbum(null);
+                  }}
+                  className="text-base text-[#CCCCCC] hover:text-[#E5A00D] font-medium transition-colors cursor-pointer text-left block"
+                  title={t("localBrowser.viewDiscography", "Ver discografia")}
+                >
+                  {selectedAlbum.artist}
+                </button>
                 <p className="text-xs text-[#777777]">
                   {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
                   {albumTracks.length} {t("favorites.tracks")}
@@ -442,6 +490,31 @@ export const LocalBrowserView: React.FC = () => {
                 </div>
               ))}
             </div>
+          </div>
+        ) : selectedArtist ? (
+          <div className="space-y-6 animate-in fade-in duration-100">
+            {artistAlbums.length === 0 ? (
+              <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
+                <Disc3 size={40} className="opacity-40" />
+                <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
+              </div>
+            ) : (
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
+                {artistAlbums.map((album) => (
+                  <LocalAlbumCard
+                    key={album.id || album.folder_path}
+                    album={album}
+                    isFavorite={favoriteIds.has(album.folder_path)}
+                    onToggleFavorite={handleToggleFavoriteLocal}
+                    onClick={() => handleSelectAlbum(album)}
+                    onPlayQuick={(e) => {
+                      e.stopPropagation();
+                      handlePlayEntireAlbum(album);
+                    }}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         ) : viewMode === "albums" ? (
           loadingAlbums ? (
