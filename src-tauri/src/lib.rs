@@ -293,16 +293,16 @@ async fn search_plex(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let socket_path = "/tmp/mpd.socket";
+    let socket_path = MpdSupervisor::socket_path().to_string_lossy().to_string();
     let initial_config = AppConfig::load();
 
-    let mut supervisor = MpdSupervisor::new(socket_path);
+    let mut supervisor = MpdSupervisor::new(&socket_path);
     if let Err(e) = supervisor.start(&initial_config) {
         eprintln!("[Aviso] Erro no supervisor de áudio: {}", e);
     }
 
     let audio_engine = AudioEngine::new(
-        socket_path,
+        &socket_path,
         &MpdSupervisor::library_dir().to_string_lossy(),
     );
     let _ = audio_engine.rescan_library();
@@ -354,7 +354,9 @@ pub fn run() {
             if let WindowEvent::CloseRequested { .. } = event {
                 if let Some(sup_state) = window.app_handle().try_state::<SupervisorState>() {
                     if let Ok(mut sup) = sup_state.0.lock() {
-                        sup.stop();
+                        if let Err(e) = sup.stop() {
+                            eprintln!("[Supervisor] Falha no shutdown da janela: {}", e);
+                        }
                     }
                 }
             }
@@ -367,7 +369,9 @@ pub fn run() {
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
                 if let Some(sup_state) = app_handle.try_state::<SupervisorState>() {
                     if let Ok(mut supervisor) = sup_state.0.lock() {
-                        supervisor.stop();
+                        if let Err(e) = supervisor.stop() {
+                            eprintln!("[Supervisor] Falha no shutdown da aplicação: {}", e);
+                        }
                     }
                 }
             }
