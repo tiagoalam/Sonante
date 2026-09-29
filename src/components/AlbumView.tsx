@@ -75,6 +75,7 @@ export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist, onTo
       album: album.title,
       thumb: t.thumb || album.thumb || null,
       uri: t.play_uri,
+      duration: t.duration_ms ? t.duration_ms / 1000 : (t.duration ? (t.duration > 1000 ? t.duration / 1000 : t.duration) : undefined),
     }));
 
     if (metaTracks.length > 0) {
@@ -214,9 +215,8 @@ export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist, onTo
                     {album.artist}
                   </span>
                 </div>
-
-                <span className="col-span-3 text-right font-mono text-[#888888]">
-                {formatDuration(track.duration || 0)}
+		<span className="col-span-3 text-right font-mono text-[#888888]">
+  			{formatDuration(track.duration_ms ?? track.duration ?? 0)}
 		</span>
               </div>
             ))

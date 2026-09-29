@@ -330,6 +330,7 @@ export function App() {
         album: album.title,
         thumb: t.thumb || album.thumb || null,
         uri: t.play_uri,
+        duration: t.duration_ms ? t.duration_ms / 1000 : undefined,
       }));
       if (metaTracks.length > 0) {
         audioService.playTracks(metaTracks, 0);
@@ -338,7 +339,7 @@ export function App() {
       console.error("Falha na reprodução rápida:", err);
     }
   };
-
+  
   const handleTogglePlexCardFav = async (e: React.MouseEvent, album: PlexAlbum) => {
     e.stopPropagation();
     const albumKey = String(album.rating_key || "");

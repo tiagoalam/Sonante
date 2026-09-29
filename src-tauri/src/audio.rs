@@ -21,6 +21,8 @@ pub struct TrackMetadata {
     pub album: String,
     pub thumb: Option<String>,
     pub uri: String,
+    #[serde(default)]
+    pub duration: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -428,6 +430,7 @@ impl AudioEngine {
                     album: "".to_string(),
                     thumb: None,
                     uri: u,
+                    duration: None,
                 }
             })
             .collect();
@@ -527,15 +530,17 @@ impl AudioEngine {
                             item.album = Some(v.to_string());
                         }
                     }
-                    "duration" => {
-                        if let Some(ref mut item) = current_item {
-                            item.duration = v.parse::<f64>().ok();
-                        }
-                    }
-                    "Time" => {
+                    "duration" | "Time" | "time" | "Duration" => {
                         if let Some(ref mut item) = current_item {
                             if item.duration.is_none() {
-                                item.duration = v.parse::<f64>().ok();
+                                let clean = v.trim();
+                                if let Ok(secs) = clean.parse::<f64>() {
+                                    item.duration = Some(secs);
+                                } else if let Some((m, s)) = clean.split_once(':') {
+                                    if let (Ok(m_val), Ok(s_val)) = (m.trim().parse::<f64>(), s.trim().parse::<f64>()) {
+                                        item.duration = Some(m_val * 60.0 + s_val);
+                                    }
+                                }
                             }
                         }
                     }
