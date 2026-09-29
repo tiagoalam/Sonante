@@ -4,7 +4,7 @@
 
 **Audiophile Bit-Perfect Desktop Audio Player for Linux**
 
-*Direct ALSA bit-perfect routing, flexible PipeWire shared output, native DSD/PCM streaming, and Plex Media Server integration.*
+*Direct ALSA bit-perfect routing, universal system-shared output, native DSD/PCM streaming, and Plex Media Server integration.*
 
 [![Release](https://img.shields.io/github/v/release/tiagoalam/sonante?style=flat-square&color=E5A00D)](https://github.com/tiagoalam/sonante/releases)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20(ALSA%20%7C%20PipeWire)-blue?style=flat-square)](#requirements)
@@ -21,19 +21,20 @@
 
 **Sonante** is a desktop music player crafted for high-fidelity audio on Linux, offering the choice between **exclusive bit-perfect hardware playback** and **everyday system-shared audio**:
 
-* **Bit-Perfect Mode (Direct ALSA):** Bypasses all operating system mixers, software volume controls, and resampling layers (PipeWire/PulseAudio) to speak directly to dedicated DAC hardware nodes (`hw:X,Y`).
-* **Shared Mode (PipeWire / PulseAudio):** Routes audio through your system's default sound server, allowing music playback to coexist seamlessly with browsers, Discord, games, and system notifications without monopolizing the device.
+* **Bit-Perfect Exclusive Mode (Direct ALSA):** Bypasses all operating system mixers, software volume controls, and resampling layers (PipeWire/PulseAudio) to stream unadulterated audio directly to dedicated DAC hardware nodes (`hw:CARD,DEV`).
+* **Shared System Mode (PipeWire / PulseAudio / ALSA dmix):** Routes audio through your system's default sound server (`default`), allowing high-quality music playback to coexist seamlessly with browsers, Discord, games, and system notifications without monopolizing the device.
 
 Sonante unifies offline high-resolution collections (spanning internal disks and external drives) and remote **Plex Media Server** audio libraries under an elegant, responsive dark interface.
 
 ---
 
-## What's New in v0.3.5
+## What's New in v0.3.8
 
-* **Persistent Queue & Playback State:** Dedicated disk caching (`queue_cache.json`) preserves the active playlist, playhead position, high-resolution artwork, and metadata across application restarts.
-* **Unified Track Duration Engine:** Fixed Plex API millisecond-to-second discrepancies and integrated MPD `lsinfo` duration parsing, ensuring exact time displays across albums and queue drawers.
-* **Interactive PlayerBar Navigation:** Album covers, track titles, and artist labels in the bottom control bar now act as contextual links directly navigating to discographies and album views.
-* **UI Lifecycle & Render Performance:** Component memoization for album cards (`React.memo`), elimination of duplicate initialization calls, and full metadata support in global Plex searches.
+* **Dual-Mode Audio Engine Architecture:** Distinct separation between **Bit-Perfect Exclusive** (hardware-direct `hw:CARD,DEV` with DoP support) and **Shared System** (`default` ALSA node for transparent PipeWire/PulseAudio integration).
+* **Hardware Lock Prevention & Resilient Daemon Teardown:** Implemented strict socket teardown, `Drop` traits, and process cleanup routines in the MPD supervisor, guaranteeing DACs are released immediately without orphaned processes blocking other apps.
+* **Seamless Audio Handover:** Dynamic device switching preserves current playhead position, playback state, and queue metadata without audio dropouts or manual intervention.
+* **Refined Plex Navigation Stack:** Fixed navigation precedence in the artist view, allowing discography album cards to act as responsive links opening the album view while preserving back-stack history.
+* **Interactive First-Run Wizard:** Full bilingual onboarding flow with instant audio mode selection, directory mapping, and OAuth PIN login.
 
 ---
 
@@ -62,9 +63,9 @@ Sonante v0.3.8 introduces a dedicated dual-mode audio architecture designed to s
   * Graceful socket teardown and strict device descriptor release ensuring DACs are freed immediately when playback stops or the app is closed.
 
 * **Shared System Mode (PipeWire / PulseAudio / ALSA dmix):**
-  * Universal routing through the default system audio server using the standard `default` endpoint.
+  * Universal routing through the default system audio server using the standard `default` ALSA endpoint.
   * Plays concurrently with web browsers, communication tools, games, and desktop notifications without hardware locking or audio device conflicts.
-  * Resilient backend implementation requiring no special MPD plugin dependencies, guaranteeing compatibility across all Linux distributions.
+  * Resilient backend implementation requiring no special MPD plugin dependencies, guaranteeing out-of-the-box compatibility across all Linux distributions.
 
 ### Plex Media Server Integration
 * **Official OAuth / PIN Authentication:** Web-based login with polling and secure local token storage.
@@ -80,7 +81,7 @@ Sonante v0.3.8 introduces a dedicated dual-mode audio architecture designed to s
 ### UI & User Experience
 * **Interactive PlayerBar:** Instant navigation back to current artists and albums directly from playback controls.
 * **Fully Internationalized (i18n):** Native support for **English (en-US)** and **Portuguese (pt-BR)** with real-time switching across the entire UI.
-* **Interactive First-Run Wizard:** Guides the user through audio output selection (ALSA Bit-Perfect vs PipeWire Shared), local library setup, and Plex connection.
+* **Interactive First-Run Wizard:** Guides the user through audio output selection (ALSA Bit-Perfect vs Shared System), local library setup, and Plex connection.
 * **Unified Favorites:** Persistent favorites system across both local albums and Plex libraries with active offline availability tracking.
 * **Global Keyboard Shortcuts:** Fast control for common playback, volume, and search actions.
 
@@ -90,12 +91,12 @@ Sonante v0.3.8 introduces a dedicated dual-mode audio architecture designed to s
 
 ```text
 +-----------------------------------------------------------------+
-|                   Frontend (React 18 + Vite)                    |
-|      Lucide Icons  *  Tailwind CSS  *  react-i18next (pt/en)    |
+|                    Frontend (React 18 + Vite)                   |
+|       Lucide Icons  *  Tailwind CSS  *  react-i18next (pt/en)   |
 +--------------------------------+--------------------------------+
                                  | IPC (Tauri Core Invokes)
 +--------------------------------v--------------------------------+
-|                      Tauri / Rust Backend                       |
+|                       Tauri / Rust Backend                      |
 |  - HTTP Connection Pooling with Keep-Alive (reqwest)            |
 |  - Atomic Configuration Persistence (fs::rename)                |
 |  - MPD Process Supervisor & Dynamic mpd.conf Generation         |
@@ -103,8 +104,8 @@ Sonante v0.3.8 introduces a dedicated dual-mode audio architecture designed to s
 +--------------------------------+--------------------------------+
                                  | UNIX Domain Socket
 +--------------------------------v--------------------------------+
-|                   Dedicated MPD Audio Daemon                    |
-|       Configured for ALSA Exclusive or PipeWire Shared Output   |
+|                    Dedicated MPD Audio Daemon                   |
+|        Configured for ALSA Exclusive or Shared System Output    |
 +--------------------------------+--------------------------------+
                                  |
         +------------------------+------------------------+
@@ -114,6 +115,7 @@ Sonante v0.3.8 introduces a dedicated dual-mode audio architecture designed to s
 |   External Audiophile USB DAC   |     |    PipeWire / PulseAudio Server |
 |   Direct Hardware (hw:CARD,DEV) |     |    System Mixed Output (default)|
 +---------------------------------+     +---------------------------------+
+
 ```
 
 ---
