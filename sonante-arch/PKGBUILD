@@ -1,6 +1,6 @@
 # Maintainer: Tiago Alam <seu-email@exemplo.com>
 pkgname=sonante-bin
-pkgver=0.3.0
+pkgver=0.3.5
 pkgrel=1
 pkgdesc="Audiophile Bit-Perfect Player for Linux (ALSA Direct Exclusive & Plex Streaming)"
 arch=('x86_64')

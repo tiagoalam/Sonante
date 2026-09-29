@@ -118,12 +118,16 @@
     "cancel": "Cancelar",
     "save": "Gravar Preferências",
     "language": "Idioma da Interface",
-    "audioBackend": "Sistema de Saída",
-    "alsaMode": "ALSA (Exclusivo / Direto)",
-    "pipewireMode": "PipeWire (Integrado / Compartilhado)",
-    "pipewireNotice": "O PipeWire gerencia o roteamento e a comutação de amostragem dinamicamente para o dispositivo padrão do sistema, sem bloquear o hardware de outros apps."
-  },
+    "audioBackend": "Modo de Saída de Áudio",
+    "alsaMode": "Bit-Perfect Exclusivo (ALSA Direct)",
+    "pipewireMode": "Áudio Compartilhado (Sistema / PipeWire)",
+    "pipewireNotice": "O áudio é enviado ao servidor de som do sistema (PipeWire / PulseAudio), permitindo ouvir músicas juntamente com navegadores, jogos e notificações sem travar o DAC.",
+    "exclusiveNotice": "Acesso direto e exclusivo ao hardware via nós ALSA (hw:CARD,DEV), contornando mixers e reamostragens do sistema para máxima fidelidade sonora. Outros sons do sistema ficarão mudos neste dispositivo.",
+    "sharedActiveNotice": "O áudio sairá pelo dispositivo de som padrão configurado no painel do seu sistema operacional.",
+    "dopOnlyExclusive": "O encapsulamento DSD over PCM (DoP) requer o modo Bit-Perfect Exclusivo ativo." 
+ },
   "wizard": {
+    "step1Shared": "O modo compartilhado integra o som ao servidor padrão do sistema (PipeWire / PulseAudio), permitindo reprodução simultânea com outros aplicativos.",
     "subtitle": "Assistente de Configuração Inicial",
     "step": "Etapa {{step}}",
     "enabled": "Ativado",
@@ -162,5 +166,17 @@
     "devDesc": "Construído em Rust, Tauri, React e MPD.",
     "builtWith": "Desenvolvido com",
     "forEnthusiasts": "para entusiastas de áudio"
+  },
+  "artistView": {
+    "back": "Voltar",
+    "artist": "Artista",
+    "albumsCount_one": "{{count}} álbum",
+    "albumsCount_other": "{{count}} álbuns",
+    "catalogedTracks": "{{count}} faixas catalogadas",
+    "loading": "Carregando informações do artista...",
+    "popular": "Populares",
+    "showMore": "Mostrar mais",
+    "showLess": "Mostrar menos",
+    "discography": "Discografia"
   }
 }

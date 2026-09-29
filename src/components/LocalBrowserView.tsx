@@ -274,6 +274,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         album: f.album || album.title,
         thumb: cov,
         uri: f.path,
+	duration: f.duration,
       }));
       if (meta.length > 0) {
         audioService.playTracks(meta, startIdx);
@@ -585,6 +586,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                               album: item.album || "",
                               thumb: folderCover,
                               uri: item.path,
+			      duration: item.duration,
                             },
                           ];
                           audioService.playTracks(meta, 0);

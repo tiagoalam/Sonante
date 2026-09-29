@@ -16,6 +16,7 @@ import {
   ChevronDown,
   ChevronUp,
   Languages,
+  Radio,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { AppConfig } from "../types/config";
@@ -40,10 +41,8 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   const [usePlex, setUsePlex] = useState<boolean>(false);
   const [isFinishing, setIsFinishing] = useState<boolean>(false);
 
-  // Seleção de idioma no Wizard
   const [selectedLang, setSelectedLang] = useState(i18n.language || "pt-BR");
 
-  // Estados do Fluxo de Login Plex (PIN / OAuth)
   const [pinCode, setPinCode] = useState<string | null>(null);
   const [pinId, setPinId] = useState<number | null>(null);
   const [isPollingPin, setIsPollingPin] = useState(false);
@@ -53,7 +52,6 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   const [showManualPlex, setShowManualPlex] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
 
-  // Garante a auto-seleção do primeiro DAC disponível se estiver vazio
   useEffect(() => {
     if (devices.length > 0) {
       const exists = devices.some((d) => d.id === config.alsa_device);
@@ -101,7 +99,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
     } catch (err) {
       console.error("Falha ao iniciar autenticação Plex:", err);
       setIsPollingPin(false);
-      alert("Não foi possível conectar aos servidores do Plex. Verifique a sua ligação à internet.");
+      alert("Não foi possível conectar aos servidores do Plex.");
     }
   };
 
@@ -177,6 +175,8 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
     setStep((s) => Math.max(1, s - 1));
   };
 
+  const isExclusive = (config.audio_output_type || "alsa") === "alsa";
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0C0C0C] select-none p-6 text-white font-sans">
       <div className="bg-[#161616] border border-[#2B2B2B] rounded-2xl w-full max-w-2xl min-h-[540px] flex flex-col shadow-2xl overflow-hidden animate-in fade-in duration-200">
@@ -193,7 +193,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
           </div>
 
           <div className="flex items-center space-x-3">
-            {/* Alternador de Idioma Discreto */}
+            {/* Alternador de Idioma */}
             <div className="flex items-center space-x-1 bg-[#121212] border border-[#282828] rounded-lg p-0.5 text-[11px]">
               <Languages size={12} className="text-[#777777] ml-1.5 mr-0.5" />
               <button
@@ -224,7 +224,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
 
         {/* Conteúdo */}
         <div className="p-8 flex-1 flex flex-col justify-between">
-          {/* ETAPA 1: DAC / SAÍDA DE ÁUDIO */}
+          {/* ETAPA 1: ESCOLHA DO MODO DE SAÍDA (Opção A) */}
           {step === 1 && (
             <div className="space-y-5 animate-in fade-in duration-150">
               <div className="space-y-1.5">
@@ -237,27 +237,81 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                 </p>
               </div>
 
-              <div className="space-y-2 pt-2">
-                <label className="block text-xs font-bold text-[#CCCCCC] uppercase tracking-wider">
-                  {t("settings.audioOutput")}
-                </label>
-                <select
-                  value={config.alsa_device}
-                  onChange={(e) => setConfig({ ...config, alsa_device: e.target.value })}
-                  className="w-full bg-[#111111] border border-[#333333] rounded-xl px-4 py-3 text-xs text-white outline-none focus:border-[#E5A00D] cursor-pointer"
+              {/* Botões dos 2 Modos */}
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setConfig({ ...config, audio_output_type: "alsa" })}
+                  className={`p-3.5 rounded-xl border-2 text-left transition-all cursor-pointer flex flex-col justify-between ${
+                    isExclusive
+                      ? "border-[#E5A00D] bg-[#221B0E]"
+                      : "border-[#262626] bg-[#141414] hover:bg-[#181818]"
+                  }`}
                 >
-                  {devices.map((dev) => (
-                    <option key={dev.id} value={dev.id} className="bg-[#1A1A1A] py-1">
-                      {dev.name}
-                    </option>
-                  ))}
-                </select>
+                  <div className="flex items-center space-x-2">
+                    <ShieldCheck size={18} className={isExclusive ? "text-[#E5A00D]" : "text-[#777777]"} />
+                    <span className="font-bold text-xs text-white">{t("settings.alsaMode")}</span>
+                  </div>
+                  <span className="text-[10px] text-[#777777] mt-1">
+                    hw:CARD,DEV • ALSA Direct
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setConfig({ ...config, audio_output_type: "pipewire" })}
+                  className={`p-3.5 rounded-xl border-2 text-left transition-all cursor-pointer flex flex-col justify-between ${
+                    !isExclusive
+                      ? "border-[#E5A00D] bg-[#221B0E]"
+                      : "border-[#262626] bg-[#141414] hover:bg-[#181818]"
+                  }`}
+                >
+                  <div className="flex items-center space-x-2">
+                    <Radio size={18} className={!isExclusive ? "text-[#E5A00D]" : "text-[#777777]"} />
+                    <span className="font-bold text-xs text-white">{t("settings.pipewireMode")}</span>
+                  </div>
+                  <span className="text-[10px] text-[#777777] mt-1">
+                    PipeWire / PulseAudio
+                  </span>
+                </button>
               </div>
 
-              <div className="bg-[#1B1812] border border-[#E5A00D]/30 p-3.5 rounded-xl flex items-start space-x-3 text-xs text-[#CCCCCC]">
-                <ShieldCheck size={18} className="text-[#E5A00D] shrink-0 mt-0.5" />
-                <span>{t("wizard.step1Exclusive")}</span>
-              </div>
+              {/* Configuração Contextual */}
+              {isExclusive ? (
+                <div className="space-y-3 pt-1">
+                  <div className="space-y-1.5">
+                    <label className="block text-xs font-bold text-[#CCCCCC] uppercase tracking-wider">
+                      {t("settings.alsaBitPerfect")}
+                    </label>
+                    <select
+                      value={config.alsa_device}
+                      onChange={(e) => setConfig({ ...config, alsa_device: e.target.value })}
+                      className="w-full bg-[#111111] border border-[#333333] rounded-xl px-4 py-3 text-xs text-white outline-none focus:border-[#E5A00D] cursor-pointer"
+                    >
+                      {devices.map((dev) => (
+                        <option key={dev.id} value={dev.id} className="bg-[#1A1A1A] py-1">
+                          {dev.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="bg-[#1B1812] border border-[#E5A00D]/30 p-3.5 rounded-xl flex items-start space-x-3 text-xs text-[#CCCCCC]">
+                    <ShieldCheck size={18} className="text-[#E5A00D] shrink-0 mt-0.5" />
+                    <span>{t("wizard.step1Exclusive")}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-[#141414] border border-[#262626] p-4 rounded-xl space-y-2 text-xs">
+                  <div className="flex items-center space-x-2 text-[#E5A00D] font-bold">
+                    <Check size={15} />
+                    <span>{t("settings.sharedActiveNotice")}</span>
+                  </div>
+                  <p className="text-[11px] text-[#888888] leading-relaxed">
+                    {t("wizard.step1Shared")}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -289,8 +343,8 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                   </div>
                   <div className="pt-4 flex items-center justify-between text-xs">
                     <span className={useLocal ? "text-[#E5A00D] font-bold" : "text-[#666666]"}>
-                    {useLocal ? t("wizard.enabled") : t("wizard.disabled")}
-		    </span>
+                      {useLocal ? t("wizard.enabled") : t("wizard.disabled")}
+                    </span>
                     <input
                       type="checkbox"
                       checked={useLocal}
@@ -319,8 +373,8 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                   </div>
                   <div className="pt-4 flex items-center justify-between text-xs">
                     <span className={usePlex ? "text-[#E5A00D] font-bold" : "text-[#666666]"}>
-                    {usePlex ? t("wizard.enabled") : t("wizard.disabled")}
-		    </span>
+                      {usePlex ? t("wizard.enabled") : t("wizard.disabled")}
+                    </span>
                     <input
                       type="checkbox"
                       checked={usePlex}
@@ -490,42 +544,6 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                   </div>
                 </div>
               )}
-
-              <div className="pt-2 border-t border-[#222222]">
-                <button
-                  type="button"
-                  onClick={() => setShowManualPlex(!showManualPlex)}
-                  className="flex items-center space-x-1.5 text-[11px] text-[#777777] hover:text-[#CCCCCC] transition-colors cursor-pointer"
-                >
-                  {showManualPlex ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-                  <span>{t("settings.manualConfig")}</span>
-                </button>
-
-                {showManualPlex && (
-                  <div className="grid grid-cols-2 gap-3 pt-2.5 animate-in fade-in duration-100">
-                    <div>
-                      <label className="block text-[11px] text-[#999999] mb-1">{t("settings.serverUrl")}</label>
-                      <input
-                        type="text"
-                        value={config.plex_url}
-                        onChange={(e) => setConfig({ ...config, plex_url: e.target.value })}
-                        placeholder="http://192.168.1.100:32400"
-                        className="w-full bg-[#111111] border border-[#333333] rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] text-[#999999] mb-1">{t("settings.plexToken")}</label>
-                      <input
-                        type="password"
-                        value={config.plex_token}
-                        onChange={(e) => setConfig({ ...config, plex_token: e.target.value })}
-                        placeholder="Token manual"
-                        className="w-full bg-[#111111] border border-[#333333] rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
             </div>
           )}
 
@@ -547,7 +565,9 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
               <div className="bg-[#121212] border border-[#242424] rounded-xl p-4 space-y-2 text-xs">
                 <div className="flex justify-between py-1 border-b border-[#1F1F1F]">
                   <span className="text-[#888888]">{t("settings.audioOutput")}:</span>
-                  <span className="font-mono text-white truncate max-w-xs">{config.alsa_device}</span>
+                  <span className="font-mono text-white truncate max-w-xs">
+                    {isExclusive ? config.alsa_device : t("settings.pipewireMode")}
+                  </span>
                 </div>
                 <div className="flex justify-between py-1 border-b border-[#1F1F1F]">
                   <span className="text-[#888888]">{t("sidebar.local")}:</span>

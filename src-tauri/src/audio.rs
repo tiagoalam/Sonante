@@ -27,7 +27,7 @@ pub struct TrackMetadata {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LocalItem {
-    pub item_type: String, // "directory" ou "file"
+    pub item_type: String,
     pub path: String,
     pub name: String,
     pub title: Option<String>,
@@ -48,17 +48,17 @@ pub struct LocalAlbum {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlaybackStatus {
-    pub state: String,         // "play", "pause", "stop", "disconnected"
+    pub state: String,
     pub elapsed: f64,
     pub duration: f64,
-    pub audio_format: String,  // Ex: "176400:32:2" (DoP/DSD) ou "192000:24:2"
+    pub audio_format: String,
     pub current_file: String,
     pub title: String,
     pub artist: String,
     pub album: String,
     pub thumb: Option<String>,
     pub volume: i32,
-    pub is_updating: bool,     // True quando o MPD está indexando pastas locais
+    pub is_updating: bool,
 }
 
 fn get_queue_cache_path() -> Option<PathBuf> {
@@ -85,7 +85,6 @@ pub fn find_folder_cover_path(dir: &Path) -> Option<String> {
         let p = dir.join(name);
         if p.is_file() {
             if let Ok(bytes) = std::fs::read(&p) {
-                // Limita capas a 8MB para não sobrecarregar a memória
                 if bytes.len() <= 8 * 1024 * 1024 {
                     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("jpeg").to_lowercase();
                     let mime = if ext == "png" { "image/png" } else { "image/jpeg" };
@@ -98,7 +97,6 @@ pub fn find_folder_cover_path(dir: &Path) -> Option<String> {
     None
 }
 
-/// Verifica se uma saída HDMI/DisplayPort possui uma tela/TV com áudio fisicamente conectada
 fn check_hdmi_connected(card_num: &str, dev_id: &str) -> Option<String> {
     let card_dir = format!("/proc/asound/card{}", card_num);
     let Ok(entries) = std::fs::read_dir(&card_dir) else {
@@ -218,21 +216,8 @@ pub fn list_audio_devices() -> Vec<AudioDevice> {
     }
 
     let mut devices = Vec::new();
-
-    // 1. DACs USB dedicados no topo
     devices.extend(dacs);
-
-    // 2. Sistema Padrão Compartilhado
-    devices.push(AudioDevice {
-        id: "default".to_string(),
-        name: "Sistema Padrão (PipeWire / Compartilhado)".to_string(),
-        is_bitperfect: false,
-    });
-
-    // 3. Áudio Interno da Placa-Mãe
     devices.extend(onboard);
-
-    // 4. Portas HDMI conectadas
     devices.extend(hdmi_devs);
 
     devices
@@ -258,9 +243,7 @@ impl AudioEngine {
             folder_path: String,
         }
 
-        // Chave de deduplicação: (artista_normalizado, album_normalizado)
         let mut map: HashMap<String, AlbumCollector> = HashMap::new();
-
         let mut cur_file = String::new();
         let mut cur_album = None;
         let mut cur_artist = None;
@@ -286,7 +269,6 @@ impl AudioEngine {
 
             let title = album.unwrap_or(folder_name);
             let final_artist = album_artist.or(artist).unwrap_or_else(|| "Artista Desconhecido".to_string());
-
             let key = format!("{}:::{}", final_artist.trim().to_lowercase(), title.trim().to_lowercase());
 
             let entry = map.entry(key).or_insert_with(|| AlbumCollector {
@@ -430,6 +412,62 @@ impl AudioEngine {
         }
 
         Ok(lines)
+    }
+
+    /// Prepara a troca de saída: captura a posição e para a reprodução sem destruir a fila
+    pub fn prepare_device_switch(&mut self) -> Option<(usize, f64, bool)> {
+        let status = self.get_status().ok()?;
+        let is_playing = status.state == "play";
+        let is_paused = status.state == "pause";
+
+        if !is_playing && !is_paused && self.queue.is_empty() {
+            let _ = self.send_command("stop");
+            return None;
+        }
+
+        let mut cur_index = 0;
+        if let Ok(lines) = self.send_command("currentsong") {
+            for line in lines {
+                if let Some((k, v)) = line.split_once(": ") {
+                    if k == "Pos" {
+                        if let Ok(idx) = v.parse::<usize>() {
+                            cur_index = idx;
+                        }
+                    }
+                }
+            }
+        }
+
+        let elapsed = status.elapsed;
+        let _ = self.send_command("stop");
+
+        Some((cur_index, elapsed, is_playing))
+    }
+
+    /// Restaura a fila e retoma a reprodução exatamente no mesmo ponto após reiniciar o daemon
+    pub fn restore_after_device_switch(&mut self, saved_state: Option<(usize, f64, bool)>) -> Result<(), String> {
+        if self.queue.is_empty() {
+            return Ok(());
+        }
+
+        let mut batch = String::from("command_list_begin\nclear\n");
+        for track in &self.queue {
+            batch.push_str(&format!("add \"{}\"\n", track.uri));
+        }
+
+        if let Some((idx, elapsed, was_playing)) = saved_state {
+            let target_idx = idx.min(self.queue.len().saturating_sub(1));
+            batch.push_str(&format!("play {}\n", target_idx));
+            if elapsed > 0.5 {
+                batch.push_str(&format!("seekcur {:.1}\n", elapsed));
+            }
+            if !was_playing {
+                batch.push_str("pause 1\n");
+            }
+        }
+        batch.push_str("command_list_end");
+
+        self.send_command(&batch).map(|_| ())
     }
 
     pub fn play_tracks(&mut self, mut tracks: Vec<TrackMetadata>, start_index: usize) -> Result<(), String> {
@@ -633,6 +671,23 @@ impl AudioEngine {
             }
         }
 
+        // Se o MPD estiver parado e sem nenhuma faixa ativa, retorna estado neutro e limpo
+        if state == "stop" && song_index.is_none() {
+            return Ok(PlaybackStatus {
+                state,
+                elapsed: 0.0,
+                duration: 0.0,
+                audio_format,
+                current_file: String::new(),
+                title: String::new(),
+                artist: String::new(),
+                album: String::new(),
+                thumb: None,
+                volume,
+                is_updating,
+            });
+        }
+
         let song_lines = self.send_command("currentsong").unwrap_or_default();
         let mut current_file = String::new();
         let mut tag_title = String::new();
@@ -661,7 +716,6 @@ impl AudioEngine {
         let mut album = String::new();
         let mut thumb = None;
 
-        // 1. Tenta recuperar os metadados ricos diretamente pelo índice da fila
         if let Some(idx) = song_index {
             if let Some(track) = self.queue.get(idx) {
                 title = track.title.clone();
@@ -676,7 +730,6 @@ impl AudioEngine {
             }
         }
 
-        // 2. Se o índice não coincidir, busca pela URI da faixa na fila em cache
         if (title.is_empty() || thumb.is_none()) && !current_file.is_empty() {
             if let Some(track) = self.queue.iter().find(|t| t.uri == current_file) {
                 if title.is_empty() {
@@ -699,7 +752,6 @@ impl AudioEngine {
             }
         }
 
-        // 3. Fallbacks normais caso seja uma faixa tocada fora da fila gerenciada
         if title.is_empty() {
             title = if !tag_title.is_empty() {
                 tag_title

@@ -4,10 +4,10 @@
 
 **Audiophile Bit-Perfect Desktop Audio Player for Linux**
 
-*Direct hardware ALSA routing, native DSD/PCM stream, and seamless Plex Media Server integration.*
+*Direct ALSA bit-perfect routing, flexible PipeWire shared output, native DSD/PCM streaming, and Plex Media Server integration.*
 
 [![Release](https://img.shields.io/github/v/release/tiagoalam/sonante?style=flat-square&color=E5A00D)](https://github.com/tiagoalam/sonante/releases)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20(ALSA)-blue?style=flat-square)](#requirements)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20(ALSA%20%7C%20PipeWire)-blue?style=flat-square)](#requirements)
 [![Backend](https://img.shields.io/badge/Backend-Rust%20%7C%20Tauri-orange?style=flat-square)](#architecture)
 [![Frontend](https://img.shields.io/badge/Frontend-React%2018%20%7C%20TypeScript-blueviolet?style=flat-square)](#architecture)
 [![Engine](https://img.shields.io/badge/Audio%20Engine-Dedicated%20MPD-white?style=flat-square)](#audiophile-audio-engine)
@@ -19,15 +19,18 @@
 
 ## Overview
 
-**Sonante** is a desktop music player crafted specifically for audiophiles and high-fidelity audio enthusiasts on Linux. By bypassing OS-level resampling, software mixers (PulseAudio/PipeWire), and audio degradations, Sonante communicates directly with your dedicated USB DAC through unadulterated ALSA hardware nodes (`hw:X,Y`).
+**Sonante** is a desktop music player crafted for high-fidelity audio on Linux, offering the choice between **exclusive bit-perfect hardware playback** and **everyday system-shared audio**:
 
-Sonante seamlessly unifies your offline high-resolution local collection (across multiple drives and directories) and remote **Plex Media Server** audio libraries into an elegant, dark, responsive interface.
+* **Bit-Perfect Mode (Direct ALSA):** Bypasses all operating system mixers, software volume controls, and resampling layers (PipeWire/PulseAudio) to speak directly to dedicated DAC hardware nodes (`hw:X,Y`).
+* **Shared Mode (PipeWire / PulseAudio):** Routes audio through your system's default sound server, allowing music playback to coexist seamlessly with browsers, Discord, games, and system notifications without monopolizing the device.
+
+Sonante unifies offline high-resolution collections (spanning internal disks and external drives) and remote **Plex Media Server** audio libraries under an elegant, responsive dark interface.
 
 ---
 
 ## What's New in v0.3.5
 
-* **Persistent Queue & Playback State:** Dedicated disk caching (`queue_cache.json`) preserves the active playlist, track progression, high-resolution covers, and track metadata across application restarts.
+* **Persistent Queue & Playback State:** Dedicated disk caching (`queue_cache.json`) preserves the active playlist, playhead position, high-resolution artwork, and metadata across application restarts.
 * **Unified Track Duration Engine:** Fixed Plex API millisecond-to-second discrepancies and integrated MPD `lsinfo` duration parsing, ensuring exact time displays across albums and queue drawers.
 * **Interactive PlayerBar Navigation:** Album covers, track titles, and artist labels in the bottom control bar now act as contextual links directly navigating to discographies and album views.
 * **UI Lifecycle & Render Performance:** Component memoization for album cards (`React.memo`), elimination of duplicate initialization calls, and full metadata support in global Plex searches.
@@ -49,15 +52,22 @@ Sonante seamlessly unifies your offline high-resolution local collection (across
 
 ## Key Features
 
-### Audiophile Audio Engine
-* **Direct ALSA Exclusive Access:** Feeds raw PCM and DSD data straight to the DAC without kernel mixer intervention.
-* **Native DSD & Hi-Res PCM:** Full bit-perfect playback up to **384 kHz / 32-bit PCM** and **DSD over PCM (DoP)** up to DSD128.
-* **Supervised Background MPD Core:** A dedicated, lightweight Music Player Daemon (MPD) instance is managed internally via a secure UNIX socket, fully decoupling audio decoding from UI rendering.
-* **Configurable RAM Audio Buffer:** Ring buffer settings (4 MB to 32 MB) to eliminate disk I/O jitter and network streaming dropouts.
-* **Pure ReplayGain Control:** Bit-perfect output when disabled, with optional Track or Album mode normalization.
+### 🔊 Audio Output Architecture
+
+Sonante v0.3.8 introduces a dedicated dual-mode audio architecture designed to seamlessly accommodate both critical listening and daily desktop workflows:
+
+* **Bit-Perfect Exclusive Mode (Direct ALSA):**
+  * Direct communication with physical hardware endpoints (`hw:CARD,DEV`), bypassing OS mixers, sample-rate converters, and DSP layers for pure, uncolored bit-perfect streaming.
+  * Native **DSD over PCM (DoP)** support up to DSD128/DSD256 and bit-perfect Hi-Res PCM streaming up to 384 kHz / 32-bit.
+  * Graceful socket teardown and strict device descriptor release ensuring DACs are freed immediately when playback stops or the app is closed.
+
+* **Shared System Mode (PipeWire / PulseAudio / ALSA dmix):**
+  * Universal routing through the default system audio server using the standard `default` endpoint.
+  * Plays concurrently with web browsers, communication tools, games, and desktop notifications without hardware locking or audio device conflicts.
+  * Resilient backend implementation requiring no special MPD plugin dependencies, guaranteeing compatibility across all Linux distributions.
 
 ### Plex Media Server Integration
-* **Official OAuth / PIN Authentication:** Secure login via web browser with automatic polling and local token persistence.
+* **Official OAuth / PIN Authentication:** Web-based login with polling and secure local token storage.
 * **LAN Auto-Discovery & Direct Play:** Automatically detects whether the server is local or remote, prioritizing local network IP routes for maximum throughput.
 * **Lossless Direct Streaming:** Direct stream playback of FLAC, ALAC, and DSD tracks without server-side transcoding.
 * **Unified Remote Navigation:** Browse Plex Music Libraries, Collections, Artist Discographies, and perform fast instant search with debounced indexing.
@@ -68,9 +78,9 @@ Sonante seamlessly unifies your offline high-resolution local collection (across
 * **LRU Caching & Lazy Loading:** Visual artwork is lazily loaded using an `IntersectionObserver` coupled with an in-memory Least-Recently-Used (LRU) cover cache to minimize RAM consumption.
 
 ### UI & User Experience
-* **Interactive PlayerBar:** Instant navigation back to current artists and albums from playback controls.
+* **Interactive PlayerBar:** Instant navigation back to current artists and albums directly from playback controls.
 * **Fully Internationalized (i18n):** Native support for **English (en-US)** and **Portuguese (pt-BR)** with real-time switching across the entire UI.
-* **Interactive First-Run Wizard:** Guides the user through DAC hardware selection, local library configuration, and Plex connection.
+* **Interactive First-Run Wizard:** Guides the user through audio output selection (ALSA Bit-Perfect vs PipeWire Shared), local library setup, and Plex connection.
 * **Unified Favorites:** Persistent favorites system across both local albums and Plex libraries with active offline availability tracking.
 * **Global Keyboard Shortcuts:** Fast control for common playback, volume, and search actions.
 
@@ -94,12 +104,16 @@ Sonante seamlessly unifies your offline high-resolution local collection (across
                                  | UNIX Domain Socket
 +--------------------------------v--------------------------------+
 |                   Dedicated MPD Audio Daemon                    |
-|             Direct Hardware Route to ALSA (hw:X,Y)              |
+|       Configured for ALSA Exclusive or PipeWire Shared Output   |
 +--------------------------------+--------------------------------+
-                                 | Bit-Perfect PCM / DoP DSD
-+--------------------------------v--------------------------------+
-|                   External Audiophile USB DAC                   |
-+-----------------------------------------------------------------+
+                                 |
+        +------------------------+------------------------+
+        |                                                 |
+        | Bit-Perfect PCM / DoP DSD                       | Shared PCM Audio
++-------v-------------------------+     +-----------------v---------------+
+|   External Audiophile USB DAC   |     |    PipeWire / PulseAudio Server |
+|   Direct Hardware (hw:CARD,DEV) |     |    System Mixed Output (default)|
++---------------------------------+     +---------------------------------+
 ```
 
 ---
@@ -109,7 +123,7 @@ Sonante seamlessly unifies your offline high-resolution local collection (across
 Pre-built binaries are available in the [GitHub Releases](https://github.com/tiagoalam/sonante/releases) page.
 
 ### 1. Arch Linux / Manjaro
-You can install via the pre-compiled package or build using `makepkg`:
+Install via the pre-compiled package or build using `makepkg`:
 
 ```bash
 # Using your preferred AUR helper
@@ -172,7 +186,7 @@ sudo pacman -S --needed base-devel curl wget openssl gtk3 libayatana-appindicato
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/tiagoalam/sonante.git
+git clone [https://github.com/tiagoalam/sonante.git](https://github.com/tiagoalam/sonante.git)
 cd sonante
 ```
 

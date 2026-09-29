@@ -1,7 +1,9 @@
 use crate::config::AppConfig;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::symlink;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
@@ -34,7 +36,6 @@ impl MpdSupervisor {
         let lib_dir = Self::library_dir();
         fs::create_dir_all(&lib_dir).map_err(|e| e.to_string())?;
 
-        // 1. Limpa links existentes antigos
         if let Ok(entries) = fs::read_dir(&lib_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
@@ -46,7 +47,6 @@ impl MpdSupervisor {
             }
         }
 
-        // 2. Deduplica caminhos idênticos informados pelo usuário
         let mut unique_folders = Vec::new();
         for f in folders {
             let p = Path::new(f);
@@ -87,16 +87,19 @@ impl MpdSupervisor {
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
         let lib_dir = Self::sync_library_symlinks(&cfg.local_folders)?;
-        
+
         let conf_path = dir.join("mpd.conf");
         let db_path = dir.join("mpd.db");
-        let state_path = dir.join("mpd.state");
+        let pid_path = dir.join("mpd.pid");
         let dop_flag = if cfg.dop_enabled { "yes" } else { "no" };
 
-        let audio_output_section = if cfg.audio_output_type == "pipewire" {
+        let is_shared = cfg.audio_output_type == "pipewire" || cfg.audio_output_type == "shared" || cfg.alsa_device == "default";
+
+        let audio_output_section = if is_shared {
             r#"audio_output {
-    type "pipewire"
-    name "Sonante PipeWire"
+    type "alsa"
+    name "Sonante Shared"
+    device "default"
     mixer_type "software"
 }"#.to_string()
         } else {
@@ -112,13 +115,13 @@ impl MpdSupervisor {
                 dop_flag
             )
         };
-        
+
+        // Sem state_file: o MPD inicia em modo neutro/stop sem tocar sozinho
         let conf_content = format!(
             r#"music_directory "{}"
 playlist_directory "{}"
 db_file "{}"
-state_file "{}"
-restore_paused "yes"
+pid_file "{}"
 log_file "/dev/null"
 bind_to_address "{}"
 
@@ -139,7 +142,7 @@ decoder {{
             lib_dir.display(),
             dir.display(),
             db_path.display(),
-            state_path.display(),
+            pid_path.display(),
             self.socket_path,
             cfg.audio_buffer_size_kb,
             cfg.replay_gain,
@@ -151,7 +154,14 @@ decoder {{
     }
 
     pub fn start(&mut self, cfg: &AppConfig) -> Result<(), String> {
-        let _ = self.stop();
+        self.stop();
+
+        let dir = Self::sonante_config_dir();
+        // Remove arquivos de estado residuais para assegurar inicialização silenciosa
+        let legacy_state = dir.join("mpd.state");
+        if legacy_state.exists() {
+            let _ = fs::remove_file(&legacy_state);
+        }
 
         if Path::new(&self.socket_path).exists() {
             let _ = fs::remove_file(&self.socket_path);
@@ -160,15 +170,15 @@ decoder {{
         let conf_path = self.ensure_config_file(cfg)?;
 
         println!(
-            "[Supervisor] Iniciando MPD apontando para {} (DoP: {}, Buffer: {} KB, Pastas: {})",
-            cfg.alsa_device, cfg.dop_enabled, cfg.audio_buffer_size_kb, cfg.local_folders.len()
+            "[Supervisor] Iniciando MPD: dispositivo={}, saída={}, buffer={} KB",
+            cfg.alsa_device, cfg.audio_output_type, cfg.audio_buffer_size_kb
         );
 
         let child = Command::new("mpd")
             .arg("--no-daemon")
             .arg(&conf_path)
             .spawn()
-            .map_err(|e| format!("Falha ao executar mpd: {}", e))?;
+            .map_err(|e| format!("Falha ao executar o processo do MPD: {}", e))?;
 
         self.process = Some(child);
 
@@ -182,34 +192,54 @@ decoder {{
 
         Err("Tempo esgotado aguardando o socket do MPD inicializar.".to_string())
     }
-    
-    pub fn stop(&mut self) {
-        if let Some(mut child) = self.process.take() {
-            let pid = child.id();
-            // Envia SIGTERM gracioso para que o MPD grave o mpd.state em disco
-            let _ = Command::new("kill").arg(pid.to_string()).output();
 
-            // Aguarda até 500ms para a persistência em disco finalizar
+    pub fn stop(&mut self) {
+        if Path::new(&self.socket_path).exists() {
+            if let Ok(mut stream) = UnixStream::connect(&self.socket_path) {
+                let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+                let _ = stream.write_all(b"stop\nkill\n");
+                let _ = stream.flush();
+            }
+        }
+
+        if let Some(mut child) = self.process.take() {
             let mut exited = false;
-            for _ in 0..10 {
+            for _ in 0..8 {
                 if let Ok(Some(_)) = child.try_wait() {
                     exited = true;
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(50));
             }
 
-            // Fallback forçado apenas se o processo travar
             if !exited {
                 let _ = child.kill();
                 let _ = child.wait();
             }
-        } else {
-            let _ = Command::new("killall").arg("mpd").output();
+        }
+
+        let pid_path = Self::sonante_config_dir().join("mpd.pid");
+        if pid_path.exists() {
+            if let Ok(content) = fs::read_to_string(&pid_path) {
+                if let Ok(pid) = content.trim().parse::<u32>() {
+                    let _ = Command::new("kill").arg("-15").arg(pid.to_string()).output();
+                    thread::sleep(Duration::from_millis(50));
+                    let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
+                }
+            }
+            let _ = fs::remove_file(&pid_path);
         }
 
         if Path::new(&self.socket_path).exists() {
             let _ = fs::remove_file(&self.socket_path);
         }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+impl Drop for MpdSupervisor {
+    fn drop(&mut self) {
+        self.stop();
     }
 }

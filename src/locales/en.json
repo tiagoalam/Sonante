@@ -118,12 +118,16 @@
     "cancel": "Cancel",
     "save": "Save Preferences",
     "language": "Language",
-    "audioBackend": "Audio Backend",
-    "alsaMode": "ALSA (Exclusive / Direct)",
-    "pipewireMode": "PipeWire (Desktop Integrated)",
-    "pipewireNotice": "PipeWire dynamically manages sample rate switching and routes audio to your default system output without exclusive device locking."
+    "audioBackend": "Audio Output Mode",
+    "alsaMode": "Bit-Perfect Exclusive (ALSA Direct)",
+    "pipewireMode": "Shared Audio (System / PipeWire)",
+    "pipewireNotice": "Audio is routed to your system sound server (PipeWire / PulseAudio), allowing playback alongside browsers, games, and notifications without locking the DAC.",
+    "exclusiveNotice": "Direct and exclusive hardware access via ALSA (hw:CARD,DEV). Bypasses OS mixers and resampling for pure bit-perfect streaming. Other system sounds will be muted on this device.",
+    "sharedActiveNotice": "Audio will automatically play through the default output configured in your desktop system settings.",
+    "dopOnlyExclusive": "DSD over PCM (DoP) requires Bit-Perfect Exclusive mode."
   },
   "wizard": {
+    "step1Shared": "Shared mode integrates audio with your system sound server (PipeWire / PulseAudio), allowing simultaneous playback with other applications.",
     "subtitle": "Initial Setup Wizard",
     "step": "Step {{step}}",
     "enabled": "Enabled",
@@ -162,5 +166,17 @@
     "devDesc": "Built in Rust, Tauri, React, and MPD.",
     "builtWith": "Crafted with",
     "forEnthusiasts": "for audio enthusiasts"
+  },
+  "artistView": {
+    "back": "Back",
+    "artist": "Artist",
+    "albumsCount_one": "{{count}} album",
+    "albumsCount_other": "{{count}} albums",
+    "catalogedTracks": "{{count}} cataloged tracks",
+    "loading": "Loading artist details...",
+    "popular": "Popular",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "discography": "Discography"
   }
 }

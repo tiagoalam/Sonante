@@ -3,12 +3,12 @@
 pkgname = sonante-bin
 pkgbase = sonante-bin
 xdata = pkgtype=pkg
-pkgver = 0.3.0-1
+pkgver = 0.3.5-1
 pkgdesc = Audiophile Bit-Perfect Player for Linux (ALSA Direct Exclusive & Plex Streaming)
 url = https://github.com/tiagoalam/sonante
-builddate = 1790630184
+builddate = 1790686459
 packager = Unknown Packager
-size = 6232650
+size = 6274278
 arch = x86_64
 license = MIT
 conflict = sonante

@@ -10,7 +10,7 @@ use favorites::FavoriteAlbum;
 use plex::{PlexAlbum, PlexClient, PlexCollection, PlexLibrary, PlexSearchResults, PlexTrack};
 use supervisor::MpdSupervisor;
 use std::sync::Mutex;
-use tauri::{Manager, State, Window};
+use tauri::{Manager, RunEvent, State, Window, WindowEvent};
 
 pub struct PlexState(pub Mutex<PlexClient>);
 pub struct SupervisorState(pub Mutex<MpdSupervisor>);
@@ -174,7 +174,6 @@ fn save_config(
 ) -> Result<(), String> {
     let mut current_cfg = config_state.0.lock().unwrap();
 
-    // 1. Detecta se houve alteração crítica de hardware de áudio
     let audio_hw_changed = current_cfg.audio_output_type != new_config.audio_output_type
         || current_cfg.alsa_device != new_config.alsa_device
         || current_cfg.dop_enabled != new_config.dop_enabled
@@ -183,22 +182,32 @@ fn save_config(
 
     let folders_changed = current_cfg.local_folders != new_config.local_folders;
 
-    // 2. Salva o arquivo de configuração e atualiza o Plex
     new_config.save()?;
     plex_state.0.lock().unwrap().update_config(&new_config);
 
-    // 3. Se apenas as pastas mudaram, atualiza os symlinks e dispara o rescan sem reiniciar o MPD
     if folders_changed {
         let _ = MpdSupervisor::sync_library_symlinks(&new_config.local_folders);
         audio_state.0.lock().unwrap().set_music_dir(&MpdSupervisor::library_dir().to_string_lossy());
         let _ = audio_state.0.lock().unwrap().rescan_library();
     }
 
-    // 4. Só reinicia o daemon do MPD se o dispositivo de saída de som foi realmente trocado
     if audio_hw_changed {
+        // 1. Captura o estado e segundo atual da música sem destruir a fila
+        let playback_snapshot = if let Ok(mut audio) = audio_state.0.lock() {
+            audio.prepare_device_switch()
+        } else {
+            None
+        };
+
+        // 2. Reinicia o MPD com a nova saída (liberando o ALSA)
         if let Ok(mut supervisor) = sup_state.0.lock() {
             supervisor.stop();
             let _ = supervisor.start(&new_config);
+        }
+
+        // 3. Reinsere a fila intacta e retoma a reprodução exatamente no mesmo ponto
+        if let Ok(mut audio) = audio_state.0.lock() {
+            let _ = audio.restore_after_device_switch(playback_snapshot);
         }
     }
 
@@ -341,16 +350,28 @@ pub fn run() {
             plex_get_servers,
             open_external_url,
         ])
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { .. } = event {
+                if let Some(sup_state) = window.app_handle().try_state::<SupervisorState>() {
+                    if let Ok(mut sup) = sup_state.0.lock() {
+                        sup.stop();
+                    }
+                }
+            }
+        })
         .build(tauri::generate_context!())
         .expect("Erro ao compilar o contexto do Tauri");
 
     app.run(|app_handle, event| {
-        if let tauri::RunEvent::Exit = event {
-            if let Some(sup_state) = app_handle.try_state::<SupervisorState>() {
-                if let Ok(mut supervisor) = sup_state.0.lock() {
-                    supervisor.stop();
+        match event {
+            RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                if let Some(sup_state) = app_handle.try_state::<SupervisorState>() {
+                    if let Ok(mut supervisor) = sup_state.0.lock() {
+                        supervisor.stop();
+                    }
                 }
             }
+            _ => {}
         }
     });
 }

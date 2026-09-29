@@ -15,6 +15,8 @@ import {
   LogOut,
   CheckCircle2,
   Languages,
+  Radio,
+  Info,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { AppConfig } from "../types/config";
@@ -189,6 +191,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
 
   if (loading || !config) return null;
 
+  const isExclusive = (config.audio_output_type || "alsa") === "alsa";
   const isSelectedInList = devices.some((d) => d.id === config.alsa_device);
   const isPlexConnected = Boolean(config.plex_token && config.plex_token.trim().length > 0);
 
@@ -244,47 +247,60 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
             </div>
           </div>
 
-	  {/* Seção 1: Saída de Áudio */}
+          {/* Seção 1: Saída de Áudio (Opção A) */}
           <div className="space-y-3 pt-3 border-t border-[#242424]">
             <h3 className="text-[11px] font-bold text-[#E5A00D] uppercase tracking-wider">
               {t("settings.audioOutput")}
             </h3>
 
-            {/* Seletor de Modo: ALSA vs PipeWire */}
+            {/* Alternador de Modos Claros */}
             <div>
-              <label className="block text-[#CCCCCC] font-semibold mb-1.5 text-xs">
+              <label className="block text-[#CCCCCC] font-semibold mb-2 text-xs">
                 {t("settings.audioBackend")}
               </label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-3">
                 <button
                   type="button"
                   onClick={() => setConfig({ ...config, audio_output_type: "alsa" })}
-                  className={`py-2 px-3 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
-                    (config.audio_output_type || "alsa") === "alsa"
-                      ? "bg-[#E5A00D]/20 border-[#E5A00D] text-[#E5A00D]"
-                      : "bg-[#141414] border-[#333333] text-[#888888] hover:text-white hover:border-[#444444]"
+                  className={`p-3 rounded-xl text-left border transition-all cursor-pointer flex flex-col justify-between ${
+                    isExclusive
+                      ? "bg-[#221B0E] border-[#E5A00D] text-white"
+                      : "bg-[#141414] border-[#2A2A2A] text-[#888888] hover:border-[#3A3A3A] hover:text-white"
                   }`}
                 >
-                  {t("settings.alsaMode")}
+                  <div className="flex items-center space-x-2">
+                    <ShieldCheck size={16} className={isExclusive ? "text-[#E5A00D]" : "text-[#777777]"} />
+                    <span className="font-bold text-xs">{t("settings.alsaMode")}</span>
+                  </div>
+                  <span className="text-[10px] text-[#777777] mt-1 line-clamp-2">
+                    hw:CARD,DEV • Direct ALSA
+                  </span>
                 </button>
+
                 <button
                   type="button"
                   onClick={() => setConfig({ ...config, audio_output_type: "pipewire" })}
-                  className={`py-2 px-3 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
-                    config.audio_output_type === "pipewire"
-                      ? "bg-[#E5A00D]/20 border-[#E5A00D] text-[#E5A00D]"
-                      : "bg-[#141414] border-[#333333] text-[#888888] hover:text-white hover:border-[#444444]"
+                  className={`p-3 rounded-xl text-left border transition-all cursor-pointer flex flex-col justify-between ${
+                    !isExclusive
+                      ? "bg-[#221B0E] border-[#E5A00D] text-white"
+                      : "bg-[#141414] border-[#2A2A2A] text-[#888888] hover:border-[#3A3A3A] hover:text-white"
                   }`}
                 >
-                  {t("settings.pipewireMode")}
+                  <div className="flex items-center space-x-2">
+                    <Radio size={16} className={!isExclusive ? "text-[#E5A00D]" : "text-[#777777]"} />
+                    <span className="font-bold text-xs">{t("settings.pipewireMode")}</span>
+                  </div>
+                  <span className="text-[10px] text-[#777777] mt-1 line-clamp-2">
+                    PipeWire / PulseAudio / dmix
+                  </span>
                 </button>
               </div>
             </div>
 
-            {/* Dispositivo ALSA (ativo apenas quando em modo ALSA) */}
-            {(config.audio_output_type || "alsa") === "alsa" ? (
-              <div>
-                <label className="block text-[#CCCCCC] font-semibold mb-1.5 text-xs">
+            {/* Painel Contextual do Modo Selecionado */}
+            {isExclusive ? (
+              <div className="space-y-2.5 pt-1">
+                <label className="block text-[#CCCCCC] font-semibold text-xs">
                   {t("settings.alsaBitPerfect")}
                 </label>
                 <select
@@ -303,14 +319,25 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                     </option>
                   ))}
                 </select>
+
+                <div className="p-2.5 bg-[#171717] border border-[#262626] rounded-lg text-[11px] text-[#888888] leading-relaxed flex items-start space-x-2">
+                  <Info size={14} className="text-[#E5A00D] shrink-0 mt-0.5" />
+                  <span>{t("settings.exclusiveNotice")}</span>
+                </div>
               </div>
             ) : (
-              <div className="p-3 bg-[#121212] border border-[#2B2B2B] rounded-lg text-xs text-[#888888] leading-relaxed">
-                {t("settings.pipewireNotice")}
+              <div className="p-3 bg-[#141414] border border-[#262626] rounded-xl space-y-2 text-xs">
+                <div className="flex items-center space-x-2 text-[#E5A00D] font-bold">
+                  <CheckCircle2 size={15} />
+                  <span>{t("settings.sharedActiveNotice")}</span>
+                </div>
+                <p className="text-[11px] text-[#888888] leading-relaxed">
+                  {t("settings.pipewireNotice")}
+                </p>
               </div>
             )}
           </div>
-	
+
           {/* Seção 2: Pastas Locais */}
           <div className="space-y-3 pt-3 border-t border-[#242424]">
             <div className="flex items-center justify-between">
@@ -376,18 +403,26 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
               <span>{t("settings.audioEngine")}</span>
             </h3>
 
-            <div className="flex items-center justify-between bg-[#141414] p-3 rounded-lg border border-[#262626]">
+            {/* Chave de DoP - Ativa apenas em modo Bit-Perfect */}
+            <div
+              className={`flex items-center justify-between p-3 rounded-lg border transition-opacity ${
+                isExclusive
+                  ? "bg-[#141414] border-[#262626]"
+                  : "bg-[#111111] border-[#202020] opacity-50"
+              }`}
+            >
               <div className="flex flex-col pr-4">
                 <span className="text-white font-semibold">{t("settings.dop")}</span>
                 <span className="text-[11px] text-[#777777] mt-0.5">
-                  {t("settings.dopDesc")}
+                  {isExclusive ? t("settings.dopDesc") : t("settings.dopOnlyExclusive")}
                 </span>
               </div>
               <input
                 type="checkbox"
-                checked={config.dop_enabled}
+                disabled={!isExclusive}
+                checked={isExclusive && config.dop_enabled}
                 onChange={(e) => setConfig({ ...config, dop_enabled: e.target.checked })}
-                className="w-4 h-4 accent-[#E5A00D] cursor-pointer shrink-0"
+                className="w-4 h-4 accent-[#E5A00D] cursor-pointer shrink-0 disabled:cursor-not-allowed"
               />
             </div>
 

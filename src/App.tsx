@@ -666,13 +666,7 @@ export function App() {
               <span>{t("plex.connectBtn")}</span>
             </button>
           </main>
-        ) : activeArtist ? (
-          <ArtistView
-            artist={activeArtist}
-            onBack={() => setActiveArtist(null)}
-            onSelectAlbum={(alb) => setActiveAlbum(alb)}
-          />
-        ) : activeAlbum ? (
+	  ) : activeAlbum ? (
           <AlbumView
             album={activeAlbum}
             onBack={() => setActiveAlbum(null)}
@@ -681,6 +675,12 @@ export function App() {
               setActiveArtist(art);
             }}
             onToggleFavorite={refreshPlexFavorites}
+          />
+        ) : activeArtist ? (
+          <ArtistView
+            artist={activeArtist}
+            onBack={() => setActiveArtist(null)}
+            onSelectAlbum={(alb) => setActiveAlbum(alb)}
           />
         ) : (
           <main className="flex-1 flex flex-col overflow-hidden bg-[#121212]">
