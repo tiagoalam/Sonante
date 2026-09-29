@@ -20,6 +20,8 @@ pub struct AppConfig {
     pub remote_share_path: String,  // Caminho no servidor Plex
     
     // Audiófilo
+    #[serde(default = "default_audio_output_type")]
+    pub audio_output_type: String,
     #[serde(default = "default_dop")]
     pub dop_enabled: bool,
     #[serde(default = "default_buffer_size")]
@@ -30,6 +32,10 @@ pub struct AppConfig {
 
 fn default_first_run() -> bool {
     true
+}
+
+fn default_audio_output_type() -> String {
+    "alsa".to_string()
 }
 
 fn default_dop() -> bool {
@@ -49,6 +55,7 @@ impl Default for AppConfig {
         Self {
             first_run: true,
             alsa_device: "hw:CARD=R2R,DEV=0".to_string(),
+            audio_output_type: "alsa".to_string(),
             local_folders: Vec::new(),
             plex_url: "http://192.168.1.100:32400".to_string(),
             plex_token: "".to_string(),
@@ -85,6 +92,7 @@ impl AppConfig {
         }
         Self::default()
     }
+
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {

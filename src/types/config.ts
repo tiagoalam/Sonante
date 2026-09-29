@@ -1,6 +1,7 @@
 export interface AppConfig {
   first_run: boolean;
   alsa_device: string;
+  audio_output_type: "alsa" | "pipewire";
   local_folders: string[];
   plex_url: string;
   plex_token: string;

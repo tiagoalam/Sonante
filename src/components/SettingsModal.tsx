@@ -244,34 +244,73 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
             </div>
           </div>
 
-          {/* Seção 1: Saída de Áudio ALSA */}
+	  {/* Seção 1: Saída de Áudio */}
           <div className="space-y-3 pt-3 border-t border-[#242424]">
             <h3 className="text-[11px] font-bold text-[#E5A00D] uppercase tracking-wider">
               {t("settings.audioOutput")}
             </h3>
-            <div>
-              <label className="block text-[#CCCCCC] font-semibold mb-1.5">
-                {t("settings.alsaBitPerfect")}
-              </label>
-              <select
-                value={config.alsa_device}
-                onChange={(e) => setConfig({ ...config, alsa_device: e.target.value })}
-                className="w-full bg-[#121212] border border-[#333333] rounded-lg px-3 py-2 text-white outline-none focus:border-[#E5A00D] cursor-pointer"
-              >
-                {!isSelectedInList && config.alsa_device && (
-                  <option value={config.alsa_device} className="bg-[#1A1A1A] text-white py-1">
-                    {t("settings.currentDevice", { id: config.alsa_device })}
-                  </option>
-                )}
-                {devices.map((dev) => (
-                  <option key={dev.id} value={dev.id} className="bg-[#1A1A1A] text-white py-1">
-                    {dev.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
 
+            {/* Seletor de Modo: ALSA vs PipeWire */}
+            <div>
+              <label className="block text-[#CCCCCC] font-semibold mb-1.5 text-xs">
+                {t("settings.audioBackend")}
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setConfig({ ...config, audio_output_type: "alsa" })}
+                  className={`py-2 px-3 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
+                    (config.audio_output_type || "alsa") === "alsa"
+                      ? "bg-[#E5A00D]/20 border-[#E5A00D] text-[#E5A00D]"
+                      : "bg-[#141414] border-[#333333] text-[#888888] hover:text-white hover:border-[#444444]"
+                  }`}
+                >
+                  {t("settings.alsaMode")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfig({ ...config, audio_output_type: "pipewire" })}
+                  className={`py-2 px-3 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
+                    config.audio_output_type === "pipewire"
+                      ? "bg-[#E5A00D]/20 border-[#E5A00D] text-[#E5A00D]"
+                      : "bg-[#141414] border-[#333333] text-[#888888] hover:text-white hover:border-[#444444]"
+                  }`}
+                >
+                  {t("settings.pipewireMode")}
+                </button>
+              </div>
+            </div>
+
+            {/* Dispositivo ALSA (ativo apenas quando em modo ALSA) */}
+            {(config.audio_output_type || "alsa") === "alsa" ? (
+              <div>
+                <label className="block text-[#CCCCCC] font-semibold mb-1.5 text-xs">
+                  {t("settings.alsaBitPerfect")}
+                </label>
+                <select
+                  value={config.alsa_device}
+                  onChange={(e) => setConfig({ ...config, alsa_device: e.target.value })}
+                  className="w-full bg-[#121212] border border-[#333333] rounded-lg px-3 py-2 text-white outline-none focus:border-[#E5A00D] cursor-pointer text-sm"
+                >
+                  {!isSelectedInList && config.alsa_device && (
+                    <option value={config.alsa_device} className="bg-[#1A1A1A] text-white py-1">
+                      {t("settings.currentDevice", { id: config.alsa_device })}
+                    </option>
+                  )}
+                  {devices.map((dev) => (
+                    <option key={dev.id} value={dev.id} className="bg-[#1A1A1A] text-white py-1">
+                      {dev.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div className="p-3 bg-[#121212] border border-[#2B2B2B] rounded-lg text-xs text-[#888888] leading-relaxed">
+                {t("settings.pipewireNotice")}
+              </div>
+            )}
+          </div>
+	
           {/* Seção 2: Pastas Locais */}
           <div className="space-y-3 pt-3 border-t border-[#242424]">
             <div className="flex items-center justify-between">

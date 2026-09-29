@@ -175,7 +175,8 @@ fn save_config(
     let mut current_cfg = config_state.0.lock().unwrap();
 
     // 1. Detecta se houve alteração crítica de hardware de áudio
-    let audio_hw_changed = current_cfg.alsa_device != new_config.alsa_device
+    let audio_hw_changed = current_cfg.audio_output_type != new_config.audio_output_type
+        || current_cfg.alsa_device != new_config.alsa_device
         || current_cfg.dop_enabled != new_config.dop_enabled
         || current_cfg.audio_buffer_size_kb != new_config.audio_buffer_size_kb
         || current_cfg.replay_gain != new_config.replay_gain;

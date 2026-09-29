@@ -87,15 +87,38 @@ impl MpdSupervisor {
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
         let lib_dir = Self::sync_library_symlinks(&cfg.local_folders)?;
-
+        
         let conf_path = dir.join("mpd.conf");
         let db_path = dir.join("mpd.db");
+        let state_path = dir.join("mpd.state");
         let dop_flag = if cfg.dop_enabled { "yes" } else { "no" };
 
+        let audio_output_section = if cfg.audio_output_type == "pipewire" {
+            r#"audio_output {
+    type "pipewire"
+    name "Sonante PipeWire"
+    mixer_type "software"
+}"#.to_string()
+        } else {
+            format!(
+                r#"audio_output {{
+    type "alsa"
+    name "Sonante Output"
+    device "{}"
+    dop "{}"
+    mixer_type "software"
+}}"#,
+                cfg.alsa_device,
+                dop_flag
+            )
+        };
+        
         let conf_content = format!(
             r#"music_directory "{}"
 playlist_directory "{}"
 db_file "{}"
+state_file "{}"
+restore_paused "yes"
 log_file "/dev/null"
 bind_to_address "{}"
 
@@ -111,22 +134,16 @@ decoder {{
     enabled "no"
 }}
 
-audio_output {{
-    type "alsa"
-    name "Sonante Output"
-    device "{}"
-    dop "{}"
-    mixer_type "software"
-}}
+{}
 "#,
             lib_dir.display(),
             dir.display(),
             db_path.display(),
+            state_path.display(),
             self.socket_path,
             cfg.audio_buffer_size_kb,
             cfg.replay_gain,
-            cfg.alsa_device,
-            dop_flag
+            audio_output_section
         );
 
         fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
@@ -165,13 +182,31 @@ audio_output {{
 
         Err("Tempo esgotado aguardando o socket do MPD inicializar.".to_string())
     }
-
+    
     pub fn stop(&mut self) {
         if let Some(mut child) = self.process.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            let pid = child.id();
+            // Envia SIGTERM gracioso para que o MPD grave o mpd.state em disco
+            let _ = Command::new("kill").arg(pid.to_string()).output();
+
+            // Aguarda até 500ms para a persistência em disco finalizar
+            let mut exited = false;
+            for _ in 0..10 {
+                if let Ok(Some(_)) = child.try_wait() {
+                    exited = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+
+            // Fallback forçado apenas se o processo travar
+            if !exited {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        } else {
+            let _ = Command::new("killall").arg("mpd").output();
         }
-        let _ = Command::new("killall").arg("-9").arg("mpd").output();
 
         if Path::new(&self.socket_path).exists() {
             let _ = fs::remove_file(&self.socket_path);

@@ -9,7 +9,9 @@
     "noAccountConnected": "No account connected",
     "connectNow": "Connect now",
     "preferences": "Preferences",
-    "about": "About Sonante"
+    "about": "About Sonante",
+    "indexingTooltip": "Indexing local folders...",
+    "syncedTooltip": "Library Synchronized"
   },
   "player": {
     "noTrack": "No track playing",
@@ -27,7 +29,7 @@
     "title": "Play Queue",
     "empty": "Play queue is empty.",
     "clear": "Clear Queue"
-  },  
+  },
   "favorites": {
     "title": "Favorite Albums",
     "count_one": "{{count}} album favorited in this source",
@@ -66,6 +68,8 @@
     "disconnectedTitle": "Plex Server Disconnected",
     "disconnectedDesc": "Connect your Plex account to synchronize and play your audio libraries, albums, and Hi-Res tracks with bit-perfect fidelity.",
     "connectBtn": "Connect Plex Account",
+    "searchPlaceholder": "Search artists, albums... (Ctrl+F)",
+    "resultsFor": "Results for \"{{query}}\"",
     "searching": "Searching library...",
     "noResults": "No results found for \"{{query}}\"",
     "artists": "Artists",
@@ -76,7 +80,11 @@
     "tabCollections": "Collections",
     "sortAdded": "Recently Added",
     "sortTitle": "Title (A-Z)",
-    "sortYear": "Release Year"
+    "sortYear": "Release Year",
+    "backToCollections": "Back to Collections",
+    "itemsCount_one": "{{count}} album",
+    "itemsCount_other": "{{count}} items",
+    "playAlbum": "Play Album"
   },
   "settings": {
     "title": "System Preferences",
@@ -109,43 +117,11 @@
     "plexToken": "X-Plex-Token",
     "cancel": "Cancel",
     "save": "Save Preferences",
-    "language": "Language"
-  },
-  "sidebar": {
-    "mediaSources": "Media Sources",
-    "local": "Local Storage",
-    "plex": "Plex Server",
-    "favorites": "Favorites",
-    "plexAudioLibraries": "Plex Audio Libraries",
-    "noLibraries": "No libraries found.",
-    "noAccountConnected": "No account connected",
-    "connectNow": "Connect now",
-    "preferences": "Preferences",
-    "about": "About Sonante",
-    "indexingTooltip": "Indexing local folders...",
-    "syncedTooltip": "Library Synchronized"
-  },
-  "plex": {
-    "disconnectedTitle": "Plex Server Disconnected",
-    "disconnectedDesc": "Connect your Plex account to synchronize and play your audio libraries, albums, and Hi-Res tracks with bit-perfect fidelity.",
-    "connectBtn": "Connect Plex Account",
-    "searchPlaceholder": "Search artists, albums... (Ctrl+F)",
-    "resultsFor": "Results for \"{{query}}\"",
-    "searching": "Searching library...",
-    "noResults": "No results found for \"{{query}}\"",
-    "artists": "Artists",
-    "albums": "Albums",
-    "tracks": "Tracks",
-    "loading": "Loading media...",
-    "tabLibrary": "Library",
-    "tabCollections": "Collections",
-    "sortAdded": "Recently Added",
-    "sortTitle": "Title (A-Z)",
-    "sortYear": "Release Year",
-    "backToCollections": "Back to Collections",
-    "itemsCount_one": "{{count}} album",
-    "itemsCount_other": "{{count}} items",
-    "playAlbum": "Play Album"
+    "language": "Language",
+    "audioBackend": "Audio Backend",
+    "alsaMode": "ALSA (Exclusive / Direct)",
+    "pipewireMode": "PipeWire (Desktop Integrated)",
+    "pipewireNotice": "PipeWire dynamically manages sample rate switching and routes audio to your default system output without exclusive device locking."
   },
   "wizard": {
     "subtitle": "Initial Setup Wizard",

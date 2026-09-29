@@ -9,7 +9,9 @@
     "noAccountConnected": "Nenhuma conta conectada",
     "connectNow": "Conectar agora",
     "preferences": "Preferências",
-    "about": "Sobre o Sonante"
+    "about": "Sobre o Sonante",
+    "indexingTooltip": "Indexando pastas locais...",
+    "syncedTooltip": "Biblioteca Sincronizada"
   },
   "player": {
     "noTrack": "Nenhuma faixa em reprodução",
@@ -66,6 +68,8 @@
     "disconnectedTitle": "Servidor Plex Desconectado",
     "disconnectedDesc": "Conecte sua conta do Plex para sincronizar e reproduzir suas bibliotecas de áudio, álbuns e faixas Hi-Res com fidelidade bit-perfect.",
     "connectBtn": "Conectar Conta Plex",
+    "searchPlaceholder": "Pesquisar artistas, álbuns... (Ctrl+F)",
+    "resultsFor": "Resultados para \"{{query}}\"",
     "searching": "Buscando na biblioteca...",
     "noResults": "Nenhum resultado encontrado para \"{{query}}\"",
     "artists": "Artistas",
@@ -76,7 +80,11 @@
     "tabCollections": "Coleções",
     "sortAdded": "Adicionados Recentemente",
     "sortTitle": "Título (A-Z)",
-    "sortYear": "Ano de Lançamento"
+    "sortYear": "Ano de Lançamento",
+    "backToCollections": "Voltar para Coleções",
+    "itemsCount_one": "{{count}} álbum",
+    "itemsCount_other": "{{count}} itens",
+    "playAlbum": "Tocar Álbum"
   },
   "settings": {
     "title": "Preferências do Sistema",
@@ -109,7 +117,11 @@
     "plexToken": "X-Plex-Token",
     "cancel": "Cancelar",
     "save": "Gravar Preferências",
-    "language": "Idioma da Interface"
+    "language": "Idioma da Interface",
+    "audioBackend": "Sistema de Saída",
+    "alsaMode": "ALSA (Exclusivo / Direto)",
+    "pipewireMode": "PipeWire (Integrado / Compartilhado)",
+    "pipewireNotice": "O PipeWire gerencia o roteamento e a comutação de amostragem dinamicamente para o dispositivo padrão do sistema, sem bloquear o hardware de outros apps."
   },
   "wizard": {
     "subtitle": "Assistente de Configuração Inicial",
@@ -135,42 +147,6 @@
     "next": "Avançar",
     "start": "Iniciar Sonante",
     "starting": "Inicializando..."
-  },
-  "sidebar": {
-    "mediaSources": "Fontes de Mídia",
-    "local": "Armazenamento Local",
-    "plex": "Servidor Plex",
-    "favorites": "Favoritos",
-    "plexAudioLibraries": "Bibliotecas de áudio Plex",
-    "noLibraries": "Nenhuma biblioteca encontrada.",
-    "noAccountConnected": "Nenhuma conta conectada",
-    "connectNow": "Conectar agora",
-    "preferences": "Preferências",
-    "about": "Sobre o Sonante",
-    "indexingTooltip": "Indexando pastas locais...",
-    "syncedTooltip": "Biblioteca Sincronizada"
-  },
-  "plex": {
-    "disconnectedTitle": "Servidor Plex Desconectado",
-    "disconnectedDesc": "Conecte sua conta do Plex para sincronizar e reproduzir suas bibliotecas de áudio, álbuns e faixas Hi-Res com fidelidade bit-perfect.",
-    "connectBtn": "Conectar Conta Plex",
-    "searchPlaceholder": "Pesquisar artistas, álbuns... (Ctrl+F)",
-    "resultsFor": "Resultados para \"{{query}}\"",
-    "searching": "Buscando na biblioteca...",
-    "noResults": "Nenhum resultado encontrado para \"{{query}}\"",
-    "artists": "Artistas",
-    "albums": "Álbuns",
-    "tracks": "Faixas",
-    "loading": "Carregando mídias...",
-    "tabLibrary": "Biblioteca",
-    "tabCollections": "Coleções",
-    "sortAdded": "Adicionados Recentemente",
-    "sortTitle": "Título (A-Z)",
-    "sortYear": "Ano de Lançamento",
-    "backToCollections": "Voltar para Coleções",
-    "itemsCount_one": "{{count}} álbum",
-    "itemsCount_other": "{{count}} itens",
-    "playAlbum": "Tocar Álbum"
   },
   "about": {
     "title": "Sobre o Sonante",
