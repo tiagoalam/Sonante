@@ -13,8 +13,6 @@ import {
   Disc3,
   ExternalLink,
   RefreshCw,
-  ChevronDown,
-  ChevronUp,
   Languages,
   Radio,
 } from "lucide-react";
@@ -49,7 +47,6 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   const [discoveredServers, setDiscoveredServers] = useState<PlexServerResource[]>([]);
   const [selectedServerUri, setSelectedServerUri] = useState<string>(config.plex_url || "");
   const [loadingServers, setLoadingServers] = useState(false);
-  const [showManualPlex, setShowManualPlex] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
