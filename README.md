@@ -25,6 +25,14 @@ Sonante seamlessly unifies your offline high-resolution local collection (across
 
 ---
 
+## What's New in v0.3.5
+
+* **Persistent Queue & Playback State:** Dedicated disk caching (`queue_cache.json`) preserves the active playlist, track progression, high-resolution covers, and track metadata across application restarts.
+* **Unified Track Duration Engine:** Fixed Plex API millisecond-to-second discrepancies and integrated MPD `lsinfo` duration parsing, ensuring exact time displays across albums and queue drawers.
+* **Interactive PlayerBar Navigation:** Album covers, track titles, and artist labels in the bottom control bar now act as contextual links directly navigating to discographies and album views.
+* **UI Lifecycle & Render Performance:** Component memoization for album cards (`React.memo`), elimination of duplicate initialization calls, and full metadata support in global Plex searches.
+
+---
 
 ## Screenshots
 
@@ -45,7 +53,7 @@ Sonante seamlessly unifies your offline high-resolution local collection (across
 * **Direct ALSA Exclusive Access:** Feeds raw PCM and DSD data straight to the DAC without kernel mixer intervention.
 * **Native DSD & Hi-Res PCM:** Full bit-perfect playback up to **384 kHz / 32-bit PCM** and **DSD over PCM (DoP)** up to DSD128.
 * **Supervised Background MPD Core:** A dedicated, lightweight Music Player Daemon (MPD) instance is managed internally via a secure UNIX socket, fully decoupling audio decoding from UI rendering.
-* **Configurable RAM Audio Buffer:** Configurable ring buffer (4 MB to 32 MB) to eliminate disk I/O jitter and network streaming dropouts.
+* **Configurable RAM Audio Buffer:** Ring buffer settings (4 MB to 32 MB) to eliminate disk I/O jitter and network streaming dropouts.
 * **Pure ReplayGain Control:** Bit-perfect output when disabled, with optional Track or Album mode normalization.
 
 ### Plex Media Server Integration
@@ -60,6 +68,7 @@ Sonante seamlessly unifies your offline high-resolution local collection (across
 * **LRU Caching & Lazy Loading:** Visual artwork is lazily loaded using an `IntersectionObserver` coupled with an in-memory Least-Recently-Used (LRU) cover cache to minimize RAM consumption.
 
 ### UI & User Experience
+* **Interactive PlayerBar:** Instant navigation back to current artists and albums from playback controls.
 * **Fully Internationalized (i18n):** Native support for **English (en-US)** and **Portuguese (pt-BR)** with real-time switching across the entire UI.
 * **Interactive First-Run Wizard:** Guides the user through DAC hardware selection, local library configuration, and Plex connection.
 * **Unified Favorites:** Persistent favorites system across both local albums and Plex libraries with active offline availability tracking.
@@ -70,26 +79,27 @@ Sonante seamlessly unifies your offline high-resolution local collection (across
 ## Architecture
 
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                    Frontend (React 18 + Vite)                   │
-│     Lucide Icons  •  Tailwind CSS  •  react-i18next (pt/en)     │
-└────────────────────────────────┬────────────────────────────────┘
-                                 │ IPC (Tauri Core Invokes)
-┌────────────────────────────────▼────────────────────────────────┐
-│                       Tauri / Rust Backend                      │
-│  - HTTP Connection Pooling with Keep-Alive (reqwest)            │
-│  - Atomic Configuration Persistence (fs::rename)                │
-│  - MPD Process Supervisor & Dynamic mpd.conf Generation        │
-└────────────────────────────────┬────────────────────────────────┘
-                                 │ UNIX Domain Socket
-┌────────────────────────────────▼────────────────────────────────┐
-│                    Dedicated MPD Audio Daemon                   │
-│               Direct Hardware Route to ALSA (hw:X,Y)            │
-└────────────────────────────────┬────────────────────────────────┘
-                                 │ Bit-Perfect PCM / DoP DSD
-┌────────────────────────────────▼────────────────────────────────┐
-│                   External Audiophile USB DAC                   │
-└─────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------+
+|                   Frontend (React 18 + Vite)                    |
+|      Lucide Icons  *  Tailwind CSS  *  react-i18next (pt/en)    |
++--------------------------------+--------------------------------+
+                                 | IPC (Tauri Core Invokes)
++--------------------------------v--------------------------------+
+|                      Tauri / Rust Backend                       |
+|  - HTTP Connection Pooling with Keep-Alive (reqwest)            |
+|  - Atomic Configuration Persistence (fs::rename)                |
+|  - MPD Process Supervisor & Dynamic mpd.conf Generation         |
+|  - State & Queue File Caching (queue_cache.json)                |
++--------------------------------+--------------------------------+
+                                 | UNIX Domain Socket
++--------------------------------v--------------------------------+
+|                   Dedicated MPD Audio Daemon                    |
+|             Direct Hardware Route to ALSA (hw:X,Y)              |
++--------------------------------+--------------------------------+
+                                 | Bit-Perfect PCM / DoP DSD
++--------------------------------v--------------------------------+
+|                   External Audiophile USB DAC                   |
++-----------------------------------------------------------------+
 ```
 
 ---
@@ -162,7 +172,7 @@ sudo pacman -S --needed base-devel curl wget openssl gtk3 libayatana-appindicato
 
 1. Clone the repository:
 ```bash
-git clone [https://github.com/tiagoalam/sonante.git](https://github.com/tiagoalam/sonante.git)
+git clone https://github.com/tiagoalam/sonante.git
 cd sonante
 ```
 
@@ -190,6 +200,7 @@ Sonante organizes all user data, socket endpoints, and configurations within the
 
 * `~/.config/sonante/config.json` — Hardware preferences, buffers, and Plex session tokens.
 * `~/.config/sonante/favorites.json` — Unified favorites registry.
+* `~/.config/sonante/queue_cache.json` — Persistent queue, playback state, and rich metadata cache.
 * `~/.config/sonante/mpd.conf` — Dynamically generated MPD configuration.
 * `~/.config/sonante/mpd.socket` — Dedicated MPD UNIX IPC control socket.
 * `~/.config/sonante/library/` — Symlinked virtual directory mirroring all local library roots.

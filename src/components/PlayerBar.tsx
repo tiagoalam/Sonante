@@ -21,7 +21,12 @@ interface Props {
   onNavigateToAlbum?: () => void;
 }
 
-export const PlayerBar: React.FC<Props> = ({ onToggleQueue, isQueueOpen }) => {
+export const PlayerBar: React.FC<Props> = ({
+  onToggleQueue,
+  isQueueOpen,
+  onNavigateToArtist,
+  onNavigateToAlbum,
+}) => {
   const { t } = useTranslation();
   const [status, setStatus] = useState<PlaybackStatus>({
     state: "stop",
@@ -130,7 +135,6 @@ export const PlayerBar: React.FC<Props> = ({ onToggleQueue, isQueueOpen }) => {
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
-  // Trata faixas paradas ou títulos padrão enviados pelo backend
   const isNoTrack =
     !status.title ||
     status.state === "stop" ||
@@ -153,23 +157,60 @@ export const PlayerBar: React.FC<Props> = ({ onToggleQueue, isQueueOpen }) => {
 
   return (
     <footer className="h-20 bg-[#161616] border-t border-[#262626] flex items-center justify-between px-6 z-40 select-none">
-      {/* 1. Metadados e Capa */}
+      {/* 1. Metadados e Capa com Links Interativos */}
       <div className="flex items-center space-x-3.5 w-1/4 min-w-[200px]">
-        <div className="w-12 h-12 rounded-lg bg-[#202020] border border-[#2B2B2B] overflow-hidden shrink-0 flex items-center justify-center shadow-md">
+        <div
+          onClick={() => {
+            if (!isNoTrack && onNavigateToAlbum) onNavigateToAlbum();
+          }}
+          className={`w-12 h-12 rounded-lg bg-[#202020] border border-[#2B2B2B] overflow-hidden shrink-0 flex items-center justify-center shadow-md group/cover transition-all ${
+            !isNoTrack && onNavigateToAlbum
+              ? "cursor-pointer hover:border-[#E5A00D] hover:shadow-[0_0_12px_rgba(229,160,13,0.2)]"
+              : ""
+          }`}
+          title={!isNoTrack && onNavigateToAlbum ? (status.album || displayTitle) : undefined}
+        >
           {status.thumb && !isNoTrack ? (
-            <img src={status.thumb} alt="" className="w-full h-full object-cover" />
+            <img
+              src={status.thumb}
+              alt=""
+              className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
+            />
           ) : (
             <Disc3 size={24} className="text-[#444444]" />
           )}
         </div>
 
         <div className="flex flex-col min-w-0 pr-2">
-          <span className="text-xs font-bold text-white truncate" title={displayTitle}>
-            {displayTitle}
-          </span>
-          <span className="text-[11px] text-[#888888] truncate mt-0.5" title={displayArtist}>
-            {displayArtist}
-          </span>
+          {!isNoTrack && onNavigateToAlbum ? (
+            <button
+              type="button"
+              onClick={onNavigateToAlbum}
+              className="text-xs font-bold text-white hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
+              title={displayTitle}
+            >
+              {displayTitle}
+            </button>
+          ) : (
+            <span className="text-xs font-bold text-white truncate" title={displayTitle}>
+              {displayTitle}
+            </span>
+          )}
+
+          {!isNoTrack && status.artist && onNavigateToArtist ? (
+            <button
+              type="button"
+              onClick={() => onNavigateToArtist(status.artist)}
+              className="text-[11px] text-[#888888] hover:text-[#E5A00D] transition-colors truncate mt-0.5 text-left cursor-pointer"
+              title={displayArtist}
+            >
+              {displayArtist}
+            </button>
+          ) : (
+            <span className="text-[11px] text-[#888888] truncate mt-0.5" title={displayArtist}>
+              {displayArtist}
+            </span>
+          )}
 
           {status.audio_format && (
             <div className="flex items-center space-x-1.5 mt-1">

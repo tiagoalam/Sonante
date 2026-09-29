@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -59,6 +59,18 @@ pub struct PlaybackStatus {
     pub thumb: Option<String>,
     pub volume: i32,
     pub is_updating: bool,     // True quando o MPD está indexando pastas locais
+}
+
+fn get_queue_cache_path() -> Option<PathBuf> {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| {
+            std::env::var("HOME").map(|h| Path::new(&h).join(".config"))
+        })
+        .ok()?;
+    let dir = base.join("sonante");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join("queue_cache.json"))
 }
 
 pub fn find_folder_cover_path(dir: &Path) -> Option<String> {
@@ -275,7 +287,6 @@ impl AudioEngine {
             let title = album.unwrap_or(folder_name);
             let final_artist = album_artist.or(artist).unwrap_or_else(|| "Artista Desconhecido".to_string());
 
-            // Normaliza para fundir variações e duplicatas
             let key = format!("{}:::{}", final_artist.trim().to_lowercase(), title.trim().to_lowercase());
 
             let entry = map.entry(key).or_insert_with(|| AlbumCollector {
@@ -328,15 +339,36 @@ impl AudioEngine {
     }
 
     pub fn rescan_library(&self) -> Result<(), String> {
-        // "rescan" limpa caminhos fantasmas e atualiza modificações
         self.send_command("rescan").map(|_| ())
     }
 
+    fn save_queue_cache(&self) {
+        if let Some(p) = get_queue_cache_path() {
+            if let Ok(file) = std::fs::File::create(&p) {
+                let _ = serde_json::to_writer(file, &self.queue);
+            }
+        }
+    }
+
+    fn load_queue_cache() -> Vec<TrackMetadata> {
+        if let Some(p) = get_queue_cache_path() {
+            if p.exists() {
+                if let Ok(file) = std::fs::File::open(&p) {
+                    if let Ok(q) = serde_json::from_reader(file) {
+                        return q;
+                    }
+                }
+            }
+        }
+        Vec::new()
+    }
+
     pub fn new(socket_path: &str, music_dir: &str) -> Self {
+        let queue = Self::load_queue_cache();
         Self {
             socket_path: socket_path.to_string(),
             music_dir: music_dir.to_string(),
-            queue: Vec::new(),
+            queue,
         }
     }
 
@@ -408,6 +440,7 @@ impl AudioEngine {
         }
 
         self.queue = tracks;
+        self.save_queue_cache();
 
         let mut batch = String::from("command_list_begin\nclear\n");
         for track in &self.queue {
@@ -468,6 +501,7 @@ impl AudioEngine {
 
     pub fn clear_queue(&mut self) -> Result<(), String> {
         self.queue.clear();
+        self.save_queue_cache();
         self.send_command("clear").map(|_| ())
     }
 
@@ -612,6 +646,11 @@ impl AudioEngine {
                     "Title" => tag_title = v.to_string(),
                     "Artist" => tag_artist = v.to_string(),
                     "Album" => tag_album = v.to_string(),
+                    "Pos" => {
+                        if song_index.is_none() {
+                            song_index = v.parse::<usize>().ok();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -622,15 +661,45 @@ impl AudioEngine {
         let mut album = String::new();
         let mut thumb = None;
 
+        // 1. Tenta recuperar os metadados ricos diretamente pelo índice da fila
         if let Some(idx) = song_index {
             if let Some(track) = self.queue.get(idx) {
                 title = track.title.clone();
                 artist = track.artist.clone();
                 album = track.album.clone();
                 thumb = track.thumb.clone();
+                if duration <= 0.0 {
+                    if let Some(d) = track.duration {
+                        duration = d;
+                    }
+                }
             }
         }
 
+        // 2. Se o índice não coincidir, busca pela URI da faixa na fila em cache
+        if (title.is_empty() || thumb.is_none()) && !current_file.is_empty() {
+            if let Some(track) = self.queue.iter().find(|t| t.uri == current_file) {
+                if title.is_empty() {
+                    title = track.title.clone();
+                }
+                if artist.is_empty() {
+                    artist = track.artist.clone();
+                }
+                if album.is_empty() {
+                    album = track.album.clone();
+                }
+                if thumb.is_none() {
+                    thumb = track.thumb.clone();
+                }
+                if duration <= 0.0 {
+                    if let Some(d) = track.duration {
+                        duration = d;
+                    }
+                }
+            }
+        }
+
+        // 3. Fallbacks normais caso seja uma faixa tocada fora da fila gerenciada
         if title.is_empty() {
             title = if !tag_title.is_empty() {
                 tag_title

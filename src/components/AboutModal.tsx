@@ -22,7 +22,7 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
               <div className="flex items-center space-x-2">
                 <h2 className="text-lg font-black tracking-wider text-[#E5A00D]">SONANTE</h2>
                 <span className="text-[10px] font-mono font-bold bg-[#E5A00D] text-black px-1.5 py-0.5 rounded-sm">
-                  v0.3.0
+                  v0.3.5
                 </span>
               </div>
               <p className="text-[11px] text-[#888888]">{t("about.tagline")}</p>

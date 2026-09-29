@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, memo } from "react";
 import {
   Disc3,
   Folder,
@@ -43,6 +43,96 @@ import { PlaybackStatus, AudioDevice } from "./types/audio";
 import { AppConfig } from "./types/config";
 import { FavoriteAlbum } from "./types/favorite";
 
+// Card isolado e memorizado para evitar re-render a cada 1s da telemetria do player
+const PlexAlbumCard = memo<{
+  album: PlexAlbum;
+  isFav: boolean;
+  onSelect: (album: PlexAlbum) => void;
+  onPlayQuick: (e: React.MouseEvent, album: PlexAlbum) => void;
+  onToggleFav: (e: React.MouseEvent, album: PlexAlbum) => void;
+  onSelectArtist: (artistKey: string, artistName: string) => void;
+  removeFavText: string;
+  addFavText: string;
+  playAlbumText: string;
+}>(({
+  album,
+  isFav,
+  onSelect,
+  onPlayQuick,
+  onToggleFav,
+  onSelectArtist,
+  removeFavText,
+  addFavText,
+  playAlbumText,
+}) => {
+  return (
+    <div
+      onClick={() => onSelect(album)}
+      className="group flex flex-col cursor-pointer relative"
+    >
+      <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
+        {album.thumb ? (
+          <img
+            src={album.thumb}
+            alt={album.title}
+            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            loading="lazy"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-[#444444]">
+            <Disc3 size={40} />
+          </div>
+        )}
+
+        <button
+          onClick={(e) => onToggleFav(e, album)}
+          className={`absolute top-2 right-2 p-1.5 rounded-full backdrop-blur-xs transition-transform active:scale-90 cursor-pointer shadow z-20 ${
+            isFav
+              ? "bg-black/60 text-[#E5A00D]"
+              : "bg-black/40 text-white/70 hover:text-white opacity-0 group-hover:opacity-100"
+          }`}
+          title={isFav ? removeFavText : addFavText}
+        >
+          <Heart size={14} fill={isFav ? "#E5A00D" : "none"} />
+        </button>
+
+        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+          <button
+            onClick={(e) => onPlayQuick(e, album)}
+            className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer pointer-events-auto"
+            title={playAlbumText}
+          >
+            <Play size={20} className="ml-1" fill="black" />
+          </button>
+        </div>
+      </div>
+
+      <span className="text-sm font-semibold text-white truncate" title={album.title}>
+        {album.title}
+      </span>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          if (album.artist_rating_key) {
+            onSelectArtist(album.artist_rating_key, album.artist);
+          }
+        }}
+        className="text-xs text-[#999999] hover:text-[#E5A00D] transition-colors truncate mt-0.5 text-left cursor-pointer"
+      >
+        {album.artist}
+      </button>
+      {album.year && (
+        <span className="text-[11px] text-[#666666] mt-0.5">
+          {album.year}
+        </span>
+      )}
+    </div>
+  );
+});
+
+PlexAlbumCard.displayName = "PlexAlbumCard";
+
 export function App() {
   const { t } = useTranslation();
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -57,7 +147,7 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
 
-  // Favoritos Plex (IDs válidos em cache)
+  // Favoritos Plex (IDs em cache)
   const [plexFavIds, setPlexFavIds] = useState<Set<string>>(new Set());
 
   // Fila e status global
@@ -81,11 +171,11 @@ export function App() {
     statusRef.current = playbackStatus;
   }, [playbackStatus]);
 
-  // Estados de listagem normal
+  // Listagens Plex
   const [albums, setAlbums] = useState<PlexAlbum[]>([]);
   const [collections, setCollections] = useState<PlexCollection[]>([]);
 
-  // Estados de navegação interna
+  // Navegação interna Plex
   const [activeCollection, setActiveCollection] = useState<PlexCollection | null>(null);
   const [collectionAlbums, setCollectionAlbums] = useState<PlexAlbum[]>([]);
   const [activeAlbum, setActiveAlbum] = useState<PlexAlbum | null>(null);
@@ -111,6 +201,7 @@ export function App() {
       .catch(console.error);
   }, []);
 
+  // Carga inicial de configurações e dispositivos
   useEffect(() => {
     Promise.all([configService.getConfig(), configService.getAudioDevices()])
       .then(([cfg, devs]) => {
@@ -123,10 +214,9 @@ export function App() {
         }
       })
       .catch(console.error);
+  }, []);
 
-    refreshPlexFavorites();
-  }, [refreshPlexFavorites]);
-
+  // Atualiza favoritos Plex ao alternar a fonte de mídia
   useEffect(() => {
     refreshPlexFavorites();
   }, [mediaSource, refreshPlexFavorites]);
@@ -264,7 +354,7 @@ export function App() {
         }
       })
       .catch(() => setHasCollections(false));
-  }, [selectedLibrary]);
+  }, [selectedLibrary, activeTab]);
 
   // Carregar álbuns/coleções do Plex
   useEffect(() => {
@@ -320,7 +410,7 @@ export function App() {
     }
   };
 
-  const handlePlayQuick = async (e: React.MouseEvent, album: PlexAlbum) => {
+  const handlePlayQuick = useCallback(async (e: React.MouseEvent, album: PlexAlbum) => {
     e.stopPropagation();
     try {
       const tracks = await plexService.getAlbumTracks(album.rating_key);
@@ -338,9 +428,9 @@ export function App() {
     } catch (err) {
       console.error("Falha na reprodução rápida:", err);
     }
-  };
-  
-  const handleTogglePlexCardFav = async (e: React.MouseEvent, album: PlexAlbum) => {
+  }, []);
+
+  const handleTogglePlexCardFav = useCallback(async (e: React.MouseEvent, album: PlexAlbum) => {
     e.stopPropagation();
     const albumKey = String(album.rating_key || "");
     if (!albumKey) return;
@@ -367,77 +457,19 @@ export function App() {
     } catch (err) {
       console.error("Erro ao favoritar no Plex:", err);
     }
-  };
+  }, []);
 
-  const renderAlbumCard = (album: PlexAlbum) => {
-    const albumKey = String(album.rating_key || "");
-    const isFav = albumKey ? plexFavIds.has(albumKey) : false;
+  const handleSelectArtist = useCallback((artistKey: string, artistName: string) => {
+    setActiveArtist({ rating_key: artistKey, name: artistName });
+  }, []);
 
-    return (
-      <div
-        key={albumKey || album.title}
-        onClick={() => setActiveAlbum(album)}
-        className="group flex flex-col cursor-pointer relative"
-      >
-        <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
-          {album.thumb ? (
-            <img
-              src={album.thumb}
-              alt={album.title}
-              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-              loading="lazy"
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center text-[#444444]">
-              <Disc3 size={40} />
-            </div>
-          )}
-
-          {/* Botão de Coração sobre a Capa */}
-          <button
-            onClick={(e) => handleTogglePlexCardFav(e, album)}
-            className={`absolute top-2 right-2 p-1.5 rounded-full backdrop-blur-xs transition-transform active:scale-90 cursor-pointer shadow z-20 ${
-              isFav
-                ? "bg-black/60 text-[#E5A00D]"
-                : "bg-black/40 text-white/70 hover:text-white opacity-0 group-hover:opacity-100"
-            }`}
-            title={isFav ? t("favorites.removeFavorite") : t("favorites.title")}
-          >
-            <Heart size={14} fill={isFav ? "#E5A00D" : "none"} />
-          </button>
-
-          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
-            <button
-              onClick={(e) => handlePlayQuick(e, album)}
-              className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer pointer-events-auto"
-              title={t("plex.playAlbum")}
-            >
-              <Play size={20} className="ml-1" fill="black" />
-            </button>
-          </div>
-        </div>
-
-        <span className="text-sm font-semibold text-white truncate" title={album.title}>
-          {album.title}
-        </span>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            if (album.artist_rating_key) {
-              setActiveArtist({ rating_key: album.artist_rating_key, name: album.artist });
-            }
-          }}
-          className="text-xs text-[#999999] hover:text-[#E5A00D] transition-colors truncate mt-0.5 text-left cursor-pointer"
-        >
-          {album.artist}
-        </button>
-        {album.year && (
-          <span className="text-[11px] text-[#666666] mt-0.5">
-            {album.year}
-          </span>
-        )}
-      </div>
-    );
+  const resetAllNavigation = () => {
+    setLocalSelectedArtist(null);
+    setActiveAlbum(null);
+    setActiveCollection(null);
+    setActiveArtist(null);
+    setSearchQuery("");
+    setSearchResults(null);
   };
 
   const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
@@ -476,10 +508,8 @@ export function App() {
           <nav className="space-y-1 mb-6">
             <button
               onClick={() => {
+                resetAllNavigation();
                 setMediaSource("local");
-                setLocalSelectedArtist(null);
-                setActiveAlbum(null);
-                setActiveArtist(null);
               }}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
                 mediaSource === "local"
@@ -511,10 +541,8 @@ export function App() {
 
             <button
               onClick={() => {
+                resetAllNavigation();
                 setMediaSource("plex");
-                setLocalSelectedArtist(null);
-                setActiveAlbum(null);
-                setActiveArtist(null);
               }}
               className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
                 mediaSource === "plex"
@@ -528,10 +556,8 @@ export function App() {
 
             <button
               onClick={() => {
+                resetAllNavigation();
                 setMediaSource("favorites");
-                setLocalSelectedArtist(null);
-                setActiveAlbum(null);
-                setActiveArtist(null);
               }}
               className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
                 mediaSource === "favorites"
@@ -576,11 +602,7 @@ export function App() {
                           key={lib.key}
                           onClick={() => {
                             setSelectedLibrary(lib);
-                            setActiveAlbum(null);
-                            setActiveCollection(null);
-                            setActiveArtist(null);
-                            setLocalSelectedArtist(null);
-                            setSearchQuery("");
+                            resetAllNavigation();
                           }}
                           className={`w-full text-left px-3 py-2 rounded-md truncate transition-colors cursor-pointer ${
                             isSelected
@@ -803,7 +825,23 @@ export function App() {
                           {t("plex.albums")}
                         </h3>
                         <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
-                          {searchResults.albums.map(renderAlbumCard)}
+                          {searchResults.albums.map((album) => {
+                            const albumKey = String(album.rating_key || "");
+                            return (
+                              <PlexAlbumCard
+                                key={albumKey || album.title}
+                                album={album}
+                                isFav={albumKey ? plexFavIds.has(albumKey) : false}
+                                onSelect={(a) => setActiveAlbum(a)}
+                                onPlayQuick={handlePlayQuick}
+                                onToggleFav={handleTogglePlexCardFav}
+                                onSelectArtist={handleSelectArtist}
+                                removeFavText={t("favorites.removeFavorite")}
+                                addFavText={t("favorites.title")}
+                                playAlbumText={t("plex.playAlbum")}
+                              />
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -825,6 +863,7 @@ export function App() {
                                     album: track.album_title || "",
                                     thumb: track.thumb || null,
                                     uri: track.play_uri,
+                                    duration: track.duration_ms ? track.duration_ms / 1000 : undefined,
                                   },
                                 ];
                                 audioService.playTracks(meta, 0);
@@ -870,11 +909,43 @@ export function App() {
                 </div>
               ) : activeCollection ? (
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
-                  {collectionAlbums.map(renderAlbumCard)}
+                  {collectionAlbums.map((album) => {
+                    const albumKey = String(album.rating_key || "");
+                    return (
+                      <PlexAlbumCard
+                        key={albumKey || album.title}
+                        album={album}
+                        isFav={albumKey ? plexFavIds.has(albumKey) : false}
+                        onSelect={(a) => setActiveAlbum(a)}
+                        onPlayQuick={handlePlayQuick}
+                        onToggleFav={handleTogglePlexCardFav}
+                        onSelectArtist={handleSelectArtist}
+                        removeFavText={t("favorites.removeFavorite")}
+                        addFavText={t("favorites.title")}
+                        playAlbumText={t("plex.playAlbum")}
+                      />
+                    );
+                  })}
                 </div>
               ) : activeTab === "library" ? (
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
-                  {albums.map(renderAlbumCard)}
+                  {albums.map((album) => {
+                    const albumKey = String(album.rating_key || "");
+                    return (
+                      <PlexAlbumCard
+                        key={albumKey || album.title}
+                        album={album}
+                        isFav={albumKey ? plexFavIds.has(albumKey) : false}
+                        onSelect={(a) => setActiveAlbum(a)}
+                        onPlayQuick={handlePlayQuick}
+                        onToggleFav={handleTogglePlexCardFav}
+                        onSelectArtist={handleSelectArtist}
+                        removeFavText={t("favorites.removeFavorite")}
+                        addFavText={t("favorites.title")}
+                        playAlbumText={t("plex.playAlbum")}
+                      />
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
@@ -922,27 +993,22 @@ export function App() {
         isQueueOpen={showQueue}
         onNavigateToArtist={(artistName) => {
           if (!playbackStatus.current_file.startsWith("http")) {
+            resetAllNavigation();
             setMediaSource("local");
             setLocalSelectedArtist(artistName);
-            setActiveAlbum(null);
-            setActiveArtist(null);
           } else {
+            resetAllNavigation();
             setMediaSource("plex");
-            setActiveAlbum(null);
-            setActiveArtist(null);
-            setLocalSelectedArtist(null);
             setSearchQuery(artistName);
           }
         }}
         onNavigateToAlbum={() => {
           if (!playbackStatus.current_file.startsWith("http")) {
+            resetAllNavigation();
             setMediaSource("local");
-            setLocalSelectedArtist(null);
           } else if (playbackStatus.album) {
+            resetAllNavigation();
             setMediaSource("plex");
-            setActiveAlbum(null);
-            setActiveArtist(null);
-            setLocalSelectedArtist(null);
             setSearchQuery(playbackStatus.album);
           }
         }}
