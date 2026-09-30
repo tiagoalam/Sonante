@@ -43,6 +43,112 @@ pub struct PlexServerResource {
     pub chosen_uri: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlexServerIdentity {
+    pub machine_identifier: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlexConnectionCandidate {
+    pub base_url: String,
+    pub local: bool,
+    pub relay: bool,
+    pub protocol: String,
+    address: String,
+    port: u16,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DiscoveredPlexServer {
+    identity: PlexServerIdentity,
+    connections: Vec<PlexConnectionCandidate>,
+    resource_access_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawConnection {
+    uri: String,
+    #[serde(default)]
+    local: bool,
+    #[serde(default)]
+    relay: bool,
+    #[serde(default)]
+    protocol: String,
+    address: String,
+    port: u16,
+}
+
+#[derive(Deserialize)]
+struct RawResource {
+    name: String,
+    #[serde(rename = "clientIdentifier")]
+    client_identifier: String,
+    provides: String,
+    #[serde(rename = "accessToken")]
+    access_token: Option<String>,
+    #[serde(default)]
+    connections: Vec<RawConnection>,
+}
+
+fn parse_discovered_servers(resources: Vec<RawResource>) -> Vec<DiscoveredPlexServer> {
+    resources
+        .into_iter()
+        .filter(|resource| {
+            resource
+                .provides
+                .split(',')
+                .any(|provided| provided.trim() == "server")
+        })
+        .map(|resource| DiscoveredPlexServer {
+            identity: PlexServerIdentity {
+                machine_identifier: resource.client_identifier,
+                display_name: resource.name,
+            },
+            connections: resource
+                .connections
+                .into_iter()
+                .map(|connection| PlexConnectionCandidate {
+                    base_url: connection.uri,
+                    local: connection.local,
+                    relay: connection.relay,
+                    protocol: connection.protocol,
+                    address: connection.address,
+                    port: connection.port,
+                })
+                .collect(),
+            resource_access_token: resource.access_token,
+        })
+        .collect()
+}
+
+fn into_public_server_resource(server: DiscoveredPlexServer) -> PlexServerResource {
+    let mut connections: Vec<PlexConnection> = server
+        .connections
+        .into_iter()
+        .map(|candidate| PlexConnection {
+            uri: candidate.base_url,
+            local: candidate.local,
+            address: candidate.address,
+            port: candidate.port,
+        })
+        .collect();
+
+    // Compatibilidade: a API pública continua priorizando a primeira conexão marcada como local.
+    connections.sort_by_key(|connection| if connection.local { 0 } else { 1 });
+    let chosen_uri = connections
+        .first()
+        .map(|connection| connection.uri.clone())
+        .unwrap_or_default();
+
+    PlexServerResource {
+        name: server.identity.display_name,
+        client_identifier: server.identity.machine_identifier,
+        connections,
+        chosen_uri,
+    }
+}
+
 pub async fn request_plex_pin() -> Result<PlexPin, String> {
     let client = http_client();
     let res = client
@@ -121,62 +227,15 @@ pub async fn get_plex_servers(auth_token: &str) -> Result<Vec<PlexServerResource
         .await
         .map_err(|e| format!("Erro ao consultar servidores Plex: {}", e))?;
 
-    #[derive(Deserialize)]
-    struct RawConnection {
-        uri: String,
-        #[serde(default)]
-        local: bool,
-        address: String,
-        port: u16,
-    }
-
-    #[derive(Deserialize)]
-    struct RawResource {
-        name: String,
-        #[serde(rename = "clientIdentifier")]
-        client_identifier: String,
-        provides: String,
-        #[serde(default)]
-        connections: Vec<RawConnection>,
-    }
-
     let resources: Vec<RawResource> = res
         .json()
         .await
         .map_err(|e| format!("Erro ao ler recursos Plex: {}", e))?;
 
-    let mut servers = Vec::new();
-    for r in resources {
-        if r.provides.split(',').any(|p| p.trim() == "server") {
-            let mut connections: Vec<PlexConnection> = r
-                .connections
-                .into_iter()
-                .map(|c| PlexConnection {
-                    uri: c.uri,
-                    local: c.local,
-                    address: c.address,
-                    port: c.port,
-                })
-                .collect();
-
-            // Prioriza conexões de rede local (IP da LAN em vez de conexões remotas/relay)
-            connections.sort_by_key(|c| if c.local { 0 } else { 1 });
-
-            let chosen_uri = connections
-                .first()
-                .map(|c| c.uri.clone())
-                .unwrap_or_default();
-
-            servers.push(PlexServerResource {
-                name: r.name,
-                client_identifier: r.client_identifier,
-                connections,
-                chosen_uri,
-            });
-        }
-    }
-
-    Ok(servers)
+    Ok(parse_discovered_servers(resources)
+        .into_iter()
+        .map(into_public_server_resource)
+        .collect())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -184,6 +243,82 @@ pub struct PlexArtistResult {
     pub rating_key: String,
     pub name: String,
     pub thumb: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIXED_ORDER_REMOTE_FIRST: &str =
+        include_str!("../tests/fixtures/plex_resources_remote_first.json");
+    const MIXED_ORDER_LOCAL_FIRST: &str =
+        include_str!("../tests/fixtures/plex_resources_local_first.json");
+
+    fn parse_fixture(payload: &str) -> Vec<DiscoveredPlexServer> {
+        let resources: Vec<RawResource> = serde_json::from_str(payload).unwrap();
+        parse_discovered_servers(resources)
+    }
+
+    #[test]
+    fn resources_capture_identity_connections_and_resource_token_internally() {
+        let servers = parse_fixture(MIXED_ORDER_REMOTE_FIRST);
+        assert_eq!(servers.len(), 1);
+
+        let server = &servers[0];
+        assert_eq!(server.identity.machine_identifier, "fixture-machine-id");
+        assert_eq!(server.identity.display_name, "Fixture Music Server");
+        assert_eq!(
+            server.resource_access_token.as_deref(),
+            Some("TEST_RESOURCE_ACCESS_TOKEN")
+        );
+        assert_eq!(server.connections.len(), 3);
+        assert_eq!(
+            server.connections[0].base_url,
+            "https://remote.example.invalid:443"
+        );
+        assert_eq!(server.connections[0].protocol, "https");
+        assert!(!server.connections[0].local);
+        assert!(!server.connections[0].relay);
+        assert_eq!(
+            server.connections[1].base_url,
+            "https://relay.example.invalid:443"
+        );
+        assert_eq!(server.connections[1].protocol, "https");
+        assert!(!server.connections[1].local);
+        assert!(server.connections[1].relay);
+        assert_eq!(
+            server.connections[2].base_url,
+            "https://lan.example.invalid:32400"
+        );
+        assert_eq!(server.connections[2].protocol, "https");
+        assert!(server.connections[2].local);
+        assert!(!server.connections[2].relay);
+    }
+
+    #[test]
+    fn public_dto_preserves_existing_local_first_selection_for_variable_api_order() {
+        for fixture in [MIXED_ORDER_REMOTE_FIRST, MIXED_ORDER_LOCAL_FIRST] {
+            let server = parse_fixture(fixture).pop().unwrap();
+            let public = into_public_server_resource(server);
+
+            assert_eq!(public.client_identifier, "fixture-machine-id");
+            assert_eq!(public.chosen_uri, "https://lan.example.invalid:32400");
+            assert!(public.connections[0].local);
+        }
+    }
+
+    #[test]
+    fn public_server_dto_does_not_expose_internal_credentials_or_connection_details() {
+        let server = parse_fixture(MIXED_ORDER_REMOTE_FIRST).pop().unwrap();
+        let public = serde_json::to_value(into_public_server_resource(server)).unwrap();
+        let public_server = public.as_object().unwrap();
+        let public_connection = public_server["connections"][0].as_object().unwrap();
+
+        assert!(!public_server.contains_key("resource_access_token"));
+        assert!(!public_server.contains_key("accessToken"));
+        assert!(!public_connection.contains_key("relay"));
+        assert!(!public_connection.contains_key("protocol"));
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

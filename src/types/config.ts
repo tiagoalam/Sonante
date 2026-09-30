@@ -3,6 +3,9 @@ export interface AppConfig {
   alsa_device: string;
   audio_output_type: "alsa" | "pipewire";
   local_folders: string[];
+  plex_server_id?: string | null;
+  plex_server_name?: string | null;
+  /** Legacy connection route retained until dynamic resolution is introduced. */
   plex_url: string;
   plex_token: string;
   playback_mode: "http" | "local";

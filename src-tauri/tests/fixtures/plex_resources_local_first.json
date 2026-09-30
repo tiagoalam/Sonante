@@ -1,0 +1,34 @@
+[
+  {
+    "name": "Fixture Music Server",
+    "clientIdentifier": "fixture-machine-id",
+    "provides": "server,player",
+    "accessToken": "TEST_RESOURCE_ACCESS_TOKEN",
+    "connections": [
+      {
+        "protocol": "https",
+        "address": "lan.example.invalid",
+        "port": 32400,
+        "uri": "https://lan.example.invalid:32400",
+        "local": true,
+        "relay": false
+      },
+      {
+        "protocol": "https",
+        "address": "relay.example.invalid",
+        "port": 443,
+        "uri": "https://relay.example.invalid:443",
+        "local": false,
+        "relay": true
+      },
+      {
+        "protocol": "https",
+        "address": "remote.example.invalid",
+        "port": 443,
+        "uri": "https://remote.example.invalid:443",
+        "local": false,
+        "relay": false
+      }
+    ]
+  }
+]
