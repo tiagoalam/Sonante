@@ -8,7 +8,6 @@ import {
   VolumeX,
   Disc3,
   ListMusic,
-  ShieldCheck,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlaybackStatus } from "../types/audio";
@@ -143,17 +142,8 @@ export const PlayerBar: React.FC<Props> = ({
 
   const displayTitle = isNoTrack ? t("player.noTrack") : status.title;
   const displayArtist = isNoTrack
-    ? "Sonante Bit-Perfect"
-    : status.artist || (status.album ? status.album : "Sonante Bit-Perfect");
-
-  const isDsd = status.audio_format.toUpperCase().includes("DSD");
-  const isHiRes =
-    isDsd ||
-    status.audio_format.includes("96") ||
-    status.audio_format.includes("192") ||
-    status.audio_format.includes("384") ||
-    status.audio_format.includes("24-bit") ||
-    status.audio_format.includes("32-bit");
+    ? "Sonante"
+    : status.artist || (status.album ? status.album : "Sonante");
 
   return (
     <footer className="h-20 bg-[#161616] border-t border-[#262626] flex items-center justify-between px-6 z-40 select-none">
@@ -215,20 +205,10 @@ export const PlayerBar: React.FC<Props> = ({
           {status.audio_format && (
             <div className="flex items-center space-x-1.5 mt-1">
               <span
-                className={`text-[9px] font-mono px-1.5 py-0.2 rounded font-bold uppercase tracking-wider ${
-                  isHiRes
-                    ? "bg-[#E5A00D]/20 text-[#E5A00D] border border-[#E5A00D]/30"
-                    : "bg-[#252525] text-[#AAAAAA]"
-                }`}
+                className="text-[9px] font-mono px-1.5 py-0.2 rounded font-bold uppercase tracking-wider bg-[#252525] text-[#AAAAAA]"
+                title={t("player.formatReportedByMpd")}
               >
                 {status.audio_format}
-              </span>
-              <span
-                className="text-[9px] font-mono text-[#4BB543] flex items-center space-x-0.5"
-                title={t("player.exclusive")}
-              >
-                <ShieldCheck size={10} className="shrink-0" />
-                <span>{t("player.bitPerfect")}</span>
               </span>
             </div>
           )}

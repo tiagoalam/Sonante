@@ -223,7 +223,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
 
   if (loading || !config) return null;
 
-  const isExclusive = (config.audio_output_type || "alsa") === "alsa";
+  const isDirect = (config.audio_output_type || "alsa") === "alsa";
   const isSelectedInList = devices.some((d) => d.id === config.alsa_device);
   const isPlexConnected = Boolean(config.plex_token && config.plex_token.trim().length > 0);
 
@@ -295,17 +295,17 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                   type="button"
                   onClick={() => setConfig({ ...config, audio_output_type: "alsa" })}
                   className={`p-3 rounded-xl text-left border transition-all cursor-pointer flex flex-col justify-between ${
-                    isExclusive
+                    isDirect
                       ? "bg-[#221B0E] border-[#E5A00D] text-white"
                       : "bg-[#141414] border-[#2A2A2A] text-[#888888] hover:border-[#3A3A3A] hover:text-white"
                   }`}
                 >
                   <div className="flex items-center space-x-2">
-                    <ShieldCheck size={16} className={isExclusive ? "text-[#E5A00D]" : "text-[#777777]"} />
+                    <ShieldCheck size={16} className={isDirect ? "text-[#E5A00D]" : "text-[#777777]"} />
                     <span className="font-bold text-xs">{t("settings.alsaMode")}</span>
                   </div>
                   <span className="text-[10px] text-[#777777] mt-1 line-clamp-2">
-                    hw:CARD,DEV • Direct ALSA
+                    hw:CARD,DEV • ALSA Direct
                   </span>
                 </button>
 
@@ -313,13 +313,13 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
                   type="button"
                   onClick={() => setConfig({ ...config, audio_output_type: "pipewire" })}
                   className={`p-3 rounded-xl text-left border transition-all cursor-pointer flex flex-col justify-between ${
-                    !isExclusive
+                    !isDirect
                       ? "bg-[#221B0E] border-[#E5A00D] text-white"
                       : "bg-[#141414] border-[#2A2A2A] text-[#888888] hover:border-[#3A3A3A] hover:text-white"
                   }`}
                 >
                   <div className="flex items-center space-x-2">
-                    <Radio size={16} className={!isExclusive ? "text-[#E5A00D]" : "text-[#777777]"} />
+                    <Radio size={16} className={!isDirect ? "text-[#E5A00D]" : "text-[#777777]"} />
                     <span className="font-bold text-xs">{t("settings.pipewireMode")}</span>
                   </div>
                   <span className="text-[10px] text-[#777777] mt-1 line-clamp-2">
@@ -330,10 +330,10 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
             </div>
 
             {/* Painel Contextual do Modo Selecionado */}
-            {isExclusive ? (
+            {isDirect ? (
               <div className="space-y-2.5 pt-1">
                 <label className="block text-[#CCCCCC] font-semibold text-xs">
-                  {t("settings.alsaBitPerfect")}
+                  {t("settings.alsaDevice")}
                 </label>
                 <select
                   value={config.alsa_device}
@@ -354,7 +354,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
 
                 <div className="p-2.5 bg-[#171717] border border-[#262626] rounded-lg text-[11px] text-[#888888] leading-relaxed flex items-start space-x-2">
                   <Info size={14} className="text-[#E5A00D] shrink-0 mt-0.5" />
-                  <span>{t("settings.exclusiveNotice")}</span>
+                  <span>{t("settings.directNotice")}</span>
                 </div>
               </div>
             ) : (
@@ -435,10 +435,10 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
               <span>{t("settings.audioEngine")}</span>
             </h3>
 
-            {/* Chave de DoP - Ativa apenas em modo Bit-Perfect */}
+            {/* Chave de DoP - Disponível apenas em ALSA Direct */}
             <div
               className={`flex items-center justify-between p-3 rounded-lg border transition-opacity ${
-                isExclusive
+                isDirect
                   ? "bg-[#141414] border-[#262626]"
                   : "bg-[#111111] border-[#202020] opacity-50"
               }`}
@@ -446,13 +446,13 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
               <div className="flex flex-col pr-4">
                 <span className="text-white font-semibold">{t("settings.dop")}</span>
                 <span className="text-[11px] text-[#777777] mt-0.5">
-                  {isExclusive ? t("settings.dopDesc") : t("settings.dopOnlyExclusive")}
+                  {isDirect ? t("settings.dopDesc") : t("settings.dopOnlyDirect")}
                 </span>
               </div>
               <input
                 type="checkbox"
-                disabled={!isExclusive}
-                checked={isExclusive && config.dop_enabled}
+                disabled={!isDirect}
+                checked={isDirect && config.dop_enabled}
                 onChange={(e) => setConfig({ ...config, dop_enabled: e.target.checked })}
                 className="w-4 h-4 accent-[#E5A00D] cursor-pointer shrink-0 disabled:cursor-not-allowed"
               />

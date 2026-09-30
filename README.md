@@ -2,9 +2,9 @@
 
 # Sonante
 
-**Audiophile Bit-Perfect Desktop Audio Player for Linux**
+**Desktop Audio Player for Linux**
 
-*Direct ALSA bit-perfect routing, universal system-shared output, native DSD/PCM streaming, and Plex Media Server integration.*
+*ALSA Direct and Shared Audio output, local libraries, and Plex Media Server integration.*
 
 [![Release](https://img.shields.io/github/v/release/tiagoalam/sonante?style=flat-square&color=E5A00D)](https://github.com/tiagoalam/sonante/releases)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20(ALSA%20%7C%20PipeWire)-blue?style=flat-square)](#requirements)
@@ -19,10 +19,10 @@
 
 ## Overview
 
-**Sonante** is a desktop music player crafted for high-fidelity audio on Linux, offering the choice between **exclusive bit-perfect hardware playback** and **everyday system-shared audio**:
+**Sonante** is a desktop music player for Linux offering a choice between **ALSA Direct** and **Shared Audio**:
 
-* **Bit-Perfect Exclusive Mode (Direct ALSA):** Bypasses all operating system mixers, software volume controls, and resampling layers (PipeWire/PulseAudio) to stream unadulterated audio directly to dedicated DAC hardware nodes (`hw:CARD,DEV`).
-* **Shared System Mode (PipeWire / PulseAudio / ALSA dmix):** Routes audio through your system's default sound server (`default`), allowing high-quality music playback to coexist seamlessly with browsers, Discord, games, and system notifications without monopolizing the device.
+* **ALSA Direct:** Points MPD to the selected ALSA hardware endpoint, normally `hw:CARD=...,DEV=...`. A hardware endpoint alone does not confirm bit-for-bit integrity, absence of conversion, or the format effectively received by the DAC.
+* **Shared Audio (PipeWire / PulseAudio / ALSA dmix):** Routes audio through the system's `default` ALSA endpoint. Coexistence and any mixing or resampling behavior depend on the host audio configuration.
 
 Sonante unifies offline high-resolution collections (spanning internal disks and external drives) and remote **Plex Media Server** audio libraries under an elegant, responsive dark interface.
 
@@ -30,7 +30,7 @@ Sonante unifies offline high-resolution collections (spanning internal disks and
 
 ## What's New in v0.3.8
 
-* **Dual-Mode Audio Engine Architecture:** Distinct separation between **Bit-Perfect Exclusive** (hardware-direct `hw:CARD,DEV` with DoP support) and **Shared System** (`default` ALSA node for transparent PipeWire/PulseAudio integration).
+* **Dual-Mode Audio Engine Architecture:** Distinct separation between **ALSA Direct** (selected hardware endpoint with optional MPD DoP configuration) and **Shared Audio** (`default` ALSA endpoint for system-managed output).
 * **Hardware Lock Prevention & Resilient Daemon Teardown:** Uses owned-process validation, socket teardown, `Drop` cleanup, and explicit shutdown paths to release the DAC without signaling unrelated processes from stale PID files.
 * **Deterministic Audio Handover:** Dynamic device switching preserves the queue, selected track, and playhead position when possible. Playing and Paused sessions finish the switch paused for manual resume; Stopped sessions remain stopped without autoplay.
 * **Refined Plex Navigation Stack:** Fixed navigation precedence in the artist view, allowing discography album cards to act as responsive links opening the album view while preserving back-stack history.
@@ -57,20 +57,21 @@ Sonante unifies offline high-resolution collections (spanning internal disks and
 
 Sonante v0.3.8 introduces a dedicated dual-mode audio architecture designed to seamlessly accommodate both critical listening and daily desktop workflows:
 
-* **Bit-Perfect Exclusive Mode (Direct ALSA):**
-  * Direct communication with physical hardware endpoints (`hw:CARD,DEV`), bypassing OS mixers, sample-rate converters, and DSP layers for pure, uncolored bit-perfect streaming.
-  * Native **DSD over PCM (DoP)** support up to DSD128/DSD256 and bit-perfect Hi-Res PCM streaming up to 384 kHz / 32-bit.
-  * Graceful socket teardown and strict device descriptor release ensuring DACs are freed immediately when playback stops or the app is closed.
+* **ALSA Direct:**
+  * Points MPD to a selected ALSA hardware endpoint, normally `hw:CARD=...,DEV=...`.
+  * Can request **DSD over PCM (DoP)** from MPD. Effective operation depends on compatible MPD, ALSA, and DAC behavior.
+  * The format reported by MPD describes its playback state; it does not by itself confirm the format delivered through ALSA or received by the DAC.
+  * Uses controlled shutdown and owned-process validation to release the MPD process and its audio resources safely.
 
-* **Shared System Mode (PipeWire / PulseAudio / ALSA dmix):**
-  * Universal routing through the default system audio server using the standard `default` ALSA endpoint.
-  * Plays concurrently with web browsers, communication tools, games, and desktop notifications without hardware locking or audio device conflicts.
-  * Resilient backend implementation requiring no special MPD plugin dependencies, guaranteeing out-of-the-box compatibility across all Linux distributions.
+* **Shared Audio (PipeWire / PulseAudio / ALSA dmix):**
+  * Routes MPD through the standard `default` ALSA endpoint.
+  * Is intended to coexist with browsers, communication tools, games, and desktop notifications when supported by the host audio configuration.
+  * Mixing, resampling, device sharing, and compatibility are controlled by the system's ALSA/PipeWire/PulseAudio setup.
 
 ### Plex Media Server Integration
 * **Official OAuth / PIN Authentication:** Web-based login with polling and secure local token storage.
 * **LAN Auto-Discovery & Direct Play:** Automatically detects whether the server is local or remote, prioritizing local network IP routes for maximum throughput.
-* **Lossless Direct Streaming:** Direct stream playback of FLAC, ALAC, and DSD tracks without server-side transcoding.
+* **Media-Part Streaming:** Passes Plex media-part URIs to MPD; decoding and output depend on MPD and the configured audio path.
 * **Unified Remote Navigation:** Browse Plex Music Libraries, Collections, Artist Discographies, and perform fast instant search with debounced indexing.
 
 ### Local Music Management
@@ -81,7 +82,7 @@ Sonante v0.3.8 introduces a dedicated dual-mode audio architecture designed to s
 ### UI & User Experience
 * **Interactive PlayerBar:** Instant navigation back to current artists and albums directly from playback controls.
 * **Fully Internationalized (i18n):** Native support for **English (en-US)** and **Portuguese (pt-BR)** with real-time switching across the entire UI.
-* **Interactive First-Run Wizard:** Guides the user through audio output selection (ALSA Bit-Perfect vs Shared System), local library setup, and Plex connection.
+* **Interactive First-Run Wizard:** Guides the user through audio output selection (ALSA Direct or Shared Audio), local library setup, and Plex connection.
 * **Unified Favorites:** Persistent favorites system across both local albums and Plex libraries with active offline availability tracking.
 * **Global Keyboard Shortcuts:** Fast control for common playback, volume, and search actions.
 
@@ -105,12 +106,12 @@ Sonante v0.3.8 introduces a dedicated dual-mode audio architecture designed to s
                                  | UNIX Domain Socket
 +--------------------------------v--------------------------------+
 |                    Dedicated MPD Audio Daemon                   |
-|        Configured for ALSA Exclusive or Shared System Output    |
+|          Configured for ALSA Direct or Shared Audio Output     |
 +--------------------------------+--------------------------------+
                                  |
         +------------------------+------------------------+
         |                                                 |
-        | Bit-Perfect PCM / DoP DSD                       | Shared PCM Audio
+        | ALSA Direct / optional MPD DoP request          | Shared Audio
 +-------v-------------------------+     +-----------------v---------------+
 |   External Audiophile USB DAC   |     |    PipeWire / PulseAudio Server |
 |   Direct Hardware (hw:CARD,DEV) |     |    System Mixed Output (default)|

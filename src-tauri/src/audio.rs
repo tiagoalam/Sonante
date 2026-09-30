@@ -11,7 +11,6 @@ use std::time::Duration;
 pub struct AudioDevice {
     pub id: String,
     pub name: String,
-    pub is_bitperfect: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -214,21 +213,18 @@ pub fn list_audio_devices() -> Vec<AudioDevice> {
                     dacs.push(AudioDevice {
                         id: hw_id,
                         name: format!("{} — DAC USB (hw:CARD={},DEV={})", card_label, card_id, dev_id),
-                        is_bitperfect: true,
                     });
                 } else if is_hdmi {
                     if let Some(display_name) = check_hdmi_connected(card_num, dev_id) {
                         hdmi_devs.push(AudioDevice {
                             id: hw_id,
                             name: format!("{} — {} (hw:CARD={},DEV={})", card_label, display_name, card_id, dev_id),
-                            is_bitperfect: true,
                         });
                     }
                 } else {
                     onboard.push(AudioDevice {
                         id: hw_id,
                         name: format!("{} — {} (hw:CARD={},DEV={})", card_label, dev_label, card_id, dev_id),
-                        is_bitperfect: true,
                     });
                 }
             }

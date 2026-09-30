@@ -10,7 +10,6 @@ export interface TrackMetadata {
 export interface AudioDevice {
   id: string;
   name: string;
-  is_bitperfect: boolean;
 }
 
 export interface PlaybackStatus {

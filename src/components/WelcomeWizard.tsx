@@ -172,7 +172,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
     setStep((s) => Math.max(1, s - 1));
   };
 
-  const isExclusive = (config.audio_output_type || "alsa") === "alsa";
+  const isDirect = (config.audio_output_type || "alsa") === "alsa";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0C0C0C] select-none p-6 text-white font-sans">
@@ -240,13 +240,13 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                   type="button"
                   onClick={() => setConfig({ ...config, audio_output_type: "alsa" })}
                   className={`p-3.5 rounded-xl border-2 text-left transition-all cursor-pointer flex flex-col justify-between ${
-                    isExclusive
+                    isDirect
                       ? "border-[#E5A00D] bg-[#221B0E]"
                       : "border-[#262626] bg-[#141414] hover:bg-[#181818]"
                   }`}
                 >
                   <div className="flex items-center space-x-2">
-                    <ShieldCheck size={18} className={isExclusive ? "text-[#E5A00D]" : "text-[#777777]"} />
+                    <ShieldCheck size={18} className={isDirect ? "text-[#E5A00D]" : "text-[#777777]"} />
                     <span className="font-bold text-xs text-white">{t("settings.alsaMode")}</span>
                   </div>
                   <span className="text-[10px] text-[#777777] mt-1">
@@ -258,13 +258,13 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                   type="button"
                   onClick={() => setConfig({ ...config, audio_output_type: "pipewire" })}
                   className={`p-3.5 rounded-xl border-2 text-left transition-all cursor-pointer flex flex-col justify-between ${
-                    !isExclusive
+                    !isDirect
                       ? "border-[#E5A00D] bg-[#221B0E]"
                       : "border-[#262626] bg-[#141414] hover:bg-[#181818]"
                   }`}
                 >
                   <div className="flex items-center space-x-2">
-                    <Radio size={18} className={!isExclusive ? "text-[#E5A00D]" : "text-[#777777]"} />
+                    <Radio size={18} className={!isDirect ? "text-[#E5A00D]" : "text-[#777777]"} />
                     <span className="font-bold text-xs text-white">{t("settings.pipewireMode")}</span>
                   </div>
                   <span className="text-[10px] text-[#777777] mt-1">
@@ -274,11 +274,11 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
               </div>
 
               {/* Configuração Contextual */}
-              {isExclusive ? (
+              {isDirect ? (
                 <div className="space-y-3 pt-1">
                   <div className="space-y-1.5">
                     <label className="block text-xs font-bold text-[#CCCCCC] uppercase tracking-wider">
-                      {t("settings.alsaBitPerfect")}
+                      {t("settings.alsaDevice")}
                     </label>
                     <select
                       value={config.alsa_device}
@@ -295,7 +295,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
 
                   <div className="bg-[#1B1812] border border-[#E5A00D]/30 p-3.5 rounded-xl flex items-start space-x-3 text-xs text-[#CCCCCC]">
                     <ShieldCheck size={18} className="text-[#E5A00D] shrink-0 mt-0.5" />
-                    <span>{t("wizard.step1Exclusive")}</span>
+                    <span>{t("wizard.step1Direct")}</span>
                   </div>
                 </div>
               ) : (
@@ -563,7 +563,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                 <div className="flex justify-between py-1 border-b border-[#1F1F1F]">
                   <span className="text-[#888888]">{t("settings.audioOutput")}:</span>
                   <span className="font-mono text-white truncate max-w-xs">
-                    {isExclusive ? config.alsa_device : t("settings.pipewireMode")}
+                    {isDirect ? config.alsa_device : t("settings.pipewireMode")}
                   </span>
                 </div>
                 <div className="flex justify-between py-1 border-b border-[#1F1F1F]">

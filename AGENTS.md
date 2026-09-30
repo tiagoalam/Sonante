@@ -100,7 +100,7 @@ Comandos em src-tauri/src/lib.rs
                     MPD dedicado
                          │ plugin ALSA
                          ▼
-                hw:* (Exclusive) ou default (Shared)
+                hw:* (ALSA Direct) ou default (Shared)
 ```
 
 O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor real de streaming, decodificação, fila e saída de áudio.
@@ -124,11 +124,11 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 6. MPD decodifica PCM/DSD e usa seu plugin ALSA.
 7. O frontend consulta status por IPC e exibe metadata, posição, volume e formato reportado pelo MPD.
 
-### Shared e Exclusive atuais
+### Shared e ALSA Direct atuais
 
-- **Exclusive**: `audio_output_type == "alsa"`; gera saída MPD ALSA para `alsa_device`, normalmente `hw:CARD=...,DEV=...`, e inclui `dop yes/no`.
+- **ALSA Direct**: `audio_output_type == "alsa"`; gera saída MPD ALSA para `alsa_device`, normalmente `hw:CARD=...,DEV=...`, e inclui `dop yes/no`.
 - **Shared**: `audio_output_type == "pipewire"`/`"shared"`, ou dispositivo `default`; ainda usa `type "alsa"`, mas aponta para `device "default"`. A coexistência com o sistema depende da configuração ALSA/PipeWire/PulseAudio/dmix do host.
-- Na versão 0.3.8, ambos geram `mixer_type "software"`. Isso é um fato atual e uma razão para não tratar a indicação “bit-perfect” existente como validação técnica.
+- Na versão 0.3.8, ambos geram `mixer_type "software"`. A UI não apresenta ALSA Direct como bit-perfect, e o formato reportado pelo MPD não valida o caminho efetivamente entregue ao ALSA/DAC.
 
 ### Estado conhecido que merece cautela
 

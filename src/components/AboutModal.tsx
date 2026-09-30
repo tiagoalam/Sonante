@@ -94,7 +94,7 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
             <Heart size={12} className="text-[#E5A00D] fill-[#E5A00D]" />
             <span>{t("about.forEnthusiasts")}</span>
           </div>
-          <span className="font-mono">Linux ALSA Exclusive</span>
+          <span className="font-mono">Linux • MPD • ALSA</span>
         </div>
       </div>
     </div>
