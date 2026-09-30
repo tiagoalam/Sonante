@@ -108,18 +108,18 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 ### Responsabilidades atuais
 
 - **Frontend (`src/`)**: React, navegação, biblioteca local/Plex, favoritos, configurações, onboarding, player e fila. Os serviços em `src/services/` são fachadas finas sobre `invoke`; os contratos ficam em `src/types/`.
-- **Composição Tauri (`src-tauri/src/lib.rs`)**: registra comandos IPC e mantém `AudioState`, `SupervisorState`, `ConfigState` e `PlexState` em `Mutex`.
+- **Composição Tauri (`src-tauri/src/lib.rs`)**: registra comandos IPC e mantém `AudioState`, `SupervisorState`, `ConfigState`, `ConfigTransactionState` e `PlexState` em `Mutex`.
 - **`AudioEngine` (`src-tauri/src/audio.rs`)**: cliente síncrono do protocolo MPD, fila espelhada em memória, `queue_cache.json`, status, seek/volume, listagem da biblioteca local e resolução de covers. Atualmente reúne responsabilidades que podem ser separadas no futuro.
 - **`MpdSupervisor` (`src-tauri/src/supervisor.rs`)**: sincroniza a biblioteca virtual de symlinks, gera `mpd.conf`, inicia/para o processo MPD e administra socket/PID. Mudanças aqui têm impacto direto na disponibilidade do DAC.
 - **`PlexClient` (`src-tauri/src/plex.rs`)**: OAuth PIN, descoberta de servidores, consultas a bibliotecas/álbuns/artistas/coleções, parsing de tracks e geração de URIs HTTP ou paths mapeados.
-- **Persistência**: `config.json`, `favorites.json`, `queue_cache.json`, banco/configuração do MPD e diretório virtual ficam sob o diretório de configuração do Sonante. No código 0.3.8, o socket MPD ainda é `/tmp/mpd.socket`, apesar de o README indicar outro local.
+- **Persistência**: `config.json`, `favorites.json`, `queue_cache.json`, banco/configuração do MPD e diretório virtual ficam sob o diretório de configuração do Sonante. O socket e o PID do MPD ficam em `$XDG_RUNTIME_DIR/sonante/`; quando esse diretório não está disponível, o fallback privado é o subdiretório `runtime/sonante` da configuração do Sonante.
 
 ### Fluxo de reprodução atual
 
 1. React obtém itens locais pelo MPD ou itens remotos pelo `PlexClient`.
 2. A view converte a seleção em `TrackMetadata[]` e chama `audioService.playTracks`.
 3. Tauri desserializa a chamada e bloqueia `AudioState`.
-4. `AudioEngine` resolve covers, substitui sua fila/cache e envia `clear`/`add`/`play` ao socket MPD.
+4. `AudioEngine` resolve covers, valida e escapa os argumentos, envia `clear`/`add`/`play` ao socket MPD e só então publica/persiste a fila espelhada após a aceitação do MPD.
 5. Para local, MPD lê a path sob seu `music_directory`; para Plex, MPD abre a URI HTTP com token.
 6. MPD decodifica PCM/DSD e usa seu plugin ALSA.
 7. O frontend consulta status por IPC e exibe metadata, posição, volume e formato reportado pelo MPD.
@@ -133,12 +133,12 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 ### Estado conhecido que merece cautela
 
 - A fila em `queue_cache.json` é metadata espelhada; ela não é automaticamente restaurada no MPD no startup.
-- O transporte MPD atual concatena strings e deve ser endurecido antes de aceitar dados arbitrários.
-- A troca de saída atual contém erros ignorados e não possui rollback completo.
+- O transporte MPD valida e escapa argumentos textuais, rejeita NUL/CR/LF e diferencia `OK`, `ACK`, EOF e erros de I/O/timeout; novos comandos devem reutilizar essas mesmas fronteiras.
+- A troca de saída é serializada e transacional: captura um snapshot explícito, aplica a nova configuração e tenta rollback em falha. Snapshots Playing e Paused terminam pausados após a troca; Stopped permanece parado.
 - Há polling de status duplicado no frontend.
 - A biblioteca local agrega roots por symlinks e usa o índice do MPD; roots sobrepostos ou álbuns homônimos exigem cuidado.
 - O token Plex aparece em URLs e arquivos persistidos; trate-o como segredo.
-- Não há testes automatizados no estado 0.3.8.
+- Há testes unitários Rust para protocolo MPD, escaping, restauração de fila/estado, rollback e lifecycle do supervisor. Eles usam simulações e não comprovam, sozinhos, integração real com MPD/ALSA, hardware ou bit-perfect.
 
 ## 3. Convenções atuais — retrato mutável
 
@@ -185,7 +185,7 @@ cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
 - `npm run tauri dev` inicia Vite e compila/executa o app Tauri.
 - `npm run tauri build` executa o build frontend e gera bundles em `src-tauri/target/release/bundle/`.
-- `cargo test` é um comando Cargo válido, mas atualmente não encontra testes próprios do projeto; sucesso não representa cobertura funcional.
+- `cargo test` executa testes unitários Rust do projeto para protocolo MPD, restauração, rollback e lifecycle do supervisor; sucesso não substitui validação de integração com MPD/ALSA ou hardware real.
 - `cargo clippy` e `cargo fmt` dependem dos componentes Rust correspondentes estarem instalados; não existem scripts do repositório que os encapsulem.
 - Build, check, clippy e testes Rust escrevem em `src-tauri/target/`. Respeite tarefas explicitamente somente leitura.
 

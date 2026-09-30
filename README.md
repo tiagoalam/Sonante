@@ -31,8 +31,8 @@ Sonante unifies offline high-resolution collections (spanning internal disks and
 ## What's New in v0.3.8
 
 * **Dual-Mode Audio Engine Architecture:** Distinct separation between **Bit-Perfect Exclusive** (hardware-direct `hw:CARD,DEV` with DoP support) and **Shared System** (`default` ALSA node for transparent PipeWire/PulseAudio integration).
-* **Hardware Lock Prevention & Resilient Daemon Teardown:** Implemented strict socket teardown, `Drop` traits, and process cleanup routines in the MPD supervisor, guaranteeing DACs are released immediately without orphaned processes blocking other apps.
-* **Seamless Audio Handover:** Dynamic device switching preserves current playhead position, playback state, and queue metadata without audio dropouts or manual intervention.
+* **Hardware Lock Prevention & Resilient Daemon Teardown:** Uses owned-process validation, socket teardown, `Drop` cleanup, and explicit shutdown paths to release the DAC without signaling unrelated processes from stale PID files.
+* **Deterministic Audio Handover:** Dynamic device switching preserves the queue, selected track, and playhead position when possible. Playing and Paused sessions finish the switch paused for manual resume; Stopped sessions remain stopped without autoplay.
 * **Refined Plex Navigation Stack:** Fixed navigation precedence in the artist view, allowing discography album cards to act as responsive links opening the album view while preserving back-stack history.
 * **Interactive First-Run Wizard:** Full bilingual onboarding flow with instant audio mode selection, directory mapping, and OAuth PIN login.
 
@@ -100,7 +100,7 @@ Sonante v0.3.8 introduces a dedicated dual-mode audio architecture designed to s
 |  - HTTP Connection Pooling with Keep-Alive (reqwest)            |
 |  - Atomic Configuration Persistence (fs::rename)                |
 |  - MPD Process Supervisor & Dynamic mpd.conf Generation         |
-|  - State & Queue File Caching (queue_cache.json)                |
+|  - Mirrored Queue Metadata Cache (queue_cache.json)             |
 +--------------------------------+--------------------------------+
                                  | UNIX Domain Socket
 +--------------------------------v--------------------------------+
@@ -212,13 +212,15 @@ Binaries and bundles will be placed in `src-tauri/target/release/bundle/`.
 
 ## Application Paths
 
-Sonante organizes all user data, socket endpoints, and configurations within the user directory:
+Sonante keeps persistent data in the user configuration directory and transient process endpoints in the per-user runtime directory:
 
 * `~/.config/sonante/config.json` — Hardware preferences, buffers, and Plex session tokens.
 * `~/.config/sonante/favorites.json` — Unified favorites registry.
-* `~/.config/sonante/queue_cache.json` — Persistent queue, playback state, and rich metadata cache.
+* `~/.config/sonante/queue_cache.json` — Mirrored queue metadata cache; it does not persist MPD playback state.
 * `~/.config/sonante/mpd.conf` — Dynamically generated MPD configuration.
-* `~/.config/sonante/mpd.socket` — Dedicated MPD UNIX IPC control socket.
+* `$XDG_RUNTIME_DIR/sonante/mpd.socket` — Dedicated per-user MPD UNIX IPC control socket.
+* `$XDG_RUNTIME_DIR/sonante/mpd.pid` — PID file for the owned MPD process.
+* When `XDG_RUNTIME_DIR` is unavailable, both runtime files use the private `runtime/sonante/` subdirectory inside the Sonante configuration directory.
 * `~/.config/sonante/library/` — Symlinked virtual directory mirroring all local library roots.
 
 ---
