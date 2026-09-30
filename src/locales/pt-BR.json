@@ -22,7 +22,10 @@
     "play": "Reproduzir",
     "pause": "Pausar",
     "previous": "Anterior",
-    "next": "Seguinte"
+    "next": "Seguinte",
+    "engineUnavailable": "Motor de áudio indisponível",
+    "engineTransitioning": "Motor de áudio em transição",
+    "lastKnown": "Último estado conhecido"
   },
   "queue": {
     "title": "Fila de Reprodução",

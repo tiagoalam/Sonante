@@ -61,6 +61,12 @@ pub struct PlaybackStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MpdProbeFailure {
+    SocketUnavailable,
+    ProtocolUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackState {
     Stopped,
     Paused,
@@ -400,6 +406,22 @@ impl AudioEngine {
     pub fn set_volume(&self, volume: u32) -> Result<(), String> {
         let clamped = volume.min(100);
         self.send_command(&format!("setvol {}", clamped)).map(|_| ())
+    }
+
+    pub(crate) fn probe_mpd(&self) -> Result<(), MpdProbeFailure> {
+        let stream = UnixStream::connect(&self.socket_path)
+            .map_err(|_| MpdProbeFailure::SocketUnavailable)?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .map_err(|_| MpdProbeFailure::ProtocolUnavailable)?;
+        let mut greeting = String::new();
+        let greeting_bytes = BufReader::new(stream)
+            .read_line(&mut greeting)
+            .map_err(|_| MpdProbeFailure::ProtocolUnavailable)?;
+        if greeting_bytes == 0 || !greeting.starts_with("OK MPD ") || !greeting.ends_with('\n') {
+            return Err(MpdProbeFailure::ProtocolUnavailable);
+        }
+        Ok(())
     }
 
     fn send_command(&self, command: &str) -> Result<Vec<String>, String> {

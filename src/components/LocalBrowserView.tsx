@@ -61,7 +61,8 @@ const LocalAlbumCard: React.FC<{
   onToggleFavorite: (e: React.MouseEvent, album: LocalAlbum, cover: string | null) => void;
   onClick: () => void;
   onPlayQuick: (e: React.MouseEvent) => void;
-}> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick }) => {
+  isPlaybackAvailable: boolean;
+}> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable }) => {
   const [cover, setCover] = useState<string | null>(() => coverMemoryCache.get(album.folder_path) || null);
   const cardRef = useRef<HTMLDivElement>(null);
 
@@ -127,7 +128,8 @@ const LocalAlbumCard: React.FC<{
         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
           <button
             onClick={onPlayQuick}
-            className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer"
+            disabled={!isPlaybackAvailable}
+            className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Play size={20} className="ml-1" fill="black" />
           </button>
@@ -151,11 +153,13 @@ const LocalAlbumCard: React.FC<{
 export interface LocalBrowserViewProps {
   initialArtist?: string | null;
   onClearInitialArtist?: () => void;
+  isPlaybackAvailable: boolean;
 }
 
 export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   initialArtist,
   onClearInitialArtist,
+  isPlaybackAvailable,
 }) => {
   const { t } = useTranslation();
   const [viewMode, setViewMode] = useState<"albums" | "folders">("albums");
@@ -265,6 +269,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   };
 
   const handlePlayEntireAlbum = async (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => {
+    if (!isPlaybackAvailable) return;
     try {
       const files = trackItems || (await audioService.listLocalDirectory(album.folder_path)).filter((i) => i.item_type === "file");
       const cov = albumCover || coverMemoryCache.get(album.folder_path) || (await audioService.getLocalCover(album.folder_path));
@@ -437,7 +442,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 <div className="pt-2 flex items-center space-x-3">
                   <button
                     onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, 0)}
-                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer"
+                    disabled={!isPlaybackAvailable}
+                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Play size={16} fill="black" />
                     <span>{t("localBrowser.playAlbum")}</span>
@@ -472,7 +478,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 <div
                   key={track.path}
                   onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, idx)}
-                  className="grid grid-cols-12 px-4 py-3 text-xs items-center hover:bg-[#1E1E1E] transition-colors cursor-pointer group"
+                  aria-disabled={!isPlaybackAvailable}
+                  className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
+                    isPlaybackAvailable
+                      ? "hover:bg-[#1E1E1E] cursor-pointer"
+                      : "opacity-60 cursor-not-allowed"
+                  }`}
                 >
                   <span className="col-span-1 text-center font-mono text-[#666666] group-hover:text-[#E5A00D]">
                     {idx + 1}
@@ -512,6 +523,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       e.stopPropagation();
                       handlePlayEntireAlbum(album);
                     }}
+                    isPlaybackAvailable={isPlaybackAvailable}
                   />
                 ))}
               </div>
@@ -540,6 +552,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     e.stopPropagation();
                     handlePlayEntireAlbum(album);
                   }}
+                  isPlaybackAvailable={isPlaybackAvailable}
                 />
               ))}
             </div>
@@ -578,7 +591,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       onClick={() => {
                         if (isDir) {
                           setCurrentPath(item.path);
-                        } else {
+                        } else if (isPlaybackAvailable) {
                           const meta = [
                             {
                               title: item.title || item.name,
@@ -592,7 +605,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                           audioService.playTracks(meta, 0);
                         }
                       }}
-                      className="flex items-center justify-between p-3 hover:bg-[#1E1E1E] transition-colors cursor-pointer group"
+                      aria-disabled={!isDir && !isPlaybackAvailable}
+                      className={`flex items-center justify-between p-3 transition-colors group ${
+                        isDir || isPlaybackAvailable
+                          ? "hover:bg-[#1E1E1E] cursor-pointer"
+                          : "opacity-60 cursor-not-allowed"
+                      }`}
                     >
                       <div className="flex items-center space-x-3 truncate mr-4">
                         {isDir ? (

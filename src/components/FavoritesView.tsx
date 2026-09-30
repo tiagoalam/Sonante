@@ -18,9 +18,10 @@ import { plexService } from "../services/plex";
 
 interface Props {
   onFavoritesChanged?: () => void;
+  isPlaybackAvailable: boolean;
 }
 
-export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
+export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackAvailable }) => {
   const { t } = useTranslation();
   const [favorites, setFavorites] = useState<FavoriteAlbum[]>([]);
   const [activeTab, setActiveTab] = useState<"local" | "plex">("local");
@@ -101,6 +102,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
   };
 
   const handlePlayAll = (startIndex = 0) => {
+    if (!isPlaybackAvailable) return;
     if (!selectedAlbum || tracks.length === 0) return;
     const meta = tracks.map((t) => ({
       title: t.title,
@@ -114,6 +116,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
 
   const handleQuickPlayCard = async (e: React.MouseEvent, fav: FavoriteAlbum) => {
     e.stopPropagation();
+    if (!isPlaybackAvailable) return;
     if (fav.source === "local" && fav.exists === false) {
       alert(t("favorites.missingDiskAlert"));
       return;
@@ -269,7 +272,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                 <div className="pt-2 flex items-center space-x-3">
                   <button
                     onClick={() => handlePlayAll(0)}
-                    disabled={tracks.length === 0}
+                    disabled={!isPlaybackAvailable || tracks.length === 0}
                     className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50"
                   >
                     <Play size={16} fill="black" />
@@ -306,7 +309,12 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                   <div
                     key={tItem.uri}
                     onClick={() => handlePlayAll(idx)}
-                    className="grid grid-cols-12 px-4 py-3 text-xs items-center hover:bg-[#1E1E1E] transition-colors cursor-pointer group"
+                    aria-disabled={!isPlaybackAvailable}
+                    className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
+                      isPlaybackAvailable
+                        ? "hover:bg-[#1E1E1E] cursor-pointer"
+                        : "opacity-60 cursor-not-allowed"
+                    }`}
                   >
                     <span className="col-span-1 text-center font-mono text-[#666666] group-hover:text-[#E5A00D]">
                       {idx + 1}
@@ -382,7 +390,8 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged }) => {
                       <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                         <button
                           onClick={(e) => handleQuickPlayCard(e, fav)}
-                          className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer"
+                          disabled={!isPlaybackAvailable}
+                          className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                           title={t("favorites.playAlbum")}
                         >
                           <Play size={20} className="ml-1" fill="black" />

@@ -15,6 +15,7 @@ import {
   Info,
   RefreshCw,
   CheckCircle2,
+  CircleAlert,
   Heart,
   ExternalLink,
 } from "lucide-react";
@@ -39,7 +40,7 @@ import {
   SelectedArtist,
   PlexSearchResults,
 } from "./types/plex";
-import { PlaybackStatus, AudioDevice } from "./types/audio";
+import { PlaybackStatus, AudioDevice, MpdHealth } from "./types/audio";
 import { AppConfig } from "./types/config";
 import { FavoriteAlbum } from "./types/favorite";
 
@@ -54,6 +55,7 @@ const PlexAlbumCard = memo<{
   removeFavText: string;
   addFavText: string;
   playAlbumText: string;
+  isPlaybackAvailable: boolean;
 }>(({
   album,
   isFav,
@@ -64,6 +66,7 @@ const PlexAlbumCard = memo<{
   removeFavText,
   addFavText,
   playAlbumText,
+  isPlaybackAvailable,
 }) => {
   return (
     <div
@@ -99,8 +102,9 @@ const PlexAlbumCard = memo<{
         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
           <button
             onClick={(e) => onPlayQuick(e, album)}
-            className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer pointer-events-auto"
-            title={playAlbumText}
+            disabled={!isPlaybackAvailable}
+            className="w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer pointer-events-auto disabled:opacity-50 disabled:cursor-not-allowed"
+            title={isPlaybackAvailable ? playAlbumText : undefined}
           >
             <Play size={20} className="ml-1" fill="black" />
           </button>
@@ -165,11 +169,23 @@ export function App() {
     volume: 100,
     is_updating: false,
   });
+  const [mpdHealth, setMpdHealth] = useState<MpdHealth>({ state: "starting" });
+  const isPlaybackAvailable = mpdHealth.state === "available";
+  const statusRequestGenerationRef = useRef(0);
 
   const statusRef = useRef(playbackStatus);
   useEffect(() => {
     statusRef.current = playbackStatus;
   }, [playbackStatus]);
+  const playbackAvailableRef = useRef(isPlaybackAvailable);
+  useEffect(() => {
+    playbackAvailableRef.current = isPlaybackAvailable;
+  }, [isPlaybackAvailable]);
+
+  const invalidateStatusRequests = useCallback(() => {
+    statusRequestGenerationRef.current += 1;
+    setMpdHealth({ state: "starting" });
+  }, []);
 
   // Listagens Plex
   const [albums, setAlbums] = useState<PlexAlbum[]>([]);
@@ -221,24 +237,49 @@ export function App() {
     refreshPlexFavorites();
   }, [mediaSource, refreshPlexFavorites]);
 
-  // Telemetria global (1s)
+  // Fonte única de saúde e telemetria do MPD (polling encadeado, sem sobreposição).
   useEffect(() => {
+    let disposed = false;
+    let timer: number | undefined;
+
     const update = async () => {
+      const generation = statusRequestGenerationRef.current + 1;
+      statusRequestGenerationRef.current = generation;
       try {
-        const s = await audioService.getStatus();
-        setPlaybackStatus(s);
+        const snapshot = await audioService.getMpdStatusSnapshot();
+        if (disposed || generation !== statusRequestGenerationRef.current) return;
+
+        if (snapshot.health.state === "available" && snapshot.playback) {
+          setMpdHealth(snapshot.health);
+          setPlaybackStatus(snapshot.playback);
+        } else if (snapshot.health.state === "available") {
+          setMpdHealth({ state: "unavailable", reason: "protocol_unavailable" });
+        } else {
+          setMpdHealth(snapshot.health);
+        }
       } catch (err) {
-        console.error("Erro ao sincronizar status global:", err);
+        if (!disposed && generation === statusRequestGenerationRef.current) {
+          setMpdHealth({ state: "unavailable", reason: "protocol_unavailable" });
+          console.error("Erro ao consultar saúde do motor de áudio:", err);
+        }
+      } finally {
+        if (!disposed) {
+          timer = window.setTimeout(update, 1000);
+        }
       }
     };
-    update();
-    const interval = setInterval(update, 1000);
-    return () => clearInterval(interval);
+
+    void update();
+    return () => {
+      disposed = true;
+      statusRequestGenerationRef.current += 1;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, []);
 
   // Título Dinâmico da Janela
   useEffect(() => {
-    if (playbackStatus.state === "play" && playbackStatus.title) {
+    if (isPlaybackAvailable && playbackStatus.state === "play" && playbackStatus.title) {
       const trackLabel = playbackStatus.artist
         ? `${playbackStatus.artist} — ${playbackStatus.title}`
         : playbackStatus.title;
@@ -246,7 +287,7 @@ export function App() {
     } else {
       audioService.setWindowTitle("Sonante").catch(console.error);
     }
-  }, [playbackStatus.state, playbackStatus.title, playbackStatus.artist]);
+  }, [isPlaybackAvailable, playbackStatus.state, playbackStatus.title, playbackStatus.artist]);
 
   // Atalhos de Teclado Globais
   useEffect(() => {
@@ -280,6 +321,8 @@ export function App() {
       }
 
       if (isInput) return;
+
+      if (!playbackAvailableRef.current) return;
 
       const current = statusRef.current;
 
@@ -412,6 +455,7 @@ export function App() {
 
   const handlePlayQuick = useCallback(async (e: React.MouseEvent, album: PlexAlbum) => {
     e.stopPropagation();
+    if (!playbackAvailableRef.current) return;
     try {
       const tracks = await plexService.getAlbumTracks(album.rating_key);
       const metaTracks = tracks.map((t) => ({
@@ -522,7 +566,14 @@ export function App() {
                 <span>{t("sidebar.local")}</span>
               </div>
 
-              {playbackStatus.is_updating ? (
+              {!isPlaybackAvailable ? (
+                <div
+                  className="flex items-center text-[#C9A45D]"
+                  title={mpdHealth.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")}
+                >
+                  <CircleAlert size={13} />
+                </div>
+              ) : playbackStatus.is_updating ? (
                 <div
                   className="flex items-center space-x-1 text-[#E5A00D]"
                   title={t("sidebar.indexingTooltip")}
@@ -643,11 +694,15 @@ export function App() {
 
         {/* Painel Central */}
         {mediaSource === "favorites" ? (
-          <FavoritesView onFavoritesChanged={refreshPlexFavorites} />
+          <FavoritesView
+            onFavoritesChanged={refreshPlexFavorites}
+            isPlaybackAvailable={isPlaybackAvailable}
+          />
         ) : mediaSource === "local" ? (
           <LocalBrowserView
             initialArtist={localSelectedArtist}
             onClearInitialArtist={() => setLocalSelectedArtist(null)}
+            isPlaybackAvailable={isPlaybackAvailable}
           />
         ) : !isPlexConnected ? (
           <main className="flex-1 flex flex-col items-center justify-center bg-[#121212] select-none p-8 text-center animate-in fade-in duration-200">
@@ -675,12 +730,15 @@ export function App() {
               setActiveArtist(art);
             }}
             onToggleFavorite={refreshPlexFavorites}
+            isPlaybackAvailable={isPlaybackAvailable}
           />
         ) : activeArtist ? (
           <ArtistView
             artist={activeArtist}
             onBack={() => setActiveArtist(null)}
             onSelectAlbum={(alb) => setActiveAlbum(alb)}
+            status={playbackStatus}
+            isPlaybackAvailable={isPlaybackAvailable}
           />
         ) : (
           <main className="flex-1 flex flex-col overflow-hidden bg-[#121212]">
@@ -839,6 +897,7 @@ export function App() {
                                 removeFavText={t("favorites.removeFavorite")}
                                 addFavText={t("favorites.title")}
                                 playAlbumText={t("plex.playAlbum")}
+                                isPlaybackAvailable={isPlaybackAvailable}
                               />
                             );
                           })}
@@ -856,6 +915,7 @@ export function App() {
                             <div
                               key={track.rating_key}
                               onClick={() => {
+                                if (!isPlaybackAvailable) return;
                                 const meta = [
                                   {
                                     title: track.title,
@@ -868,7 +928,12 @@ export function App() {
                                 ];
                                 audioService.playTracks(meta, 0);
                               }}
-                              className="flex items-center justify-between p-2.5 rounded-lg hover:bg-[#1E1E1E] transition-colors cursor-pointer group"
+                              aria-disabled={!isPlaybackAvailable}
+                              className={`flex items-center justify-between p-2.5 rounded-lg transition-colors group ${
+                                isPlaybackAvailable
+                                  ? "hover:bg-[#1E1E1E] cursor-pointer"
+                                  : "opacity-60 cursor-not-allowed"
+                              }`}
                             >
                               <div className="flex items-center space-x-3 min-w-0 pr-4">
                                 <div className="w-9 h-9 rounded bg-[#202020] overflow-hidden shrink-0">
@@ -923,6 +988,7 @@ export function App() {
                         removeFavText={t("favorites.removeFavorite")}
                         addFavText={t("favorites.title")}
                         playAlbumText={t("plex.playAlbum")}
+                        isPlaybackAvailable={isPlaybackAvailable}
                       />
                     );
                   })}
@@ -943,6 +1009,7 @@ export function App() {
                         removeFavText={t("favorites.removeFavorite")}
                         addFavText={t("favorites.title")}
                         playAlbumText={t("plex.playAlbum")}
+                        isPlaybackAvailable={isPlaybackAvailable}
                       />
                     );
                   })}
@@ -989,6 +1056,8 @@ export function App() {
       </div>
 
       <PlayerBar
+        status={playbackStatus}
+        health={mpdHealth}
         onToggleQueue={() => setShowQueue(!showQueue)}
         isQueueOpen={showQueue}
         onNavigateToArtist={(artistName) => {
@@ -1018,12 +1087,15 @@ export function App() {
         isOpen={showQueue}
         onClose={() => setShowQueue(false)}
         status={playbackStatus}
+        isPlaybackAvailable={isPlaybackAvailable}
       />
 
       {showSettings && (
         <SettingsModal
           onClose={() => setShowSettings(false)}
+          onSaveStarted={invalidateStatusRequests}
           onSaved={() => {
+            invalidateStatusRequests();
             configService.getConfig().then(setConfig).catch(console.error);
             refreshPlexFavorites();
           }}

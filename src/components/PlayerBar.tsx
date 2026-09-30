@@ -10,7 +10,7 @@ import {
   ListMusic,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { PlaybackStatus } from "../types/audio";
+import { MpdHealth, PlaybackStatus } from "../types/audio";
 import { audioService } from "../services/audio";
 
 interface Props {
@@ -18,6 +18,8 @@ interface Props {
   isQueueOpen: boolean;
   onNavigateToArtist?: (artistName: string) => void;
   onNavigateToAlbum?: () => void;
+  status: PlaybackStatus;
+  health: MpdHealth;
 }
 
 export const PlayerBar: React.FC<Props> = ({
@@ -25,22 +27,10 @@ export const PlayerBar: React.FC<Props> = ({
   isQueueOpen,
   onNavigateToArtist,
   onNavigateToAlbum,
+  status,
+  health,
 }) => {
   const { t } = useTranslation();
-  const [status, setStatus] = useState<PlaybackStatus>({
-    state: "stop",
-    elapsed: 0.0,
-    duration: 0.0,
-    audio_format: "",
-    current_file: "",
-    title: "",
-    artist: "",
-    album: "",
-    thumb: null,
-    volume: 100,
-    is_updating: false,
-  });
-
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekValue, setSeekValue] = useState(0.0);
   const [prevVolume, setPrevVolume] = useState(100);
@@ -50,49 +40,36 @@ export const PlayerBar: React.FC<Props> = ({
     isSeekingRef.current = isSeeking;
   }, [isSeeking]);
 
-  useEffect(() => {
-    const update = async () => {
-      try {
-        const s = await audioService.getStatus();
-        setStatus(s);
-        if (!isSeekingRef.current) {
-          setSeekValue(s.elapsed);
-        }
-      } catch (err) {
-        console.error("Erro ao sincronizar status na barra de reprodução:", err);
-      }
-    };
+  const isAvailable = health.state === "available";
 
-    update();
-    const interval = setInterval(update, 1000);
-    return () => clearInterval(interval);
-  }, []);
+  useEffect(() => {
+    if (isAvailable && !isSeekingRef.current) {
+      setSeekValue(status.elapsed);
+    }
+  }, [isAvailable, status.elapsed]);
 
   const handlePlayToggle = async () => {
+    if (!isAvailable) return;
     try {
       await audioService.togglePlay();
-      const s = await audioService.getStatus();
-      setStatus(s);
     } catch (err) {
       console.error("Erro no play/pause:", err);
     }
   };
 
   const handleNext = async () => {
+    if (!isAvailable) return;
     try {
       await audioService.next();
-      const s = await audioService.getStatus();
-      setStatus(s);
     } catch (err) {
       console.error("Erro na faixa seguinte:", err);
     }
   };
 
   const handlePrevious = async () => {
+    if (!isAvailable) return;
     try {
       await audioService.previous();
-      const s = await audioService.getStatus();
-      setStatus(s);
     } catch (err) {
       console.error("Erro na faixa anterior:", err);
     }
@@ -100,6 +77,7 @@ export const PlayerBar: React.FC<Props> = ({
 
   const handleSeekCommit = async (val: number) => {
     setIsSeeking(false);
+    if (!isAvailable) return;
     try {
       await audioService.seek(val);
       setSeekValue(val);
@@ -109,15 +87,16 @@ export const PlayerBar: React.FC<Props> = ({
   };
 
   const handleVolumeChange = async (val: number) => {
+    if (!isAvailable) return;
     try {
       await audioService.setVolume(val);
-      setStatus((prev) => ({ ...prev, volume: val }));
     } catch (err) {
       console.error("Erro ao alterar volume:", err);
     }
   };
 
   const handleToggleMute = async () => {
+    if (!isAvailable) return;
     const current = status.volume ?? 100;
     if (current > 0) {
       setPrevVolume(current);
@@ -202,7 +181,13 @@ export const PlayerBar: React.FC<Props> = ({
             </span>
           )}
 
-          {status.audio_format && (
+          {!isAvailable && !isNoTrack && (
+            <span className="text-[9px] font-semibold text-[#C9A45D] mt-1">
+              {t("player.lastKnown")}
+            </span>
+          )}
+
+          {isAvailable && status.audio_format && (
             <div className="flex items-center space-x-1.5 mt-1">
               <span
                 className="text-[9px] font-mono px-1.5 py-0.2 rounded font-bold uppercase tracking-wider bg-[#252525] text-[#AAAAAA]"
@@ -217,10 +202,18 @@ export const PlayerBar: React.FC<Props> = ({
 
       {/* 2. Controlos de Reprodução & Barra de Progresso */}
       <div className="flex flex-col items-center justify-center flex-1 max-w-xl px-4 space-y-1.5">
+        {!isAvailable && (
+          <span className="text-[10px] font-semibold text-[#C9A45D]">
+            {health.state === "unavailable"
+              ? t("player.engineUnavailable")
+              : t("player.engineTransitioning")}
+          </span>
+        )}
         <div className="flex items-center space-x-5">
           <button
             onClick={handlePrevious}
-            className="text-[#888888] hover:text-white transition-colors cursor-pointer"
+            disabled={!isAvailable}
+            className="text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={t("player.previous")}
           >
             <SkipBack size={18} />
@@ -228,10 +221,11 @@ export const PlayerBar: React.FC<Props> = ({
 
           <button
             onClick={handlePlayToggle}
-            className="w-9 h-9 rounded-full bg-white hover:bg-[#E5A00D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer"
-            title={status.state === "play" ? t("player.pause") : t("player.play")}
+            disabled={!isAvailable}
+            className="w-9 h-9 rounded-full bg-white hover:bg-[#E5A00D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+            title={isAvailable && status.state === "play" ? t("player.pause") : t("player.play")}
           >
-            {status.state === "play" ? (
+            {isAvailable && status.state === "play" ? (
               <Pause size={17} fill="black" />
             ) : (
               <Play size={17} className="ml-0.5" fill="black" />
@@ -240,7 +234,8 @@ export const PlayerBar: React.FC<Props> = ({
 
           <button
             onClick={handleNext}
-            className="text-[#888888] hover:text-white transition-colors cursor-pointer"
+            disabled={!isAvailable}
+            className="text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={t("player.next")}
           >
             <SkipForward size={18} />
@@ -250,23 +245,25 @@ export const PlayerBar: React.FC<Props> = ({
         {/* Barra de Progresso (Seek) */}
         <div className="w-full flex items-center space-x-2.5 text-[10px] font-mono text-[#777777]">
           <span className="w-8 text-right">
-            {formatTime(isSeeking ? seekValue : status.elapsed)}
+            {isAvailable ? formatTime(isSeeking ? seekValue : status.elapsed) : "--:--"}
           </span>
 
           <input
             type="range"
             min={0}
-            max={status.duration > 0 ? status.duration : 100}
+            max={isAvailable && status.duration > 0 ? status.duration : 100}
             step={0.5}
-            value={isSeeking ? seekValue : status.elapsed}
-            disabled={status.duration <= 0}
+            value={isAvailable ? (isSeeking ? seekValue : status.elapsed) : 0}
+            disabled={!isAvailable || status.duration <= 0}
             onMouseDown={() => setIsSeeking(true)}
             onChange={(e) => setSeekValue(parseFloat(e.target.value))}
             onMouseUp={(e) => handleSeekCommit(parseFloat((e.target as HTMLInputElement).value))}
             className="flex-1 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-30 disabled:cursor-default"
           />
 
-          <span className="w-8 text-left">{formatTime(status.duration)}</span>
+          <span className="w-8 text-left">
+            {isAvailable ? formatTime(status.duration) : "--:--"}
+          </span>
         </div>
       </div>
 
@@ -275,19 +272,21 @@ export const PlayerBar: React.FC<Props> = ({
         <div className="flex items-center space-x-2">
           <button
             onClick={handleToggleMute}
-            className="text-[#888888] hover:text-white transition-colors cursor-pointer"
-            title={(status.volume ?? 100) > 0 ? t("player.mute") : t("player.unmute")}
+            disabled={!isAvailable}
+            className="text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+            title={isAvailable ? ((status.volume ?? 100) > 0 ? t("player.mute") : t("player.unmute")) : undefined}
           >
-            {(status.volume ?? 100) === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
+            {isAvailable && (status.volume ?? 100) === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
           </button>
 
           <input
             type="range"
             min={0}
             max={100}
-            value={status.volume ?? 100}
+            value={isAvailable ? (status.volume ?? 100) : 0}
+            disabled={!isAvailable}
             onChange={(e) => handleVolumeChange(parseInt(e.target.value, 10))}
-            className="w-20 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D]"
+            className="w-20 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-35 disabled:cursor-not-allowed"
           />
         </div>
 

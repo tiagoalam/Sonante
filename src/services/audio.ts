@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import { PlaybackStatus, TrackMetadata } from "../types/audio";
+import { MpdStatusSnapshot, PlaybackStatus, TrackMetadata } from "../types/audio";
 import { LocalItem, LocalAlbum } from "../types/local";
 
 export const audioService = {
   getStatus: (): Promise<PlaybackStatus> => invoke<PlaybackStatus>("get_playback_status"),
+  getMpdStatusSnapshot: (): Promise<MpdStatusSnapshot> =>
+    invoke<MpdStatusSnapshot>("get_mpd_status_snapshot"),
   togglePlay: (): Promise<void> => invoke<void>("toggle_playback"),
   next: (): Promise<void> => invoke<void>("next_track"),
   previous: (): Promise<void> => invoke<void>("previous_track"),

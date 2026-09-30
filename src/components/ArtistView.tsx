@@ -10,15 +10,22 @@ interface Props {
   artist: SelectedArtist;
   onBack: () => void;
   onSelectAlbum: (album: PlexAlbum) => void;
+  status: PlaybackStatus;
+  isPlaybackAvailable: boolean;
 }
 
-export const ArtistView: React.FC<Props> = ({ artist, onBack, onSelectAlbum }) => {
+export const ArtistView: React.FC<Props> = ({
+  artist,
+  onBack,
+  onSelectAlbum,
+  status,
+  isPlaybackAvailable,
+}) => {
   const { t } = useTranslation();
   const [albums, setAlbums] = useState<PlexAlbum[]>([]);
   const [topTracks, setTopTracks] = useState<PlexTrack[]>([]);
   const [visibleTracksCount, setVisibleTracksCount] = useState<number>(5);
   const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState<PlaybackStatus | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -34,21 +41,6 @@ export const ArtistView: React.FC<Props> = ({ artist, onBack, onSelectAlbum }) =
       .finally(() => setLoading(false));
   }, [artist.rating_key]);
 
-  useEffect(() => {
-    const updateStatus = async () => {
-      try {
-        const s = await audioService.getStatus();
-        setStatus(s);
-      } catch (err) {
-        console.error("Erro status áudio:", err);
-      }
-    };
-
-    updateStatus();
-    const interval = setInterval(updateStatus, 1000);
-    return () => clearInterval(interval);
-  }, []);
-
   const formatTime = (ms: number) => {
     const totalSeconds = Math.floor(ms / 1000);
     const minutes = Math.floor(totalSeconds / 60);
@@ -57,7 +49,7 @@ export const ArtistView: React.FC<Props> = ({ artist, onBack, onSelectAlbum }) =
   };
 
   const isTrackActive = (track: PlexTrack) => {
-    if (!status || !status.current_file) return false;
+    if (!isPlaybackAvailable || !status.current_file) return false;
     return (
       track.play_uri === status.current_file ||
       track.play_uri.endsWith(status.current_file) ||
@@ -69,6 +61,7 @@ export const ArtistView: React.FC<Props> = ({ artist, onBack, onSelectAlbum }) =
   const artistThumb = albums.find((a) => a.thumb)?.thumb;
 
   const handlePlayTrack = async (index: number) => {
+    if (!isPlaybackAvailable) return;
     const track = topTracks[index];
     if (!track) return;
 
@@ -87,8 +80,6 @@ export const ArtistView: React.FC<Props> = ({ artist, onBack, onSelectAlbum }) =
 
     try {
       await audioService.playTracks(metaTracks, index);
-      const updated = await audioService.getStatus();
-      setStatus(updated);
     } catch (err) {
       console.error("Falha ao tocar faixas do artista:", err);
     }
@@ -150,13 +141,16 @@ export const ArtistView: React.FC<Props> = ({ artist, onBack, onSelectAlbum }) =
               <div className="divide-y divide-[#1A1A1A]">
                 {topTracks.slice(0, visibleTracksCount).map((track, idx) => {
                   const active = isTrackActive(track);
-                  const isPlaying = active && status?.state === "play";
+                  const isPlaying = active && status.state === "play";
 
                   return (
                     <div
                       key={track.rating_key}
                       onClick={() => handlePlayTrack(idx)}
-                      className={`group grid grid-cols-[40px_48px_1fr_80px] items-center px-4 py-2.5 rounded-lg text-xs transition-colors cursor-pointer ${
+                      aria-disabled={!isPlaybackAvailable}
+                      className={`group grid grid-cols-[40px_48px_1fr_80px] items-center px-4 py-2.5 rounded-lg text-xs transition-colors ${
+                        isPlaybackAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-60"
+                      } ${
                         active ? "bg-[#251E10] text-[#E5A00D]" : "hover:bg-[#1A1A1A] text-[#CCCCCC]"
                       }`}
                     >

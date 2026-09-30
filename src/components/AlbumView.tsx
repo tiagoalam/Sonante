@@ -19,9 +19,16 @@ interface Props {
   onBack: () => void;
   onSelectArtist?: (artist: SelectedArtist) => void;
   onToggleFavorite?: () => void;
+  isPlaybackAvailable: boolean;
 }
 
-export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist, onToggleFavorite }) => {
+export const AlbumView: React.FC<Props> = ({
+  album,
+  onBack,
+  onSelectArtist,
+  onToggleFavorite,
+  isPlaybackAvailable,
+}) => {
   const [tracks, setTracks] = useState<PlexTrack[]>([]);
   const [loading, setLoading] = useState(true);
   const [isFavorite, setIsFavorite] = useState(false);
@@ -69,6 +76,7 @@ export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist, onTo
   };
 
   const handlePlayTracks = (startIndex: number = 0) => {
+    if (!isPlaybackAvailable) return;
     const metaTracks = tracks.map((t) => ({
       title: t.title,
       artist: album.artist,
@@ -156,7 +164,7 @@ export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist, onTo
             <div className="pt-2 flex items-center space-x-3">
               <button
                 onClick={() => handlePlayTracks(0)}
-                disabled={loading || tracks.length === 0}
+                disabled={!isPlaybackAvailable || loading || tracks.length === 0}
                 className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50"
               >
                 <Play size={16} fill="black" />
@@ -201,7 +209,12 @@ export const AlbumView: React.FC<Props> = ({ album, onBack, onSelectArtist, onTo
               <div
                 key={track.rating_key}
                 onClick={() => handlePlayTracks(idx)}
-                className="grid grid-cols-12 px-4 py-3 text-xs items-center hover:bg-[#1E1E1E] transition-colors cursor-pointer group"
+                aria-disabled={!isPlaybackAvailable}
+                className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
+                  isPlaybackAvailable
+                    ? "hover:bg-[#1E1E1E] cursor-pointer"
+                    : "opacity-60 cursor-not-allowed"
+                }`}
               >
                 <span className="col-span-1 text-center font-mono text-[#666666] group-hover:text-[#E5A00D]">
                   {track.index || idx + 1}

@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
@@ -15,6 +16,31 @@ pub struct MpdSupervisor {
     socket_path: String,
     pid_path: PathBuf,
     owns_runtime_files: bool,
+    health: MpdHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", content = "reason", rename_all = "snake_case")]
+pub enum MpdHealth {
+    Starting,
+    Available,
+    Unavailable(MpdUnavailableReason),
+    Stopping,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MpdUnavailableReason {
+    ProcessExited,
+    SocketUnavailable,
+    ProtocolUnavailable,
+    StartupFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MpdProcessObservation {
+    Running,
+    NotRunning(MpdHealth),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -37,17 +63,31 @@ impl MpdSupervisor {
             socket_path: socket_path.to_string_lossy().to_string(),
             pid_path,
             owns_runtime_files: false,
+            health: MpdHealth::Starting,
         }
     }
 
     #[cfg(test)]
-    fn new_with_runtime_paths(socket_path: &Path, pid_path: &Path) -> Self {
+    pub(crate) fn new_with_runtime_paths(socket_path: &Path, pid_path: &Path) -> Self {
         Self {
             process: None,
             socket_path: socket_path.to_string_lossy().to_string(),
             pid_path: pid_path.to_path_buf(),
             owns_runtime_files: false,
+            health: MpdHealth::Starting,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_process_for_test(&mut self, child: Child, owns_runtime_files: bool) {
+        self.process = Some(child);
+        self.owns_runtime_files = owns_runtime_files;
+        self.health = MpdHealth::Available;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_process_for_test(&self) -> bool {
+        self.process.is_some()
     }
 
     pub fn sonante_config_dir() -> PathBuf {
@@ -70,6 +110,50 @@ impl MpdSupervisor {
 
     pub fn socket_path() -> PathBuf {
         Self::runtime_dir().join("mpd.socket")
+    }
+
+    pub(crate) fn observe_health(&mut self) -> Result<MpdProcessObservation, String> {
+        let (child_pid, child_status) = match self.process.as_mut() {
+            Some(child) => (child.id(), child.try_wait()),
+            None => return Ok(MpdProcessObservation::NotRunning(self.health.clone())),
+        };
+
+        match child_status {
+            Ok(None) => Ok(MpdProcessObservation::Running),
+            Ok(Some(_)) => {
+                let pid_was_confirmed = matches!(
+                    self.read_pid_identity(child_pid),
+                    Ok(PidFileIdentity::Matches)
+                );
+                self.process.take();
+                self.health = MpdHealth::Unavailable(MpdUnavailableReason::ProcessExited);
+                if let Err(error) =
+                    self.cleanup_owned_runtime_files(Some(child_pid), pid_was_confirmed)
+                {
+                    eprintln!(
+                        "[Supervisor] Falha ao limpar runtime após término inesperado do MPD: {}",
+                        error
+                    );
+                }
+                Ok(MpdProcessObservation::NotRunning(self.health.clone()))
+            }
+            Err(error) => Err(format!(
+                "Falha ao consultar o processo MPD controlado: {}",
+                error
+            )),
+        }
+    }
+
+    pub(crate) fn mark_available(&mut self) -> MpdHealth {
+        if self.process.is_some() {
+            self.health = MpdHealth::Available;
+        }
+        self.health.clone()
+    }
+
+    pub(crate) fn mark_unavailable(&mut self, reason: MpdUnavailableReason) -> MpdHealth {
+        self.health = MpdHealth::Unavailable(reason);
+        self.health.clone()
     }
 
     pub fn sync_library_symlinks(folders: &[String]) -> Result<PathBuf, String> {
@@ -231,8 +315,23 @@ decoder {{
     }
 
     pub fn start(&mut self, cfg: &AppConfig) -> Result<(), String> {
+        let result = self.start_inner(cfg);
+        match result {
+            Ok(()) => {
+                self.health = MpdHealth::Available;
+                Ok(())
+            }
+            Err(error) => {
+                self.health = MpdHealth::Unavailable(MpdUnavailableReason::StartupFailed);
+                Err(error)
+            }
+        }
+    }
+
+    fn start_inner(&mut self, cfg: &AppConfig) -> Result<(), String> {
         self.stop()
             .map_err(|e| format!("Falha ao encerrar a instância anterior do MPD: {}", e))?;
+        self.health = MpdHealth::Starting;
 
         self.prepare_runtime_files()?;
 
@@ -573,6 +672,7 @@ decoder {{
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
+        self.health = MpdHealth::Stopping;
         if let Some(mut child) = self.process.take() {
             let child_pid = child.id();
             let pid_was_confirmed = matches!(
@@ -655,6 +755,148 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("deve iniciar processo auxiliar")
+    }
+
+    fn spawn_exiting_child() -> Child {
+        Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .spawn()
+            .expect("deve iniciar processo auxiliar")
+    }
+
+    fn observe_until_not_running(supervisor: &mut MpdSupervisor) -> MpdHealth {
+        for _ in 0..50 {
+            match supervisor.observe_health().unwrap() {
+                MpdProcessObservation::Running => thread::sleep(Duration::from_millis(10)),
+                MpdProcessObservation::NotRunning(health) => return health,
+            }
+        }
+        panic!("processo auxiliar não encerrou a tempo");
+    }
+
+    #[test]
+    fn health_observation_keeps_live_child_running() {
+        let (dir, socket_path, pid_path) = test_runtime_paths("health-live-child");
+        let child = spawn_sleeping_child();
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+        supervisor.set_process_for_test(child, false);
+
+        assert_eq!(
+            supervisor.observe_health().unwrap(),
+            MpdProcessObservation::Running
+        );
+        assert!(supervisor.has_process_for_test());
+
+        supervisor.stop().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn health_observation_reaps_exited_child_and_is_idempotent() {
+        let (dir, socket_path, pid_path) = test_runtime_paths("health-exited-child");
+        let child = spawn_exiting_child();
+        let child_pid = child.id();
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+        supervisor.set_process_for_test(child, false);
+
+        let expected = MpdHealth::Unavailable(MpdUnavailableReason::ProcessExited);
+        assert_eq!(observe_until_not_running(&mut supervisor), expected);
+        assert!(!supervisor.has_process_for_test());
+        assert!(!Path::new(&format!("/proc/{}", child_pid)).exists());
+        assert_eq!(
+            supervisor.observe_health().unwrap(),
+            MpdProcessObservation::NotRunning(expected)
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unexpected_exit_cleans_only_owned_runtime_files() {
+        let (dir, socket_path, pid_path) = test_runtime_paths("health-runtime-cleanup");
+        let child = spawn_exiting_child();
+        let child_pid = child.id();
+        fs::write(&socket_path, "socket stale").unwrap();
+        fs::write(&pid_path, child_pid.to_string()).unwrap();
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+        supervisor.set_process_for_test(child, true);
+
+        assert_eq!(
+            observe_until_not_running(&mut supervisor),
+            MpdHealth::Unavailable(MpdUnavailableReason::ProcessExited)
+        );
+        assert!(!socket_path.exists());
+        assert!(!pid_path.exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unexpected_exit_preserves_mismatched_pid_without_signalling_it() {
+        let (dir, socket_path, pid_path) = test_runtime_paths("health-pid-mismatch");
+        let child = spawn_exiting_child();
+        let mut unrelated_child = spawn_sleeping_child();
+        fs::write(&socket_path, "socket stale").unwrap();
+        fs::write(&pid_path, unrelated_child.id().to_string()).unwrap();
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+        supervisor.set_process_for_test(child, true);
+
+        assert_eq!(
+            observe_until_not_running(&mut supervisor),
+            MpdHealth::Unavailable(MpdUnavailableReason::ProcessExited)
+        );
+        assert!(!socket_path.exists());
+        assert!(pid_path.exists());
+        assert!(unrelated_child.try_wait().unwrap().is_none());
+
+        unrelated_child.kill().unwrap();
+        unrelated_child.wait().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn serialized_health_contains_only_state_and_reason_codes() {
+        assert_eq!(
+            serde_json::to_string(&MpdHealth::Starting).unwrap(),
+            r#"{"state":"starting"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&MpdHealth::Available).unwrap(),
+            r#"{"state":"available"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&MpdHealth::Stopping).unwrap(),
+            r#"{"state":"stopping"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&MpdHealth::Unavailable(
+                MpdUnavailableReason::ProcessExited
+            ))
+            .unwrap(),
+            r#"{"state":"unavailable","reason":"process_exited"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&MpdHealth::Unavailable(
+                MpdUnavailableReason::SocketUnavailable
+            ))
+            .unwrap(),
+            r#"{"state":"unavailable","reason":"socket_unavailable"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&MpdHealth::Unavailable(
+                MpdUnavailableReason::ProtocolUnavailable
+            ))
+            .unwrap(),
+            r#"{"state":"unavailable","reason":"protocol_unavailable"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&MpdHealth::Unavailable(
+                MpdUnavailableReason::StartupFailed
+            ))
+            .unwrap(),
+            r#"{"state":"unavailable","reason":"startup_failed"}"#
+        );
     }
 
     #[test]

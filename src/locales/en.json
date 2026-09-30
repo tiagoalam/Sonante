@@ -22,7 +22,10 @@
     "play": "Play",
     "pause": "Pause",
     "previous": "Previous",
-    "next": "Next"
+    "next": "Next",
+    "engineUnavailable": "Audio engine unavailable",
+    "engineTransitioning": "Audio engine is changing state",
+    "lastKnown": "Last known playback"
   },
   "queue": {
     "title": "Play Queue",

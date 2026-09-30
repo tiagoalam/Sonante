@@ -8,9 +8,15 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   status: PlaybackStatus;
+  isPlaybackAvailable: boolean;
 }
 
-export const QueueDrawer: React.FC<Props> = ({ isOpen, onClose, status }) => {
+export const QueueDrawer: React.FC<Props> = ({
+  isOpen,
+  onClose,
+  status,
+  isPlaybackAvailable,
+}) => {
   const { t } = useTranslation();
   const [queue, setQueue] = useState<TrackMetadata[]>([]);
   const [loading, setLoading] = useState(false);
@@ -31,6 +37,7 @@ export const QueueDrawer: React.FC<Props> = ({ isOpen, onClose, status }) => {
   }, [isOpen, status.current_file]);
 
   const handlePlayIndex = async (index: number) => {
+    if (!isPlaybackAvailable) return;
     try {
       await audioService.playQueueIndex(index);
     } catch (err) {
@@ -39,6 +46,7 @@ export const QueueDrawer: React.FC<Props> = ({ isOpen, onClose, status }) => {
   };
 
   const handleClear = async () => {
+    if (!isPlaybackAvailable) return;
     setLoading(true);
     try {
       await audioService.clearQueue();
@@ -74,8 +82,8 @@ export const QueueDrawer: React.FC<Props> = ({ isOpen, onClose, status }) => {
           {queue.length > 0 && (
             <button
               onClick={handleClear}
-              disabled={loading}
-              className="p-1.5 text-[#888888] hover:text-[#FF4D4D] rounded-lg transition-colors cursor-pointer"
+              disabled={loading || !isPlaybackAvailable}
+              className="p-1.5 text-[#888888] hover:text-[#FF4D4D] rounded-lg transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
               title={t("queue.clear")}
             >
               <Trash2 size={16} />
@@ -101,6 +109,7 @@ export const QueueDrawer: React.FC<Props> = ({ isOpen, onClose, status }) => {
         ) : (
           queue.map((item, idx) => {
             const isCurrent =
+              isPlaybackAvailable &&
               status.state === "play" &&
               status.title &&
               item.title &&
@@ -110,7 +119,10 @@ export const QueueDrawer: React.FC<Props> = ({ isOpen, onClose, status }) => {
               <div
                 key={`${item.uri}-${idx}`}
                 onClick={() => handlePlayIndex(idx)}
-                className={`flex items-center justify-between p-2.5 rounded-lg transition-colors cursor-pointer group ${
+                aria-disabled={!isPlaybackAvailable}
+                className={`flex items-center justify-between p-2.5 rounded-lg transition-colors group ${
+                  isPlaybackAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-60"
+                } ${
                   isCurrent ? "bg-[#252014] text-[#E5A00D]" : "hover:bg-[#1C1C1C] text-white"
                 }`}
               >

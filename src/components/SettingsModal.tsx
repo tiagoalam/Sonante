@@ -29,6 +29,7 @@ import { plexService } from "../services/plex";
 interface Props {
   onClose: () => void;
   onSaved: () => void;
+  onSaveStarted?: () => void;
 }
 
 const formatConfigError = (error: unknown): string => {
@@ -51,7 +52,7 @@ const formatConfigError = (error: unknown): string => {
     .replace(/(ACK\s+\[[^\]]+\]\s+\{add\}).*/gi, "$1 [ADD DETAILS REDACTED]");
 };
 
-export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
+export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted }) => {
   const { t, i18n } = useTranslation();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
@@ -195,6 +196,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
 
   const handleSave = async () => {
     if (!config) return;
+    onSaveStarted?.();
     setSaving(true);
     try {
       await configService.saveConfig(config);

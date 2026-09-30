@@ -5,13 +5,14 @@ mod plex;
 mod supervisor;
 
 use audio::{
-    list_audio_devices, AudioDevice, AudioEngine, AudioState, DeviceSwitchSnapshot, PlaybackStatus,
-    TrackMetadata,
+    list_audio_devices, AudioDevice, AudioEngine, AudioState, DeviceSwitchSnapshot,
+    MpdProbeFailure, PlaybackStatus, TrackMetadata,
 };
 use config::AppConfig;
 use favorites::FavoriteAlbum;
 use plex::{PlexAlbum, PlexClient, PlexCollection, PlexLibrary, PlexSearchResults, PlexTrack};
-use supervisor::MpdSupervisor;
+use serde::Serialize;
+use supervisor::{MpdHealth, MpdProcessObservation, MpdSupervisor, MpdUnavailableReason};
 use std::sync::Mutex;
 use tauri::{Manager, RunEvent, State, Window, WindowEvent};
 
@@ -19,6 +20,12 @@ pub struct PlexState(pub Mutex<PlexClient>);
 pub struct SupervisorState(pub Mutex<MpdSupervisor>);
 pub struct ConfigState(pub Mutex<AppConfig>);
 pub struct ConfigTransactionState(pub Mutex<()>);
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MpdStatusSnapshot {
+    pub health: MpdHealth,
+    pub playback: Option<PlaybackStatus>,
+}
 
 impl ConfigTransactionState {
     fn begin(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
@@ -31,6 +38,91 @@ impl ConfigTransactionState {
 #[tauri::command]
 fn get_playback_status(state: State<AudioState>) -> Result<PlaybackStatus, String> {
     state.0.lock().unwrap().get_status()
+}
+
+#[tauri::command]
+fn get_mpd_status_snapshot(
+    sup_state: State<SupervisorState>,
+    audio_state: State<AudioState>,
+) -> Result<MpdStatusSnapshot, String> {
+    collect_mpd_status_snapshot(&sup_state.0, &audio_state.0)
+}
+
+fn observe_mpd_process(supervisor: &Mutex<MpdSupervisor>) -> Result<MpdProcessObservation, String> {
+    supervisor
+        .lock()
+        .map_err(|e| format!("Falha ao acessar a saúde do MPD: {}", e))?
+        .observe_health()
+}
+
+fn unavailable_snapshot(health: MpdHealth) -> MpdStatusSnapshot {
+    MpdStatusSnapshot {
+        health,
+        playback: None,
+    }
+}
+
+fn collect_mpd_status_snapshot(
+    supervisor: &Mutex<MpdSupervisor>,
+    audio: &Mutex<AudioEngine>,
+) -> Result<MpdStatusSnapshot, String> {
+    if let MpdProcessObservation::NotRunning(health) = observe_mpd_process(supervisor)? {
+        return Ok(unavailable_snapshot(health));
+    }
+
+    let playback_result = audio
+        .lock()
+        .map_err(|e| format!("Falha ao acessar o cliente MPD: {}", e))?
+        .get_status();
+
+    match playback_result {
+        Ok(playback) => {
+            let health = {
+                let mut supervisor = supervisor
+                    .lock()
+                    .map_err(|e| format!("Falha ao confirmar a saúde do MPD: {}", e))?;
+                match supervisor.observe_health()? {
+                    MpdProcessObservation::Running => supervisor.mark_available(),
+                    MpdProcessObservation::NotRunning(health) => {
+                        return Ok(unavailable_snapshot(health));
+                    }
+                }
+            };
+            Ok(MpdStatusSnapshot {
+                health,
+                playback: Some(playback),
+            })
+        }
+        Err(_) => {
+            if let MpdProcessObservation::NotRunning(health) = observe_mpd_process(supervisor)? {
+                return Ok(unavailable_snapshot(health));
+            }
+
+            let reason = match audio
+                .lock()
+                .map_err(|e| format!("Falha ao verificar o protocolo MPD: {}", e))?
+                .probe_mpd()
+            {
+                Err(MpdProbeFailure::SocketUnavailable) => {
+                    MpdUnavailableReason::SocketUnavailable
+                }
+                Ok(()) | Err(MpdProbeFailure::ProtocolUnavailable) => {
+                    MpdUnavailableReason::ProtocolUnavailable
+                }
+            };
+
+            let health = {
+                let mut supervisor = supervisor
+                    .lock()
+                    .map_err(|e| format!("Falha ao concluir a saúde do MPD: {}", e))?;
+                match supervisor.observe_health()? {
+                    MpdProcessObservation::Running => supervisor.mark_unavailable(reason),
+                    MpdProcessObservation::NotRunning(health) => health,
+                }
+            };
+            Ok(unavailable_snapshot(health))
+        }
+    }
 }
 
 #[tauri::command]
@@ -532,6 +624,7 @@ pub fn run() {
         .manage(ConfigTransactionState(Mutex::new(())))
         .invoke_handler(tauri::generate_handler![
             get_playback_status,
+            get_mpd_status_snapshot,
             toggle_playback,
             next_track,
             previous_track,
@@ -599,9 +692,157 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
+
+    static NEXT_MPD_HEALTH_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn mpd_health_test_paths(test_name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let id = NEXT_MPD_HEALTH_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("mpd-health-tests")
+            .join(format!("{}-{}-{}", std::process::id(), test_name, id));
+        fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("mpd.socket");
+        let pid_path = dir.join("mpd.pid");
+        (dir, socket_path, pid_path)
+    }
+
+    fn sleeping_child() -> Child {
+        Command::new("sleep").arg("30").spawn().unwrap()
+    }
+
+    fn test_supervisor(socket_path: &Path, pid_path: &Path, child: Child) -> MpdSupervisor {
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(socket_path, pid_path);
+        supervisor.set_process_for_test(child, false);
+        supervisor
+    }
+
+    fn spawn_status_server(socket_path: &Path) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket_path).unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"OK MPD 0.23.15\n").unwrap();
+            stream.flush().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(command, "status\n");
+            stream
+                .write_all(b"volume: 75\nstate: stop\nOK\n")
+                .unwrap();
+            stream.flush().unwrap();
+        })
+    }
+
+    fn spawn_invalid_protocol_server(socket_path: &Path) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket_path).unwrap();
+        thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.write_all(b"NOT MPD\n").unwrap();
+                stream.flush().unwrap();
+            }
+        })
+    }
+
+    #[test]
+    fn mpd_status_snapshot_is_available_only_with_valid_mpd_communication() {
+        let (dir, socket_path, pid_path) = mpd_health_test_paths("available");
+        let server = spawn_status_server(&socket_path);
+        let supervisor = Mutex::new(test_supervisor(&socket_path, &pid_path, sleeping_child()));
+        let audio = Mutex::new(AudioEngine::new(
+            &socket_path.to_string_lossy(),
+            &dir.to_string_lossy(),
+        ));
+
+        let snapshot = collect_mpd_status_snapshot(&supervisor, &audio).unwrap();
+        assert_eq!(snapshot.health, MpdHealth::Available);
+        assert_eq!(
+            snapshot
+                .playback
+                .as_ref()
+                .map(|status| status.state.as_str()),
+            Some("stop")
+        );
+
+        server.join().unwrap();
+        supervisor.lock().unwrap().stop().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn mpd_status_snapshot_reports_process_exit_without_playback() {
+        let (dir, socket_path, pid_path) = mpd_health_test_paths("process-exited");
+        let mut child = Command::new("sh").arg("-c").arg("exit 9").spawn().unwrap();
+        child.wait().unwrap();
+        let supervisor = Mutex::new(test_supervisor(&socket_path, &pid_path, child));
+        let audio = Mutex::new(AudioEngine::new(
+            &socket_path.to_string_lossy(),
+            &dir.to_string_lossy(),
+        ));
+
+        let snapshot = collect_mpd_status_snapshot(&supervisor, &audio).unwrap();
+        assert_eq!(
+            snapshot.health,
+            MpdHealth::Unavailable(MpdUnavailableReason::ProcessExited)
+        );
+        assert!(snapshot.playback.is_none());
+        assert!(!supervisor.lock().unwrap().has_process_for_test());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn mpd_status_snapshot_distinguishes_socket_unavailable() {
+        let (dir, socket_path, pid_path) = mpd_health_test_paths("socket-unavailable");
+        let supervisor = Mutex::new(test_supervisor(&socket_path, &pid_path, sleeping_child()));
+        let audio = Mutex::new(AudioEngine::new(
+            &socket_path.to_string_lossy(),
+            &dir.to_string_lossy(),
+        ));
+
+        let snapshot = collect_mpd_status_snapshot(&supervisor, &audio).unwrap();
+        assert_eq!(
+            snapshot.health,
+            MpdHealth::Unavailable(MpdUnavailableReason::SocketUnavailable)
+        );
+        assert!(snapshot.playback.is_none());
+
+        supervisor.lock().unwrap().stop().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn mpd_status_snapshot_distinguishes_protocol_unavailable() {
+        let (dir, socket_path, pid_path) = mpd_health_test_paths("protocol-unavailable");
+        let server = spawn_invalid_protocol_server(&socket_path);
+        let supervisor = Mutex::new(test_supervisor(&socket_path, &pid_path, sleeping_child()));
+        let audio = Mutex::new(AudioEngine::new(
+            &socket_path.to_string_lossy(),
+            &dir.to_string_lossy(),
+        ));
+
+        let snapshot = collect_mpd_status_snapshot(&supervisor, &audio).unwrap();
+        assert_eq!(
+            snapshot.health,
+            MpdHealth::Unavailable(MpdUnavailableReason::ProtocolUnavailable)
+        );
+        assert!(snapshot.playback.is_none());
+
+        server.join().unwrap();
+        supervisor.lock().unwrap().stop().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn config_transaction_state_serializes_concurrent_changes() {
