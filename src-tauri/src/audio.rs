@@ -61,6 +61,26 @@ pub struct PlaybackStatus {
     pub is_updating: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackState {
+    Stopped,
+    Paused,
+    Playing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeviceSwitchSnapshot {
+    pub queue_index: usize,
+    pub elapsed: f64,
+    pub state: PlaybackState,
+}
+
+#[derive(Debug)]
+pub struct DeviceSwitchPreparationError {
+    pub cause: String,
+    pub snapshot: Option<DeviceSwitchSnapshot>,
+}
+
 fn get_queue_cache_path() -> Option<PathBuf> {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -324,12 +344,18 @@ impl AudioEngine {
         self.send_command("rescan").map(|_| ())
     }
 
-    fn save_queue_cache(&self) {
-        if let Some(p) = get_queue_cache_path() {
-            if let Ok(file) = std::fs::File::create(&p) {
-                let _ = serde_json::to_writer(file, &self.queue);
-            }
-        }
+    fn save_queue_cache(&self) -> Result<(), String> {
+        let path = get_queue_cache_path()
+            .ok_or_else(|| "Não foi possível determinar o caminho do cache da fila.".to_string())?;
+        let file = std::fs::File::create(&path).map_err(|e| {
+            format!(
+                "Falha ao abrir o cache da fila para escrita ({}): {}",
+                path.display(),
+                e
+            )
+        })?;
+        serde_json::to_writer(file, &self.queue)
+            .map_err(|e| format!("Falha ao persistir o cache da fila: {}", e))
     }
 
     fn load_queue_cache() -> Vec<TrackMetadata> {
@@ -386,107 +412,283 @@ impl AudioEngine {
 
         stream
             .set_read_timeout(Some(Duration::from_millis(500)))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("Falha ao configurar timeout de leitura do MPD: {}", e))?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .map_err(|e| format!("Falha ao configurar timeout de escrita do MPD: {}", e))?;
 
         let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
         let mut welcome = String::new();
-        reader.read_line(&mut welcome).map_err(|e| e.to_string())?;
+        let welcome_bytes = reader
+            .read_line(&mut welcome)
+            .map_err(|e| format!("Falha ao ler handshake do MPD: {}", e))?;
+        if welcome_bytes == 0 || !welcome.starts_with("OK MPD ") || !welcome.ends_with('\n') {
+            return Err("Handshake inválido ou incompleto recebido do MPD.".to_string());
+        }
 
         let cmd = format!("{}\n", command);
-        stream.write_all(cmd.as_bytes()).map_err(|e| e.to_string())?;
+        stream
+            .write_all(cmd.as_bytes())
+            .map_err(|e| format!("Falha ao enviar comando ao MPD: {}", e))?;
+        stream
+            .flush()
+            .map_err(|e| format!("Falha ao concluir envio do comando ao MPD: {}", e))?;
 
+        Self::read_mpd_response(&mut reader)
+    }
+
+    fn read_mpd_response<R: BufRead>(reader: &mut R) -> Result<Vec<String>, String> {
         let mut lines = Vec::new();
         loop {
             let mut line = String::new();
-            if reader.read_line(&mut line).is_err() || line.is_empty() {
-                break;
+            let bytes = reader
+                .read_line(&mut line)
+                .map_err(|e| format!("Falha ao ler resposta do MPD: {}", e))?;
+            if bytes == 0 {
+                return Err("Conexão MPD encerrada antes da resposta final.".to_string());
             }
-            let trimmed = line.trim().to_string();
+            let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
             if trimmed == "OK" {
-                break;
+                return Ok(lines);
             }
             if trimmed.starts_with("ACK") {
                 return Err(trimmed);
             }
             lines.push(trimmed);
         }
-
-        Ok(lines)
     }
 
     /// Prepara a troca de saída: captura a posição e para a reprodução sem destruir a fila
-    pub fn prepare_device_switch(&mut self) -> Option<(usize, f64, bool)> {
-        let status = self.get_status().ok()?;
-        let is_playing = status.state == "play";
-        let is_paused = status.state == "pause";
-
-        if !is_playing && !is_paused && self.queue.is_empty() {
-            let _ = self.send_command("stop");
-            return None;
-        }
-
-        let mut cur_index = 0;
-        if let Ok(lines) = self.send_command("currentsong") {
-            for line in lines {
-                if let Some((k, v)) = line.split_once(": ") {
-                    if k == "Pos" {
-                        if let Ok(idx) = v.parse::<usize>() {
-                            cur_index = idx;
-                        }
+    pub fn prepare_device_switch(
+        &mut self,
+    ) -> Result<Option<DeviceSwitchSnapshot>, DeviceSwitchPreparationError> {
+        let before_stop = |cause| DeviceSwitchPreparationError {
+            cause,
+            snapshot: None,
+        };
+        let status_lines = self.send_command("status").map_err(before_stop)?;
+        let mut state = None;
+        let mut elapsed = 0.0;
+        let mut queue_index = 0;
+        for line in status_lines {
+            if let Some((key, value)) = line.split_once(": ") {
+                match key {
+                    "state" => {
+                        state = Some(Self::parse_playback_state(value).map_err(before_stop)?)
                     }
+                    "elapsed" => {
+                        elapsed = value.parse::<f64>().map_err(|e| {
+                            before_stop(format!(
+                                "Posição inválida retornada pelo MPD ({}): {}",
+                                value, e
+                            ))
+                        })?;
+                    }
+                    "song" => {
+                        queue_index = value.parse::<usize>().map_err(|e| {
+                            before_stop(format!(
+                                "Índice inválido retornado pelo MPD ({}): {}",
+                                value, e
+                            ))
+                        })?;
+                    }
+                    _ => {}
                 }
             }
         }
+        let state = state.ok_or_else(|| {
+            before_stop("Resposta de status do MPD não contém o estado de reprodução.".to_string())
+        })?;
+        let snapshot = (!self.queue.is_empty()).then_some(DeviceSwitchSnapshot {
+            queue_index,
+            elapsed,
+            state,
+        });
 
-        let elapsed = status.elapsed;
-        let _ = self.send_command("stop");
+        if state != PlaybackState::Stopped {
+            self.send_command("stop")
+                .map_err(|cause| DeviceSwitchPreparationError { cause, snapshot })?;
+        }
 
-        Some((cur_index, elapsed, is_playing))
+        Ok(snapshot)
     }
 
-    /// Restaura a fila e retoma a reprodução exatamente no mesmo ponto após reiniciar o daemon
-    pub fn restore_after_device_switch(&mut self, saved_state: Option<(usize, f64, bool)>) -> Result<(), String> {
+    /// Restaura fila, faixa e posição quando possível; Playing/Paused terminam pausados e Stopped permanece parado.
+    pub fn restore_after_device_switch(
+        &self,
+        saved_state: Option<DeviceSwitchSnapshot>,
+    ) -> Result<(), String> {
         if self.queue.is_empty() {
             return Ok(());
         }
 
-        let mut batch = String::from("command_list_begin\nclear\n");
-        for track in &self.queue {
-            batch.push_str(&format!("add \"{}\"\n", track.uri));
+        let mut send_command = |command: &str| self.send_command(command);
+        self.restore_after_device_switch_with(
+            saved_state,
+            &mut send_command,
+            &mut std::thread::sleep,
+        )
+    }
+
+    fn restore_after_device_switch_with<F, S>(
+        &self,
+        saved_state: Option<DeviceSwitchSnapshot>,
+        send_command: &mut F,
+        sleep: &mut S,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&str) -> Result<Vec<String>, String>,
+        S: FnMut(Duration),
+    {
+        let restore_queue = self.device_switch_queue_restore_commands(saved_state)?;
+        send_command(&restore_queue)?;
+
+        let Some(snapshot) = saved_state else {
+            return Ok(());
+        };
+        if snapshot.state == PlaybackState::Stopped {
+            return Ok(());
         }
 
-        if let Some((idx, elapsed, was_playing)) = saved_state {
-            let target_idx = idx.min(self.queue.len().saturating_sub(1));
-            batch.push_str(&format!("play {}\n", target_idx));
-            if elapsed > 0.5 {
-                batch.push_str(&format!("seekcur {:.1}\n", elapsed));
-            }
-            if !was_playing {
-                batch.push_str("pause 1\n");
+        if snapshot.elapsed > 0.5 {
+            Self::restore_position(snapshot.elapsed, send_command, sleep)?;
+        }
+
+        send_command("pause 1")?;
+
+        Ok(())
+    }
+
+    fn device_switch_queue_restore_commands(
+        &self,
+        saved_state: Option<DeviceSwitchSnapshot>,
+    ) -> Result<String, String> {
+        let mut batch = String::from("command_list_begin\nclear\n");
+        for track in &self.queue {
+            batch.push_str(&format!("add {}\n", Self::quote_mpd_argument(&track.uri)?));
+        }
+        if let Some(snapshot) = saved_state {
+            // `add` preserva a posição na fila, mas não seleciona uma faixa atual no MPD.
+            // Para Stopped isso é intencional: selecionar exigiria play/seek e poderia abrir o DAC.
+            if snapshot.state != PlaybackState::Stopped {
+                let target_index = snapshot.queue_index.min(self.queue.len().saturating_sub(1));
+                batch.push_str(&format!("play {}\n", target_index));
             }
         }
         batch.push_str("command_list_end");
 
-        self.send_command(&batch).map(|_| ())
+        Ok(batch)
     }
 
-    pub fn play_tracks(&mut self, mut tracks: Vec<TrackMetadata>, start_index: usize) -> Result<(), String> {
+    fn restore_position<F, S>(
+        elapsed: f64,
+        send_command: &mut F,
+        sleep: &mut S,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&str) -> Result<Vec<String>, String>,
+        S: FnMut(Duration),
+    {
+        const ATTEMPTS: usize = 3;
+        const RETRY_DELAY: Duration = Duration::from_millis(75);
+        let command = format!("seekcur {:.1}", elapsed);
+
+        for attempt in 0..ATTEMPTS {
+            match send_command(&command) {
+                Ok(_) => return Ok(()),
+                Err(error) if Self::is_not_seekable_ack(&error) => {
+                    if attempt + 1 < ATTEMPTS {
+                        sleep(RETRY_DELAY);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        eprintln!(
+            "[Audio] Aviso: o MPD manteve a faixa ativa, mas recusou restaurar a posição temporal (Not seekable)."
+        );
+        Ok(())
+    }
+
+    fn is_not_seekable_ack(error: &str) -> bool {
+        let Some((prefix, message)) = error.rsplit_once('}') else {
+            return false;
+        };
+        error.starts_with("ACK [")
+            && prefix.ends_with("{seekcur")
+            && message.trim() == "Not seekable"
+    }
+
+    fn quote_mpd_argument(value: &str) -> Result<String, String> {
+        if value.contains(['\0', '\r', '\n']) {
+            return Err(
+                "Argumento textual inválido para o MPD: NUL e quebras de linha não são permitidos."
+                    .to_string(),
+            );
+        }
+        Ok(format!(
+            "\"{}\"",
+            value.replace('\\', "\\\\").replace('"', "\\\"")
+        ))
+    }
+
+    fn parse_playback_state(state: &str) -> Result<PlaybackState, String> {
+        match state {
+            "stop" => Ok(PlaybackState::Stopped),
+            "pause" => Ok(PlaybackState::Paused),
+            "play" => Ok(PlaybackState::Playing),
+            value => Err(format!(
+                "Estado de reprodução inválido retornado pelo MPD: {}",
+                value
+            )),
+        }
+    }
+
+    fn parse_mpd_number<T>(field: &str, value: &str) -> Result<T, String>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        value.parse::<T>().map_err(|e| {
+            format!(
+                "Valor inválido para o campo {} retornado pelo MPD: {}",
+                field, e
+            )
+        })
+    }
+
+    pub fn play_tracks(
+        &mut self,
+        mut tracks: Vec<TrackMetadata>,
+        start_index: usize,
+    ) -> Result<(), String> {
+        if tracks.is_empty() {
+            return Err("Não é possível iniciar uma fila vazia.".to_string());
+        }
+        if start_index >= tracks.len() {
+            return Err(format!(
+                "Índice inicial fora da fila: {} para {} faixa(s).",
+                start_index,
+                tracks.len()
+            ));
+        }
+
         for track in &mut tracks {
             if track.thumb.is_none() {
                 track.thumb = self.resolve_cover(&track.uri);
             }
         }
 
-        self.queue = tracks;
-        self.save_queue_cache();
-
         let mut batch = String::from("command_list_begin\nclear\n");
-        for track in &self.queue {
-            batch.push_str(&format!("add \"{}\"\n", track.uri));
+        for track in &tracks {
+            batch.push_str(&format!("add {}\n", Self::quote_mpd_argument(&track.uri)?));
         }
         batch.push_str(&format!("play {}\ncommand_list_end", start_index));
 
-        self.send_command(&batch).map(|_| ())
+        self.send_command(&batch)?;
+        self.queue = tracks;
+        self.save_queue_cache()
     }
 
     pub fn play_uris(&mut self, uris: Vec<String>, start_index: usize) -> Result<(), String> {
@@ -534,20 +736,27 @@ impl AudioEngine {
     }
 
     pub fn play_index(&self, index: usize) -> Result<(), String> {
+        if index >= self.queue.len() {
+            return Err(format!(
+                "Índice fora da fila: {} para {} faixa(s).",
+                index,
+                self.queue.len()
+            ));
+        }
         self.send_command(&format!("play {}", index)).map(|_| ())
     }
 
     pub fn clear_queue(&mut self) -> Result<(), String> {
+        self.send_command("clear")?;
         self.queue.clear();
-        self.save_queue_cache();
-        self.send_command("clear").map(|_| ())
+        self.save_queue_cache()
     }
 
     pub fn list_directory(&self, path: &str) -> Result<Vec<LocalItem>, String> {
         let cmd = if path.trim().is_empty() {
             "lsinfo".to_string()
         } else {
-            format!("lsinfo \"{}\"", path)
+            format!("lsinfo {}", Self::quote_mpd_argument(path)?)
         };
 
         let lines = self.send_command(&cmd)?;
@@ -629,26 +838,9 @@ impl AudioEngine {
     }
 
     pub fn get_status(&self) -> Result<PlaybackStatus, String> {
-        let lines = match self.send_command("status") {
-            Ok(l) => l,
-            Err(_) => {
-                return Ok(PlaybackStatus {
-                    state: "disconnected".to_string(),
-                    elapsed: 0.0,
-                    duration: 0.0,
-                    audio_format: String::new(),
-                    current_file: String::new(),
-                    title: String::new(),
-                    artist: String::new(),
-                    album: String::new(),
-                    thumb: None,
-                    volume: 100,
-                    is_updating: false,
-                });
-            }
-        };
+        let lines = self.send_command("status")?;
 
-        let mut state = "stop".to_string();
+        let mut state = None;
         let mut elapsed = 0.0;
         let mut duration = 0.0;
         let mut audio_format = String::new();
@@ -659,17 +851,23 @@ impl AudioEngine {
         for line in lines {
             if let Some((k, v)) = line.split_once(": ") {
                 match k {
-                    "state" => state = v.to_string(),
-                    "elapsed" => elapsed = v.parse::<f64>().unwrap_or(0.0),
-                    "duration" => duration = v.parse::<f64>().unwrap_or(0.0),
+                    "state" => {
+                        Self::parse_playback_state(v)?;
+                        state = Some(v.to_string());
+                    }
+                    "elapsed" => elapsed = Self::parse_mpd_number("elapsed", v)?,
+                    "duration" => duration = Self::parse_mpd_number("duration", v)?,
                     "audio" => audio_format = v.to_string(),
-                    "song" => song_index = v.parse::<usize>().ok(),
-                    "volume" => volume = v.parse::<i32>().unwrap_or(100),
+                    "song" => song_index = Some(Self::parse_mpd_number("song", v)?),
+                    "volume" => volume = Self::parse_mpd_number("volume", v)?,
                     "updating_db" => is_updating = true,
                     _ => {}
                 }
             }
         }
+        let state = state.ok_or_else(|| {
+            "Resposta de status do MPD não contém o estado de reprodução.".to_string()
+        })?;
 
         // Se o MPD estiver parado e sem nenhuma faixa ativa, retorna estado neutro e limpo
         if state == "stop" && song_index.is_none() {
@@ -688,7 +886,7 @@ impl AudioEngine {
             });
         }
 
-        let song_lines = self.send_command("currentsong").unwrap_or_default();
+        let song_lines = self.send_command("currentsong")?;
         let mut current_file = String::new();
         let mut tag_title = String::new();
         let mut tag_artist = String::new();
@@ -703,7 +901,7 @@ impl AudioEngine {
                     "Album" => tag_album = v.to_string(),
                     "Pos" => {
                         if song_index.is_none() {
-                            song_index = v.parse::<usize>().ok();
+                            song_index = Some(Self::parse_mpd_number("Pos", v)?);
                         }
                     }
                     _ => {}
@@ -791,3 +989,282 @@ impl AudioEngine {
 }
 
 pub struct AudioState(pub Mutex<AudioEngine>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine_with_track(uri: &str) -> AudioEngine {
+        AudioEngine {
+            socket_path: String::new(),
+            music_dir: String::new(),
+            queue: vec![TrackMetadata {
+                title: "Faixa".to_string(),
+                artist: "Artista".to_string(),
+                album: "Álbum".to_string(),
+                thumb: None,
+                uri: uri.to_string(),
+                duration: Some(120.0),
+            }],
+        }
+    }
+
+    fn engine_with_two_tracks() -> AudioEngine {
+        let mut engine = engine_with_track("álbum/faixa.flac");
+        engine.queue.push(TrackMetadata {
+            title: "Segunda".to_string(),
+            artist: "Artista".to_string(),
+            album: "Álbum".to_string(),
+            thumb: None,
+            uri: "álbum/segunda.flac".to_string(),
+            duration: Some(180.0),
+        });
+        engine
+    }
+
+    fn restore_with_seek_responses(
+        engine: &AudioEngine,
+        snapshot: DeviceSwitchSnapshot,
+        mut seek_responses: Vec<Result<(), String>>,
+    ) -> (Result<(), String>, Vec<String>) {
+        let mut commands = Vec::new();
+        let mut send = |command: &str| {
+            commands.push(command.to_string());
+            if command.starts_with("seekcur") {
+                if seek_responses.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    seek_responses.remove(0).map(|_| Vec::new())
+                }
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let result =
+            engine.restore_after_device_switch_with(Some(snapshot), &mut send, &mut |_| {});
+        (result, commands)
+    }
+
+    #[test]
+    fn restore_playing_batches_queue_and_play_then_seeks_and_pauses() {
+        let engine = engine_with_two_tracks();
+        let (result, commands) = restore_with_seek_responses(
+            &engine,
+            DeviceSwitchSnapshot {
+                queue_index: 1,
+                elapsed: 12.0,
+                state: PlaybackState::Playing,
+            },
+            vec![],
+        );
+
+        result.unwrap();
+        assert_eq!(commands.len(), 3);
+        assert_eq!(
+            commands[0],
+            "command_list_begin\nclear\nadd \"álbum/faixa.flac\"\nadd \"álbum/segunda.flac\"\nplay 1\ncommand_list_end"
+        );
+        assert_eq!(commands[1], "seekcur 12.0");
+        assert_eq!(commands[2], "pause 1");
+        assert!(!commands[0].contains("seekcur"));
+        assert!(!commands.iter().any(|command| command == "status"));
+    }
+
+    #[test]
+    fn restore_paused_batches_queue_and_play_then_seeks_and_pauses() {
+        let engine = engine_with_track("faixa.flac");
+        let (result, commands) = restore_with_seek_responses(
+            &engine,
+            DeviceSwitchSnapshot {
+                queue_index: 0,
+                elapsed: 42.5,
+                state: PlaybackState::Paused,
+            },
+            vec![Ok(())],
+        );
+
+        result.unwrap();
+        assert_eq!(commands.len(), 3);
+        assert!(commands[0].contains("\nplay 0\ncommand_list_end"));
+        assert_eq!(commands[1], "seekcur 42.5");
+        assert_eq!(commands[2], "pause 1");
+        assert!(!commands.iter().any(|command| command == "status"));
+    }
+
+    #[test]
+    fn restore_retries_temporary_not_seekable_then_succeeds() {
+        let engine = engine_with_track("faixa.flac");
+        let (result, commands) = restore_with_seek_responses(
+            &engine,
+            DeviceSwitchSnapshot {
+                queue_index: 0,
+                elapsed: 9.0,
+                state: PlaybackState::Playing,
+            },
+            vec![
+                Err("ACK [5@0] {seekcur} Not seekable".to_string()),
+                Ok(()),
+            ],
+        );
+
+        result.unwrap();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.starts_with("seekcur"))
+                .count(),
+            2
+        );
+        assert_eq!(commands.last().map(String::as_str), Some("pause 1"));
+    }
+
+    #[test]
+    fn restore_treats_persistent_not_seekable_as_partial_success_and_pauses() {
+        let engine = engine_with_track("faixa.flac");
+        let not_seekable = || Err("ACK [5@0] {seekcur} Not seekable".to_string());
+        let (result, commands) = restore_with_seek_responses(
+            &engine,
+            DeviceSwitchSnapshot {
+                queue_index: 0,
+                elapsed: 30.0,
+                state: PlaybackState::Playing,
+            },
+            vec![not_seekable(), not_seekable(), not_seekable()],
+        );
+
+        result.unwrap();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.starts_with("seekcur"))
+                .count(),
+            3
+        );
+        assert_eq!(commands.last().map(String::as_str), Some("pause 1"));
+    }
+
+    #[test]
+    fn restore_stopped_rebuilds_only_queue_without_selecting_a_current_song() {
+        let engine = engine_with_two_tracks();
+        let (result, commands) = restore_with_seek_responses(
+            &engine,
+            DeviceSwitchSnapshot {
+                queue_index: 1,
+                elapsed: 12.0,
+                state: PlaybackState::Stopped,
+            },
+            vec![],
+        );
+
+        result.unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].contains("add \"álbum/segunda.flac\""));
+        assert!(!commands.iter().any(|command| command.starts_with("play")));
+        assert!(!commands.iter().any(|command| command.starts_with("seek")));
+        assert!(!commands.iter().any(|command| command.starts_with("pause")));
+        assert!(!commands.iter().any(|command| command == "status"));
+        assert!(!commands[0].contains("\nplay "));
+    }
+
+    #[test]
+    fn restore_propagates_other_seek_ack_errors() {
+        let engine = engine_with_track("faixa.flac");
+        let (result, commands) = restore_with_seek_responses(
+            &engine,
+            DeviceSwitchSnapshot {
+                queue_index: 0,
+                elapsed: 12.0,
+                state: PlaybackState::Playing,
+            },
+            vec![Err("ACK [50@0] {seekcur} No such song".to_string())],
+        );
+
+        assert_eq!(result.unwrap_err(), "ACK [50@0] {seekcur} No such song");
+        assert_eq!(commands.len(), 2);
+    }
+
+    #[test]
+    fn queue_restore_commands_escape_mpd_arguments_and_reject_line_breaks() {
+        let engine = engine_with_track("pasta/uma \\\"faixa\\\".flac");
+        let commands = engine.device_switch_queue_restore_commands(None).unwrap();
+        assert!(commands.contains(r#"add "pasta/uma \\\"faixa\\\".flac""#));
+
+        let plex_engine =
+            engine_with_track("http://plex.local/library/parts/1/file.flac?download=1");
+        let plex_commands = plex_engine.device_switch_queue_restore_commands(None).unwrap();
+        assert!(plex_commands
+            .contains(r#"add "http://plex.local/library/parts/1/file.flac?download=1""#));
+
+        let engine = engine_with_track("pasta/faixa.flac\nkill");
+        assert!(engine.device_switch_queue_restore_commands(None).is_err());
+    }
+
+    #[test]
+    fn textual_mpd_arguments_use_one_quoting_strategy() {
+        assert_eq!(
+            AudioEngine::quote_mpd_argument(" pasta/Único \\\"mix\\\".flac ").unwrap(),
+            r#"" pasta/Único \\\"mix\\\".flac ""#
+        );
+        assert!(AudioEngine::quote_mpd_argument("faixa\nkill").is_err());
+        assert!(AudioEngine::quote_mpd_argument("faixa\rkill").is_err());
+        assert!(AudioEngine::quote_mpd_argument("faixa\0kill").is_err());
+
+        let engine = engine_with_track("faixa.flac");
+        assert!(engine.list_directory("pasta\nkill").is_err());
+
+        let mut engine = engine_with_track("anterior.flac");
+        let invalid_track = TrackMetadata {
+            title: "Inválida".to_string(),
+            artist: String::new(),
+            album: String::new(),
+            thumb: Some(String::new()),
+            uri: "faixa.flac\nkill".to_string(),
+            duration: None,
+        };
+        assert!(engine.play_tracks(vec![invalid_track], 0).is_err());
+        assert_eq!(engine.queue[0].uri, "anterior.flac");
+    }
+
+    #[test]
+    fn empty_queue_requires_no_mpd_restore_command() {
+        let engine = AudioEngine {
+            socket_path: "/socket/que/não/existe".to_string(),
+            music_dir: String::new(),
+            queue: Vec::new(),
+        };
+        assert!(engine.restore_after_device_switch(None).is_ok());
+    }
+
+    #[test]
+    fn playback_state_parser_rejects_unknown_mpd_state() {
+        assert_eq!(
+            AudioEngine::parse_playback_state("stop").unwrap(),
+            PlaybackState::Stopped
+        );
+        assert!(AudioEngine::parse_playback_state("unknown").is_err());
+    }
+
+    #[test]
+    fn mpd_response_parser_distinguishes_ok_ack_and_early_eof() {
+        let mut ok = std::io::Cursor::new(b"state: play\nOK\n");
+        assert_eq!(
+            AudioEngine::read_mpd_response(&mut ok).unwrap(),
+            vec!["state: play"]
+        );
+
+        let mut ack = std::io::Cursor::new(b"ACK [50@0] {play} No such song\n");
+        assert!(AudioEngine::read_mpd_response(&mut ack)
+            .unwrap_err()
+            .starts_with("ACK"));
+
+        let mut eof = std::io::Cursor::new(b"state: play\n");
+        assert!(AudioEngine::read_mpd_response(&mut eof)
+            .unwrap_err()
+            .contains("antes da resposta final"));
+
+        let mut partial = std::io::Cursor::new(b"state: play");
+        assert!(AudioEngine::read_mpd_response(&mut partial)
+            .unwrap_err()
+            .contains("antes da resposta final"));
+    }
+}

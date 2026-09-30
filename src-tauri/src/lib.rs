@@ -4,7 +4,10 @@ mod favorites;
 mod plex;
 mod supervisor;
 
-use audio::{list_audio_devices, AudioDevice, AudioEngine, AudioState, PlaybackStatus, TrackMetadata};
+use audio::{
+    list_audio_devices, AudioDevice, AudioEngine, AudioState, DeviceSwitchSnapshot, PlaybackStatus,
+    TrackMetadata,
+};
 use config::AppConfig;
 use favorites::FavoriteAlbum;
 use plex::{PlexAlbum, PlexClient, PlexCollection, PlexLibrary, PlexSearchResults, PlexTrack};
@@ -15,6 +18,15 @@ use tauri::{Manager, RunEvent, State, Window, WindowEvent};
 pub struct PlexState(pub Mutex<PlexClient>);
 pub struct SupervisorState(pub Mutex<MpdSupervisor>);
 pub struct ConfigState(pub Mutex<AppConfig>);
+pub struct ConfigTransactionState(pub Mutex<()>);
+
+impl ConfigTransactionState {
+    fn begin(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+        self.0
+            .lock()
+            .map_err(|e| format!("Falha ao serializar a alteração de configuração: {}", e))
+    }
+}
 
 #[tauri::command]
 fn get_playback_status(state: State<AudioState>) -> Result<PlaybackStatus, String> {
@@ -168,11 +180,17 @@ fn open_external_url(url: String) -> Result<(), String> {
 fn save_config(
     new_config: AppConfig,
     config_state: State<ConfigState>,
+    transaction_state: State<ConfigTransactionState>,
     plex_state: State<PlexState>,
     sup_state: State<SupervisorState>,
     audio_state: State<AudioState>,
 ) -> Result<(), String> {
-    let mut current_cfg = config_state.0.lock().unwrap();
+    let _transaction_guard = transaction_state.begin()?;
+    let current_cfg = config_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar a configuração atual: {}", e))?
+        .clone();
 
     let audio_hw_changed = current_cfg.audio_output_type != new_config.audio_output_type
         || current_cfg.alsa_device != new_config.alsa_device
@@ -181,38 +199,230 @@ fn save_config(
         || current_cfg.replay_gain != new_config.replay_gain;
 
     let folders_changed = current_cfg.local_folders != new_config.local_folders;
-
-    new_config.save()?;
-    plex_state.0.lock().unwrap().update_config(&new_config);
-
-    if folders_changed {
-        let _ = MpdSupervisor::sync_library_symlinks(&new_config.local_folders);
-        audio_state.0.lock().unwrap().set_music_dir(&MpdSupervisor::library_dir().to_string_lossy());
-        let _ = audio_state.0.lock().unwrap().rescan_library();
-    }
+    let mut playback_snapshot = None;
 
     if audio_hw_changed {
         // 1. Captura o estado e segundo atual da música sem destruir a fila
-        let playback_snapshot = if let Ok(mut audio) = audio_state.0.lock() {
-            audio.prepare_device_switch()
-        } else {
-            None
+        let preparation = audio_state
+            .0
+            .lock()
+            .map_err(|e| {
+                format!(
+                    "Falha ao preparar troca de saída: não foi possível acessar o estado de reprodução: {}",
+                    e
+                )
+            })?
+            .prepare_device_switch();
+        playback_snapshot = match preparation {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if error.snapshot.is_some() {
+                    let rollback = restore_prepared_playback(error.snapshot, &audio_state);
+                    return Err(error_with_rollback(
+                        format!("Falha ao preparar troca de saída: {}", error.cause),
+                        rollback,
+                    ));
+                }
+                return Err(format!(
+                    "Falha ao preparar troca de saída: {}",
+                    error.cause
+                ));
+            }
         };
-
         // 2. Reinicia o MPD com a nova saída (liberando o ALSA)
-        if let Ok(mut supervisor) = sup_state.0.lock() {
-            supervisor.stop();
-            let _ = supervisor.start(&new_config);
+        let switch_result = match sup_state.0.lock() {
+            Ok(mut supervisor) => supervisor.start(&new_config),
+            Err(e) => {
+                let original = format!(
+                    "Falha ao iniciar nova saída: não foi possível acessar o supervisor do MPD: {}",
+                    e
+                );
+                let rollback = restore_prepared_playback(playback_snapshot, &audio_state);
+                return Err(error_with_rollback(original, rollback));
+            }
+        };
+        if let Err(switch_error) = switch_result {
+            let rollback =
+                rollback_audio_switch(&current_cfg, playback_snapshot, &sup_state, &audio_state);
+            return Err(error_with_rollback(
+                format!("Falha ao iniciar nova saída: {}", switch_error),
+                rollback,
+            ));
         }
 
-        // 3. Reinsere a fila intacta e retoma a reprodução exatamente no mesmo ponto
-        if let Ok(mut audio) = audio_state.0.lock() {
-            let _ = audio.restore_after_device_switch(playback_snapshot);
+        // 3. Restaura fila/faixa/posição quando possível; Playing/Paused terminam pausados e Stopped permanece parado
+        let restore_result = match audio_state.0.lock() {
+            Ok(audio) => audio.restore_after_device_switch(playback_snapshot),
+            Err(e) => Err(format!(
+                "não foi possível acessar a fila após trocar a saída: {}",
+                e
+            )),
+        };
+        if let Err(restore_error) = restore_result {
+            let rollback =
+                rollback_audio_switch(&current_cfg, playback_snapshot, &sup_state, &audio_state);
+            return Err(error_with_rollback(
+                format!("Falha ao restaurar reprodução: {}", restore_error),
+                rollback,
+            ));
         }
     }
 
-    *current_cfg = new_config;
+    if folders_changed {
+        let update_library = || -> Result<(), String> {
+            MpdSupervisor::sync_library_symlinks(&new_config.local_folders)?;
+            let mut audio = audio_state
+                .0
+                .lock()
+                .map_err(|e| format!("Falha ao acessar a biblioteca local: {}", e))?;
+            audio.set_music_dir(&MpdSupervisor::library_dir().to_string_lossy());
+            audio.rescan_library()
+        };
+        if let Err(library_error) = update_library() {
+            let rollback = rollback_applied_config_change(
+                audio_hw_changed,
+                folders_changed,
+                &current_cfg,
+                playback_snapshot,
+                &sup_state,
+                &audio_state,
+            );
+            return Err(error_with_rollback(
+                format!("Falha ao atualizar a biblioteca local: {}", library_error),
+                rollback,
+            ));
+        }
+    }
+
+    let mut config_guard = match config_state.0.lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            let original = format!("Falha ao publicar a nova configuração: {}", e);
+            let rollback = rollback_applied_config_change(
+                audio_hw_changed,
+                folders_changed,
+                &current_cfg,
+                playback_snapshot,
+                &sup_state,
+                &audio_state,
+            );
+            return Err(error_with_rollback(original, rollback));
+        }
+    };
+    let mut plex_guard = match plex_state.0.lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            drop(config_guard);
+            let original = format!("Falha ao atualizar a configuração do Plex: {}", e);
+            let rollback = rollback_applied_config_change(
+                audio_hw_changed,
+                folders_changed,
+                &current_cfg,
+                playback_snapshot,
+                &sup_state,
+                &audio_state,
+            );
+            return Err(error_with_rollback(original, rollback));
+        }
+    };
+
+    if let Err(save_error) = new_config.save() {
+        drop(plex_guard);
+        drop(config_guard);
+        let rollback = rollback_applied_config_change(
+            audio_hw_changed,
+            folders_changed,
+            &current_cfg,
+            playback_snapshot,
+            &sup_state,
+            &audio_state,
+        );
+        return Err(error_with_rollback(
+            format!("Falha ao persistir configuração: {}", save_error),
+            rollback,
+        ));
+    }
+
+    plex_guard.update_config(&new_config);
+    *config_guard = new_config;
     Ok(())
+}
+
+fn error_with_rollback(original_error: String, rollback: Result<(), String>) -> String {
+    match rollback {
+        Ok(()) => format!("{}. Estado anterior restaurado.", original_error),
+        Err(rollback_error) => format!(
+            "{}. Rollback também falhou: {}",
+            original_error, rollback_error
+        ),
+    }
+}
+
+fn restore_prepared_playback(
+    playback_snapshot: Option<DeviceSwitchSnapshot>,
+    audio_state: &State<'_, AudioState>,
+) -> Result<(), String> {
+    audio_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
+        .restore_after_device_switch(playback_snapshot)
+}
+
+fn rollback_audio_switch(
+    previous_config: &AppConfig,
+    playback_snapshot: Option<DeviceSwitchSnapshot>,
+    sup_state: &State<'_, SupervisorState>,
+    audio_state: &State<'_, AudioState>,
+) -> Result<(), String> {
+    sup_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar o supervisor durante rollback: {}", e))?
+        .start(previous_config)?;
+    audio_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
+        .restore_after_device_switch(playback_snapshot)
+}
+
+fn rollback_applied_config_change(
+    audio_hw_changed: bool,
+    folders_changed: bool,
+    previous_config: &AppConfig,
+    playback_snapshot: Option<DeviceSwitchSnapshot>,
+    sup_state: &State<'_, SupervisorState>,
+    audio_state: &State<'_, AudioState>,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    if folders_changed {
+        let library_rollback = MpdSupervisor::sync_library_symlinks(&previous_config.local_folders)
+            .and_then(|_| {
+                audio_state
+                    .0
+                    .lock()
+                    .map_err(|e| format!("Falha ao acessar a biblioteca durante rollback: {}", e))?
+                    .rescan_library()
+            });
+        if let Err(error) = library_rollback {
+            failures.push(format!("biblioteca: {}", error));
+        }
+    }
+
+    if audio_hw_changed {
+        if let Err(error) =
+            rollback_audio_switch(previous_config, playback_snapshot, sup_state, audio_state)
+        {
+            failures.push(format!("saída de áudio: {}", error));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 #[tauri::command]
@@ -305,7 +515,12 @@ pub fn run() {
         &socket_path,
         &MpdSupervisor::library_dir().to_string_lossy(),
     );
-    let _ = audio_engine.rescan_library();
+    if let Err(e) = audio_engine.rescan_library() {
+        eprintln!(
+            "[Audio] Falha ao solicitar rescan inicial da biblioteca: {}",
+            e
+        );
+    }
 
     let plex_client = PlexClient::from_config(&initial_config);
 
@@ -314,6 +529,7 @@ pub fn run() {
         .manage(PlexState(Mutex::new(plex_client)))
         .manage(SupervisorState(Mutex::new(supervisor)))
         .manage(ConfigState(Mutex::new(initial_config)))
+        .manage(ConfigTransactionState(Mutex::new(())))
         .invoke_handler(tauri::generate_handler![
             get_playback_status,
             toggle_playback,
@@ -378,4 +594,48 @@ pub fn run() {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn config_transaction_state_serializes_concurrent_changes() {
+        let state = Arc::new(ConfigTransactionState(Mutex::new(())));
+        let first_guard = state.begin().unwrap();
+        let worker_state = Arc::clone(&state);
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+
+        let worker = thread::spawn(move || {
+            attempt_tx.send(()).unwrap();
+            let _guard = worker_state.begin().unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+
+        attempt_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(acquired_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(first_guard);
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn transaction_error_preserves_original_and_rollback_failures() {
+        let error = error_with_rollback(
+            "falha original".to_string(),
+            Err("falha no rollback".to_string()),
+        );
+        assert!(error.contains("falha original"));
+        assert!(error.contains("falha no rollback"));
+        assert!(error.contains("Rollback também falhou"));
+
+        let restored = error_with_rollback("falha original".to_string(), Ok(()));
+        assert!(restored.contains("falha original"));
+        assert!(restored.contains("Estado anterior restaurado"));
+    }
 }

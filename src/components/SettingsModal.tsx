@@ -31,6 +31,26 @@ interface Props {
   onSaved: () => void;
 }
 
+const formatConfigError = (error: unknown): string => {
+  let message: string;
+  if (typeof error === "string") {
+    message = error;
+  } else if (error instanceof Error) {
+    message = error.message;
+  } else {
+    try {
+      message = JSON.stringify(error) ?? String(error);
+    } catch {
+      message = String(error);
+    }
+  }
+
+  return message
+    .replace(/([?&]X-Plex-Token=)[^&\s"']+/gi, "$1[REDACTED]")
+    .replace(/https?:\/\/[^\s"']+/gi, "[URI REDACTED]")
+    .replace(/(ACK\s+\[[^\]]+\]\s+\{add\}).*/gi, "$1 [ADD DETAILS REDACTED]");
+};
+
 export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
   const { t, i18n } = useTranslation();
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -178,12 +198,24 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved }) => {
     setSaving(true);
     try {
       await configService.saveConfig(config);
-      await audioService.rescanLibrary();
       onSaved();
       onClose();
     } catch (err) {
-      console.error("Falha ao gravar configurações:", err);
-      alert("Erro ao gravar as configurações.");
+      const diagnostic = formatConfigError(err);
+      console.error("Falha em saveConfig:", diagnostic);
+      try {
+        const confirmedConfig = await configService.getConfig();
+        setConfig(confirmedConfig);
+      } catch (reloadError) {
+        console.error(
+          "Falha ao recarregar configuração confirmada:",
+          formatConfigError(reloadError),
+        );
+      }
+      const summary = diagnostic.startsWith("Falha ao persistir configuração:")
+        ? "Falha ao persistir a configuração."
+        : "Falha ao alterar a saída/configuração.";
+      alert(`${summary}\n\nEtapa reportada pelo backend:\n${diagnostic}`);
     } finally {
       setSaving(false);
     }
