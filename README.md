@@ -138,7 +138,7 @@ paru -S sonante-bin
 Download the latest `.deb` package from Releases and install via `dpkg`:
 
 ```bash
-sudo dpkg -i sonante_*_amd64.deb
+sudo dpkg -i Sonante_*_amd64.deb
 sudo apt-get install -f # Resolve dependencies if needed
 ```
 
@@ -146,8 +146,8 @@ sudo apt-get install -f # Resolve dependencies if needed
 Download the `.AppImage`, make it executable, and run:
 
 ```bash
-chmod +x sonante_*_amd64.AppImage
-./sonante_*_amd64.AppImage
+chmod +x Sonante_*_amd64.AppImage
+./Sonante_*_amd64.AppImage
 ```
 
 ---
