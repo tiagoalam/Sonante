@@ -1,4 +1,6 @@
 use crate::config::AppConfig;
+use reqwest::{RequestBuilder, StatusCode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -7,6 +9,107 @@ use std::time::Duration;
 const PLEX_CLIENT_ID: &str = "sonante-audio-player";
 const PLEX_PRODUCT_NAME: &str = "Sonante";
 const PLEX_VERSION: &str = "0.2.0";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlexErrorKind {
+    Timeout,
+    Transport,
+    Unauthorized,
+    NotFound,
+    ServerError(u16),
+    HttpError(u16),
+    InvalidResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlexError {
+    operation: &'static str,
+    kind: PlexErrorKind,
+}
+
+impl PlexError {
+    fn from_transport(operation: &'static str, error: &reqwest::Error) -> Self {
+        let kind = if error.is_timeout() {
+            PlexErrorKind::Timeout
+        } else {
+            PlexErrorKind::Transport
+        };
+        Self { operation, kind }
+    }
+
+    fn from_status(operation: &'static str, status: StatusCode) -> Self {
+        let kind = match status {
+            StatusCode::UNAUTHORIZED => PlexErrorKind::Unauthorized,
+            StatusCode::NOT_FOUND => PlexErrorKind::NotFound,
+            status if status.is_server_error() => PlexErrorKind::ServerError(status.as_u16()),
+            status => PlexErrorKind::HttpError(status.as_u16()),
+        };
+        Self { operation, kind }
+    }
+
+    fn invalid_response(operation: &'static str) -> Self {
+        Self {
+            operation,
+            kind: PlexErrorKind::InvalidResponse,
+        }
+    }
+
+    fn public_message(&self) -> String {
+        match self.kind {
+            PlexErrorKind::Timeout => {
+                format!("Tempo limite ao {} no Plex.", self.operation)
+            }
+            PlexErrorKind::Transport => {
+                format!("Não foi possível {} no Plex por erro de conexão.", self.operation)
+            }
+            PlexErrorKind::Unauthorized => {
+                format!("O Plex recusou a autenticação ao {} (HTTP 401).", self.operation)
+            }
+            PlexErrorKind::NotFound => {
+                format!("O recurso solicitado não foi encontrado ao {} no Plex (HTTP 404).", self.operation)
+            }
+            PlexErrorKind::ServerError(status) => {
+                format!("O servidor Plex falhou ao {} (HTTP {}).", self.operation, status)
+            }
+            PlexErrorKind::HttpError(status) => {
+                format!("O Plex recusou a operação de {} (HTTP {}).", self.operation, status)
+            }
+            PlexErrorKind::InvalidResponse => {
+                format!("O Plex retornou uma resposta inválida ao {}.", self.operation)
+            }
+        }
+    }
+}
+
+async fn send_json<T: DeserializeOwned>(
+    request: RequestBuilder,
+    operation: &'static str,
+) -> Result<T, PlexError> {
+    let response = request
+        .send()
+        .await
+        .map_err(|error| PlexError::from_transport(operation, &error))?;
+
+    if !response.status().is_success() {
+        return Err(PlexError::from_status(operation, response.status()));
+    }
+
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| PlexError::from_transport(operation, &error))?;
+
+    serde_json::from_slice(&body).map_err(|_| PlexError::invalid_response(operation))
+}
+
+fn media_container<'a>(
+    json: &'a serde_json::Value,
+    operation: &'static str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, PlexError> {
+    json.get("MediaContainer")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| PlexError::invalid_response(operation))
+}
 
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -151,7 +254,7 @@ fn into_public_server_resource(server: DiscoveredPlexServer) -> PlexServerResour
 
 pub async fn request_plex_pin() -> Result<PlexPin, String> {
     let client = http_client();
-    let res = client
+    let request = client
         .post("https://plex.tv/api/v2/pins")
         .header("X-Plex-Product", PLEX_PRODUCT_NAME)
         .header("X-Plex-Version", PLEX_VERSION)
@@ -160,10 +263,7 @@ pub async fn request_plex_pin() -> Result<PlexPin, String> {
         .header("X-Plex-Device", "PC")
         .header("X-Plex-Device-Name", "Sonante (Linux)")
         .header("Accept", "application/json")
-        .query(&[("strong", "true")])
-        .send()
-        .await
-        .map_err(|e| format!("Erro ao solicitar PIN do Plex: {}", e))?;
+        .query(&[("strong", "true")]);
 
     #[derive(Deserialize)]
     struct RawPin {
@@ -171,10 +271,9 @@ pub async fn request_plex_pin() -> Result<PlexPin, String> {
         code: String,
     }
 
-    let pin: RawPin = res
-        .json()
+    let pin: RawPin = send_json(request, "solicitar um PIN")
         .await
-        .map_err(|e| format!("Resposta inválida do Plex ao criar PIN: {}", e))?;
+        .map_err(|error| error.public_message())?;
 
     // URL oficial moderna do Plex OAuth (usa '#?' sem exclamação e parâmetros estritamente alinhados)
     let auth_url = format!(
@@ -192,15 +291,12 @@ pub async fn request_plex_pin() -> Result<PlexPin, String> {
 pub async fn check_plex_pin(pin_id: u64) -> Result<Option<String>, String> {
     let client = http_client();
     let url = format!("https://plex.tv/api/v2/pins/{}", pin_id);
-    let res = client
+    let request = client
         .get(&url)
         .header("X-Plex-Product", PLEX_PRODUCT_NAME)
         .header("X-Plex-Version", PLEX_VERSION)
         .header("X-Plex-Client-Identifier", PLEX_CLIENT_ID)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("Erro ao checar status do PIN: {}", e))?;
+        .header("Accept", "application/json");
 
     #[derive(Deserialize)]
     struct RawPinCheck {
@@ -208,29 +304,24 @@ pub async fn check_plex_pin(pin_id: u64) -> Result<Option<String>, String> {
         auth_token: Option<String>,
     }
 
-    let data: RawPinCheck = res
-        .json()
+    let data: RawPinCheck = send_json(request, "consultar o status do PIN")
         .await
-        .map_err(|e| format!("Erro ao decodificar resposta do PIN: {}", e))?;
+        .map_err(|error| error.public_message())?;
 
     Ok(data.auth_token)
 }
 
 pub async fn get_plex_servers(auth_token: &str) -> Result<Vec<PlexServerResource>, String> {
     let client = http_client();
-    let res = client
+    let request = client
         .get("https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1")
         .header("X-Plex-Client-Identifier", PLEX_CLIENT_ID)
         .header("X-Plex-Token", auth_token)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("Erro ao consultar servidores Plex: {}", e))?;
+        .header("Accept", "application/json");
 
-    let resources: Vec<RawResource> = res
-        .json()
+    let resources: Vec<RawResource> = send_json(request, "consultar os servidores")
         .await
-        .map_err(|e| format!("Erro ao ler recursos Plex: {}", e))?;
+        .map_err(|error| error.public_message())?;
 
     Ok(parse_discovered_servers(resources)
         .into_iter()
@@ -248,6 +339,9 @@ pub struct PlexArtistResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread::{self, JoinHandle};
 
     const MIXED_ORDER_REMOTE_FIRST: &str =
         include_str!("../tests/fixtures/plex_resources_remote_first.json");
@@ -257,6 +351,59 @@ mod tests {
     fn parse_fixture(payload: &str) -> Vec<DiscoveredPlexServer> {
         let resources: Vec<RawResource> = serde_json::from_str(payload).unwrap();
         parse_discovered_servers(resources)
+    }
+
+    fn spawn_http_response(
+        status_line: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+        delay: Duration,
+    ) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            thread::sleep(delay);
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn test_request(
+        status_line: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+        delay: Duration,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, PlexError> {
+        let (base_url, server) = spawn_http_response(status_line, content_type, body, delay);
+        let client = reqwest::Client::builder().timeout(timeout).build().unwrap();
+        let url = format!("{base_url}/fixture?X-Plex-Token=TEST_SECRET_TOKEN");
+        let result = tauri::async_runtime::block_on(send_json(
+            client.get(url),
+            "consultar o fixture",
+        ));
+        server.join().unwrap();
+        result
+    }
+
+    fn plex_client_for_test(base_url: String) -> PlexClient {
+        PlexClient {
+            base_url,
+            token: "TEST_SECRET_TOKEN".to_string(),
+            playback_mode: "http".to_string(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            path_mappings: HashMap::new(),
+        }
     }
 
     #[test]
@@ -318,6 +465,141 @@ mod tests {
         assert!(!public_server.contains_key("accessToken"));
         assert!(!public_connection.contains_key("relay"));
         assert!(!public_connection.contains_key("protocol"));
+    }
+
+    #[test]
+    fn http_200_with_valid_json_is_parsed() {
+        let json = test_request(
+            "200 OK",
+            "application/json",
+            r#"{"MediaContainer":{"size":0}}"#,
+            Duration::ZERO,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(json["MediaContainer"]["size"], 0);
+    }
+
+    #[test]
+    fn http_401_is_explicit_and_public_error_is_sanitized() {
+        let error = test_request(
+            "401 Unauthorized",
+            "application/json",
+            r#"{"error":"TEST_SECRET_TOKEN"}"#,
+            Duration::ZERO,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, PlexErrorKind::Unauthorized);
+        let public = error.public_message();
+        assert!(public.contains("401"));
+        assert!(!public.contains("TEST_SECRET_TOKEN"));
+        assert!(!public.contains("X-Plex-Token"));
+        assert!(!public.contains("http://"));
+        assert!(!public.contains('?'));
+    }
+
+    #[test]
+    fn http_404_is_explicit() {
+        let error = test_request(
+            "404 Not Found",
+            "application/json",
+            "{}",
+            Duration::ZERO,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, PlexErrorKind::NotFound);
+    }
+
+    #[test]
+    fn http_500_is_explicit() {
+        let error = test_request(
+            "500 Internal Server Error",
+            "application/json",
+            "{}",
+            Duration::ZERO,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, PlexErrorKind::ServerError(500));
+    }
+
+    #[test]
+    fn successful_non_json_response_is_invalid_protocol() {
+        let error = test_request(
+            "200 OK",
+            "text/plain",
+            "not json",
+            Duration::ZERO,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, PlexErrorKind::InvalidResponse);
+    }
+
+    #[test]
+    fn slow_response_is_classified_as_timeout() {
+        let error = test_request(
+            "200 OK",
+            "application/json",
+            "{}",
+            Duration::from_millis(150),
+            Duration::from_millis(25),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, PlexErrorKind::Timeout);
+    }
+
+    #[test]
+    fn media_container_is_required_for_plex_content_responses() {
+        let error = media_container(&serde_json::json!({"unexpected": true}), "testar protocolo")
+            .unwrap_err();
+
+        assert_eq!(error.kind, PlexErrorKind::InvalidResponse);
+    }
+
+    #[test]
+    fn collections_do_not_turn_http_404_into_an_empty_list() {
+        let (base_url, server) = spawn_http_response(
+            "404 Not Found",
+            "application/json",
+            "{}",
+            Duration::ZERO,
+        );
+        let client = plex_client_for_test(base_url);
+
+        let error = tauri::async_runtime::block_on(client.get_collections("1")).unwrap_err();
+        server.join().unwrap();
+
+        assert!(error.contains("404"));
+        assert!(!error.contains("TEST_SECRET_TOKEN"));
+        assert!(!error.contains("X-Plex-Token"));
+    }
+
+    #[test]
+    fn top_tracks_does_not_fall_back_after_http_401() {
+        let (base_url, server) = spawn_http_response(
+            "401 Unauthorized",
+            "application/json",
+            "{}",
+            Duration::ZERO,
+        );
+        let client = plex_client_for_test(base_url);
+
+        let error =
+            tauri::async_runtime::block_on(client.get_artist_top_tracks("artist-1")).unwrap_err();
+        server.join().unwrap();
+
+        assert!(error.contains("401"));
+        assert!(!error.contains("TEST_SECRET_TOKEN"));
+        assert!(!error.contains("X-Plex-Token"));
     }
 }
 
@@ -385,21 +667,23 @@ impl PlexClient {
             url.push_str(&format!("&sectionId={}", sec));
         }
 
-        let resp = self
+        let request = self
             .http
             .get(&url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+            .header("Accept", "application/json");
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let operation = "pesquisar a biblioteca";
+        let json: serde_json::Value = send_json(request, operation)
+            .await
+            .map_err(|error| error.public_message())?;
+        let container = media_container(&json, operation)
+            .map_err(|error| error.public_message())?;
 
         let mut artists = Vec::new();
         let mut albums = Vec::new();
         let mut tracks = Vec::new();
 
-        if let Some(hubs) = json["MediaContainer"]["Hub"].as_array() {
+        if let Some(hubs) = container.get("Hub").and_then(serde_json::Value::as_array) {
             for hub in hubs {
                 let hub_type = hub["type"].as_str().unwrap_or("");
                 if let Some(meta) = hub["Metadata"].as_array() {
@@ -522,18 +806,23 @@ impl PlexClient {
 
     pub async fn get_music_libraries(&self) -> Result<Vec<PlexLibrary>, String> {
         let url = format!("{}/library/sections?X-Plex-Token={}", self.base_url, self.token);
-        let resp = self
+        let request = self
             .http
             .get(&url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+            .header("Accept", "application/json");
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let operation = "consultar as bibliotecas";
+        let json: serde_json::Value = send_json(request, operation)
+            .await
+            .map_err(|error| error.public_message())?;
+        let container = media_container(&json, operation)
+            .map_err(|error| error.public_message())?;
         let mut libraries = Vec::new();
 
-        if let Some(dirs) = json["MediaContainer"]["Directory"].as_array() {
+        if let Some(dirs) = container
+            .get("Directory")
+            .and_then(serde_json::Value::as_array)
+        {
             for dir in dirs {
                 if dir["type"].as_str() == Some("artist") {
                     if let (Some(key), Some(title)) = (dir["key"].as_str(), dir["title"].as_str()) {
@@ -561,18 +850,23 @@ impl PlexClient {
             self.base_url, section_key, sort_param, self.token
         );
 
-        let resp = self
+        let request = self
             .http
             .get(&url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+            .header("Accept", "application/json");
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let operation = "consultar os álbuns";
+        let json: serde_json::Value = send_json(request, operation)
+            .await
+            .map_err(|error| error.public_message())?;
+        let container = media_container(&json, operation)
+            .map_err(|error| error.public_message())?;
         let mut albums = Vec::new();
 
-        if let Some(meta) = json["MediaContainer"]["Metadata"].as_array() {
+        if let Some(meta) = container
+            .get("Metadata")
+            .and_then(serde_json::Value::as_array)
+        {
             for item in meta {
                 let rating_key = item["ratingKey"].as_str().unwrap_or("").to_string();
                 let title = item["title"].as_str().unwrap_or("Desconhecido").to_string();
@@ -601,18 +895,23 @@ impl PlexClient {
             self.base_url, section_key, self.token
         );
 
-        let resp = self
+        let request = self
             .http
             .get(&url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+            .header("Accept", "application/json");
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let operation = "consultar as coleções";
+        let json: serde_json::Value = send_json(request, operation)
+            .await
+            .map_err(|error| error.public_message())?;
+        let container = media_container(&json, operation)
+            .map_err(|error| error.public_message())?;
         let mut collections = Vec::new();
 
-        if let Some(meta) = json["MediaContainer"]["Metadata"].as_array() {
+        if let Some(meta) = container
+            .get("Metadata")
+            .and_then(serde_json::Value::as_array)
+        {
             for item in meta {
                 let rating_key = item["ratingKey"].as_str().unwrap_or("").to_string();
                 let title = item["title"].as_str().unwrap_or("").to_string();
@@ -637,18 +936,23 @@ impl PlexClient {
             self.base_url, collection_rating_key, self.token
         );
 
-        let resp = self
+        let request = self
             .http
             .get(&url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+            .header("Accept", "application/json");
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let operation = "consultar os álbuns da coleção";
+        let json: serde_json::Value = send_json(request, operation)
+            .await
+            .map_err(|error| error.public_message())?;
+        let container = media_container(&json, operation)
+            .map_err(|error| error.public_message())?;
         let mut albums = Vec::new();
 
-        if let Some(meta) = json["MediaContainer"]["Metadata"].as_array() {
+        if let Some(meta) = container
+            .get("Metadata")
+            .and_then(serde_json::Value::as_array)
+        {
             for item in meta {
                 let rating_key = item["ratingKey"].as_str().unwrap_or("").to_string();
                 let title = item["title"].as_str().unwrap_or("Desconhecido").to_string();
@@ -677,18 +981,23 @@ impl PlexClient {
             self.base_url, artist_rating_key, self.token
         );
 
-        let resp = self
+        let request = self
             .http
             .get(&url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+            .header("Accept", "application/json");
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let operation = "consultar os álbuns do artista";
+        let json: serde_json::Value = send_json(request, operation)
+            .await
+            .map_err(|error| error.public_message())?;
+        let container = media_container(&json, operation)
+            .map_err(|error| error.public_message())?;
         let mut albums = Vec::new();
 
-        if let Some(meta) = json["MediaContainer"]["Metadata"].as_array() {
+        if let Some(meta) = container
+            .get("Metadata")
+            .and_then(serde_json::Value::as_array)
+        {
             for item in meta {
                 let rating_key = item["ratingKey"].as_str().unwrap_or("").to_string();
                 let title = item["title"].as_str().unwrap_or("Desconhecido").to_string();
@@ -716,17 +1025,31 @@ impl PlexClient {
             "{}/library/metadata/{}/topTracks?X-Plex-Token={}",
             self.base_url, artist_rating_key, self.token
         );
-        if let Ok(resp) = self.http.get(&url_top).header("Accept", "application/json").send().await {
-            if resp.status().is_success() {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(meta) = json["MediaContainer"]["Metadata"].as_array() {
-                        let tracks: Vec<PlexTrack> = meta.iter().filter_map(|t| self.parse_track_item(t)).collect();
-                        if !tracks.is_empty() {
-                            return Ok(tracks);
-                        }
+        let top_operation = "consultar as faixas populares do artista";
+        match send_json::<serde_json::Value>(
+            self.http.get(&url_top).header("Accept", "application/json"),
+            top_operation,
+        )
+        .await
+        {
+            Ok(json) => {
+                let container = media_container(&json, top_operation)
+                    .map_err(|error| error.public_message())?;
+                if let Some(meta) = container
+                    .get("Metadata")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    let tracks: Vec<PlexTrack> = meta
+                        .iter()
+                        .filter_map(|track| self.parse_track_item(track))
+                        .collect();
+                    if !tracks.is_empty() {
+                        return Ok(tracks);
                     }
                 }
             }
+            Err(error) if error.kind == PlexErrorKind::NotFound => {}
+            Err(error) => return Err(error.public_message()),
         }
 
         // Tentativa 2: Hubs do artista (usado pelo Plex Web para renderizar o card Populares)
@@ -734,25 +1057,39 @@ impl PlexClient {
             "{}/hubs/metadata/{}?X-Plex-Token={}",
             self.base_url, artist_rating_key, self.token
         );
-        if let Ok(resp) = self.http.get(&url_hub).header("Accept", "application/json").send().await {
-            if resp.status().is_success() {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(hubs) = json["MediaContainer"]["Hub"].as_array() {
-                        for hub in hubs {
-                            let hub_id = hub["hubIdentifier"].as_str().unwrap_or("");
-                            let hub_type = hub["type"].as_str().unwrap_or("");
-                            if hub_id == "artist.topTracks" || hub_type == "track" {
-                                if let Some(meta) = hub["Metadata"].as_array() {
-                                    let tracks: Vec<PlexTrack> = meta.iter().filter_map(|t| self.parse_track_item(t)).collect();
-                                    if !tracks.is_empty() {
-                                        return Ok(tracks);
-                                    }
+        let hub_operation = "consultar os hubs do artista";
+        match send_json::<serde_json::Value>(
+            self.http.get(&url_hub).header("Accept", "application/json"),
+            hub_operation,
+        )
+        .await
+        {
+            Ok(json) => {
+                let container = media_container(&json, hub_operation)
+                    .map_err(|error| error.public_message())?;
+                if let Some(hubs) = container
+                    .get("Hub")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for hub in hubs {
+                        let hub_id = hub["hubIdentifier"].as_str().unwrap_or("");
+                        let hub_type = hub["type"].as_str().unwrap_or("");
+                        if hub_id == "artist.topTracks" || hub_type == "track" {
+                            if let Some(meta) = hub["Metadata"].as_array() {
+                                let tracks: Vec<PlexTrack> = meta
+                                    .iter()
+                                    .filter_map(|track| self.parse_track_item(track))
+                                    .collect();
+                                if !tracks.is_empty() {
+                                    return Ok(tracks);
                                 }
                             }
                         }
                     }
                 }
             }
+            Err(error) if error.kind == PlexErrorKind::NotFound => {}
+            Err(error) => return Err(error.public_message()),
         }
 
         // Tentativa 3: allLeaves com ordenação manual em memória por popularidade
@@ -760,18 +1097,23 @@ impl PlexClient {
             "{}/library/metadata/{}/allLeaves?X-Plex-Token={}",
             self.base_url, artist_rating_key, self.token
         );
-        let resp = self
+        let request = self
             .http
             .get(&url_all)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+            .header("Accept", "application/json");
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let operation = "consultar todas as faixas do artista";
+        let json: serde_json::Value = send_json(request, operation)
+            .await
+            .map_err(|error| error.public_message())?;
+        let container = media_container(&json, operation)
+            .map_err(|error| error.public_message())?;
         let mut scored_tracks = Vec::new();
 
-        if let Some(meta) = json["MediaContainer"]["Metadata"].as_array() {
+        if let Some(meta) = container
+            .get("Metadata")
+            .and_then(serde_json::Value::as_array)
+        {
             for item in meta {
                 let rating_count = item["ratingCount"].as_u64().unwrap_or(0);
                 let view_count = item["viewCount"].as_u64().unwrap_or(0);
@@ -794,18 +1136,23 @@ impl PlexClient {
             self.base_url, album_rating_key, self.token
         );
 
-        let resp = self
+        let request = self
             .http
             .get(&url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+            .header("Accept", "application/json");
 
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let operation = "consultar as faixas do álbum";
+        let json: serde_json::Value = send_json(request, operation)
+            .await
+            .map_err(|error| error.public_message())?;
+        let container = media_container(&json, operation)
+            .map_err(|error| error.public_message())?;
         let mut tracks = Vec::new();
 
-        if let Some(meta) = json["MediaContainer"]["Metadata"].as_array() {
+        if let Some(meta) = container
+            .get("Metadata")
+            .and_then(serde_json::Value::as_array)
+        {
             for track in meta {
                 if let Some(t) = self.parse_track_item(track) {
                     tracks.push(t);
