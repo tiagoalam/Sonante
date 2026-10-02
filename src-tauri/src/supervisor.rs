@@ -108,9 +108,7 @@ impl MpdSupervisor {
     }
 
     pub fn sonante_config_dir() -> PathBuf {
-        let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        path.push("sonante");
-        path
+        crate::persistence::sonante_config_dir()
     }
 
     pub fn library_dir() -> PathBuf {
@@ -174,6 +172,7 @@ impl MpdSupervisor {
     }
 
     pub fn sync_library_symlinks(folders: &[String]) -> Result<PathBuf, String> {
+        crate::persistence::ensure_sonante_config_dir()?;
         let lib_dir = Self::library_dir();
         fs::create_dir_all(&lib_dir).map_err(|e| e.to_string())?;
 
@@ -247,8 +246,7 @@ impl MpdSupervisor {
         cfg: &AppConfig,
         shared_volume_backend: Option<SharedVolumeBackend>,
     ) -> Result<(PathBuf, VolumeBackend), String> {
-        let dir = Self::sonante_config_dir();
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let dir = crate::persistence::ensure_sonante_config_dir()?;
 
         let lib_dir = Self::sync_library_symlinks(&cfg.local_folders)?;
 
@@ -430,6 +428,7 @@ decoder {{
             .map_err(|e| format!("Falha ao encerrar a instância anterior do MPD: {}", e))?;
         self.health = MpdHealth::Starting;
 
+        crate::persistence::ensure_sonante_config_dir()?;
         self.prepare_runtime_files()?;
 
         let dir = Self::sonante_config_dir();

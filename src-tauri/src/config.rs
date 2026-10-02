@@ -78,14 +78,15 @@ impl Default for AppConfig {
 
 impl AppConfig {
     fn config_path() -> PathBuf {
-        let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        path.push("sonante");
-        path.push("config.json");
-        path
+        crate::persistence::sonante_config_dir().join("config.json")
     }
 
     pub fn load() -> Self {
         let path = Self::config_path();
+        if let Err(error) = crate::persistence::prepare_private_file_for_load(&path, "config.json")
+        {
+            eprintln!("[Persistência] {}", error);
+        }
         if path.exists() {
             if let Ok(content) = fs::read_to_string(&path) {
                 if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&content) {
@@ -99,19 +100,8 @@ impl AppConfig {
 
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        
-        // Grava primeiramente em arquivo temporário no mesmo diretório/sistema de arquivos
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
-
-        // Operação atômica no nível do kernel (POSIX rename)
-        fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
-        Ok(())
+        crate::persistence::atomic_write_private(&path, json.as_bytes(), "config.json")
     }
 
     fn apply_legacy_migrations(&mut self) {

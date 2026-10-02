@@ -50,14 +50,16 @@ fn check_local_path_exists(path_str: &str) -> bool {
 
 impl FavoriteAlbum {
     fn favorites_file_path() -> PathBuf {
-        let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        path.push("sonante");
-        path.push("favorites.json");
-        path
+        crate::persistence::sonante_config_dir().join("favorites.json")
     }
 
     pub fn load_all() -> Vec<FavoriteAlbum> {
         let path = Self::favorites_file_path();
+        if let Err(error) =
+            crate::persistence::prepare_private_file_for_load(&path, "favorites.json")
+        {
+            eprintln!("[Persistência] {}", error);
+        }
         if !path.exists() {
             return Vec::new();
         }
@@ -85,19 +87,8 @@ impl FavoriteAlbum {
 
     pub fn save_all(list: &[FavoriteAlbum]) -> Result<(), String> {
         let path = Self::favorites_file_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-
         let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
-
-        // Grava no arquivo temporário antes de substituir o arquivo real
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
-
-        // Troca atômica (impede que o arquivo favorites.json fique zerado ou quebrado)
-        fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
-        Ok(())
+        crate::persistence::atomic_write_private(&path, json.as_bytes(), "favorites.json")
     }
 
     pub fn toggle(album: FavoriteAlbum) -> Result<bool, String> {

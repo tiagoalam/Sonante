@@ -3603,6 +3603,7 @@ version = "0.3.5"
 dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",
+ "libc",
  "reqwest 0.12.28",
  "rfd",
  "serde",

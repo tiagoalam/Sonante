@@ -185,13 +185,9 @@ pub struct DeviceSwitchPreparationError {
 fn get_queue_cache_path() -> Option<PathBuf> {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|_| {
-            std::env::var("HOME").map(|h| Path::new(&h).join(".config"))
-        })
+        .or_else(|_| std::env::var("HOME").map(|h| Path::new(&h).join(".config")))
         .ok()?;
-    let dir = base.join("sonante");
-    let _ = std::fs::create_dir_all(&dir);
-    Some(dir.join("queue_cache.json"))
+    Some(base.join("sonante").join("queue_cache.json"))
 }
 
 pub fn find_folder_cover_path(dir: &Path) -> Option<String> {
@@ -484,15 +480,9 @@ impl AudioEngine {
     fn save_queue_cache(&self) -> Result<(), String> {
         let path = get_queue_cache_path()
             .ok_or_else(|| "Não foi possível determinar o caminho do cache da fila.".to_string())?;
-        let file = std::fs::File::create(&path).map_err(|e| {
-            format!(
-                "Falha ao abrir o cache da fila para escrita ({}): {}",
-                path.display(),
-                e
-            )
-        })?;
-        serde_json::to_writer(file, &self.queue)
-            .map_err(|e| format!("Falha ao persistir o cache da fila: {}", e))
+        let json = serde_json::to_vec(&self.queue)
+            .map_err(|e| format!("Falha ao serializar o cache da fila: {}", e))?;
+        crate::persistence::atomic_write_private(&path, &json, "queue_cache.json")
     }
 
     fn migrate_loaded_queue(queue: Vec<TrackMetadata>) -> Vec<TrackMetadata> {
@@ -546,6 +536,11 @@ impl AudioEngine {
 
     fn load_queue_cache() -> Vec<TrackMetadata> {
         if let Some(p) = get_queue_cache_path() {
+            if let Err(error) =
+                crate::persistence::prepare_private_file_for_load(&p, "queue_cache.json")
+            {
+                eprintln!("[Persistência] {}", error);
+            }
             if p.exists() {
                 if let Ok(file) = std::fs::File::open(&p) {
                     if let Ok(q) = serde_json::from_reader(file) {

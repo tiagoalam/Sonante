@@ -2,6 +2,7 @@ mod alsa_mixer;
 mod audio;
 mod config;
 mod favorites;
+mod persistence;
 mod plex;
 mod shared_volume;
 mod supervisor;
