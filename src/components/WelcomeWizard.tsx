@@ -117,9 +117,15 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
           setLoadingServers(false);
 
           if (servers.length > 0) {
-            const defaultUri = servers[0].chosen_uri;
+            const server = servers[0];
+            const defaultUri = server.chosen_uri;
             setSelectedServerUri(defaultUri);
-            setConfig((prev) => ({ ...prev, plex_url: defaultUri }));
+            setConfig((prev) => ({
+              ...prev,
+              plex_url: defaultUri,
+              plex_server_id: server.client_identifier,
+              plex_server_name: server.name,
+            }));
           }
         }
       } catch (err) {
@@ -137,6 +143,8 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
     setConfig((prev) => ({
       ...prev,
       plex_url: server.chosen_uri,
+      plex_server_id: server.client_identifier,
+      plex_server_name: server.name,
     }));
   };
 
@@ -487,7 +495,13 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                     <button
                       type="button"
                       onClick={() => {
-                        setConfig((prev) => ({ ...prev, plex_token: "", plex_url: "" }));
+                        setConfig((prev) => ({
+                          ...prev,
+                          plex_token: "",
+                          plex_url: "",
+                          plex_server_id: null,
+                          plex_server_name: null,
+                        }));
                         setDiscoveredServers([]);
                       }}
                       className="text-[#888888] hover:text-[#FF4D4D] text-[11px] underline cursor-pointer"

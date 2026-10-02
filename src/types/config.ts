@@ -5,7 +5,7 @@ export interface AppConfig {
   local_folders: string[];
   plex_server_id?: string | null;
   plex_server_name?: string | null;
-  /** Legacy connection route retained until dynamic resolution is introduced. */
+  /** Legacy initial route retained for configuration compatibility. */
   plex_url: string;
   plex_token: string;
   playback_mode: "http" | "local";

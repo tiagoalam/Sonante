@@ -159,6 +159,8 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
       ...config,
       plex_token: "",
       plex_url: "",
+      plex_server_id: null,
+      plex_server_name: null,
     });
     setDiscoveredServers([]);
   };
@@ -181,7 +183,17 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
           setLoadingServers(false);
 
           if (servers.length > 0) {
-            setConfig((prev) => (prev ? { ...prev, plex_url: servers[0].chosen_uri } : null));
+            const server = servers[0];
+            setConfig((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    plex_url: server.chosen_uri,
+                    plex_server_id: server.client_identifier,
+                    plex_server_name: server.name,
+                  }
+                : null,
+            );
           }
         }
       } catch (err) {
@@ -577,12 +589,21 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
                   ) : (
                     <div className="space-y-1.5 max-h-36 overflow-y-auto">
                       {discoveredServers.map((srv) => {
-                        const isSelected = config.plex_url === srv.chosen_uri;
+                        const isSelected = config.plex_server_id
+                          ? config.plex_server_id === srv.client_identifier
+                          : config.plex_url === srv.chosen_uri;
                         const localConn = srv.connections.find((c) => c.local);
+                        const selectServer = () =>
+                          setConfig({
+                            ...config,
+                            plex_url: srv.chosen_uri,
+                            plex_server_id: srv.client_identifier,
+                            plex_server_name: srv.name,
+                          });
                         return (
                           <div
                             key={srv.client_identifier}
-                            onClick={() => setConfig({ ...config, plex_url: srv.chosen_uri })}
+                            onClick={selectServer}
                             className={`p-2.5 rounded-lg border transition-all cursor-pointer flex items-center justify-between ${
                               isSelected
                                 ? "border-[#E5A00D] bg-[#221B0E]"
@@ -598,7 +619,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
                             <input
                               type="radio"
                               checked={isSelected}
-                              onChange={() => setConfig({ ...config, plex_url: srv.chosen_uri })}
+                              onChange={selectServer}
                               className="accent-[#E5A00D] cursor-pointer"
                             />
                           </div>
@@ -628,7 +649,14 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
                     <input
                       type="text"
                       value={config.plex_url}
-                      onChange={(e) => setConfig({ ...config, plex_url: e.target.value })}
+                      onChange={(e) =>
+                        setConfig({
+                          ...config,
+                          plex_url: e.target.value,
+                          plex_server_id: null,
+                          plex_server_name: null,
+                        })
+                      }
                       placeholder="http://192.168.1.100:32400"
                       className="w-full bg-[#121212] border border-[#333333] rounded-lg px-3 py-1.5 text-white outline-none focus:border-[#E5A00D]"
                     />

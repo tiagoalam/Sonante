@@ -111,7 +111,7 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 - **Composição Tauri (`src-tauri/src/lib.rs`)**: registra comandos IPC e mantém `AudioState`, `SupervisorState`, `ConfigState`, `ConfigTransactionState` e `PlexState` em `Mutex`.
 - **`AudioEngine` (`src-tauri/src/audio.rs`)**: cliente síncrono do protocolo MPD, fila espelhada em memória, `queue_cache.json`, status, seek/volume, listagem da biblioteca local e resolução de covers. Atualmente reúne responsabilidades que podem ser separadas no futuro.
 - **`MpdSupervisor` (`src-tauri/src/supervisor.rs`)**: sincroniza a biblioteca virtual de symlinks, gera `mpd.conf`, inicia/para o processo MPD e administra socket/PID. Mudanças aqui têm impacto direto na disponibilidade do DAC.
-- **`PlexClient` (`src-tauri/src/plex.rs`)**: OAuth PIN, descoberta de servidores, consultas a bibliotecas/álbuns/artistas/coleções, parsing de tracks e geração de URIs HTTP ou paths mapeados.
+- **`PlexClient` (`src-tauri/src/plex.rs`)**: OAuth PIN, consultas a bibliotecas/álbuns/artistas/coleções, parsing de tracks e geração de URIs HTTP ou paths mapeados. Seus clones compartilham um manager que usa `machineIdentifier` como identidade, valida/redescobre rotas Plex transitórias e não mantém locks durante HTTP.
 - **Persistência**: `config.json`, `favorites.json`, `queue_cache.json`, banco/configuração do MPD e diretório virtual ficam sob o diretório de configuração do Sonante. O socket e o PID do MPD ficam em `$XDG_RUNTIME_DIR/sonante/`; quando esse diretório não está disponível, o fallback privado é o subdiretório `runtime/sonante` da configuração do Sonante.
 
 ### Fluxo de reprodução atual
@@ -137,7 +137,7 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 - A troca de saída é serializada e transacional: captura um snapshot explícito, aplica a nova configuração e tenta rollback em falha. Snapshots Playing e Paused terminam pausados após a troca; Stopped permanece parado.
 - Há polling de status duplicado no frontend.
 - A biblioteca local agrega roots por symlinks e usa o índice do MPD; roots sobrepostos ou álbuns homônimos exigem cuidado.
-- O token Plex aparece em URLs e arquivos persistidos; trate-o como segredo.
+- O token Plex aparece em URLs e arquivos persistidos; trate-o como segredo. Rotas resolvidas só afetam novas respostas: itens já materializados em fila, `play_uri`, thumbnails e `queue_cache.json` ainda podem reter a rota anterior.
 - Há testes unitários Rust para protocolo MPD, escaping, restauração de fila/estado, rollback e lifecycle do supervisor. Eles usam simulações e não comprovam, sozinhos, integração real com MPD/ALSA, hardware ou bit-perfect.
 
 ## 3. Convenções atuais — retrato mutável
