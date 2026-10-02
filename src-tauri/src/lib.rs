@@ -150,13 +150,49 @@ fn play_uris(uris: Vec<String>, start_index: usize, state: State<AudioState>) ->
     state.0.lock().unwrap().play_uris(uris, start_index)
 }
 
+async fn resolve_playback_uris(
+    tracks: &[TrackMetadata],
+    plex_client: &PlexClient,
+) -> Result<Vec<String>, String> {
+    let mut uris = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let uri = if let Some(locator) = &track.media_locator {
+            plex_client.resolve_media_locator(locator).await?
+        } else {
+            if track.uri.trim().is_empty() {
+                return Err("Faixa sem referência de mídia válida.".to_string());
+            }
+            if AudioEngine::contains_plex_token(&track.uri) {
+                return Err(
+                    "URL Plex autenticada legada não pode ser reutilizada como identidade da faixa."
+                        .to_string(),
+                );
+            }
+            track.uri.clone()
+        };
+        uris.push(uri);
+    }
+    Ok(uris)
+}
+
 #[tauri::command]
-fn play_tracks(
+async fn play_tracks(
     tracks: Vec<TrackMetadata>,
     start_index: usize,
-    state: State<AudioState>,
+    audio_state: State<'_, AudioState>,
+    plex_state: State<'_, PlexState>,
 ) -> Result<(), String> {
-    state.0.lock().unwrap().play_tracks(tracks, start_index)
+    let plex_client = plex_state
+        .0
+        .lock()
+        .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
+        .clone();
+    let playback_uris = resolve_playback_uris(&tracks, &plex_client).await?;
+    audio_state
+        .0
+        .lock()
+        .map_err(|_| "O estado de reprodução está indisponível.".to_string())?
+        .play_tracks(tracks, playback_uris, start_index)
 }
 
 #[tauri::command]
@@ -269,20 +305,53 @@ fn open_external_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn save_config(
+async fn save_config(
     new_config: AppConfig,
-    config_state: State<ConfigState>,
-    transaction_state: State<ConfigTransactionState>,
-    plex_state: State<PlexState>,
-    sup_state: State<SupervisorState>,
-    audio_state: State<AudioState>,
+    config_state: State<'_, ConfigState>,
+    transaction_state: State<'_, ConfigTransactionState>,
+    plex_state: State<'_, PlexState>,
+    sup_state: State<'_, SupervisorState>,
+    audio_state: State<'_, AudioState>,
 ) -> Result<(), String> {
+    let observed_cfg = config_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar a configuração atual: {}", e))?
+        .clone();
+
+    let output_change_expected = observed_cfg.audio_output_type != new_config.audio_output_type
+        || observed_cfg.alsa_device != new_config.alsa_device
+        || observed_cfg.dop_enabled != new_config.dop_enabled
+        || observed_cfg.audio_buffer_size_kb != new_config.audio_buffer_size_kb
+        || observed_cfg.replay_gain != new_config.replay_gain;
+    let playback_uris = if output_change_expected {
+        let queue = audio_state
+            .0
+            .lock()
+            .map_err(|e| format!("Falha ao acessar a fila antes da troca de saída: {}", e))?
+            .get_queue();
+        let plex_client = plex_state
+            .0
+            .lock()
+            .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
+            .clone();
+        resolve_playback_uris(&queue, &plex_client).await?
+    } else {
+        Vec::new()
+    };
+
     let _transaction_guard = transaction_state.begin()?;
     let current_cfg = config_state
         .0
         .lock()
         .map_err(|e| format!("Falha ao acessar a configuração atual: {}", e))?
         .clone();
+    if current_cfg != observed_cfg {
+        return Err(
+            "A configuração mudou durante a preparação da troca de saída. Tente novamente."
+                .to_string(),
+        );
+    }
 
     let audio_hw_changed = current_cfg.audio_output_type != new_config.audio_output_type
         || current_cfg.alsa_device != new_config.alsa_device
@@ -309,7 +378,11 @@ fn save_config(
             Ok(snapshot) => snapshot,
             Err(error) => {
                 if error.snapshot.is_some() {
-                    let rollback = restore_prepared_playback(error.snapshot, &audio_state);
+                    let rollback = restore_prepared_playback(
+                        error.snapshot,
+                        &playback_uris,
+                        &audio_state,
+                    );
                     return Err(error_with_rollback(
                         format!("Falha ao preparar troca de saída: {}", error.cause),
                         rollback,
@@ -329,13 +402,23 @@ fn save_config(
                     "Falha ao iniciar nova saída: não foi possível acessar o supervisor do MPD: {}",
                     e
                 );
-                let rollback = restore_prepared_playback(playback_snapshot, &audio_state);
+                let rollback = restore_prepared_playback(
+                    playback_snapshot,
+                    &playback_uris,
+                    &audio_state,
+                );
                 return Err(error_with_rollback(original, rollback));
             }
         };
         if let Err(switch_error) = switch_result {
             let rollback =
-                rollback_audio_switch(&current_cfg, playback_snapshot, &sup_state, &audio_state);
+                rollback_audio_switch(
+                    &current_cfg,
+                    playback_snapshot,
+                    &playback_uris,
+                    &sup_state,
+                    &audio_state,
+                );
             return Err(error_with_rollback(
                 format!("Falha ao iniciar nova saída: {}", switch_error),
                 rollback,
@@ -344,7 +427,7 @@ fn save_config(
 
         // 3. Restaura fila/faixa/posição quando possível; Playing/Paused terminam pausados e Stopped permanece parado
         let restore_result = match audio_state.0.lock() {
-            Ok(audio) => audio.restore_after_device_switch(playback_snapshot),
+            Ok(audio) => audio.restore_after_device_switch(playback_snapshot, &playback_uris),
             Err(e) => Err(format!(
                 "não foi possível acessar a fila após trocar a saída: {}",
                 e
@@ -352,7 +435,13 @@ fn save_config(
         };
         if let Err(restore_error) = restore_result {
             let rollback =
-                rollback_audio_switch(&current_cfg, playback_snapshot, &sup_state, &audio_state);
+                rollback_audio_switch(
+                    &current_cfg,
+                    playback_snapshot,
+                    &playback_uris,
+                    &sup_state,
+                    &audio_state,
+                );
             return Err(error_with_rollback(
                 format!("Falha ao restaurar reprodução: {}", restore_error),
                 rollback,
@@ -376,6 +465,7 @@ fn save_config(
                 folders_changed,
                 &current_cfg,
                 playback_snapshot,
+                &playback_uris,
                 &sup_state,
                 &audio_state,
             );
@@ -395,6 +485,7 @@ fn save_config(
                 folders_changed,
                 &current_cfg,
                 playback_snapshot,
+                &playback_uris,
                 &sup_state,
                 &audio_state,
             );
@@ -411,6 +502,7 @@ fn save_config(
                 folders_changed,
                 &current_cfg,
                 playback_snapshot,
+                &playback_uris,
                 &sup_state,
                 &audio_state,
             );
@@ -426,6 +518,7 @@ fn save_config(
             folders_changed,
             &current_cfg,
             playback_snapshot,
+            &playback_uris,
             &sup_state,
             &audio_state,
         );
@@ -452,18 +545,20 @@ fn error_with_rollback(original_error: String, rollback: Result<(), String>) -> 
 
 fn restore_prepared_playback(
     playback_snapshot: Option<DeviceSwitchSnapshot>,
+    playback_uris: &[String],
     audio_state: &State<'_, AudioState>,
 ) -> Result<(), String> {
     audio_state
         .0
         .lock()
         .map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
-        .restore_after_device_switch(playback_snapshot)
+        .restore_after_device_switch(playback_snapshot, playback_uris)
 }
 
 fn rollback_audio_switch(
     previous_config: &AppConfig,
     playback_snapshot: Option<DeviceSwitchSnapshot>,
+    playback_uris: &[String],
     sup_state: &State<'_, SupervisorState>,
     audio_state: &State<'_, AudioState>,
 ) -> Result<(), String> {
@@ -476,7 +571,7 @@ fn rollback_audio_switch(
         .0
         .lock()
         .map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
-        .restore_after_device_switch(playback_snapshot)
+        .restore_after_device_switch(playback_snapshot, playback_uris)
 }
 
 fn rollback_applied_config_change(
@@ -484,6 +579,7 @@ fn rollback_applied_config_change(
     folders_changed: bool,
     previous_config: &AppConfig,
     playback_snapshot: Option<DeviceSwitchSnapshot>,
+    playback_uris: &[String],
     sup_state: &State<'_, SupervisorState>,
     audio_state: &State<'_, AudioState>,
 ) -> Result<(), String> {
@@ -504,7 +600,13 @@ fn rollback_applied_config_change(
 
     if audio_hw_changed {
         if let Err(error) =
-            rollback_audio_switch(previous_config, playback_snapshot, sup_state, audio_state)
+            rollback_audio_switch(
+                previous_config,
+                playback_snapshot,
+                playback_uris,
+                sup_state,
+                audio_state,
+            )
         {
             failures.push(format!("saída de áudio: {}", error));
         }

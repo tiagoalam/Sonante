@@ -1,9 +1,14 @@
+export type MediaLocator =
+  | { kind: "local"; uri: string }
+  | { kind: "plex"; server_id: string; part_key: string; file_path?: string | null };
+
 export interface TrackMetadata {
   title: string;
   artist: string;
   album: string;
   thumb?: string | null;
-  uri: string;
+  media_locator?: MediaLocator | null;
+  uri?: string;
   duration?: number;
 }
 

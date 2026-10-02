@@ -117,9 +117,9 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 ### Fluxo de reprodução atual
 
 1. React obtém itens locais pelo MPD ou itens remotos pelo `PlexClient`.
-2. A view converte a seleção em `TrackMetadata[]` e chama `audioService.playTracks`.
-3. Tauri desserializa a chamada e bloqueia `AudioState`.
-4. `AudioEngine` resolve covers, valida e escapa os argumentos, envia `clear`/`add`/`play` ao socket MPD e só então publica/persiste a fila espelhada após a aceitação do MPD.
+2. A view converte a seleção em `TrackMetadata[]` e chama `audioService.playTracks`; faixas Plex carregam uma referência estável com servidor e part key, não a URL autenticada de stream.
+3. Tauri resolve referências Plex para URIs efêmeras com a rota/credencial atual antes de bloquear `AudioState`.
+4. `AudioEngine` resolve covers, valida e escapa os argumentos, envia `clear`/`add`/`play` ao socket MPD e só então publica/persiste a fila lógica após a aceitação do MPD.
 5. Para local, MPD lê a path sob seu `music_directory`; para Plex, MPD abre a URI HTTP com token.
 6. MPD decodifica PCM/DSD e usa seu plugin ALSA.
 7. O frontend consulta status por IPC e exibe metadata, posição, volume e formato reportado pelo MPD.
@@ -137,7 +137,7 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 - A troca de saída é serializada e transacional: captura um snapshot explícito, aplica a nova configuração e tenta rollback em falha. Snapshots Playing e Paused terminam pausados após a troca; Stopped permanece parado.
 - Há polling de status duplicado no frontend.
 - A biblioteca local agrega roots por symlinks e usa o índice do MPD; roots sobrepostos ou álbuns homônimos exigem cuidado.
-- O token Plex aparece em URLs e arquivos persistidos; trate-o como segredo. Rotas resolvidas só afetam novas respostas: itens já materializados em fila, `play_uri`, thumbnails e `queue_cache.json` ainda podem reter a rota anterior.
+- O token Plex ainda aparece em URLs de thumbnails e outros dados já materializados; trate-o como segredo. A fila e `queue_cache.json` usam referências estáveis para streams Plex, mas thumbnails ainda podem reter rota/token anteriores.
 - Há testes unitários Rust para protocolo MPD, escaping, restauração de fila/estado, rollback e lifecycle do supervisor. Eles usam simulações e não comprovam, sozinhos, integração real com MPD/ALSA, hardware ou bit-perfect.
 
 ## 3. Convenções atuais — retrato mutável

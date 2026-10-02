@@ -29,9 +29,16 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
   };
 
   const playAll = (startIndex = 0) => {
-    const uris = tracks.map((t) => t.play_uri);
-    if (uris.length > 0) {
-      audioService.playUris(uris, startIndex);
+    const metaTracks = tracks.map((track) => ({
+      title: track.title,
+      artist: album.artist,
+      album: album.title,
+      thumb: track.thumb || album.thumb || null,
+      media_locator: track.media_locator,
+      duration: track.duration_ms ? track.duration_ms / 1000 : undefined,
+    }));
+    if (metaTracks.length > 0) {
+      audioService.playTracks(metaTracks, startIndex);
     }
   };
 

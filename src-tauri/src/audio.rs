@@ -13,12 +13,29 @@ pub struct AudioDevice {
     pub name: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MediaLocator {
+    Local {
+        uri: String,
+    },
+    Plex {
+        server_id: String,
+        part_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_path: Option<String>,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
     pub album: String,
     pub thumb: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_locator: Option<MediaLocator>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub uri: String,
     #[serde(default)]
     pub duration: Option<f64>,
@@ -360,12 +377,61 @@ impl AudioEngine {
             .map_err(|e| format!("Falha ao persistir o cache da fila: {}", e))
     }
 
+    fn migrate_loaded_queue(queue: Vec<TrackMetadata>) -> Vec<TrackMetadata> {
+        queue
+            .into_iter()
+            .filter_map(|mut track| match &track.media_locator {
+                Some(MediaLocator::Plex {
+                    server_id,
+                    part_key,
+                    ..
+                }) if !server_id.trim().is_empty() && !part_key.trim().is_empty() => {
+                    // A referência estável é a fonte de verdade; nunca mantenha uma URI
+                    // autenticada que possa ter vindo de uma versão intermediária do cache.
+                    track.uri.clear();
+                    Some(track)
+                }
+                Some(MediaLocator::Plex { .. }) => None,
+                Some(MediaLocator::Local { uri }) if !Self::contains_plex_token(uri) => Some(track),
+                Some(MediaLocator::Local { .. }) => None,
+                None if !Self::contains_plex_token(&track.uri) => Some(track),
+                None => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn contains_plex_token(uri: &str) -> bool {
+        uri.split_once('?').is_some_and(|(_, query)| {
+            query.split('&').any(|field| {
+                field
+                    .split_once('=')
+                    .map(|(name, _)| name.eq_ignore_ascii_case("X-Plex-Token"))
+                    .unwrap_or(false)
+            })
+        })
+    }
+
+    fn sanitize_mpd_error(error: String, playback_uris: &[String]) -> String {
+        if !playback_uris
+            .iter()
+            .any(|uri| Self::contains_plex_token(uri))
+        {
+            return error;
+        }
+        if error.starts_with("ACK [") {
+            if let Some(end) = error.find('}') {
+                return format!("O MPD recusou a mídia Plex ({}).", &error[..=end]);
+            }
+        }
+        "Falha ao enviar a mídia Plex ao MPD.".to_string()
+    }
+
     fn load_queue_cache() -> Vec<TrackMetadata> {
         if let Some(p) = get_queue_cache_path() {
             if p.exists() {
                 if let Ok(file) = std::fs::File::open(&p) {
                     if let Ok(q) = serde_json::from_reader(file) {
-                        return q;
+                        return Self::migrate_loaded_queue(q);
                     }
                 }
             }
@@ -535,6 +601,7 @@ impl AudioEngine {
     pub fn restore_after_device_switch(
         &self,
         saved_state: Option<DeviceSwitchSnapshot>,
+        playback_uris: &[String],
     ) -> Result<(), String> {
         if self.queue.is_empty() {
             return Ok(());
@@ -543,6 +610,7 @@ impl AudioEngine {
         let mut send_command = |command: &str| self.send_command(command);
         self.restore_after_device_switch_with(
             saved_state,
+            playback_uris,
             &mut send_command,
             &mut std::thread::sleep,
         )
@@ -551,6 +619,7 @@ impl AudioEngine {
     fn restore_after_device_switch_with<F, S>(
         &self,
         saved_state: Option<DeviceSwitchSnapshot>,
+        playback_uris: &[String],
         send_command: &mut F,
         sleep: &mut S,
     ) -> Result<(), String>
@@ -558,8 +627,10 @@ impl AudioEngine {
         F: FnMut(&str) -> Result<Vec<String>, String>,
         S: FnMut(Duration),
     {
-        let restore_queue = self.device_switch_queue_restore_commands(saved_state)?;
-        send_command(&restore_queue)?;
+        let restore_queue =
+            self.device_switch_queue_restore_commands(saved_state, playback_uris)?;
+        send_command(&restore_queue)
+            .map_err(|error| Self::sanitize_mpd_error(error, playback_uris))?;
 
         let Some(snapshot) = saved_state else {
             return Ok(());
@@ -580,10 +651,18 @@ impl AudioEngine {
     fn device_switch_queue_restore_commands(
         &self,
         saved_state: Option<DeviceSwitchSnapshot>,
+        playback_uris: &[String],
     ) -> Result<String, String> {
+        if playback_uris.len() != self.queue.len() {
+            return Err(format!(
+                "Quantidade de URIs resolvidas ({}) difere da fila lógica ({}).",
+                playback_uris.len(),
+                self.queue.len()
+            ));
+        }
         let mut batch = String::from("command_list_begin\nclear\n");
-        for track in &self.queue {
-            batch.push_str(&format!("add {}\n", Self::quote_mpd_argument(&track.uri)?));
+        for uri in playback_uris {
+            batch.push_str(&format!("add {}\n", Self::quote_mpd_argument(uri)?));
         }
         if let Some(snapshot) = saved_state {
             // `add` preserva a posição na fila, mas não seleciona uma faixa atual no MPD.
@@ -679,6 +758,7 @@ impl AudioEngine {
     pub fn play_tracks(
         &mut self,
         mut tracks: Vec<TrackMetadata>,
+        playback_uris: Vec<String>,
         start_index: usize,
     ) -> Result<(), String> {
         if tracks.is_empty() {
@@ -691,25 +771,40 @@ impl AudioEngine {
                 tracks.len()
             ));
         }
+        if playback_uris.len() != tracks.len() {
+            return Err(format!(
+                "Quantidade de URIs resolvidas ({}) difere da fila lógica ({}).",
+                playback_uris.len(),
+                tracks.len()
+            ));
+        }
 
-        for track in &mut tracks {
+        for (track, playback_uri) in tracks.iter_mut().zip(&playback_uris) {
             if track.thumb.is_none() {
-                track.thumb = self.resolve_cover(&track.uri);
+                track.thumb = self.resolve_cover(playback_uri);
             }
         }
 
         let mut batch = String::from("command_list_begin\nclear\n");
-        for track in &tracks {
-            batch.push_str(&format!("add {}\n", Self::quote_mpd_argument(&track.uri)?));
+        for uri in &playback_uris {
+            batch.push_str(&format!("add {}\n", Self::quote_mpd_argument(uri)?));
         }
         batch.push_str(&format!("play {}\ncommand_list_end", start_index));
 
-        self.send_command(&batch)?;
+        self.send_command(&batch)
+            .map_err(|error| Self::sanitize_mpd_error(error, &playback_uris))?;
         self.queue = tracks;
         self.save_queue_cache()
     }
 
     pub fn play_uris(&mut self, uris: Vec<String>, start_index: usize) -> Result<(), String> {
+        if uris.iter().any(|uri| Self::contains_plex_token(uri)) {
+            return Err(
+                "URLs Plex autenticadas não são aceitas como identidade persistente da faixa."
+                    .to_string(),
+            );
+        }
+        let playback_uris = uris.clone();
         let tracks = uris
             .into_iter()
             .map(|u| {
@@ -720,12 +815,13 @@ impl AudioEngine {
                     artist: "".to_string(),
                     album: "".to_string(),
                     thumb: None,
+                    media_locator: None,
                     uri: u,
                     duration: None,
                 }
             })
             .collect();
-        self.play_tracks(tracks, start_index)
+        self.play_tracks(tracks, playback_uris, start_index)
     }
 
     pub fn toggle_play_pause(&self) -> Result<(), String> {
@@ -1021,6 +1117,7 @@ mod tests {
                 artist: "Artista".to_string(),
                 album: "Álbum".to_string(),
                 thumb: None,
+                media_locator: None,
                 uri: uri.to_string(),
                 duration: Some(120.0),
             }],
@@ -1034,10 +1131,96 @@ mod tests {
             artist: "Artista".to_string(),
             album: "Álbum".to_string(),
             thumb: None,
+            media_locator: None,
             uri: "álbum/segunda.flac".to_string(),
             duration: Some(180.0),
         });
         engine
+    }
+
+    fn plex_track() -> TrackMetadata {
+        TrackMetadata {
+            title: "Faixa Plex".to_string(),
+            artist: "Artista".to_string(),
+            album: "Álbum".to_string(),
+            thumb: None,
+            media_locator: Some(MediaLocator::Plex {
+                server_id: "server-1".to_string(),
+                part_key: "/library/parts/10/file.flac".to_string(),
+                file_path: Some("/srv/music/file.flac".to_string()),
+            }),
+            uri: String::new(),
+            duration: Some(120.0),
+        }
+    }
+
+    #[test]
+    fn new_plex_queue_entry_serializes_only_stable_media_reference() {
+        let json = serde_json::to_string(&plex_track()).unwrap();
+
+        assert!(json.contains("server-1"));
+        assert!(json.contains("/library/parts/10/file.flac"));
+        assert!(!json.contains("X-Plex-Token"));
+        assert!(!json.contains("\"uri\""));
+    }
+
+    #[test]
+    fn authenticated_legacy_plex_cache_entry_is_discarded_but_local_is_preserved() {
+        let legacy_plex = TrackMetadata {
+            uri: "http://old-route/library/parts/1/file.flac?X-Plex-Token=OLD_SECRET"
+                .to_string(),
+            ..engine_with_track("unused").queue.remove(0)
+        };
+        let local = engine_with_track("álbum/faixa.flac").queue.remove(0);
+
+        let migrated = AudioEngine::migrate_loaded_queue(vec![legacy_plex, local.clone()]);
+
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].uri, local.uri);
+    }
+
+    #[test]
+    fn queue_restore_uses_fresh_uri_without_mutating_stable_plex_queue() {
+        let engine = AudioEngine {
+            socket_path: String::new(),
+            music_dir: String::new(),
+            queue: vec![plex_track()],
+        };
+        let first = engine
+            .device_switch_queue_restore_commands(
+                None,
+                &["http://lan/library/parts/10/file.flac?X-Plex-Token=TOKEN_A".to_string()],
+            )
+            .unwrap();
+        let refreshed = engine
+            .device_switch_queue_restore_commands(
+                None,
+                &["https://remote/library/parts/10/file.flac?X-Plex-Token=TOKEN_B".to_string()],
+            )
+            .unwrap();
+
+        assert!(first.contains("http://lan/"));
+        assert!(refreshed.contains("https://remote/"));
+        assert!(engine.queue[0].uri.is_empty());
+        assert!(matches!(
+            engine.queue[0].media_locator,
+            Some(MediaLocator::Plex { .. })
+        ));
+    }
+
+    #[test]
+    fn mpd_errors_for_ephemeral_plex_uris_are_sanitized() {
+        let secret_uri =
+            "https://route.invalid/library/parts/1/file.flac?X-Plex-Token=SECRET".to_string();
+        let error = AudioEngine::sanitize_mpd_error(
+            format!("ACK [50@0] {{add}} Falha em {secret_uri}"),
+            &[secret_uri],
+        );
+
+        assert!(error.contains("ACK [50@0] {add}"));
+        assert!(!error.contains("SECRET"));
+        assert!(!error.contains("route.invalid"));
+        assert!(!error.contains("X-Plex-Token"));
     }
 
     fn restore_with_seek_responses(
@@ -1058,8 +1241,14 @@ mod tests {
                 Ok(Vec::new())
             }
         };
-        let result =
-            engine.restore_after_device_switch_with(Some(snapshot), &mut send, &mut |_| {});
+        let playback_uris: Vec<String> =
+            engine.queue.iter().map(|track| track.uri.clone()).collect();
+        let result = engine.restore_after_device_switch_with(
+            Some(snapshot),
+            &playback_uris,
+            &mut send,
+            &mut |_| {},
+        );
         (result, commands)
     }
 
@@ -1204,17 +1393,29 @@ mod tests {
     #[test]
     fn queue_restore_commands_escape_mpd_arguments_and_reject_line_breaks() {
         let engine = engine_with_track("pasta/uma \\\"faixa\\\".flac");
-        let commands = engine.device_switch_queue_restore_commands(None).unwrap();
+        let commands = engine
+            .device_switch_queue_restore_commands(
+                None,
+                &["pasta/uma \\\"faixa\\\".flac".to_string()],
+            )
+            .unwrap();
         assert!(commands.contains(r#"add "pasta/uma \\\"faixa\\\".flac""#));
 
         let plex_engine =
             engine_with_track("http://plex.local/library/parts/1/file.flac?download=1");
-        let plex_commands = plex_engine.device_switch_queue_restore_commands(None).unwrap();
+        let plex_commands = plex_engine
+            .device_switch_queue_restore_commands(
+                None,
+                &["http://plex.local/library/parts/1/file.flac?download=1".to_string()],
+            )
+            .unwrap();
         assert!(plex_commands
             .contains(r#"add "http://plex.local/library/parts/1/file.flac?download=1""#));
 
         let engine = engine_with_track("pasta/faixa.flac\nkill");
-        assert!(engine.device_switch_queue_restore_commands(None).is_err());
+        assert!(engine
+            .device_switch_queue_restore_commands(None, &["pasta/faixa.flac\nkill".to_string()])
+            .is_err());
     }
 
     #[test]
@@ -1236,10 +1437,17 @@ mod tests {
             artist: String::new(),
             album: String::new(),
             thumb: Some(String::new()),
+            media_locator: None,
             uri: "faixa.flac\nkill".to_string(),
             duration: None,
         };
-        assert!(engine.play_tracks(vec![invalid_track], 0).is_err());
+        assert!(engine
+            .play_tracks(
+                vec![invalid_track],
+                vec!["faixa.flac\nkill".to_string()],
+                0,
+            )
+            .is_err());
         assert_eq!(engine.queue[0].uri, "anterior.flac");
     }
 
@@ -1250,7 +1458,7 @@ mod tests {
             music_dir: String::new(),
             queue: Vec::new(),
         };
-        assert!(engine.restore_after_device_switch(None).is_ok());
+        assert!(engine.restore_after_device_switch(None, &[]).is_ok());
     }
 
     #[test]

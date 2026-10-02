@@ -463,7 +463,7 @@ export function App() {
         artist: album.artist,
         album: album.title,
         thumb: t.thumb || album.thumb || null,
-        uri: t.play_uri,
+        media_locator: t.media_locator,
         duration: t.duration_ms ? t.duration_ms / 1000 : undefined,
       }));
       if (metaTracks.length > 0) {
@@ -922,7 +922,7 @@ export function App() {
                                     artist: track.album_title || "Plex Track",
                                     album: track.album_title || "",
                                     thumb: track.thumb || null,
-                                    uri: track.play_uri,
+                                    media_locator: track.media_locator,
                                     duration: track.duration_ms ? track.duration_ms / 1000 : undefined,
                                   },
                                 ];

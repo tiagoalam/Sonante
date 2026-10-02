@@ -51,8 +51,8 @@ export const ArtistView: React.FC<Props> = ({
   const isTrackActive = (track: PlexTrack) => {
     if (!isPlaybackAvailable || !status.current_file) return false;
     return (
-      track.play_uri === status.current_file ||
-      track.play_uri.endsWith(status.current_file) ||
+      (track.media_locator.kind === "plex" &&
+        status.current_file.includes(track.media_locator.part_key)) ||
       status.current_file.endsWith(track.title) ||
       status.current_file.includes(track.rating_key)
     );
@@ -75,7 +75,7 @@ export const ArtistView: React.FC<Props> = ({
       artist: artist.name,
       album: t.album_title || "Single",
       thumb: t.thumb || artistThumb || null,
-      uri: t.play_uri,
+      media_locator: t.media_locator,
     }));
 
     try {

@@ -1,3 +1,5 @@
+import type { MediaLocator } from "./audio";
+
 export interface PlexLibrary {
   key: string;
   title: string;
@@ -25,7 +27,7 @@ export interface PlexTrack {
   album_title?: string;
   artist?: string;
   thumb?: string | null;
-  play_uri: string;
+  media_locator: MediaLocator;
   duration?: number;
   duration_ms?: number;
   index?: number;

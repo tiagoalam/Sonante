@@ -29,7 +29,13 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
   const [loading, setLoading] = useState(true);
 
   const [selectedAlbum, setSelectedAlbum] = useState<FavoriteAlbum | null>(null);
-  const [tracks, setTracks] = useState<{ title: string; artist: string; duration?: number; uri: string }[]>([]);
+  const [tracks, setTracks] = useState<{
+    title: string;
+    artist: string;
+    duration?: number;
+    uri?: string;
+    media_locator?: import("../types/audio").MediaLocator;
+  }[]>([]);
   const [loadingTracks, setLoadingTracks] = useState(false);
 
   const loadFavorites = async () => {
@@ -90,7 +96,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
             title: t.title,
             artist: fav.artist,
             duration: t.duration ? t.duration / 1000 : undefined,
-            uri: t.play_uri,
+            media_locator: t.media_locator,
           }))
         );
       }
@@ -110,6 +116,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
       album: selectedAlbum.title,
       thumb: selectedAlbum.thumb || null,
       uri: t.uri,
+      media_locator: t.media_locator,
     }));
     audioService.playTracks(meta, startIndex);
   };
@@ -141,7 +148,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
           artist: fav.artist,
           album: fav.title,
           thumb: fav.thumb || null,
-          uri: t.play_uri,
+          media_locator: t.media_locator,
         }));
         if (meta.length > 0) audioService.playTracks(meta, 0);
       }

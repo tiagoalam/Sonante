@@ -1,3 +1,4 @@
+use crate::audio::MediaLocator;
 use crate::config::AppConfig;
 use reqwest::{RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
@@ -295,6 +296,7 @@ async fn discover_plex_servers(
 
 #[derive(Clone)]
 struct ResolvedPlexConnection {
+    server_id: String,
     base_url: String,
     token: String,
     generation: u64,
@@ -416,7 +418,16 @@ impl PlexConnectionManager {
     async fn resolve(&self) -> Result<ResolvedPlexConnection, PlexError> {
         let snapshot = self.snapshot()?;
         if let Some(base_url) = snapshot.current_base_url.clone() {
+            let server_id = snapshot
+                .identity
+                .as_ref()
+                .map(|identity| identity.machine_identifier.clone())
+                .ok_or(PlexError {
+                    operation: "resolver o servidor",
+                    kind: PlexErrorKind::ServerSelectionRequired,
+                })?;
             return Ok(ResolvedPlexConnection {
+                server_id,
                 base_url,
                 token: snapshot
                     .resolved_token
@@ -608,10 +619,12 @@ impl PlexConnectionManager {
                 kind: PlexErrorKind::ConfigurationChanged,
             });
         }
+        let server_id = identity.machine_identifier.clone();
         state.identity = Some(identity);
         state.current_base_url = Some(base_url.clone());
         state.resolved_token = Some(token.clone());
         Ok(ResolvedPlexConnection {
+            server_id,
             base_url,
             token,
             generation: expected_generation,
@@ -665,6 +678,24 @@ impl PlexConnectionManager {
 fn normalized_base_url(value: &str) -> Option<String> {
     let normalized = value.trim().trim_end_matches('/');
     (!normalized.is_empty()).then(|| normalized.to_string())
+}
+
+fn is_valid_plex_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.contains(['\0', '\r', '\n'])
+        && !path.contains("://")
+}
+
+fn authenticated_plex_url(base_url: &str, path_and_query: &str, token: &str) -> String {
+    let separator = if path_and_query.contains('?') { '&' } else { '?' };
+    format!(
+        "{}{}{}X-Plex-Token={}",
+        base_url.trim_end_matches('/'),
+        path_and_query,
+        separator,
+        token
+    )
 }
 
 fn prioritized_candidates(
@@ -1012,6 +1043,156 @@ mod tests {
             },
             server,
         )
+    }
+
+    fn media_client_for_test(config: &AppConfig) -> PlexClient {
+        let mut path_mappings = HashMap::new();
+        if config.playback_mode == "local"
+            && !config.remote_share_path.is_empty()
+            && !config.local_mount_path.is_empty()
+        {
+            path_mappings.insert(
+                config.remote_share_path.clone(),
+                config.local_mount_path.clone(),
+            );
+        }
+        PlexClient {
+            connection_manager: Arc::new(test_manager(
+                config,
+                "http://127.0.0.1:9/api/v2/resources".to_string(),
+            )),
+            playback_mode: config.playback_mode.clone(),
+            path_mappings,
+        }
+    }
+
+    fn plex_locator(server_id: &str, part_key: &str, file_path: Option<&str>) -> MediaLocator {
+        MediaLocator::Plex {
+            server_id: server_id.to_string(),
+            part_key: part_key.to_string(),
+            file_path: file_path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn parsed_plex_track_contains_stable_reference_instead_of_authenticated_uri() {
+        let mut config = manager_config("http://route.invalid", Some("server-1"));
+        config.playback_mode = "local".to_string();
+        let client = media_client_for_test(&config);
+        let connection = ResolvedPlexConnection {
+            server_id: "server-1".to_string(),
+            base_url: "http://route.invalid".to_string(),
+            token: "SECRET".to_string(),
+            generation: 0,
+        };
+        let item = serde_json::json!({
+            "ratingKey": "track-1",
+            "title": "Faixa",
+            "Media": [{
+                "Part": [{
+                    "key": "/library/parts/1/file.flac",
+                    "file": "/srv/music/file.flac"
+                }]
+            }]
+        });
+
+        let track = client.parse_track_item(&connection, &item).unwrap();
+
+        assert_eq!(
+            track.media_locator,
+            plex_locator(
+                "server-1",
+                "/library/parts/1/file.flac",
+                Some("/srv/music/file.flac")
+            )
+        );
+        let serialized = serde_json::to_string(&track).unwrap();
+        assert!(!serialized.contains("SECRET"));
+        assert!(!serialized.contains("route.invalid"));
+    }
+
+    #[test]
+    fn same_media_reference_uses_current_route_and_current_token() {
+        let mut config = manager_config("http://lan-route", Some("server-1"));
+        config.plex_token = "TOKEN_A".to_string();
+        let manager = Arc::new(test_manager(
+            &config,
+            "http://127.0.0.1:9/api/v2/resources".to_string(),
+        ));
+        manager
+            .publish_connection(
+                0,
+                PlexServerIdentity {
+                    machine_identifier: "server-1".to_string(),
+                    display_name: "Server".to_string(),
+                },
+                "http://lan-route".to_string(),
+                "TOKEN_A".to_string(),
+            )
+            .unwrap();
+        let mut client = PlexClient {
+            connection_manager: manager.clone(),
+            playback_mode: "http".to_string(),
+            path_mappings: HashMap::new(),
+        };
+        let locator = plex_locator("server-1", "/library/parts/1/file.flac", None);
+
+        let first = tauri::async_runtime::block_on(client.resolve_media_locator(&locator)).unwrap();
+
+        config.plex_url = "https://remote-route".to_string();
+        config.plex_token = "TOKEN_B".to_string();
+        client.update_config(&config);
+        manager
+            .publish_connection(
+                1,
+                PlexServerIdentity {
+                    machine_identifier: "server-1".to_string(),
+                    display_name: "Server".to_string(),
+                },
+                "https://remote-route".to_string(),
+                "TOKEN_B".to_string(),
+            )
+            .unwrap();
+        let second =
+            tauri::async_runtime::block_on(client.resolve_media_locator(&locator)).unwrap();
+
+        assert!(first.starts_with("http://lan-route"));
+        assert!(first.ends_with("X-Plex-Token=TOKEN_A"));
+        assert!(second.starts_with("https://remote-route"));
+        assert!(second.ends_with("X-Plex-Token=TOKEN_B"));
+        assert!(!second.contains("TOKEN_A"));
+    }
+
+    #[test]
+    fn media_reference_for_different_server_is_rejected_without_sensitive_details() {
+        let config = manager_config("http://selected-route.invalid", Some("server-1"));
+        let client = media_client_for_test(&config);
+        let locator = plex_locator("server-2", "/library/parts/1/file.flac", None);
+
+        let error = tauri::async_runtime::block_on(client.resolve_media_locator(&locator))
+            .unwrap_err();
+
+        assert!(!error.contains("TEST_ACCOUNT_TOKEN"));
+        assert!(!error.contains("selected-route.invalid"));
+        assert!(!error.contains("X-Plex-Token"));
+    }
+
+    #[test]
+    fn legacy_local_playback_mode_maps_file_path_without_forcing_http() {
+        let mut config = manager_config("http://unreachable.invalid", Some("server-1"));
+        config.playback_mode = "local".to_string();
+        config.remote_share_path = "/srv/music".to_string();
+        config.local_mount_path = "/mnt/plex".to_string();
+        let client = media_client_for_test(&config);
+        let locator = plex_locator(
+            "server-1",
+            "/library/parts/1/file.flac",
+            Some("/srv/music/album/file.flac"),
+        );
+
+        let uri = tauri::async_runtime::block_on(client.resolve_media_locator(&locator)).unwrap();
+
+        assert_eq!(uri, "/mnt/plex/album/file.flac");
     }
 
     #[test]
@@ -1533,7 +1714,7 @@ pub struct PlexTrack {
     pub thumb: Option<String>,
     pub track_index: u32,
     pub duration_ms: u64,
-    pub play_uri: String,
+    pub media_locator: MediaLocator,
 }
 
 #[derive(Clone)]
@@ -1638,6 +1819,77 @@ impl PlexClient {
         }
     }
 
+    pub async fn resolve_media_locator(
+        &self,
+        locator: &MediaLocator,
+    ) -> Result<String, String> {
+        let MediaLocator::Plex {
+            server_id,
+            part_key,
+            file_path,
+        } = locator
+        else {
+            return match locator {
+                MediaLocator::Local { uri } => Ok(uri.clone()),
+                MediaLocator::Plex { .. } => unreachable!(),
+            };
+        };
+
+        let snapshot = self
+            .connection_manager
+            .snapshot()
+            .map_err(|error| error.public_message())?;
+        let selected_server_id = snapshot
+            .identity
+            .as_ref()
+            .map(|identity| identity.machine_identifier.as_str())
+            .ok_or_else(|| {
+                PlexError {
+                    operation: "resolver a faixa",
+                    kind: PlexErrorKind::ServerSelectionRequired,
+                }
+                .public_message()
+            })?;
+        if selected_server_id != server_id {
+            return Err(PlexError {
+                operation: "resolver a faixa",
+                kind: PlexErrorKind::IdentityMismatch,
+            }
+            .public_message());
+        }
+
+        if self.playback_mode == "local" {
+            if let Some(file_path) = file_path {
+                for (remote, mount) in &self.path_mappings {
+                    if file_path.starts_with(remote) {
+                        return Ok(file_path.replacen(remote, mount, 1));
+                    }
+                }
+            }
+        }
+
+        if !is_valid_plex_path(part_key) {
+            return Err(PlexError::invalid_response("resolver a faixa").public_message());
+        }
+        let connection = self
+            .connection_manager
+            .resolve()
+            .await
+            .map_err(|error| error.public_message())?;
+        if connection.server_id != *server_id {
+            return Err(PlexError {
+                operation: "resolver a faixa",
+                kind: PlexErrorKind::IdentityMismatch,
+            }
+            .public_message());
+        }
+        Ok(authenticated_plex_url(
+            &connection.base_url,
+            part_key,
+            &connection.token,
+        ))
+    }
+
     fn get_thumb_url(connection: &ResolvedPlexConnection, thumb_path: &str) -> String {
         format!(
             "{}{}?X-Plex-Token={}",
@@ -1665,28 +1917,7 @@ impl PlexClient {
         let media = item["Media"].as_array()?.first()?;
         let part = media["Part"].as_array()?.first()?;
         let file_path = part["file"].as_str().unwrap_or("");
-        let part_key = part["key"].as_str().unwrap_or("");
-
-        let play_uri = if self.playback_mode == "local" {
-            let mut local = None;
-            for (remote, mount) in &self.path_mappings {
-                if file_path.starts_with(remote) {
-                    local = Some(file_path.replacen(remote, mount, 1));
-                    break;
-                }
-            }
-            local.unwrap_or_else(|| {
-                format!(
-                    "{}{}?X-Plex-Token={}",
-                    connection.base_url, part_key, connection.token
-                )
-            })
-        } else {
-            format!(
-                "{}{}?X-Plex-Token={}",
-                connection.base_url, part_key, connection.token
-            )
-        };
+        let part_key = part["key"].as_str().filter(|key| !key.is_empty())?;
 
         Some(PlexTrack {
             rating_key,
@@ -1695,7 +1926,12 @@ impl PlexClient {
             thumb,
             track_index,
             duration_ms,
-            play_uri,
+            media_locator: MediaLocator::Plex {
+                server_id: connection.server_id.clone(),
+                part_key: part_key.to_string(),
+                file_path: (self.playback_mode == "local" && !file_path.is_empty())
+                    .then(|| file_path.to_string()),
+            },
         })
     }
 

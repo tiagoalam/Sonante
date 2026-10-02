@@ -82,7 +82,7 @@ export const AlbumView: React.FC<Props> = ({
       artist: album.artist,
       album: album.title,
       thumb: t.thumb || album.thumb || null,
-      uri: t.play_uri,
+      media_locator: t.media_locator,
       duration: t.duration_ms ? t.duration_ms / 1000 : (t.duration ? (t.duration > 1000 ? t.duration / 1000 : t.duration) : undefined),
     }));
 
