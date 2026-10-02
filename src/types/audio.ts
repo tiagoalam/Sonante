@@ -21,6 +21,14 @@ export interface AudioDevice {
   name: string;
 }
 
+export interface VolumeStatus {
+  value: number;
+  muted: boolean;
+  writable: boolean;
+  available: boolean;
+  backend: "alsa_hardware" | "pipewire" | "mpd_software" | "unavailable";
+}
+
 export interface PlaybackStatus {
   state: string;
   elapsed: number;
@@ -31,7 +39,7 @@ export interface PlaybackStatus {
   artist: string;
   album: string;
   thumb?: string | null;
-  volume: number;
+  volume: VolumeStatus;
   is_updating: boolean; // <-- Necessário para o ícone de indexação/sincronização
 }
 

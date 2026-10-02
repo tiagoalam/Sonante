@@ -20,6 +20,12 @@
     "queue": "Fila de Reprodução",
     "mute": "Silenciar",
     "unmute": "Restaurar Volume",
+    "volumeBackend": {
+      "alsa_hardware": "ALSA Hardware",
+      "pipewire": "PipeWire",
+      "mpd_software": "Software",
+      "unavailable": "Indisponível"
+    },
     "play": "Reproduzir",
     "pause": "Pausar",
     "previous": "Anterior",

@@ -41,6 +41,71 @@ pub enum CurrentMedia {
     },
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeBackend {
+    AlsaHardware,
+    #[serde(rename = "pipewire")]
+    PipeWire,
+    MpdSoftware,
+    Unavailable,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct VolumeStatus {
+    pub value: u32,
+    pub muted: bool,
+    pub writable: bool,
+    pub available: bool,
+    pub backend: VolumeBackend,
+}
+
+impl VolumeStatus {
+    fn from_mpd(value: i32) -> Self {
+        let available = (0..=100).contains(&value);
+        let value = if available { value as u32 } else { 0 };
+        Self {
+            value,
+            muted: available && value == 0,
+            writable: available,
+            available,
+            backend: if available {
+                VolumeBackend::MpdSoftware
+            } else {
+                VolumeBackend::Unavailable
+            },
+        }
+    }
+
+    pub(crate) fn pipewire(value: u32, muted: bool) -> Self {
+        Self {
+            value,
+            muted,
+            writable: true,
+            available: true,
+            backend: VolumeBackend::PipeWire,
+        }
+    }
+
+    pub(crate) fn pipewire_unavailable() -> Self {
+        Self {
+            value: 0,
+            muted: false,
+            writable: false,
+            available: false,
+            backend: VolumeBackend::Unavailable,
+        }
+    }
+
+    pub(crate) fn identify_backend(&mut self, backend: VolumeBackend) {
+        self.backend = if self.available {
+            backend
+        } else {
+            VolumeBackend::Unavailable
+        };
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TrackMetadata {
     pub title: String,
@@ -87,7 +152,7 @@ pub struct PlaybackStatus {
     pub artist: String,
     pub album: String,
     pub thumb: Option<String>,
-    pub volume: i32,
+    pub volume: VolumeStatus,
     pub is_updating: bool,
 }
 
@@ -1048,7 +1113,7 @@ impl AudioEngine {
                 artist: String::new(),
                 album: String::new(),
                 thumb: None,
-                volume,
+                volume: VolumeStatus::from_mpd(volume),
                 is_updating,
             });
         }
@@ -1156,7 +1221,7 @@ impl AudioEngine {
             artist,
             album,
             thumb,
-            volume,
+            volume: VolumeStatus::from_mpd(volume),
             is_updating,
         })
     }
@@ -1167,6 +1232,30 @@ pub struct AudioState(pub Mutex<AudioEngine>);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_backends_have_stable_public_names() {
+        let serialized = [
+            (VolumeBackend::AlsaHardware, "\"alsa_hardware\""),
+            (VolumeBackend::PipeWire, "\"pipewire\""),
+            (VolumeBackend::MpdSoftware, "\"mpd_software\""),
+            (VolumeBackend::Unavailable, "\"unavailable\""),
+        ];
+
+        for (backend, expected) in serialized {
+            assert_eq!(serde_json::to_string(&backend).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn unavailable_mpd_volume_has_no_public_percentage_backend() {
+        let volume = VolumeStatus::from_mpd(-1);
+
+        assert_eq!(volume.value, 0);
+        assert!(!volume.available);
+        assert!(!volume.writable);
+        assert_eq!(volume.backend, VolumeBackend::Unavailable);
+    }
 
     fn engine_with_track(uri: &str) -> AudioEngine {
         AudioEngine {
@@ -1281,7 +1370,7 @@ mod tests {
             artist: "Artista".to_string(),
             album: "Álbum".to_string(),
             thumb: None,
-            volume: 100,
+            volume: VolumeStatus::from_mpd(100),
             is_updating: false,
         };
 

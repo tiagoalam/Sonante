@@ -294,7 +294,13 @@ export function App() {
     artist: "",
     album: "",
     thumb: null,
-    volume: 100,
+    volume: {
+      value: 100,
+      muted: false,
+      writable: true,
+      available: true,
+      backend: "unavailable",
+    },
     is_updating: false,
   });
   const [mpdHealth, setMpdHealth] = useState<MpdHealth>({ state: "starting" });
@@ -465,16 +471,21 @@ export function App() {
         audioService.previous().catch(console.error);
       } else if (e.code === "ArrowUp") {
         e.preventDefault();
-        const nextVol = Math.min((current.volume ?? 100) + 5, 100);
+        if (!current.volume.available || !current.volume.writable) return;
+        const nextVol = Math.min(current.volume.value + 5, 100);
         audioService.setVolume(nextVol).catch(console.error);
       } else if (e.code === "ArrowDown") {
         e.preventDefault();
-        const prevVol = Math.max((current.volume ?? 100) - 5, 0);
+        if (!current.volume.available || !current.volume.writable) return;
+        const prevVol = Math.max(current.volume.value - 5, 0);
         audioService.setVolume(prevVol).catch(console.error);
       } else if (e.key.toLowerCase() === "m") {
         e.preventDefault();
-        const currentVol = current.volume ?? 100;
-        audioService.setVolume(currentVol > 0 ? 0 : 100).catch(console.error);
+        if (!current.volume.available || !current.volume.writable) return;
+        const currentVol = current.volume.value;
+        audioService
+          .setVolume(!current.volume.muted && currentVol > 0 ? 0 : currentVol || 100)
+          .catch(console.error);
       }
     };
 

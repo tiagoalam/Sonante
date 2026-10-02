@@ -20,6 +20,12 @@
     "queue": "Play Queue",
     "mute": "Mute",
     "unmute": "Unmute",
+    "volumeBackend": {
+      "alsa_hardware": "ALSA Hardware",
+      "pipewire": "PipeWire",
+      "mpd_software": "Software",
+      "unavailable": "Unavailable"
+    },
     "play": "Play",
     "pause": "Pause",
     "previous": "Previous",

@@ -128,7 +128,7 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 
 - **ALSA Direct**: `audio_output_type == "alsa"`; gera saída MPD ALSA para `alsa_device`, normalmente `hw:CARD=...,DEV=...`, e inclui `dop yes/no`.
 - **Shared**: `audio_output_type == "pipewire"`/`"shared"`, ou dispositivo `default`; ainda usa `type "alsa"`, mas aponta para `device "default"`. A coexistência com o sistema depende da configuração ALSA/PipeWire/PulseAudio/dmix do host.
-- Shared gera `mixer_type "software"`. Em ALSA Direct, o Sonante associa `hw:CARD=...,DEV=...` à placa `hw:CARD=...` e usa `mixer_type "hardware"` somente quando encontra exatamente um controle ALSA legível de volume de reprodução, com canais e faixa válidos; ausência, falha ou ambiguidade preserva o mixer por software. A UI não apresenta ALSA Direct como bit-perfect, e o formato reportado pelo MPD não valida o caminho efetivamente entregue ao ALSA/DAC.
+- Shared configurado como PipeWire usa `wpctl` opcionalmente para ler e alterar `@DEFAULT_AUDIO_SINK@` quando a sondagem inicial é válida; nesse caso o MPD gera `mixer_type "none"`. Sem confirmação segura, Shared preserva `mixer_type "software"`. Falhas posteriores do `wpctl` tornam o volume temporariamente indisponível, sem fallback silencioso. Em ALSA Direct, o Sonante associa `hw:CARD=...,DEV=...` à placa `hw:CARD=...` e usa `mixer_type "hardware"` somente quando encontra exatamente um controle ALSA legível de volume de reprodução, com canais e faixa válidos; ausência, falha ou ambiguidade preserva o mixer por software. A UI não apresenta ALSA Direct como bit-perfect, e o formato reportado pelo MPD não valida o caminho efetivamente entregue ao ALSA/DAC.
 
 ### Estado conhecido que merece cautela
 

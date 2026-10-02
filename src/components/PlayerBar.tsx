@@ -96,13 +96,14 @@ export const PlayerBar: React.FC<Props> = ({
   };
 
   const handleToggleMute = async () => {
-    if (!isAvailable) return;
-    const current = status.volume ?? 100;
-    if (current > 0) {
+    if (!isAvailable || !status.volume.available || !status.volume.writable) return;
+    const current = status.volume.value;
+    if (!status.volume.muted && current > 0) {
       setPrevVolume(current);
       await handleVolumeChange(0);
     } else {
-      await handleVolumeChange(prevVolume > 0 ? prevVolume : 100);
+      const restoreVolume = status.volume.muted && current > 0 ? current : prevVolume;
+      await handleVolumeChange(restoreVolume > 0 ? restoreVolume : 100);
     }
   };
 
@@ -123,6 +124,14 @@ export const PlayerBar: React.FC<Props> = ({
   const displayArtist = isNoTrack
     ? "Sonante"
     : status.artist || (status.album ? status.album : "Sonante");
+  const isVolumeAvailable =
+    isAvailable && status.volume.available && status.volume.writable;
+  const isMuted = status.volume.muted || status.volume.value === 0;
+  const volumeBackendLabel = t(`player.volumeBackend.${status.volume.backend}`);
+  const volumeStatusLabel =
+    isAvailable && status.volume.available && status.volume.backend !== "unavailable"
+      ? `${status.volume.value}% · ${volumeBackendLabel}`
+      : volumeBackendLabel;
 
   return (
     <footer className="h-20 bg-[#161616] border-t border-[#262626] flex items-center justify-between px-6 z-40 select-none">
@@ -269,25 +278,31 @@ export const PlayerBar: React.FC<Props> = ({
 
       {/* 3. Volume e Botão de Gaveta de Fila */}
       <div className="flex items-center justify-end space-x-4 w-1/4 min-w-[180px]">
-        <div className="flex items-center space-x-2">
-          <button
-            onClick={handleToggleMute}
-            disabled={!isAvailable}
-            className="text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
-            title={isAvailable ? ((status.volume ?? 100) > 0 ? t("player.mute") : t("player.unmute")) : undefined}
-          >
-            {isAvailable && (status.volume ?? 100) === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
-          </button>
+        <div className="flex flex-col items-center gap-1">
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={handleToggleMute}
+              disabled={!isVolumeAvailable}
+              className="text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+              title={isVolumeAvailable ? (isMuted ? t("player.unmute") : t("player.mute")) : undefined}
+            >
+              {isVolumeAvailable && isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+            </button>
 
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={isAvailable ? (status.volume ?? 100) : 0}
-            disabled={!isAvailable}
-            onChange={(e) => handleVolumeChange(parseInt(e.target.value, 10))}
-            className="w-20 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-35 disabled:cursor-not-allowed"
-          />
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={isVolumeAvailable ? status.volume.value : 0}
+              disabled={!isVolumeAvailable}
+              onChange={(e) => handleVolumeChange(parseInt(e.target.value, 10))}
+              className="w-20 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-35 disabled:cursor-not-allowed"
+            />
+          </div>
+
+          <span className="text-[9px] leading-none text-[#777777] whitespace-nowrap">
+            {volumeStatusLabel}
+          </span>
         </div>
 
         <button

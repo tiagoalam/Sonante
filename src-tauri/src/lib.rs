@@ -3,16 +3,18 @@ mod audio;
 mod config;
 mod favorites;
 mod plex;
+mod shared_volume;
 mod supervisor;
 
 use audio::{
     list_audio_devices, AudioDevice, AudioEngine, AudioState, DeviceSwitchSnapshot,
-    MpdProbeFailure, PlaybackStatus, TrackMetadata,
+    MpdProbeFailure, PlaybackStatus, TrackMetadata, VolumeBackend, VolumeStatus,
 };
 use config::AppConfig;
 use favorites::FavoriteAlbum;
 use plex::{PlexAlbum, PlexClient, PlexCollection, PlexLibrary, PlexSearchResults, PlexTrack};
 use serde::Serialize;
+use shared_volume::{PipeWireVolume, SharedVolumeBackend};
 use supervisor::{MpdHealth, MpdProcessObservation, MpdSupervisor, MpdUnavailableReason};
 use std::sync::Mutex;
 use tauri::{Manager, RunEvent, State, Window, WindowEvent};
@@ -37,8 +39,22 @@ impl ConfigTransactionState {
 }
 
 #[tauri::command]
-fn get_playback_status(state: State<AudioState>) -> Result<PlaybackStatus, String> {
-    state.0.lock().unwrap().get_status()
+fn get_playback_status(
+    sup_state: State<SupervisorState>,
+    audio_state: State<AudioState>,
+) -> Result<PlaybackStatus, String> {
+    let mut playback = audio_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar o estado de reprodução: {}", e))?
+        .get_status()?;
+    let backend = sup_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar o controle de volume: {}", e))?
+        .volume_backend();
+    apply_volume_backend(&mut playback, backend);
+    Ok(playback)
 }
 
 #[tauri::command]
@@ -63,6 +79,28 @@ fn unavailable_snapshot(health: MpdHealth) -> MpdStatusSnapshot {
     }
 }
 
+fn apply_volume_backend(playback: &mut PlaybackStatus, backend: VolumeBackend) {
+    apply_volume_backend_with(playback, backend, shared_volume::read_pipewire_volume);
+}
+
+fn apply_volume_backend_with<F>(
+    playback: &mut PlaybackStatus,
+    backend: VolumeBackend,
+    read_pipewire: F,
+) where
+    F: FnOnce() -> Result<PipeWireVolume, String>,
+{
+    if backend != VolumeBackend::PipeWire {
+        playback.volume.identify_backend(backend);
+        return;
+    }
+
+    playback.volume = match read_pipewire() {
+        Ok(volume) => VolumeStatus::pipewire(volume.value, volume.muted),
+        Err(_) => VolumeStatus::pipewire_unavailable(),
+    };
+}
+
 fn collect_mpd_status_snapshot(
     supervisor: &Mutex<MpdSupervisor>,
     audio: &Mutex<AudioEngine>,
@@ -77,18 +115,22 @@ fn collect_mpd_status_snapshot(
         .get_status();
 
     match playback_result {
-        Ok(playback) => {
-            let health = {
+        Ok(mut playback) => {
+            let (health, volume_backend) = {
                 let mut supervisor = supervisor
                     .lock()
                     .map_err(|e| format!("Falha ao confirmar a saúde do MPD: {}", e))?;
                 match supervisor.observe_health()? {
-                    MpdProcessObservation::Running => supervisor.mark_available(),
+                    MpdProcessObservation::Running => {
+                        let health = supervisor.mark_available();
+                        (health, supervisor.volume_backend())
+                    }
                     MpdProcessObservation::NotRunning(health) => {
                         return Ok(unavailable_snapshot(health));
                     }
                 }
             };
+            apply_volume_backend(&mut playback, volume_backend);
             Ok(MpdStatusSnapshot {
                 health,
                 playback: Some(playback),
@@ -197,8 +239,44 @@ async fn play_tracks(
 }
 
 #[tauri::command]
-fn set_volume(volume: u32, state: State<AudioState>) -> Result<(), String> {
-    state.0.lock().unwrap().set_volume(volume)
+fn set_volume(
+    volume: u32,
+    sup_state: State<SupervisorState>,
+    audio_state: State<AudioState>,
+) -> Result<(), String> {
+    let backend = sup_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar o controle de volume: {}", e))?
+        .shared_volume_backend();
+    set_volume_with_backend(
+        backend,
+        volume,
+        shared_volume::set_pipewire_volume,
+        |value| {
+            audio_state
+                .0
+                .lock()
+                .map_err(|e| format!("Falha ao acessar o volume do MPD: {}", e))?
+                .set_volume(value)
+        },
+    )
+}
+
+fn set_volume_with_backend<P, M>(
+    backend: Option<SharedVolumeBackend>,
+    volume: u32,
+    set_pipewire: P,
+    set_mpd: M,
+) -> Result<(), String>
+where
+    P: FnOnce(u32) -> Result<(), String>,
+    M: FnOnce(u32) -> Result<(), String>,
+{
+    match backend {
+        Some(SharedVolumeBackend::PipeWire) => set_pipewire(volume),
+        Some(SharedVolumeBackend::MpdSoftware) | None => set_mpd(volume),
+    }
 }
 
 #[tauri::command]
@@ -795,6 +873,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
@@ -806,6 +885,134 @@ mod tests {
     use std::time::Duration;
 
     static NEXT_MPD_HEALTH_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn playback_with_mpd_volume(value: i32) -> PlaybackStatus {
+        PlaybackStatus {
+            state: "stop".to_string(),
+            elapsed: 0.0,
+            duration: 0.0,
+            audio_format: String::new(),
+            current_media: None,
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            thumb: None,
+            volume: VolumeStatus {
+                value: value.clamp(0, 100) as u32,
+                muted: value == 0,
+                writable: true,
+                available: true,
+                backend: audio::VolumeBackend::MpdSoftware,
+            },
+            is_updating: false,
+        }
+    }
+
+    #[test]
+    fn pipewire_volume_write_never_calls_mpd_setvol() {
+        let pipewire_calls = Cell::new(0);
+        let mpd_calls = Cell::new(0);
+
+        set_volume_with_backend(
+            Some(SharedVolumeBackend::PipeWire),
+            42,
+            |value| {
+                assert_eq!(value, 42);
+                pipewire_calls.set(pipewire_calls.get() + 1);
+                Ok(())
+            },
+            |_| {
+                mpd_calls.set(mpd_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(pipewire_calls.get(), 1);
+        assert_eq!(mpd_calls.get(), 0);
+    }
+
+    #[test]
+    fn software_and_direct_volume_writes_keep_using_mpd() {
+        for backend in [Some(SharedVolumeBackend::MpdSoftware), None] {
+            let mpd_calls = Cell::new(0);
+            set_volume_with_backend(
+                backend,
+                58,
+                |_| panic!("PipeWire não deve ser usado neste backend"),
+                |value| {
+                    assert_eq!(value, 58);
+                    mpd_calls.set(mpd_calls.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(mpd_calls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn temporary_pipewire_failure_does_not_fall_back_to_mpd() {
+        let mpd_calls = Cell::new(0);
+        let result = set_volume_with_backend(
+            Some(SharedVolumeBackend::PipeWire),
+            30,
+            |_| Err("temporariamente indisponível".to_string()),
+            |_| {
+                mpd_calls.set(mpd_calls.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(mpd_calls.get(), 0);
+
+        let mut playback = playback_with_mpd_volume(75);
+        apply_volume_backend_with(
+            &mut playback,
+            VolumeBackend::PipeWire,
+            || Err("temporariamente indisponível".to_string()),
+        );
+        assert_eq!(playback.volume.backend, VolumeBackend::Unavailable);
+        assert!(!playback.volume.available);
+        assert!(!playback.volume.writable);
+    }
+
+    #[test]
+    fn pipewire_read_replaces_mpd_volume_in_polled_status() {
+        let mut playback = playback_with_mpd_volume(75);
+        apply_volume_backend_with(
+            &mut playback,
+            VolumeBackend::PipeWire,
+            || {
+                Ok(PipeWireVolume {
+                    value: 41,
+                    muted: true,
+                })
+            },
+        );
+
+        assert_eq!(playback.volume.value, 41);
+        assert!(playback.volume.muted);
+        assert!(playback.volume.available);
+        assert!(playback.volume.writable);
+        assert_eq!(playback.volume.backend, audio::VolumeBackend::PipeWire);
+    }
+
+    #[test]
+    fn mpd_volume_is_labeled_with_the_effective_mixer_without_changing_its_value() {
+        for backend in [VolumeBackend::AlsaHardware, VolumeBackend::MpdSoftware] {
+            let mut playback = playback_with_mpd_volume(63);
+            apply_volume_backend_with(&mut playback, backend, || {
+                panic!("Leitura PipeWire não deve ocorrer para volume controlado pelo MPD")
+            });
+
+            assert_eq!(playback.volume.value, 63);
+            assert!(playback.volume.available);
+            assert!(playback.volume.writable);
+            assert_eq!(playback.volume.backend, backend);
+        }
+    }
 
     fn mpd_health_test_paths(test_name: &str) -> (PathBuf, PathBuf, PathBuf) {
         let id = NEXT_MPD_HEALTH_TEST_ID.fetch_add(1, Ordering::Relaxed);
