@@ -6,7 +6,6 @@ import {
   Sparkles,
   Play,
   ArrowUpDown,
-  Layers,
   Settings,
   ArrowLeft,
   Search,
@@ -43,6 +42,134 @@ import {
 import { PlaybackStatus, AudioDevice, MpdHealth } from "./types/audio";
 import { AppConfig } from "./types/config";
 import { FavoriteAlbum } from "./types/favorite";
+
+interface CollectionAlbumsCacheEntry {
+  promise: Promise<PlexAlbum[]>;
+  state: "pending" | "fulfilled" | "rejected";
+}
+
+const collectionAlbumsCache = new Map<string, CollectionAlbumsCacheEntry>();
+
+const getCachedCollectionAlbums = (
+  ratingKey: string,
+  retryRejected = false,
+): Promise<PlexAlbum[]> => {
+  const cached = collectionAlbumsCache.get(ratingKey);
+  if (cached && (!retryRejected || cached.state !== "rejected")) {
+    return cached.promise;
+  }
+
+  const request = plexService.getCollectionAlbums(ratingKey);
+  const entry: CollectionAlbumsCacheEntry = { promise: request, state: "pending" };
+  collectionAlbumsCache.set(ratingKey, entry);
+  void request.then(
+    () => {
+      entry.state = "fulfilled";
+    },
+    () => {
+      entry.state = "rejected";
+    },
+  );
+  return request;
+};
+
+const PlexCollectionArtwork = memo<{ collection: PlexCollection }>(({ collection }) => {
+  const artworkRef = useRef<HTMLDivElement>(null);
+  const [primaryFailed, setPrimaryFailed] = useState(false);
+  const [mosaicThumbs, setMosaicThumbs] = useState<string[]>([]);
+  const [failedMosaicSlots, setFailedMosaicSlots] = useState<Set<number>>(new Set());
+  const showPrimary = Boolean(collection.thumb) && !primaryFailed;
+
+  useEffect(() => {
+    if (showPrimary) return;
+
+    let disposed = false;
+    let requested = false;
+    let observer: IntersectionObserver | undefined;
+
+    const loadMosaic = () => {
+      if (requested) return;
+      requested = true;
+      getCachedCollectionAlbums(collection.rating_key)
+        .then((albums) => {
+          if (disposed) return;
+          const thumbs = albums
+            .filter((album): album is PlexAlbum & { thumb: string } => Boolean(album.thumb))
+            .sort((a, b) => a.rating_key.localeCompare(b.rating_key))
+            .map((album) => album.thumb)
+            .slice(0, 4);
+          setMosaicThumbs(thumbs);
+          setFailedMosaicSlots(new Set());
+        })
+        .catch((err) => {
+          if (!disposed) console.error("Falha ao carregar capas da coleção Plex:", err);
+        });
+    };
+
+    const node = artworkRef.current;
+    if (node && "IntersectionObserver" in window) {
+      observer = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer?.disconnect();
+          loadMosaic();
+        }
+      });
+      observer.observe(node);
+    } else {
+      loadMosaic();
+    }
+
+    return () => {
+      disposed = true;
+      observer?.disconnect();
+    };
+  }, [collection.rating_key, showPrimary]);
+
+  if (showPrimary) {
+    return (
+      <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
+        <img
+          src={collection.thumb}
+          alt={collection.title}
+          className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+          loading="lazy"
+          onError={() => setPrimaryFailed(true)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={artworkRef}
+      className="relative aspect-square w-full rounded-lg bg-[#202020] border border-[#2B2B2B] overflow-hidden mb-2.5 shadow-md group-hover:border-[#E5A00D] transition-colors"
+    >
+      <div className="grid grid-cols-2 grid-rows-2 w-full h-full gap-px bg-[#2B2B2B]">
+        {[0, 1, 2, 3].map((slot) => {
+          const thumb = mosaicThumbs[slot];
+          return thumb && !failedMosaicSlots.has(slot) ? (
+            <img
+              key={`${slot}-${thumb}`}
+              src={thumb}
+              alt=""
+              className="w-full h-full object-cover"
+              loading="lazy"
+              onError={() => {
+                setFailedMosaicSlots((current) => new Set(current).add(slot));
+              }}
+            />
+          ) : (
+            <div key={slot} className="w-full h-full bg-[#1B1B1B] flex items-center justify-center">
+              <Disc3 size={18} className="text-[#444444]" />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
+
+PlexCollectionArtwork.displayName = "PlexCollectionArtwork";
 
 // Card isolado e memorizado para evitar re-render a cada 1s da telemetria do player
 const PlexAlbumCard = memo<{
@@ -458,7 +585,7 @@ export function App() {
     setActiveCollection(col);
     setLoading(true);
     try {
-      const items = await plexService.getCollectionAlbums(col.rating_key);
+      const items = await getCachedCollectionAlbums(col.rating_key, true);
       setCollectionAlbums(items);
     } catch (err) {
       console.error("Falha ao carregar álbuns da coleção:", err);
@@ -1038,23 +1165,7 @@ export function App() {
                       onClick={() => handleSelectCollection(col)}
                       className="flex flex-col cursor-pointer group"
                     >
-                      {col.thumb ? (
-                        <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
-                          <img
-                            src={col.thumb}
-                            alt={col.title}
-                            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-                            loading="lazy"
-                          />
-                        </div>
-                      ) : (
-                        <div className="relative aspect-square w-full rounded-lg bg-gradient-to-br from-[#242424] via-[#1B1B1B] to-[#121212] border border-[#2B2B2B] overflow-hidden mb-2.5 shadow-md flex flex-col items-center justify-center p-4 text-center group-hover:border-[#E5A00D] transition-colors">
-                          <Layers size={36} className="text-[#E5A00D] opacity-80 mb-2" />
-                          <span className="text-xs font-bold text-[#AAAAAA] line-clamp-2">
-                            {col.title}
-                          </span>
-                        </div>
-                      )}
+                      <PlexCollectionArtwork collection={col} />
 
                       <span className="text-sm font-semibold text-white truncate" title={col.title}>
                         {col.title}
