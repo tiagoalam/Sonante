@@ -144,6 +144,7 @@ export function App() {
   const [mediaSource, setMediaSource] = useState<"plex" | "local" | "favorites">("local");
   const [localSelectedArtist, setLocalSelectedArtist] = useState<string | null>(null);
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
+  const [loadingLibraries, setLoadingLibraries] = useState(true);
   const [selectedLibrary, setSelectedLibrary] = useState<PlexLibrary | null>(null);
   const [activeTab, setActiveTab] = useState<"library" | "collections">("library");
   const [hasCollections, setHasCollections] = useState(false);
@@ -357,6 +358,7 @@ export function App() {
   // Carregar ou Limpar Bibliotecas do Plex
   useEffect(() => {
     if (!config?.plex_token || config.plex_token.trim().length === 0) {
+      setLoadingLibraries(false);
       setLibraries([]);
       setSelectedLibrary(null);
       setAlbums([]);
@@ -367,15 +369,27 @@ export function App() {
       return;
     }
 
+    let disposed = false;
+    setLoadingLibraries(true);
     plexService
       .getLibraries()
       .then((libs) => {
+        if (disposed) return;
         setLibraries(libs);
         if (libs.length > 0) {
           setSelectedLibrary(libs[0]);
         }
       })
-      .catch(console.error);
+      .catch((err) => {
+        if (!disposed) console.error(err);
+      })
+      .finally(() => {
+        if (!disposed) setLoadingLibraries(false);
+      });
+
+    return () => {
+      disposed = true;
+    };
   }, [config?.plex_token]);
 
   // Atualizar coleções da biblioteca ativa
@@ -643,7 +657,9 @@ export function App() {
                 </div>
               ) : (
                 <div className="flex-1 overflow-y-auto space-y-1 pr-1 text-sm">
-                  {libraries.length === 0 ? (
+                  {loadingLibraries ? (
+                    <span className="text-xs text-[#666666] px-2 block">{t("sidebar.loadingLibraries")}</span>
+                  ) : libraries.length === 0 ? (
                     <span className="text-xs text-[#666666] px-2 block">{t("sidebar.noLibraries")}</span>
                   ) : (
                     libraries.map((lib) => {

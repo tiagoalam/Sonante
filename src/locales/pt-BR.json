@@ -5,6 +5,7 @@
     "plex": "Servidor Plex",
     "favorites": "Favoritos",
     "plexAudioLibraries": "Bibliotecas de áudio Plex",
+    "loadingLibraries": "Carregando bibliotecas…",
     "noLibraries": "Nenhuma biblioteca encontrada.",
     "noAccountConnected": "Nenhuma conta conectada",
     "connectNow": "Conectar agora",
