@@ -156,7 +156,6 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
         first_run: false,
       };
       await configService.saveConfig(finalConfig);
-      await audioService.rescanLibrary();
       onFinish(finalConfig);
     } catch (err) {
       console.error("Falha ao salvar configuração inicial:", err);
