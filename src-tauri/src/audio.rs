@@ -27,6 +27,20 @@ pub enum MediaLocator {
     },
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CurrentMedia {
+    Local {
+        uri: String,
+        queue_index: usize,
+    },
+    Plex {
+        server_id: String,
+        part_key: String,
+        queue_index: usize,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TrackMetadata {
     pub title: String,
@@ -68,7 +82,7 @@ pub struct PlaybackStatus {
     pub elapsed: f64,
     pub duration: f64,
     pub audio_format: String,
-    pub current_file: String,
+    pub current_media: Option<CurrentMedia>,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -269,6 +283,45 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
+    fn consistent_queue_index(
+        status_index: Option<usize>,
+        current_song_index: Option<usize>,
+    ) -> Option<usize> {
+        match (status_index, current_song_index) {
+            (Some(status), Some(current)) if status == current => Some(status),
+            (Some(_), Some(_)) => None,
+            (Some(status), None) => Some(status),
+            (None, Some(current)) => Some(current),
+            (None, None) => None,
+        }
+    }
+
+    fn current_media_for_queue_index(&self, queue_index: Option<usize>) -> Option<CurrentMedia> {
+        let queue_index = queue_index?;
+        let track = self.queue.get(queue_index)?;
+
+        match &track.media_locator {
+            Some(MediaLocator::Plex {
+                server_id,
+                part_key,
+                ..
+            }) if !server_id.is_empty() && !part_key.is_empty() => Some(CurrentMedia::Plex {
+                server_id: server_id.clone(),
+                part_key: part_key.clone(),
+                queue_index,
+            }),
+            Some(MediaLocator::Local { uri }) if !uri.is_empty() => Some(CurrentMedia::Local {
+                uri: uri.clone(),
+                queue_index,
+            }),
+            None if !track.uri.is_empty() => Some(CurrentMedia::Local {
+                uri: track.uri.clone(),
+                queue_index,
+            }),
+            _ => None,
+        }
+    }
+
     pub fn get_local_albums(&self) -> Result<Vec<LocalAlbum>, String> {
         let lines = self.send_command("listallinfo")?;
         use std::collections::HashMap;
@@ -990,7 +1043,7 @@ impl AudioEngine {
                 elapsed: 0.0,
                 duration: 0.0,
                 audio_format,
-                current_file: String::new(),
+                current_media: None,
                 title: String::new(),
                 artist: String::new(),
                 album: String::new(),
@@ -1002,6 +1055,7 @@ impl AudioEngine {
 
         let song_lines = self.send_command("currentsong")?;
         let mut current_file = String::new();
+        let mut current_song_index = None;
         let mut tag_title = String::new();
         let mut tag_artist = String::new();
         let mut tag_album = String::new();
@@ -1014,13 +1068,17 @@ impl AudioEngine {
                     "Artist" => tag_artist = v.to_string(),
                     "Album" => tag_album = v.to_string(),
                     "Pos" => {
-                        if song_index.is_none() {
-                            song_index = Some(Self::parse_mpd_number("Pos", v)?);
-                        }
+                        current_song_index = Some(Self::parse_mpd_number("Pos", v)?);
                     }
                     _ => {}
                 }
             }
+        }
+
+        let current_media_queue_index =
+            Self::consistent_queue_index(song_index, current_song_index);
+        if song_index.is_none() {
+            song_index = current_song_index;
         }
 
         let mut title = String::new();
@@ -1086,12 +1144,14 @@ impl AudioEngine {
             thumb = self.resolve_cover(&current_file);
         }
 
+        let current_media = self.current_media_for_queue_index(current_media_queue_index);
+
         Ok(PlaybackStatus {
             state,
             elapsed,
             duration,
             audio_format,
-            current_file,
+            current_media,
             title,
             artist,
             album,
@@ -1152,6 +1212,106 @@ mod tests {
             uri: String::new(),
             duration: Some(120.0),
         }
+    }
+
+    #[test]
+    fn current_plex_track_uses_only_stable_queue_identity() {
+        let mut track = plex_track();
+        if let Some(MediaLocator::Plex { file_path, .. }) = &mut track.media_locator {
+            *file_path = None;
+        }
+        let engine = AudioEngine {
+            socket_path: String::new(),
+            music_dir: String::new(),
+            queue: vec![track],
+        };
+
+        assert_eq!(
+            engine.current_media_for_queue_index(Some(0)),
+            Some(CurrentMedia::Plex {
+                server_id: "server-1".to_string(),
+                part_key: "/library/parts/10/file.flac".to_string(),
+                queue_index: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn current_local_track_preserves_its_uri() {
+        let engine = engine_with_track("álbum/faixa.flac");
+
+        assert_eq!(
+            engine.current_media_for_queue_index(Some(0)),
+            Some(CurrentMedia::Local {
+                uri: "álbum/faixa.flac".to_string(),
+                queue_index: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn current_media_is_none_when_queue_index_is_missing_or_out_of_bounds() {
+        let engine = engine_with_track("faixa.flac");
+
+        assert_eq!(engine.current_media_for_queue_index(None), None);
+        assert_eq!(engine.current_media_for_queue_index(Some(1)), None);
+        assert_eq!(
+            AudioEngine::consistent_queue_index(Some(0), Some(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn serialized_playback_status_never_exposes_authenticated_plex_uri() {
+        let mut track = plex_track();
+        track.uri =
+            "https://plex.invalid/library/parts/10/file.flac?X-Plex-Token=SECRET".to_string();
+        let engine = AudioEngine {
+            socket_path: String::new(),
+            music_dir: String::new(),
+            queue: vec![track],
+        };
+        let status = PlaybackStatus {
+            state: "play".to_string(),
+            elapsed: 1.0,
+            duration: 120.0,
+            audio_format: "44100:16:2".to_string(),
+            current_media: engine.current_media_for_queue_index(Some(0)),
+            title: "Faixa Plex".to_string(),
+            artist: "Artista".to_string(),
+            album: "Álbum".to_string(),
+            thumb: None,
+            volume: 100,
+            is_updating: false,
+        };
+
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("server-1"));
+        assert!(json.contains("/library/parts/10/file.flac"));
+        assert!(!json.contains("current_file"));
+        assert!(!json.contains("https://"));
+        assert!(!json.contains("X-Plex-Token"));
+        assert!(!json.contains("SECRET"));
+    }
+
+    #[test]
+    fn plex_local_mount_remains_identified_as_plex() {
+        let mut track = plex_track();
+        track.uri = "/mnt/plex/Álbum/faixa.flac".to_string();
+        let engine = AudioEngine {
+            socket_path: String::new(),
+            music_dir: String::new(),
+            queue: vec![track],
+        };
+
+        assert!(matches!(
+            engine.current_media_for_queue_index(Some(0)),
+            Some(CurrentMedia::Plex {
+                ref server_id,
+                ref part_key,
+                queue_index: 0,
+            }) if server_id == "server-1" && part_key == "/library/parts/10/file.flac"
+        ));
     }
 
     #[test]

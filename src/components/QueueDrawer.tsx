@@ -34,7 +34,7 @@ export const QueueDrawer: React.FC<Props> = ({
     if (isOpen) {
       fetchQueue();
     }
-  }, [isOpen, status.current_file]);
+  }, [isOpen, status.current_media?.queue_index]);
 
   const handlePlayIndex = async (index: number) => {
     if (!isPlaybackAvailable) return;
@@ -108,12 +108,19 @@ export const QueueDrawer: React.FC<Props> = ({
           </div>
         ) : (
           queue.map((item, idx) => {
+            const matchesCurrentMedia =
+              status.current_media?.queue_index === idx &&
+              (status.current_media.kind === "plex"
+                ? item.media_locator?.kind === "plex" &&
+                  status.current_media.server_id === item.media_locator.server_id &&
+                  status.current_media.part_key === item.media_locator.part_key
+                : (item.media_locator?.kind === "local"
+                    ? item.media_locator.uri
+                    : item.uri) === status.current_media.uri);
             const isCurrent =
               isPlaybackAvailable &&
               status.state === "play" &&
-              status.title &&
-              item.title &&
-              status.title.toLowerCase() === item.title.toLowerCase();
+              matchesCurrentMedia;
 
             return (
               <div

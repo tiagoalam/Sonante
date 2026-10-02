@@ -2,6 +2,10 @@ export type MediaLocator =
   | { kind: "local"; uri: string }
   | { kind: "plex"; server_id: string; part_key: string; file_path?: string | null };
 
+export type CurrentMedia =
+  | { kind: "local"; uri: string; queue_index: number }
+  | { kind: "plex"; server_id: string; part_key: string; queue_index: number };
+
 export interface TrackMetadata {
   title: string;
   artist: string;
@@ -22,7 +26,7 @@ export interface PlaybackStatus {
   elapsed: number;
   duration: number;
   audio_format: string;
-  current_file: string;
+  current_media: CurrentMedia | null;
   title: string;
   artist: string;
   album: string;

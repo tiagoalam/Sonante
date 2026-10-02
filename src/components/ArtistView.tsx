@@ -49,12 +49,11 @@ export const ArtistView: React.FC<Props> = ({
   };
 
   const isTrackActive = (track: PlexTrack) => {
-    if (!isPlaybackAvailable || !status.current_file) return false;
+    if (!isPlaybackAvailable || status.current_media?.kind !== "plex") return false;
     return (
-      (track.media_locator.kind === "plex" &&
-        status.current_file.includes(track.media_locator.part_key)) ||
-      status.current_file.endsWith(track.title) ||
-      status.current_file.includes(track.rating_key)
+      track.media_locator.kind === "plex" &&
+      status.current_media.server_id === track.media_locator.server_id &&
+      status.current_media.part_key === track.media_locator.part_key
     );
   };
 

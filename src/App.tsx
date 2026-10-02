@@ -289,7 +289,7 @@ export function App() {
     elapsed: 0.0,
     duration: 0.0,
     audio_format: "",
-    current_file: "",
+    current_media: null,
     title: "",
     artist: "",
     album: "",
@@ -1188,7 +1188,7 @@ export function App() {
         onToggleQueue={() => setShowQueue(!showQueue)}
         isQueueOpen={showQueue}
         onNavigateToArtist={(artistName) => {
-          if (!playbackStatus.current_file.startsWith("http")) {
+          if (playbackStatus.current_media?.kind !== "plex") {
             resetAllNavigation();
             setMediaSource("local");
             setLocalSelectedArtist(artistName);
@@ -1199,7 +1199,7 @@ export function App() {
           }
         }}
         onNavigateToAlbum={() => {
-          if (!playbackStatus.current_file.startsWith("http")) {
+          if (playbackStatus.current_media?.kind !== "plex") {
             resetAllNavigation();
             setMediaSource("local");
           } else if (playbackStatus.album) {
