@@ -1,3 +1,4 @@
+mod alsa_mixer;
 mod audio;
 mod config;
 mod favorites;

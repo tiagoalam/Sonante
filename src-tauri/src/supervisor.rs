@@ -1,3 +1,4 @@
+use crate::alsa_mixer::{self, MixerSelection};
 use crate::config::AppConfig;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -246,26 +247,17 @@ impl MpdSupervisor {
             || cfg.audio_output_type == "shared"
             || cfg.alsa_device == "default";
 
-        let audio_output_section = if is_shared {
-            r#"audio_output {
-    type "alsa"
-    name "Sonante Shared"
-    device "default"
-    mixer_type "software"
-}"#
-            .to_string()
+        let mixer_selection = if is_shared {
+            MixerSelection::Software
         } else {
-            format!(
-                r#"audio_output {{
-    type "alsa"
-    name "Sonante Output"
-    device "{}"
-    dop "{}"
-    mixer_type "software"
-}}"#,
-                alsa_device_value, dop_flag
-            )
+            alsa_mixer::detect_for_pcm(&cfg.alsa_device)
         };
+        let audio_output_section = Self::audio_output_section(
+            is_shared,
+            &alsa_device_value,
+            dop_flag,
+            &mixer_selection,
+        )?;
 
         // Sem state_file: o MPD inicia em modo neutro/stop sem tocar sozinho
         let conf_content = format!(
@@ -302,6 +294,54 @@ decoder {{
 
         fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
         Ok(conf_path)
+    }
+
+    fn audio_output_section(
+        is_shared: bool,
+        alsa_device_value: &str,
+        dop_flag: &str,
+        mixer_selection: &MixerSelection,
+    ) -> Result<String, String> {
+        if is_shared {
+            return Ok(r#"audio_output {
+    type "alsa"
+    name "Sonante Shared"
+    device "default"
+    mixer_type "software"
+}"#
+            .to_string());
+        }
+
+        let mixer_config = match mixer_selection {
+            MixerSelection::Software => "    mixer_type \"software\"".to_string(),
+            MixerSelection::Hardware {
+                mixer_device,
+                control,
+            } => {
+                let mixer_device = Self::escape_config_value(mixer_device)?;
+                let mixer_control = Self::escape_config_value(&control.name)?;
+                let mixer_index = if control.index == 0 {
+                    String::new()
+                } else {
+                    format!("\n    mixer_index \"{}\"", control.index)
+                };
+                format!(
+                    "    mixer_type \"hardware\"\n    mixer_device \"{}\"\n    mixer_control \"{}\"{}",
+                    mixer_device, mixer_control, mixer_index
+                )
+            }
+        };
+
+        Ok(format!(
+            r#"audio_output {{
+    type "alsa"
+    name "Sonante Output"
+    device "{}"
+    dop "{}"
+{}
+}}"#,
+            alsa_device_value, dop_flag, mixer_config
+        ))
     }
 
     fn escape_config_value(value: &str) -> Result<String, String> {
@@ -977,6 +1017,92 @@ mod tests {
         assert!(MpdSupervisor::escape_config_value("default\nlog_file bad").is_err());
         assert!(MpdSupervisor::escape_config_value("default\rkill").is_err());
         assert!(MpdSupervisor::escape_config_value("default\0kill").is_err());
+    }
+
+    #[test]
+    fn shared_output_always_keeps_software_mixer() {
+        let hardware = MixerSelection::Hardware {
+            mixer_device: "hw:CARD=Ignored".to_string(),
+            control: crate::alsa_mixer::PlaybackVolumeControl {
+                name: "Ignored".to_string(),
+                index: 0,
+                channels: vec!["Front Left".to_string()],
+                min: 0,
+                max: 100,
+            },
+        };
+
+        let section =
+            MpdSupervisor::audio_output_section(true, "ignored", "yes", &hardware).unwrap();
+
+        assert!(section.contains("device \"default\""));
+        assert!(section.contains("mixer_type \"software\""));
+        assert!(!section.contains("mixer_control"));
+        assert!(!section.contains("mixer_device"));
+    }
+
+    #[test]
+    fn direct_output_without_safe_control_keeps_software_mixer() {
+        let section = MpdSupervisor::audio_output_section(
+            false,
+            "hw:CARD=NoMixer,DEV=0",
+            "no",
+            &MixerSelection::Software,
+        )
+        .unwrap();
+
+        assert!(section.contains("device \"hw:CARD=NoMixer,DEV=0\""));
+        assert!(section.contains("dop \"no\""));
+        assert!(section.contains("mixer_type \"software\""));
+        assert!(!section.contains("mixer_control"));
+    }
+
+    #[test]
+    fn direct_output_with_safe_control_generates_hardware_mixer_config() {
+        let selection = MixerSelection::Hardware {
+            mixer_device: "hw:CARD=SoundBar".to_string(),
+            control: crate::alsa_mixer::PlaybackVolumeControl {
+                name: "USB Playback".to_string(),
+                index: 2,
+                channels: vec!["Front Left".to_string(), "Front Right".to_string()],
+                min: 0,
+                max: 127,
+            },
+        };
+
+        let section = MpdSupervisor::audio_output_section(
+            false,
+            "hw:CARD=SoundBar,DEV=0",
+            "yes",
+            &selection,
+        )
+        .unwrap();
+
+        assert!(section.contains("mixer_type \"hardware\""));
+        assert!(section.contains("mixer_device \"hw:CARD=SoundBar\""));
+        assert!(section.contains("mixer_control \"USB Playback\""));
+        assert!(section.contains("mixer_index \"2\""));
+        assert!(!section.contains("mixer_type \"software\""));
+    }
+
+    #[test]
+    fn hardware_mixer_default_index_is_not_written_to_mpd_config() {
+        let selection = MixerSelection::Hardware {
+            mixer_device: "hw:2".to_string(),
+            control: crate::alsa_mixer::PlaybackVolumeControl {
+                name: "Playback".to_string(),
+                index: 0,
+                channels: vec!["Mono".to_string()],
+                min: 0,
+                max: 10,
+            },
+        };
+
+        let section =
+            MpdSupervisor::audio_output_section(false, "hw:2,0", "no", &selection).unwrap();
+
+        assert!(section.contains("mixer_control \"Playback\""));
+        assert!(!section.contains("mixer_index"));
     }
 
     #[test]

@@ -1299,6 +1299,25 @@ mod tests {
     }
 
     #[test]
+    fn device_switch_restore_never_copies_volume_to_the_new_output() {
+        let engine = engine_with_track("faixa.flac");
+        let (result, commands) = restore_with_seek_responses(
+            &engine,
+            DeviceSwitchSnapshot {
+                queue_index: 0,
+                elapsed: 0.0,
+                state: PlaybackState::Paused,
+            },
+            vec![],
+        );
+
+        result.unwrap();
+        assert!(!commands
+            .iter()
+            .any(|command| command.starts_with("setvol")));
+    }
+
+    #[test]
     fn restore_retries_temporary_not_seekable_then_succeeds() {
         let engine = engine_with_track("faixa.flac");
         let (result, commands) = restore_with_seek_responses(
