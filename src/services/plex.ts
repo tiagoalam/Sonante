@@ -8,6 +8,7 @@ import {
   PlexSearchResults,
   PlexPin,
   PlexServerResource,
+  PlexImageRef,
 } from "../types/plex";
 
 export const plexService = {
@@ -45,4 +46,7 @@ export const plexService = {
  
   getAlbumTracks: (ratingKey: string): Promise<PlexTrack[]> =>
     invoke<PlexTrack[]>("get_album_tracks", { ratingKey }),
+
+  getImage: (image: PlexImageRef): Promise<ArrayBuffer> =>
+    invoke<ArrayBuffer>("get_plex_image", { image }),
 };

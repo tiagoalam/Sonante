@@ -15,6 +15,7 @@ import { FavoriteAlbum } from "../types/favorite";
 import { favoritesService } from "../services/favorites";
 import { audioService } from "../services/audio";
 import { plexService } from "../services/plex";
+import { PlexImage } from "./PlexImage";
 
 interface Props {
   onFavoritesChanged?: () => void;
@@ -114,7 +115,8 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
       title: t.title,
       artist: t.artist,
       album: selectedAlbum.title,
-      thumb: selectedAlbum.thumb || null,
+      thumb: selectedAlbum.source === "local" ? selectedAlbum.thumb || null : null,
+      plex_image: selectedAlbum.source === "plex" ? selectedAlbum.plex_image || null : null,
       uri: t.uri,
       media_locator: t.media_locator,
     }));
@@ -147,7 +149,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
           title: t.title,
           artist: fav.artist,
           album: fav.title,
-          thumb: fav.thumb || null,
+          plex_image: fav.plex_image || null,
           media_locator: t.media_locator,
         }));
         if (meta.length > 0) audioService.playTracks(meta, 0);
@@ -251,7 +253,14 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
           <div className="space-y-8 animate-in fade-in duration-100">
             <div className="flex items-end space-x-6">
               <div className="w-52 h-52 rounded-xl bg-[#202020] border border-[#2B2B2B] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
-                {selectedAlbum.thumb ? (
+                {selectedAlbum.source === "plex" && selectedAlbum.plex_image ? (
+                  <PlexImage
+                    image={selectedAlbum.plex_image}
+                    alt=""
+                    className="w-full h-full object-cover"
+                    fallback={<Disc3 size={64} className="text-[#444444]" />}
+                  />
+                ) : selectedAlbum.thumb ? (
                   <img src={selectedAlbum.thumb} alt="" className="w-full h-full object-cover" />
                 ) : (
                   <Disc3 size={64} className="text-[#444444]" />
@@ -363,7 +372,19 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                   className={`group flex flex-col cursor-pointer ${isMissing ? "opacity-60" : ""}`}
                 >
                   <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
-                    {fav.thumb ? (
+                    {fav.source === "plex" && fav.plex_image ? (
+                      <PlexImage
+                        image={fav.plex_image}
+                        alt={fav.title}
+                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                        loading="lazy"
+                        fallback={
+                          <div className="w-full h-full flex items-center justify-center text-[#444444]">
+                            <Disc3 size={40} />
+                          </div>
+                        }
+                      />
+                    ) : fav.thumb ? (
                       <img
                         src={fav.thumb}
                         alt={fav.title}

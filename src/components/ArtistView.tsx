@@ -5,6 +5,7 @@ import { PlexAlbum, PlexTrack, SelectedArtist } from "../types/plex";
 import { PlaybackStatus } from "../types/audio";
 import { plexService } from "../services/plex";
 import { audioService } from "../services/audio";
+import { PlexImage } from "./PlexImage";
 
 interface Props {
   artist: SelectedArtist;
@@ -73,7 +74,7 @@ export const ArtistView: React.FC<Props> = ({
       title: t.title,
       artist: artist.name,
       album: t.album_title || "Single",
-      thumb: t.thumb || artistThumb || null,
+      plex_image: t.thumb || artistThumb || null,
       media_locator: t.media_locator,
     }));
 
@@ -99,7 +100,7 @@ export const ArtistView: React.FC<Props> = ({
       <div className="flex items-end space-x-6 pb-8 border-b border-[#252525]">
         <div className="w-44 h-44 rounded-full bg-[#1C1C1C] overflow-hidden shadow-2xl shrink-0 border-2 border-[#2B2B2B]">
           {artistThumb ? (
-            <img src={artistThumb} alt={artist.name} className="w-full h-full object-cover" />
+            <PlexImage image={artistThumb} alt={artist.name} className="w-full h-full object-cover" />
           ) : (
             <div className="w-full h-full flex items-center justify-center text-[#444444]">
               <User size={64} />
@@ -174,7 +175,7 @@ export const ArtistView: React.FC<Props> = ({
 
                       <div className="w-8 h-8 rounded bg-[#202020] overflow-hidden mr-3">
                         {track.thumb ? (
-                          <img src={track.thumb} alt="" className="w-full h-full object-cover" />
+                          <PlexImage image={track.thumb} alt="" className="w-full h-full object-cover" />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-[#444444]">
                             <Disc3 size={14} />
@@ -239,8 +240,8 @@ export const ArtistView: React.FC<Props> = ({
                 >
                   <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md border border-[#262626] group-hover:border-[#E5A00D]/50 transition-all">
                     {alb.thumb ? (
-                      <img
-                        src={alb.thumb}
+                      <PlexImage
+                        image={alb.thumb}
                         alt={alb.title}
                         className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
                         loading="lazy"

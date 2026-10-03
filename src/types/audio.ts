@@ -1,3 +1,5 @@
+import type { PlexImageRef } from "./plex";
+
 export type MediaLocator =
   | { kind: "local"; uri: string }
   | { kind: "plex"; server_id: string; part_key: string; file_path?: string | null };
@@ -11,6 +13,7 @@ export interface TrackMetadata {
   artist: string;
   album: string;
   thumb?: string | null;
+  plex_image?: PlexImageRef | null;
   media_locator?: MediaLocator | null;
   uri?: string;
   duration?: number;
@@ -39,6 +42,7 @@ export interface PlaybackStatus {
   artist: string;
   album: string;
   thumb?: string | null;
+  plex_image?: PlexImageRef | null;
   volume: VolumeStatus;
   is_updating: boolean; // <-- Necessário para o ícone de indexação/sincronização
 }

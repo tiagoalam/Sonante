@@ -28,16 +28,19 @@ import { FavoritesView } from "./components/FavoritesView";
 import { SettingsModal } from "./components/SettingsModal";
 import { AboutModal } from "./components/AboutModal";
 import { WelcomeWizard } from "./components/WelcomeWizard";
+import { PlexImage } from "./components/PlexImage";
 import { plexService } from "./services/plex";
 import { audioService } from "./services/audio";
 import { configService } from "./services/config";
 import { favoritesService } from "./services/favorites";
+import { plexCollectionCacheKey } from "./services/plexArtworkCache";
 import {
   PlexLibrary,
   PlexAlbum,
   PlexCollection,
   SelectedArtist,
   PlexSearchResults,
+  PlexImageRef,
 } from "./types/plex";
 import { PlaybackStatus, AudioDevice, MpdHealth } from "./types/audio";
 import { AppConfig } from "./types/config";
@@ -51,17 +54,19 @@ interface CollectionAlbumsCacheEntry {
 const collectionAlbumsCache = new Map<string, CollectionAlbumsCacheEntry>();
 
 const getCachedCollectionAlbums = (
+  serverId: string,
   ratingKey: string,
   retryRejected = false,
 ): Promise<PlexAlbum[]> => {
-  const cached = collectionAlbumsCache.get(ratingKey);
+  const cacheKey = plexCollectionCacheKey(serverId, ratingKey);
+  const cached = collectionAlbumsCache.get(cacheKey);
   if (cached && (!retryRejected || cached.state !== "rejected")) {
     return cached.promise;
   }
 
   const request = plexService.getCollectionAlbums(ratingKey);
   const entry: CollectionAlbumsCacheEntry = { promise: request, state: "pending" };
-  collectionAlbumsCache.set(ratingKey, entry);
+  collectionAlbumsCache.set(cacheKey, entry);
   void request.then(
     () => {
       entry.state = "fulfilled";
@@ -76,7 +81,7 @@ const getCachedCollectionAlbums = (
 const PlexCollectionArtwork = memo<{ collection: PlexCollection }>(({ collection }) => {
   const artworkRef = useRef<HTMLDivElement>(null);
   const [primaryFailed, setPrimaryFailed] = useState(false);
-  const [mosaicThumbs, setMosaicThumbs] = useState<string[]>([]);
+  const [mosaicThumbs, setMosaicThumbs] = useState<PlexImageRef[]>([]);
   const [failedMosaicSlots, setFailedMosaicSlots] = useState<Set<number>>(new Set());
   const showPrimary = Boolean(collection.thumb) && !primaryFailed;
 
@@ -90,11 +95,11 @@ const PlexCollectionArtwork = memo<{ collection: PlexCollection }>(({ collection
     const loadMosaic = () => {
       if (requested) return;
       requested = true;
-      getCachedCollectionAlbums(collection.rating_key)
+      getCachedCollectionAlbums(collection.server_id, collection.rating_key)
         .then((albums) => {
           if (disposed) return;
           const thumbs = albums
-            .filter((album): album is PlexAlbum & { thumb: string } => Boolean(album.thumb))
+            .filter((album): album is PlexAlbum & { thumb: PlexImageRef } => Boolean(album.thumb))
             .sort((a, b) => a.rating_key.localeCompare(b.rating_key))
             .map((album) => album.thumb)
             .slice(0, 4);
@@ -123,17 +128,17 @@ const PlexCollectionArtwork = memo<{ collection: PlexCollection }>(({ collection
       disposed = true;
       observer?.disconnect();
     };
-  }, [collection.rating_key, showPrimary]);
+  }, [collection.rating_key, collection.server_id, showPrimary]);
 
   if (showPrimary) {
     return (
       <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
-        <img
-          src={collection.thumb}
+        <PlexImage
+          image={collection.thumb!}
           alt={collection.title}
           className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
           loading="lazy"
-          onError={() => setPrimaryFailed(true)}
+          onLoadError={() => setPrimaryFailed(true)}
         />
       </div>
     );
@@ -148,13 +153,13 @@ const PlexCollectionArtwork = memo<{ collection: PlexCollection }>(({ collection
         {[0, 1, 2, 3].map((slot) => {
           const thumb = mosaicThumbs[slot];
           return thumb && !failedMosaicSlots.has(slot) ? (
-            <img
-              key={`${slot}-${thumb}`}
-              src={thumb}
+            <PlexImage
+              key={`${slot}-${thumb.server_id}-${thumb.path}`}
+              image={thumb}
               alt=""
               className="w-full h-full object-cover"
               loading="lazy"
-              onError={() => {
+              onLoadError={() => {
                 setFailedMosaicSlots((current) => new Set(current).add(slot));
               }}
             />
@@ -202,8 +207,8 @@ const PlexAlbumCard = memo<{
     >
       <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
         {album.thumb ? (
-          <img
-            src={album.thumb}
+          <PlexImage
+            image={album.thumb}
             alt={album.title}
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
             loading="lazy"
@@ -294,6 +299,7 @@ export function App() {
     artist: "",
     album: "",
     thumb: null,
+    plex_image: null,
     volume: {
       value: 100,
       muted: false,
@@ -596,7 +602,7 @@ export function App() {
     setActiveCollection(col);
     setLoading(true);
     try {
-      const items = await getCachedCollectionAlbums(col.rating_key, true);
+      const items = await getCachedCollectionAlbums(col.server_id, col.rating_key, true);
       setCollectionAlbums(items);
     } catch (err) {
       console.error("Falha ao carregar álbuns da coleção:", err);
@@ -614,7 +620,7 @@ export function App() {
         title: t.title,
         artist: album.artist,
         album: album.title,
-        thumb: t.thumb || album.thumb || null,
+        plex_image: t.thumb || album.thumb || null,
         media_locator: t.media_locator,
         duration: t.duration_ms ? t.duration_ms / 1000 : undefined,
       }));
@@ -637,7 +643,8 @@ export function App() {
       title: album.title,
       artist: album.artist,
       year: album.year != null ? String(album.year) : undefined,
-      thumb: album.thumb || null,
+      thumb: null,
+      plex_image: album.thumb || null,
       path_or_key: albumKey,
       exists: true,
     };
@@ -1019,7 +1026,7 @@ export function App() {
                             >
                               <div className="w-8 h-8 rounded-full bg-[#242424] overflow-hidden flex items-center justify-center">
                                 {art.thumb ? (
-                                  <img src={art.thumb} alt="" className="w-full h-full object-cover" />
+                                  <PlexImage image={art.thumb} alt="" className="w-full h-full object-cover" />
                                 ) : (
                                   <User size={14} className="text-[#666666]" />
                                 )}
@@ -1075,7 +1082,7 @@ export function App() {
                                     title: track.title,
                                     artist: track.album_title || "Plex Track",
                                     album: track.album_title || "",
-                                    thumb: track.thumb || null,
+                                    plex_image: track.thumb || null,
                                     media_locator: track.media_locator,
                                     duration: track.duration_ms ? track.duration_ms / 1000 : undefined,
                                   },
@@ -1092,7 +1099,7 @@ export function App() {
                               <div className="flex items-center space-x-3 min-w-0 pr-4">
                                 <div className="w-9 h-9 rounded bg-[#202020] overflow-hidden shrink-0">
                                   {track.thumb ? (
-                                    <img src={track.thumb} alt="" className="w-full h-full object-cover" />
+                                    <PlexImage image={track.thumb} alt="" className="w-full h-full object-cover" />
                                   ) : (
                                     <div className="w-full h-full flex items-center justify-center text-[#444444]">
                                       <Disc3 size={16} />

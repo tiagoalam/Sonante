@@ -1,3 +1,4 @@
+use crate::plex::{contains_plex_token, legacy_plex_image_ref, PlexImageRef};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
@@ -106,12 +107,14 @@ impl VolumeStatus {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
     pub album: String,
     pub thumb: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plex_image: Option<PlexImageRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_locator: Option<MediaLocator>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -152,6 +155,7 @@ pub struct PlaybackStatus {
     pub artist: String,
     pub album: String,
     pub thumb: Option<String>,
+    pub plex_image: Option<PlexImageRef>,
     pub volume: VolumeStatus,
     pub is_updating: bool,
 }
@@ -488,24 +492,58 @@ impl AudioEngine {
     fn migrate_loaded_queue(queue: Vec<TrackMetadata>) -> Vec<TrackMetadata> {
         queue
             .into_iter()
-            .filter_map(|mut track| match &track.media_locator {
-                Some(MediaLocator::Plex {
-                    server_id,
-                    part_key,
-                    ..
-                }) if !server_id.trim().is_empty() && !part_key.trim().is_empty() => {
-                    // A referência estável é a fonte de verdade; nunca mantenha uma URI
-                    // autenticada que possa ter vindo de uma versão intermediária do cache.
-                    track.uri.clear();
-                    Some(track)
+            .filter_map(|mut track| {
+                Self::sanitize_track_artwork(&mut track);
+                match &track.media_locator {
+                    Some(MediaLocator::Plex {
+                        server_id,
+                        part_key,
+                        ..
+                    }) if !server_id.trim().is_empty() && !part_key.trim().is_empty() => {
+                        // A referência estável é a fonte de verdade; nunca mantenha uma URI
+                        // autenticada que possa ter vindo de uma versão intermediária do cache.
+                        track.uri.clear();
+                        Some(track)
+                    }
+                    Some(MediaLocator::Plex { .. }) => None,
+                    Some(MediaLocator::Local { uri }) if !Self::contains_plex_token(uri) => {
+                        Some(track)
+                    }
+                    Some(MediaLocator::Local { .. }) => None,
+                    None if !Self::contains_plex_token(&track.uri) => Some(track),
+                    None => None,
                 }
-                Some(MediaLocator::Plex { .. }) => None,
-                Some(MediaLocator::Local { uri }) if !Self::contains_plex_token(uri) => Some(track),
-                Some(MediaLocator::Local { .. }) => None,
-                None if !Self::contains_plex_token(&track.uri) => Some(track),
-                None => None,
             })
             .collect()
+    }
+
+    fn sanitize_track_artwork(track: &mut TrackMetadata) -> bool {
+        match &track.media_locator {
+            Some(MediaLocator::Plex { server_id, .. }) => {
+                let mut changed = false;
+                if track.plex_image.as_ref().is_some_and(|image| {
+                    !image.is_valid() || image.server_id != *server_id
+                }) {
+                    track.plex_image = None;
+                    changed = true;
+                }
+                if let Some(legacy_thumb) = track.thumb.take() {
+                    if track.plex_image.is_none() && contains_plex_token(&legacy_thumb) {
+                        track.plex_image = legacy_plex_image_ref(&legacy_thumb, Some(server_id));
+                    }
+                    changed = true;
+                }
+                changed
+            }
+            _ => {
+                let mut changed = track.plex_image.take().is_some();
+                if track.thumb.as_deref().is_some_and(contains_plex_token) {
+                    track.thumb = None;
+                    changed = true;
+                }
+                changed
+            }
+        }
     }
 
     pub(crate) fn contains_plex_token(uri: &str) -> bool {
@@ -543,8 +581,20 @@ impl AudioEngine {
             }
             if p.exists() {
                 if let Ok(file) = std::fs::File::open(&p) {
-                    if let Ok(q) = serde_json::from_reader(file) {
-                        return Self::migrate_loaded_queue(q);
+                    if let Ok(q) = serde_json::from_reader::<_, Vec<TrackMetadata>>(file) {
+                        let migrated = Self::migrate_loaded_queue(q.clone());
+                        if migrated != q {
+                            if let Ok(json) = serde_json::to_vec(&migrated) {
+                                if let Err(error) = crate::persistence::atomic_write_private(
+                                    &p,
+                                    &json,
+                                    "queue_cache.json",
+                                ) {
+                                    eprintln!("[Persistência] {}", error);
+                                }
+                            }
+                        }
+                        return migrated;
                     }
                 }
             }
@@ -893,6 +943,7 @@ impl AudioEngine {
         }
 
         for (track, playback_uri) in tracks.iter_mut().zip(&playback_uris) {
+            Self::sanitize_track_artwork(track);
             if track.thumb.is_none() {
                 track.thumb = self.resolve_cover(playback_uri);
             }
@@ -928,6 +979,7 @@ impl AudioEngine {
                     artist: "".to_string(),
                     album: "".to_string(),
                     thumb: None,
+                    plex_image: None,
                     media_locator: None,
                     uri: u,
                     duration: None,
@@ -1108,6 +1160,7 @@ impl AudioEngine {
                 artist: String::new(),
                 album: String::new(),
                 thumb: None,
+                plex_image: None,
                 volume: VolumeStatus::from_mpd(volume),
                 is_updating,
             });
@@ -1145,6 +1198,7 @@ impl AudioEngine {
         let mut artist = String::new();
         let mut album = String::new();
         let mut thumb = None;
+        let mut plex_image = None;
 
         if let Some(idx) = song_index {
             if let Some(track) = self.queue.get(idx) {
@@ -1152,6 +1206,7 @@ impl AudioEngine {
                 artist = track.artist.clone();
                 album = track.album.clone();
                 thumb = track.thumb.clone();
+                plex_image = track.plex_image.clone();
                 if duration <= 0.0 {
                     if let Some(d) = track.duration {
                         duration = d;
@@ -1173,6 +1228,9 @@ impl AudioEngine {
                 }
                 if thumb.is_none() {
                     thumb = track.thumb.clone();
+                }
+                if plex_image.is_none() {
+                    plex_image = track.plex_image.clone();
                 }
                 if duration <= 0.0 {
                     if let Some(d) = track.duration {
@@ -1216,6 +1274,7 @@ impl AudioEngine {
             artist,
             album,
             thumb,
+            plex_image,
             volume: VolumeStatus::from_mpd(volume),
             is_updating,
         })
@@ -1261,6 +1320,7 @@ mod tests {
                 artist: "Artista".to_string(),
                 album: "Álbum".to_string(),
                 thumb: None,
+                plex_image: None,
                 media_locator: None,
                 uri: uri.to_string(),
                 duration: Some(120.0),
@@ -1275,6 +1335,7 @@ mod tests {
             artist: "Artista".to_string(),
             album: "Álbum".to_string(),
             thumb: None,
+            plex_image: None,
             media_locator: None,
             uri: "álbum/segunda.flac".to_string(),
             duration: Some(180.0),
@@ -1288,6 +1349,7 @@ mod tests {
             artist: "Artista".to_string(),
             album: "Álbum".to_string(),
             thumb: None,
+            plex_image: None,
             media_locator: Some(MediaLocator::Plex {
                 server_id: "server-1".to_string(),
                 part_key: "/library/parts/10/file.flac".to_string(),
@@ -1365,6 +1427,7 @@ mod tests {
             artist: "Artista".to_string(),
             album: "Álbum".to_string(),
             thumb: None,
+            plex_image: None,
             volume: VolumeStatus::from_mpd(100),
             is_updating: false,
         };
@@ -1421,6 +1484,30 @@ mod tests {
 
         assert_eq!(migrated.len(), 1);
         assert_eq!(migrated[0].uri, local.uri);
+    }
+
+    #[test]
+    fn legacy_queue_artwork_token_is_replaced_by_stable_reference() {
+        let mut legacy = plex_track();
+        legacy.thumb = Some(
+            "https://old.invalid/library/metadata/42/thumb/1?X-Plex-Token=SECRET"
+                .to_string(),
+        );
+
+        let migrated = AudioEngine::migrate_loaded_queue(vec![legacy]);
+        let json = serde_json::to_string(&migrated).unwrap();
+
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].thumb, None);
+        assert_eq!(
+            migrated[0].plex_image,
+            Some(PlexImageRef {
+                server_id: "server-1".to_string(),
+                path: "/library/metadata/42/thumb/1".to_string(),
+            })
+        );
+        assert!(!json.contains("X-Plex-Token"));
+        assert!(!json.contains("SECRET"));
     }
 
     #[test]
@@ -1700,6 +1787,7 @@ mod tests {
             artist: String::new(),
             album: String::new(),
             thumb: Some(String::new()),
+            plex_image: None,
             media_locator: None,
             uri: "faixa.flac\nkill".to_string(),
             duration: None,

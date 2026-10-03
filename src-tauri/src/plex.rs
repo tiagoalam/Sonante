@@ -1,6 +1,6 @@
 use crate::audio::MediaLocator;
 use crate::config::AppConfig;
-use reqwest::{RequestBuilder, StatusCode};
+use reqwest::{header::CONTENT_TYPE, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -13,6 +13,14 @@ const PLEX_VERSION: &str = "0.2.0";
 const PLEX_RESOURCES_URL: &str =
     "https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1";
 const PLEX_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_PLEX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const PLEX_IMAGE_TRANSCODE_SIZE: u16 = 600;
+const SUPPORTED_IMAGE_CONTENT_TYPES: &[&str] = &[
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PlexErrorKind {
@@ -28,6 +36,9 @@ enum PlexErrorKind {
     ServerNotFound,
     ConfigurationChanged,
     StateUnavailable,
+    InvalidImageReference,
+    UnsupportedImageType,
+    ImageTooLarge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,12 +112,128 @@ impl PlexError {
             PlexErrorKind::StateUnavailable => {
                 "O estado da conexão Plex está indisponível.".to_string()
             }
+            PlexErrorKind::InvalidImageReference => {
+                "A referência da imagem Plex é inválida.".to_string()
+            }
+            PlexErrorKind::UnsupportedImageType => {
+                "O Plex retornou um formato de imagem não suportado.".to_string()
+            }
+            PlexErrorKind::ImageTooLarge => {
+                "A imagem Plex excede o limite permitido.".to_string()
+            }
         }
     }
 
     fn is_route_unavailable(&self) -> bool {
         matches!(self.kind, PlexErrorKind::Timeout | PlexErrorKind::Transport)
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct PlexImageRef {
+    pub server_id: String,
+    pub path: String,
+}
+
+impl PlexImageRef {
+    fn from_connection(connection: &ResolvedPlexConnection, path: &str) -> Option<Self> {
+        validate_plex_image_path(path).ok()?;
+        Some(Self {
+            server_id: connection.server_id.clone(),
+            path: path.to_string(),
+        })
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        validate_plex_server_id(&self.server_id).is_ok()
+            && validate_plex_image_path(&self.path).is_ok()
+    }
+}
+
+fn invalid_image_reference() -> PlexError {
+    PlexError {
+        operation: "buscar a imagem",
+        kind: PlexErrorKind::InvalidImageReference,
+    }
+}
+
+fn validate_plex_server_id(server_id: &str) -> Result<(), PlexError> {
+    if server_id.is_empty()
+        || server_id.len() > 256
+        || server_id.trim() != server_id
+        || !server_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    {
+        return Err(invalid_image_reference());
+    }
+    Ok(())
+}
+
+fn validate_plex_image_path(path: &str) -> Result<(), PlexError> {
+    let lower = path.to_ascii_lowercase();
+    let decoded_lower = urlencoding::decode(path)
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if path.is_empty()
+        || path.len() > 4096
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains(['\\', '\0', '\r', '\n', '#'])
+        || path.chars().any(char::is_whitespace)
+        || lower.contains("://")
+        || lower.contains("x-plex-token")
+        || decoded_lower.contains("x-plex-token")
+        || lower
+            .split('?')
+            .next()
+            .is_some_and(|value| value.eq_ignore_ascii_case("/photo/:/transcode"))
+        || decoded_lower
+            .split('?')
+            .next()
+            .is_some_and(|value| value.eq_ignore_ascii_case("/photo/:/transcode"))
+    {
+        return Err(invalid_image_reference());
+    }
+    Ok(())
+}
+
+fn plex_image_transcode_path(path: &str) -> String {
+    let encoded_path = urlencoding::encode(path);
+    format!(
+        "/photo/:/transcode?width={0}&height={0}&minSize=1&upscale=1&url={1}",
+        PLEX_IMAGE_TRANSCODE_SIZE, encoded_path
+    )
+}
+
+pub(crate) fn legacy_plex_image_ref(
+    value: &str,
+    server_id: Option<&str>,
+) -> Option<PlexImageRef> {
+    let server_id = server_id?.trim();
+    validate_plex_server_id(server_id).ok()?;
+    let url = reqwest::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url
+            .query_pairs()
+            .any(|(name, _)| name.eq_ignore_ascii_case("X-Plex-Token"))
+    {
+        return None;
+    }
+    let path = url.path();
+    validate_plex_image_path(path).ok()?;
+    Some(PlexImageRef {
+        server_id: server_id.to_string(),
+        path: path.to_string(),
+    })
+}
+
+pub(crate) fn contains_plex_token(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("x-plex-token")
+        || urlencoding::decode(value)
+            .map(|decoded| decoded.to_ascii_lowercase().contains("x-plex-token"))
+            .unwrap_or(false)
 }
 
 async fn send_json<T: DeserializeOwned>(
@@ -653,6 +780,102 @@ impl PlexConnectionManager {
         }
     }
 
+    async fn request_image(&self, image: &PlexImageRef) -> Result<Vec<u8>, PlexError> {
+        validate_plex_server_id(&image.server_id)?;
+        validate_plex_image_path(&image.path)?;
+        let snapshot = self.snapshot()?;
+        if snapshot
+            .identity
+            .as_ref()
+            .map(|identity| identity.machine_identifier.as_str())
+            != Some(image.server_id.as_str())
+        {
+            return Err(invalid_image_reference());
+        }
+
+        let connection = self.resolve().await?;
+        let first = self.send_authenticated_image(&connection, &image.path).await;
+        let (connection, original_result) = match first {
+            result @ Ok(_) => (connection, result),
+            Err(error) if error.is_route_unavailable() => {
+                let refreshed = self.refresh(connection.generation).await?;
+                if refreshed.server_id != image.server_id {
+                    return Err(invalid_image_reference());
+                }
+                let result = self.send_authenticated_image(&refreshed, &image.path).await;
+                (refreshed, result)
+            }
+            result @ Err(_) => (connection, result),
+        };
+
+        match original_result {
+            Ok(bytes) => Ok(bytes),
+            Err(error) if error.kind == PlexErrorKind::ImageTooLarge => {
+                let transcode_path = plex_image_transcode_path(&image.path);
+                self.send_authenticated_image(&connection, &transcode_path)
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn send_authenticated_image(
+        &self,
+        connection: &ResolvedPlexConnection,
+        path: &str,
+    ) -> Result<Vec<u8>, PlexError> {
+        let operation = "buscar a imagem";
+        let mut response = self
+            .http
+            .get(format!("{}{}", connection.base_url, path))
+            .header("X-Plex-Token", &connection.token)
+            .header("Accept", "image/jpeg,image/png,image/webp,image/gif")
+            .send()
+            .await
+            .map_err(|error| PlexError::from_transport(operation, &error))?;
+        if !response.status().is_success() {
+            return Err(PlexError::from_status(operation, response.status()));
+        }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !SUPPORTED_IMAGE_CONTENT_TYPES.contains(&content_type.as_str()) {
+            return Err(PlexError {
+                operation,
+                kind: PlexErrorKind::UnsupportedImageType,
+            });
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_PLEX_IMAGE_BYTES as u64)
+        {
+            return Err(PlexError {
+                operation,
+                kind: PlexErrorKind::ImageTooLarge,
+            });
+        }
+
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| PlexError::from_transport(operation, &error))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_PLEX_IMAGE_BYTES {
+                return Err(PlexError {
+                    operation,
+                    kind: PlexErrorKind::ImageTooLarge,
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+
     async fn send_authenticated<T: DeserializeOwned>(
         &self,
         connection: &ResolvedPlexConnection,
@@ -799,7 +1022,7 @@ pub async fn get_plex_servers(auth_token: &str) -> Result<Vec<PlexServerResource
 pub struct PlexArtistResult {
     pub rating_key: String,
     pub name: String,
-    pub thumb: Option<String>,
+    pub thumb: Option<PlexImageRef>,
 }
 
 #[cfg(test)]
@@ -1673,6 +1896,234 @@ mod tests {
 
         assert_eq!(error.kind, PlexErrorKind::ServerSelectionRequired);
     }
+
+    fn image_client(
+        status_line: &'static str,
+        content_type: &'static str,
+        body: String,
+    ) -> (PlexClient, MockServer) {
+        image_client_with_handler(move |_| MockResponse {
+            status_line,
+            content_type,
+            body: body.clone(),
+            delay: Duration::ZERO,
+        })
+    }
+
+    fn image_client_with_handler<F>(handler: F) -> (PlexClient, MockServer)
+    where
+        F: Fn(&str) -> MockResponse + Send + Sync + 'static,
+    {
+        let server = MockServer::start(move |path| {
+            if path.starts_with("/identity") {
+                MockResponse::json(
+                    "200 OK",
+                    serde_json::json!({
+                        "MediaContainer": { "machineIdentifier": "fixture-machine-id" }
+                    }),
+                )
+            } else if path == "/library/sections" {
+                MockResponse::json("200 OK", serde_json::json!({"MediaContainer": {}}))
+            } else {
+                handler(path)
+            }
+        });
+        let config = manager_config(&server.base_url, Some("fixture-machine-id"));
+        (media_client_for_test(&config), server)
+    }
+
+    fn image_ref(path: &str) -> PlexImageRef {
+        PlexImageRef {
+            server_id: "fixture-machine-id".to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn public_image_reference_contains_only_server_identity_and_relative_path() {
+        let connection = ResolvedPlexConnection {
+            server_id: "fixture-machine-id".to_string(),
+            base_url: "https://private-route.invalid".to_string(),
+            token: "SECRET".to_string(),
+            generation: 0,
+        };
+        let image = PlexImageRef::from_connection(
+            &connection,
+            "/library/metadata/42/thumb/1?width=300",
+        )
+        .unwrap();
+        let json = serde_json::to_string(&image).unwrap();
+
+        assert_eq!(image.server_id, "fixture-machine-id");
+        assert_eq!(image.path, "/library/metadata/42/thumb/1?width=300");
+        assert!(!json.contains("private-route.invalid"));
+        assert!(!json.contains("SECRET"));
+        assert!(!json.contains("X-Plex-Token"));
+    }
+
+    #[test]
+    fn valid_image_reference_returns_only_response_bytes() {
+        let transcode_requests = Arc::new(AtomicUsize::new(0));
+        let observed = transcode_requests.clone();
+        let (client, _server) = image_client_with_handler(move |path| {
+            if path.starts_with("/photo/:/transcode?") {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+            MockResponse {
+                status_line: "200 OK",
+                content_type: "image/jpeg",
+                body: "jpeg-bytes".to_string(),
+                delay: Duration::ZERO,
+            }
+        });
+        let bytes = tauri::async_runtime::block_on(
+            client.get_image(&image_ref("/library/metadata/42/thumb/1")),
+        )
+        .unwrap();
+        assert_eq!(bytes, b"jpeg-bytes");
+        assert_eq!(transcode_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn oversized_image_uses_encoded_transcode_path_and_returns_its_bytes() {
+        let transcode_path = Arc::new(Mutex::new(None));
+        let observed_path = transcode_path.clone();
+        let oversized = "x".repeat(MAX_PLEX_IMAGE_BYTES + 1);
+        let (client, _server) = image_client_with_handler(move |path| {
+            if path.starts_with("/photo/:/transcode?") {
+                *observed_path.lock().unwrap() = Some(path.to_string());
+                MockResponse {
+                    status_line: "200 OK",
+                    content_type: "image/jpeg",
+                    body: "transcoded-image".to_string(),
+                    delay: Duration::ZERO,
+                }
+            } else {
+                MockResponse {
+                    status_line: "200 OK",
+                    content_type: "image/jpeg",
+                    body: oversized.clone(),
+                    delay: Duration::ZERO,
+                }
+            }
+        });
+        let original_path = "/library/metadata/42/thumb/1?quality=high&crop=1";
+
+        let bytes = tauri::async_runtime::block_on(client.get_image(&image_ref(original_path)))
+            .unwrap();
+        let requested_path = transcode_path.lock().unwrap().clone().unwrap();
+
+        assert_eq!(bytes, b"transcoded-image");
+        assert_eq!(
+            requested_path,
+            "/photo/:/transcode?width=600&height=600&minSize=1&upscale=1&url=%2Flibrary%2Fmetadata%2F42%2Fthumb%2F1%3Fquality%3Dhigh%26crop%3D1"
+        );
+        assert!(!requested_path
+            .to_ascii_lowercase()
+            .contains("x-plex-token"));
+        assert!(!requested_path.contains("TEST_ACCOUNT_TOKEN"));
+    }
+
+    #[test]
+    fn oversized_transcode_response_is_still_rejected() {
+        let oversized = "x".repeat(MAX_PLEX_IMAGE_BYTES + 1);
+        let (client, _server) = image_client("200 OK", "image/jpeg", oversized);
+
+        let error = tauri::async_runtime::block_on(
+            client.get_image(&image_ref("/library/metadata/42/thumb/1")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "A imagem Plex excede o limite permitido.");
+    }
+
+    #[test]
+    fn invalid_transcode_content_type_is_rejected() {
+        let oversized = "x".repeat(MAX_PLEX_IMAGE_BYTES + 1);
+        let (client, _server) = image_client_with_handler(move |path| {
+            if path.starts_with("/photo/:/transcode?") {
+                MockResponse {
+                    status_line: "200 OK",
+                    content_type: "text/html",
+                    body: "SECRET TRANSCODE BODY".to_string(),
+                    delay: Duration::ZERO,
+                }
+            } else {
+                MockResponse {
+                    status_line: "200 OK",
+                    content_type: "image/jpeg",
+                    body: oversized.clone(),
+                    delay: Duration::ZERO,
+                }
+            }
+        });
+
+        let error = tauri::async_runtime::block_on(
+            client.get_image(&image_ref("/library/metadata/42/thumb/1")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "O Plex retornou um formato de imagem não suportado.");
+        assert!(!error.contains("SECRET"));
+    }
+
+    #[test]
+    fn image_reference_rejects_wrong_server_absolute_url_and_token() {
+        let config = manager_config("http://127.0.0.1:9", Some("fixture-machine-id"));
+        let client = media_client_for_test(&config);
+        for image in [
+            PlexImageRef {
+                server_id: "another-server".to_string(),
+                path: "/library/metadata/42/thumb/1".to_string(),
+            },
+            image_ref("https://outside.invalid/image.jpg"),
+            image_ref("//outside.invalid/image.jpg"),
+            image_ref("/library/metadata/42/thumb/1?x-plex-token=SECRET"),
+            image_ref("/photo/:/transcode?width=600&height=600&url=%2Flibrary%2Fmetadata%2F42"),
+        ] {
+            let error = tauri::async_runtime::block_on(client.get_image(&image)).unwrap_err();
+            assert_eq!(error, "A referência da imagem Plex é inválida.");
+            assert!(!error.contains("SECRET"));
+            assert!(!error.contains("outside.invalid"));
+        }
+    }
+
+    #[test]
+    fn image_http_errors_are_sanitized() {
+        for status in ["401 Unauthorized", "404 Not Found", "500 Internal Server Error"] {
+            let transcode_requests = Arc::new(AtomicUsize::new(0));
+            let observed = transcode_requests.clone();
+            let (client, _server) = image_client_with_handler(move |path| {
+                if path.starts_with("/photo/:/transcode?") {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+                MockResponse {
+                    status_line: status,
+                    content_type: "text/plain",
+                    body: "SECRET RESPONSE BODY".to_string(),
+                    delay: Duration::ZERO,
+                }
+            });
+            let error = tauri::async_runtime::block_on(
+                client.get_image(&image_ref("/library/metadata/42/thumb/1")),
+            )
+            .unwrap_err();
+            assert!(!error.contains("SECRET"));
+            assert!(!error.contains("X-Plex-Token"));
+            assert!(!error.contains("127.0.0.1"));
+            assert_eq!(transcode_requests.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn image_type_and_size_are_limited() {
+        let (client, _server) = image_client("200 OK", "text/html", "not an image".to_string());
+        let error = tauri::async_runtime::block_on(
+            client.get_image(&image_ref("/library/metadata/42/thumb/1")),
+        )
+        .unwrap_err();
+        assert_eq!(error, "O Plex retornou um formato de imagem não suportado.");
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1695,15 +2146,16 @@ pub struct PlexAlbum {
     pub artist: String,
     pub artist_rating_key: Option<String>,
     pub year: Option<u32>,
-    pub thumb: Option<String>,
+    pub thumb: Option<PlexImageRef>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlexCollection {
+    pub server_id: String,
     pub rating_key: String,
     pub title: String,
     pub child_count: u32,
-    pub thumb: Option<String>,
+    pub thumb: Option<PlexImageRef>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1711,7 +2163,7 @@ pub struct PlexTrack {
     pub rating_key: String,
     pub title: String,
     pub album_title: Option<String>,
-    pub thumb: Option<String>,
+    pub thumb: Option<PlexImageRef>,
     pub track_index: u32,
     pub duration_ms: u64,
     pub media_locator: MediaLocator,
@@ -1756,7 +2208,7 @@ impl PlexClient {
                                 let name = item["title"].as_str().unwrap_or("").to_string();
                                 let thumb = item["thumb"]
                                     .as_str()
-                                    .map(|thumb| Self::get_thumb_url(&connection, thumb));
+                                    .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
                                 artists.push(PlexArtistResult { rating_key, name, thumb });
                             }
                             "album" => {
@@ -1767,7 +2219,7 @@ impl PlexClient {
                                 let year = item["year"].as_u64().map(|y| y as u32);
                                 let thumb = item["thumb"]
                                     .as_str()
-                                    .map(|thumb| Self::get_thumb_url(&connection, thumb));
+                                    .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                                 albums.push(PlexAlbum {
                                     rating_key,
@@ -1890,11 +2342,11 @@ impl PlexClient {
         ))
     }
 
-    fn get_thumb_url(connection: &ResolvedPlexConnection, thumb_path: &str) -> String {
-        format!(
-            "{}{}?X-Plex-Token={}",
-            connection.base_url, thumb_path, connection.token
-        )
+    pub async fn get_image(&self, image: &PlexImageRef) -> Result<Vec<u8>, String> {
+        self.connection_manager
+            .request_image(image)
+            .await
+            .map_err(|error| error.public_message())
     }
 
     /// Helper reutilizável para converter itens brutos do JSON do Plex em PlexTrack
@@ -1912,7 +2364,7 @@ impl PlexClient {
         let thumb = item["thumb"]
             .as_str()
             .or_else(|| item["parentThumb"].as_str())
-            .map(|thumb| Self::get_thumb_url(connection, thumb));
+            .and_then(|thumb| PlexImageRef::from_connection(connection, thumb));
 
         let media = item["Media"].as_array()?.first()?;
         let part = media["Part"].as_array()?.first()?;
@@ -1999,7 +2451,7 @@ impl PlexClient {
                 let year = item["year"].as_u64().map(|y| y as u32);
                 let thumb = item["thumb"]
                     .as_str()
-                    .map(|thumb| Self::get_thumb_url(&connection, thumb));
+                    .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                 albums.push(PlexAlbum {
                     rating_key,
@@ -2038,9 +2490,10 @@ impl PlexClient {
                 let child_count = item["childCount"].as_u64().unwrap_or(0) as u32;
                 let thumb = item["thumb"]
                     .as_str()
-                    .map(|thumb| Self::get_thumb_url(&connection, thumb));
+                    .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                 collections.push(PlexCollection {
+                    server_id: connection.server_id.clone(),
                     rating_key,
                     title,
                     child_count,
@@ -2077,7 +2530,7 @@ impl PlexClient {
                 let year = item["year"].as_u64().map(|y| y as u32);
                 let thumb = item["thumb"]
                     .as_str()
-                    .map(|thumb| Self::get_thumb_url(&connection, thumb));
+                    .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                 albums.push(PlexAlbum {
                     rating_key,
@@ -2117,7 +2570,7 @@ impl PlexClient {
                 let year = item["year"].as_u64().map(|y| y as u32);
                 let thumb = item["thumb"]
                     .as_str()
-                    .map(|thumb| Self::get_thumb_url(&connection, thumb));
+                    .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                 albums.push(PlexAlbum {
                     rating_key,

@@ -12,6 +12,7 @@ import { PlexAlbum, PlexTrack, SelectedArtist } from "../types/plex";
 import { FavoriteAlbum } from "../types/favorite";
 import { plexService } from "../services/plex";
 import { audioService } from "../services/audio";
+import { PlexImage } from "./PlexImage";
 import { favoritesService } from "../services/favorites";
 
 interface Props {
@@ -59,7 +60,8 @@ export const AlbumView: React.FC<Props> = ({
       title: album.title,
       artist: album.artist,
       year: album.year != null ? String(album.year) : undefined,
-      thumb: album.thumb || null,
+      thumb: null,
+      plex_image: album.thumb || null,
       path_or_key: albumKey,
       exists: true,
     };
@@ -81,7 +83,7 @@ export const AlbumView: React.FC<Props> = ({
       title: t.title,
       artist: album.artist,
       album: album.title,
-      thumb: t.thumb || album.thumb || null,
+      plex_image: t.thumb || album.thumb || null,
       media_locator: t.media_locator,
       duration: t.duration_ms ? t.duration_ms / 1000 : (t.duration ? (t.duration > 1000 ? t.duration / 1000 : t.duration) : undefined),
     }));
@@ -114,8 +116,8 @@ export const AlbumView: React.FC<Props> = ({
         <div className="flex items-end space-x-6">
           <div className="w-56 h-56 rounded-xl bg-[#202020] border border-[#2B2B2B] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
             {album.thumb ? (
-              <img
-                src={album.thumb}
+              <PlexImage
+                image={album.thumb}
                 alt={album.title}
                 className="w-full h-full object-cover"
               />

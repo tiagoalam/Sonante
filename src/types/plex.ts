@@ -1,5 +1,10 @@
 import type { MediaLocator } from "./audio";
 
+export interface PlexImageRef {
+  server_id: string;
+  path: string;
+}
+
 export interface PlexLibrary {
   key: string;
   title: string;
@@ -11,14 +16,15 @@ export interface PlexAlbum {
   artist: string;
   artist_rating_key?: string;
   year?: number;
-  thumb?: string;
+  thumb?: PlexImageRef;
 }
 
 export interface PlexCollection {
+  server_id: string;
   rating_key: string;
   title: string;
   child_count: number;
-  thumb?: string;
+  thumb?: PlexImageRef;
 }
 
 export interface PlexTrack {
@@ -26,7 +32,7 @@ export interface PlexTrack {
   title: string;
   album_title?: string;
   artist?: string;
-  thumb?: string | null;
+  thumb?: PlexImageRef | null;
   media_locator: MediaLocator;
   duration?: number;
   duration_ms?: number;
@@ -42,7 +48,7 @@ export interface SelectedArtist {
 export interface PlexArtistResult {
   rating_key: string;
   name: string;
-  thumb?: string;
+  thumb?: PlexImageRef;
 }
 
 export interface PlexSearchResults {

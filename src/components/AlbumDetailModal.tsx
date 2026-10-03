@@ -3,6 +3,7 @@ import { X, Play, Clock, Disc3 } from "lucide-react";
 import { PlexAlbum, PlexTrack } from "../types/plex";
 import { plexService } from "../services/plex";
 import { audioService } from "../services/audio";
+import { PlexImage } from "./PlexImage";
 
 interface Props {
   album: PlexAlbum;
@@ -33,7 +34,7 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
       title: track.title,
       artist: album.artist,
       album: album.title,
-      thumb: track.thumb || album.thumb || null,
+      plex_image: track.thumb || album.thumb || null,
       media_locator: track.media_locator,
       duration: track.duration_ms ? track.duration_ms / 1000 : undefined,
     }));
@@ -50,7 +51,7 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
           <div className="flex items-center space-x-5">
             <div className="w-24 h-24 rounded-lg bg-[#141414] overflow-hidden shrink-0 shadow-md">
               {album.thumb ? (
-                <img src={album.thumb} alt={album.title} className="w-full h-full object-cover" />
+                <PlexImage image={album.thumb} alt={album.title} className="w-full h-full object-cover" />
               ) : (
                 <div className="w-full h-full flex items-center justify-center text-[#444444]">
                   <Disc3 size={32} />

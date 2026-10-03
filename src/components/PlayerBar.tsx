@@ -10,6 +10,7 @@ import {
   ListMusic,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { PlexImage } from "./PlexImage";
 import { MpdHealth, PlaybackStatus } from "../types/audio";
 import { audioService } from "../services/audio";
 
@@ -148,7 +149,13 @@ export const PlayerBar: React.FC<Props> = ({
           }`}
           title={!isNoTrack && onNavigateToAlbum ? (status.album || displayTitle) : undefined}
         >
-          {status.thumb && !isNoTrack ? (
+          {status.plex_image && !isNoTrack ? (
+            <PlexImage
+              image={status.plex_image}
+              alt=""
+              className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
+            />
+          ) : status.thumb && !isNoTrack ? (
             <img
               src={status.thumb}
               alt=""

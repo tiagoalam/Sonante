@@ -13,7 +13,9 @@ use audio::{
 };
 use config::AppConfig;
 use favorites::FavoriteAlbum;
-use plex::{PlexAlbum, PlexClient, PlexCollection, PlexLibrary, PlexSearchResults, PlexTrack};
+use plex::{
+    PlexAlbum, PlexClient, PlexCollection, PlexImageRef, PlexLibrary, PlexSearchResults, PlexTrack,
+};
 use serde::Serialize;
 use shared_volume::{PipeWireVolume, SharedVolumeBackend};
 use supervisor::{MpdHealth, MpdProcessObservation, MpdSupervisor, MpdUnavailableReason};
@@ -309,13 +311,28 @@ fn list_local_directory(
 }
 
 #[tauri::command]
-fn get_favorites() -> Vec<FavoriteAlbum> {
-    FavoriteAlbum::load_all()
+fn get_favorites(config_state: State<ConfigState>) -> Result<Vec<FavoriteAlbum>, String> {
+    let server_id = config_state
+        .0
+        .lock()
+        .map_err(|_| "O estado da configuração está indisponível.".to_string())?
+        .plex_server_id
+        .clone();
+    FavoriteAlbum::load_all(server_id.as_deref())
 }
 
 #[tauri::command]
-fn toggle_favorite(album: FavoriteAlbum) -> Result<bool, String> {
-    FavoriteAlbum::toggle(album)
+fn toggle_favorite(
+    album: FavoriteAlbum,
+    config_state: State<ConfigState>,
+) -> Result<bool, String> {
+    let server_id = config_state
+        .0
+        .lock()
+        .map_err(|_| "O estado da configuração está indisponível.".to_string())?
+        .plex_server_id
+        .clone();
+    FavoriteAlbum::toggle(album, server_id.as_deref())
 }
 
 #[tauri::command]
@@ -775,6 +792,20 @@ async fn search_plex(
     client.search(&query, section_key.as_deref()).await
 }
 
+#[tauri::command]
+async fn get_plex_image(
+    image: PlexImageRef,
+    state: State<'_, PlexState>,
+) -> Result<tauri::ipc::Response, String> {
+    let client = state
+        .0
+        .lock()
+        .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
+        .clone();
+    let bytes = client.get_image(&image).await?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let socket_path = MpdSupervisor::socket_path().to_string_lossy().to_string();
@@ -836,6 +867,7 @@ pub fn run() {
             get_artist_top_tracks,
             get_album_tracks,
             search_plex,
+            get_plex_image,
             plex_create_pin,
             plex_check_pin,
             plex_get_servers,
@@ -898,6 +930,7 @@ mod tests {
             artist: String::new(),
             album: String::new(),
             thumb: None,
+            plex_image: None,
             volume: VolumeStatus {
                 value: value.clamp(0, 100) as u32,
                 muted: value == 0,
