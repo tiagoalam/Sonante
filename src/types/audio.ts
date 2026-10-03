@@ -2,7 +2,13 @@ import type { PlexImageRef } from "./plex";
 
 export type MediaLocator =
   | { kind: "local"; uri: string }
-  | { kind: "plex"; server_id: string; part_key: string; file_path?: string | null };
+  | {
+      kind: "plex";
+      server_id: string;
+      part_key: string;
+      rating_key?: string | null;
+      file_path?: string | null;
+    };
 
 export type CurrentMedia =
   | { kind: "local"; uri: string; queue_index: number }

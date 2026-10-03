@@ -16,7 +16,9 @@ import {
   CheckCircle2,
   CircleAlert,
   Heart,
+  ListMusic,
   ExternalLink,
+  ListPlus,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlayerBar } from "./components/PlayerBar";
@@ -25,6 +27,8 @@ import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
 import { LocalBrowserView } from "./components/LocalBrowserView";
 import { FavoritesView } from "./components/FavoritesView";
+import { PlaylistsView } from "./components/PlaylistsView";
+import { PlaylistPickerModal } from "./components/PlaylistPickerModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { AboutModal } from "./components/AboutModal";
 import { WelcomeWizard } from "./components/WelcomeWizard";
@@ -51,6 +55,7 @@ import {
 import { PlaybackStatus, AudioDevice, MpdHealth } from "./types/audio";
 import { AppConfig } from "./types/config";
 import { FavoriteAlbum } from "./types/favorite";
+import type { NewPlaylistItem } from "./types/playlist";
 
 interface CollectionAlbumsCacheEntry {
   promise: Promise<PlexAlbum[]>;
@@ -279,7 +284,10 @@ export function App() {
   const { t } = useTranslation();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const [mediaSource, setMediaSource] = useState<"plex" | "local" | "favorites">("local");
+  const [mediaSource, setMediaSource] = useState<"plex" | "local" | "favorites" | "playlists">(
+    "local",
+  );
+  const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
   const [localSelectedArtist, setLocalSelectedArtist] = useState<string | null>(null);
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
   const [loadingLibraries, setLoadingLibraries] = useState(true);
@@ -744,7 +752,7 @@ export function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col bg-[#121212] text-[#E0E0E0] overflow-hidden select-none">
-      <div className="flex-1 flex overflow-hidden">
+      <div className="min-h-0 flex-1 flex overflow-hidden">
         {/* Barra Lateral */}
         <aside className="w-64 bg-[#181818] border-r border-[#262626] flex flex-col p-4 shrink-0">
           <div className="flex items-center space-x-2.5 px-2 py-3 mb-6">
@@ -830,6 +838,24 @@ export function App() {
               />
               <span>{t("sidebar.favorites")}</span>
             </button>
+
+            <button
+              onClick={() => {
+                resetAllNavigation();
+                setMediaSource("playlists");
+              }}
+              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
+                mediaSource === "playlists"
+                  ? "bg-[#242424] text-white"
+                  : "text-[#888888] hover:bg-[#202020] hover:text-white"
+              }`}
+            >
+              <ListMusic
+                size={16}
+                className={mediaSource === "playlists" ? "text-[#E5A00D]" : ""}
+              />
+              <span>{t("sidebar.playlists")}</span>
+            </button>
           </nav>
 
           {mediaSource === "plex" && (
@@ -902,7 +928,9 @@ export function App() {
         </aside>
 
         {/* Painel Central */}
-        {mediaSource === "favorites" ? (
+        {mediaSource === "playlists" ? (
+          <PlaylistsView isPlaybackAvailable={isPlaybackAvailable} />
+        ) : mediaSource === "favorites" ? (
           <FavoritesView
             onFavoritesChanged={refreshPlexFavorites}
             isPlaybackAvailable={isPlaybackAvailable}
@@ -1165,7 +1193,32 @@ export function App() {
                                   )}
                                 </div>
                               </div>
-                              <Play size={14} className="text-[#888888] group-hover:text-white shrink-0 mr-2" />
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setPlaylistItems([
+                                      {
+                                        media_locator: track.media_locator,
+                                        metadata: {
+                                          title: track.title,
+                                          artist: track.artist || "",
+                                          album: track.album_title || "",
+                                          duration: track.duration_ms
+                                            ? track.duration_ms / 1000
+                                            : track.duration,
+                                        },
+                                      },
+                                    ]);
+                                  }}
+                                  className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                                  title={t("playlists.addTrack")}
+                                >
+                                  <ListPlus size={15} />
+                                </button>
+                                <Play size={14} className="text-[#888888] group-hover:text-white shrink-0 mr-2" />
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -1280,6 +1333,13 @@ export function App() {
           }
         }}
       />
+      {playlistItems && (
+        <PlaylistPickerModal
+          items={playlistItems}
+          title={t("playlists.addTrack")}
+          onClose={() => setPlaylistItems(null)}
+        />
+      )}
 
       <QueueDrawer
         isOpen={showQueue}

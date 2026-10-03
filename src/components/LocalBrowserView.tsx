@@ -11,12 +11,15 @@ import {
   Clock,
   Sparkles,
   Heart,
+  ListPlus,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LocalItem, LocalAlbum } from "../types/local";
 import { FavoriteAlbum } from "../types/favorite";
 import { audioService } from "../services/audio";
 import { favoritesService } from "../services/favorites";
+import { PlaylistPickerModal } from "./PlaylistPickerModal";
+import type { NewPlaylistItem } from "../types/playlist";
 
 class LruMemoryCache {
   private maxSize: number;
@@ -171,6 +174,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const [albumTracks, setAlbumTracks] = useState<LocalItem[]>([]);
   const [albumCover, setAlbumCover] = useState<string | null>(null);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
+  const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
 
   const [currentPath, setCurrentPath] = useState<string>("");
   const [items, setItems] = useState<LocalItem[]>([]);
@@ -295,6 +299,19 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     const s = Math.floor(secs % 60);
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
+
+  const toPlaylistItem = (
+    track: LocalItem,
+    fallbackAlbum?: LocalAlbum,
+  ): NewPlaylistItem => ({
+    media_locator: { kind: "local", uri: track.path },
+    metadata: {
+      title: track.title || track.name,
+      artist: track.artist || fallbackAlbum?.artist || "",
+      album: track.album || fallbackAlbum?.title || "",
+      duration: track.duration,
+    },
+  });
 
   const filteredAlbums = albums.filter(
     (a) =>
@@ -450,6 +467,21 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   </button>
 
                   <button
+                    type="button"
+                    onClick={() =>
+                      setPlaylistItems(
+                        albumTracks.map((track) => toPlaylistItem(track, selectedAlbum)),
+                      )
+                    }
+                    disabled={albumTracks.length === 0}
+                    className="flex items-center space-x-2 rounded-xl border border-[#2B2B2B] bg-[#1E1E1E] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#282828] disabled:opacity-50"
+                    title={t("playlists.addAlbum")}
+                  >
+                    <ListPlus size={16} />
+                    <span>{t("playlists.addAlbum")}</span>
+                  </button>
+
+                  <button
                     onClick={(e) => handleToggleFavoriteLocal(e, selectedAlbum, albumCover)}
                     className="p-2.5 rounded-xl bg-[#1E1E1E] border border-[#2B2B2B] hover:bg-[#282828] text-white transition-colors cursor-pointer"
                     title={favoriteIds.has(selectedAlbum.folder_path) ? t("favorites.removeFavorite") : t("favorites.title")}
@@ -496,9 +528,22 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       {track.artist || selectedAlbum.artist}
                     </span>
                   </div>
-                  <span className="col-span-3 text-right font-mono text-[#888888]">
-                    {formatDuration(track.duration)}
-                  </span>
+                  <div className="col-span-3 flex items-center justify-end gap-3">
+                    <span className="font-mono text-[#888888]">
+                      {formatDuration(track.duration)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setPlaylistItems([toPlaylistItem(track, selectedAlbum)]);
+                      }}
+                      className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                      title={t("playlists.addTrack")}
+                    >
+                      <ListPlus size={15} />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -624,9 +669,22 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       </div>
 
                       {!isDir && (
-                        <span className="text-xs font-mono text-[#666666]">
-                          {formatDuration(item.duration)}
-                        </span>
+                        <div className="flex items-center gap-3">
+                          <span className="text-xs font-mono text-[#666666]">
+                            {formatDuration(item.duration)}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setPlaylistItems([toPlaylistItem(item)]);
+                            }}
+                            className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                            title={t("playlists.addTrack")}
+                          >
+                            <ListPlus size={15} />
+                          </button>
+                        </div>
                       )}
                     </div>
                   );
@@ -636,6 +694,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           </div>
         )}
       </div>
+      {playlistItems && (
+        <PlaylistPickerModal
+          items={playlistItems}
+          title={
+            playlistItems.length === 1
+              ? t("playlists.addTrack")
+              : t("playlists.addAlbum")
+          }
+          onClose={() => setPlaylistItems(null)}
+        />
+      )}
     </main>
   );
 };

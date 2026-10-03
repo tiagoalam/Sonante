@@ -24,6 +24,8 @@ pub enum MediaLocator {
         server_id: String,
         part_key: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        rating_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         file_path: Option<String>,
     },
 }
@@ -1116,6 +1118,15 @@ impl AudioEngine {
         Ok(items)
     }
 
+    pub fn local_media_exists(&self, uri: &str) -> Result<bool, String> {
+        let command = format!("find file {}", Self::quote_mpd_argument(uri)?);
+        let lines = self.send_command(&command)?;
+        Ok(lines.iter().any(|line| {
+            line.strip_prefix("file: ")
+                .is_some_and(|candidate| candidate == uri)
+        }))
+    }
+
     pub fn get_status(&self) -> Result<PlaybackStatus, String> {
         let lines = self.send_command("status")?;
 
@@ -1353,6 +1364,7 @@ mod tests {
             media_locator: Some(MediaLocator::Plex {
                 server_id: "server-1".to_string(),
                 part_key: "/library/parts/10/file.flac".to_string(),
+                rating_key: Some("track-10".to_string()),
                 file_path: Some("/srv/music/file.flac".to_string()),
             }),
             uri: String::new(),
