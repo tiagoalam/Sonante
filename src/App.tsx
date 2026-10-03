@@ -33,7 +33,13 @@ import { plexService } from "./services/plex";
 import { audioService } from "./services/audio";
 import { configService } from "./services/config";
 import { favoritesService } from "./services/favorites";
+import {
+  NOW_PLAYING_READY_EVENT,
+  openNowPlayingWindow,
+  publishNowPlayingSnapshot,
+} from "./services/nowPlayingWindow";
 import { plexCollectionCacheKey } from "./services/plexArtworkCache";
+import { listen } from "@tauri-apps/api/event";
 import {
   PlexLibrary,
   PlexAlbum,
@@ -321,6 +327,18 @@ export function App() {
   useEffect(() => {
     playbackAvailableRef.current = isPlaybackAvailable;
   }, [isPlaybackAvailable]);
+  const nowPlayingReadyRef = useRef(false);
+  const nowPlayingSnapshotRef = useRef({
+    health: mpdHealth,
+    playback: playbackStatus,
+  });
+
+  const publishCurrentNowPlayingSnapshot = useCallback(() => {
+    if (!nowPlayingReadyRef.current) return;
+    void publishNowPlayingSnapshot(nowPlayingSnapshotRef.current).catch(() => {
+      nowPlayingReadyRef.current = false;
+    });
+  }, []);
 
   const invalidateStatusRequests = useCallback(() => {
     statusRequestGenerationRef.current += 1;
@@ -371,6 +389,36 @@ export function App() {
       })
       .catch(console.error);
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen(NOW_PLAYING_READY_EVENT, () => {
+      if (disposed) return;
+      nowPlayingReadyRef.current = true;
+      publishCurrentNowPlayingSnapshot();
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch((err) => {
+      if (!disposed) console.error("Falha ao escutar a janela Now Playing:", err);
+    });
+
+    return () => {
+      disposed = true;
+      nowPlayingReadyRef.current = false;
+      unlisten?.();
+    };
+  }, [publishCurrentNowPlayingSnapshot]);
+
+  useEffect(() => {
+    nowPlayingSnapshotRef.current = {
+      health: mpdHealth,
+      playback: playbackStatus,
+    };
+    publishCurrentNowPlayingSnapshot();
+  }, [mpdHealth, playbackStatus, publishCurrentNowPlayingSnapshot]);
 
   // Atualiza favoritos Plex ao alternar a fonte de mídia
   useEffect(() => {
@@ -1203,6 +1251,11 @@ export function App() {
       <PlayerBar
         status={playbackStatus}
         health={mpdHealth}
+        onOpenNowPlaying={() => {
+          openNowPlayingWindow(t("nowPlaying.windowTitle")).catch((err) => {
+            console.error("Falha ao abrir a janela Now Playing:", err);
+          });
+        }}
         onToggleQueue={() => setShowQueue(!showQueue)}
         isQueueOpen={showQueue}
         onNavigateToArtist={(artistName) => {

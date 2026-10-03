@@ -8,6 +8,7 @@ import {
   VolumeX,
   Disc3,
   ListMusic,
+  Maximize2,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlexImage } from "./PlexImage";
@@ -21,6 +22,7 @@ interface Props {
   onNavigateToAlbum?: () => void;
   status: PlaybackStatus;
   health: MpdHealth;
+  onOpenNowPlaying: () => void;
 }
 
 export const PlayerBar: React.FC<Props> = ({
@@ -30,6 +32,7 @@ export const PlayerBar: React.FC<Props> = ({
   onNavigateToAlbum,
   status,
   health,
+  onOpenNowPlaying,
 }) => {
   const { t } = useTranslation();
   const [isSeeking, setIsSeeking] = useState(false);
@@ -311,6 +314,14 @@ export const PlayerBar: React.FC<Props> = ({
             {volumeStatusLabel}
           </span>
         </div>
+
+        <button
+          onClick={onOpenNowPlaying}
+          className="p-2 rounded-lg border border-[#262626] text-[#888888] hover:text-white hover:bg-[#202020] transition-colors cursor-pointer"
+          title={t("player.openNowPlaying")}
+        >
+          <Maximize2 size={17} />
+        </button>
 
         <button
           onClick={onToggleQueue}

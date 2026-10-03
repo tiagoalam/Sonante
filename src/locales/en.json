@@ -32,7 +32,19 @@
     "next": "Next",
     "engineUnavailable": "Audio engine unavailable",
     "engineTransitioning": "Audio engine is changing state",
-    "lastKnown": "Last known playback"
+    "lastKnown": "Last known playback",
+    "openNowPlaying": "Open Now Playing"
+  },
+  "nowPlaying": {
+    "title": "Now Playing",
+    "windowTitle": "Sonante — Now Playing",
+    "sourceLocal": "LOCAL",
+    "sourcePlex": "PLEX",
+    "waitingForStatus": "Waiting for playback status…",
+    "enterFullscreen": "Enter fullscreen",
+    "exitFullscreen": "Exit fullscreen",
+    "close": "Close window",
+    "controlFailed": "The audio engine did not accept the command."
   },
   "queue": {
     "title": "Play Queue",

@@ -27,6 +27,12 @@ pub struct SupervisorState(pub Mutex<MpdSupervisor>);
 pub struct ConfigState(pub Mutex<AppConfig>);
 pub struct ConfigTransactionState(pub Mutex<()>);
 
+const MAIN_WINDOW_LABEL: &str = "main";
+
+fn should_exit_application_on_window_close(window_label: &str) -> bool {
+    window_label == MAIN_WINDOW_LABEL
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MpdStatusSnapshot {
     pub health: MpdHealth,
@@ -874,14 +880,10 @@ pub fn run() {
             open_external_url,
         ])
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { .. } = event {
-                if let Some(sup_state) = window.app_handle().try_state::<SupervisorState>() {
-                    if let Ok(mut sup) = sup_state.0.lock() {
-                        if let Err(e) = sup.stop() {
-                            eprintln!("[Supervisor] Falha no shutdown da janela: {}", e);
-                        }
-                    }
-                }
+            if matches!(event, WindowEvent::CloseRequested { .. })
+                && should_exit_application_on_window_close(window.label())
+            {
+                window.app_handle().exit(0);
             }
         })
         .build(tauri::generate_context!())
@@ -918,6 +920,16 @@ mod tests {
     use std::time::Duration;
 
     static NEXT_MPD_HEALTH_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn main_window_close_requests_application_exit() {
+        assert!(should_exit_application_on_window_close("main"));
+    }
+
+    #[test]
+    fn secondary_window_close_does_not_request_application_exit() {
+        assert!(!should_exit_application_on_window_close("now-playing"));
+    }
 
     fn playback_with_mpd_volume(value: i32) -> PlaybackStatus {
         PlaybackStatus {

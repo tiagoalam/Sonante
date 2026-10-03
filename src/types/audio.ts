@@ -64,6 +64,11 @@ export interface MpdStatusSnapshot {
   playback: PlaybackStatus | null;
 }
 
+export interface NowPlayingSnapshot {
+  health: MpdHealth;
+  playback: PlaybackStatus;
+}
+
 export interface QueueTrack {
   id: number;
   pos: number;
