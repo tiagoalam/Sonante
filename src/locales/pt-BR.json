@@ -39,6 +39,17 @@
     "engineTransitioning": "Motor de áudio em transição",
     "lastKnown": "Último estado conhecido"
   },
+  "nowPlaying": {
+    "title": "Em reprodução",
+    "windowTitle": "Sonante — Em reprodução",
+    "sourceLocal": "LOCAL",
+    "sourcePlex": "PLEX",
+    "waitingForStatus": "Aguardando estado da reprodução…",
+    "enterFullscreen": "Entrar em tela cheia",
+    "exitFullscreen": "Sair da tela cheia",
+    "close": "Fechar janela",
+    "controlFailed": "O comando não foi aceito pelo motor de áudio."
+  },
   "queue": {
     "title": "Fila de Reprodução",
     "empty": "A fila de reprodução está vazia.",
