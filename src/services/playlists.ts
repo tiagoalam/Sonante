@@ -27,6 +27,6 @@ export const playlistsService = {
     invoke<Playlist>("reorder_playlist_items", { playlistId, orderedItemIds }),
   resolveItems: (playlistId: string): Promise<PlaylistItemAvailability[]> =>
     invoke<PlaylistItemAvailability[]>("resolve_playlist_items", { playlistId }),
-  play: (playlistId: string, startItemId?: string): Promise<{ skipped_count: number }> =>
-    invoke<{ skipped_count: number }>("play_playlist", { playlistId, startItemId }),
+  play: (playlistId: string, startItemId?: string, shuffle = false): Promise<{ skipped_count: number }> =>
+    invoke<{ skipped_count: number }>("play_playlist", { playlistId, startItemId, shuffle }),
 };

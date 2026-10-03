@@ -23,6 +23,7 @@ use plex::{
 };
 use serde::Serialize;
 use shared_volume::{PipeWireVolume, SharedVolumeBackend};
+use std::io::Read;
 use supervisor::{MpdHealth, MpdProcessObservation, MpdSupervisor, MpdUnavailableReason};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, RunEvent, State, Window, WindowEvent};
@@ -643,14 +644,48 @@ fn prepare_playlist_playback(
     })
 }
 
+fn shuffle_prepared_playlist_playback(
+    prepared: &mut PreparedPlaylistPlayback,
+    mut random_index: impl FnMut(usize) -> Result<usize, String>,
+) -> Result<(), String> {
+    for end in (1..prepared.tracks.len()).rev() {
+        let index = random_index(end + 1)?;
+        if index > end {
+            return Err("Índice aleatório inválido para a playlist.".into());
+        }
+        prepared.tracks.swap(index, end);
+        prepared.playback_uris.swap(index, end);
+    }
+    prepared.start_index = 0;
+    Ok(())
+}
+
+fn random_playlist_index(upper: usize, source: &mut impl Read) -> Result<usize, String> {
+    let upper = upper as u64;
+    let threshold = upper.wrapping_neg() % upper;
+    loop {
+        let mut bytes = [0u8; 8];
+        source.read_exact(&mut bytes)
+            .map_err(|error| format!("Falha ao obter aleatoriedade para a playlist: {error}"))?;
+        let value = u64::from_ne_bytes(bytes);
+        if value >= threshold {
+            return Ok((value % upper) as usize);
+        }
+    }
+}
+
 #[tauri::command]
 async fn play_playlist(
     playlist_id: String,
     start_item_id: Option<String>,
+    shuffle: Option<bool>,
     playlist_state: State<'_, PlaylistState>,
     audio_state: State<'_, AudioState>,
     plex_state: State<'_, PlexState>,
 ) -> Result<PlaylistPlaybackResult, String> {
+    if shuffle == Some(true) && start_item_id.is_some() {
+        return Err("Não é possível combinar embaralhamento com início em uma faixa.".into());
+    }
     let playlist = playlist_state
         .0
         .lock()
@@ -701,7 +736,12 @@ async fn play_playlist(
         };
         resolved_uris.push(uri);
     }
-    let prepared = prepare_playlist_playback(&playlist, resolved_uris, start_item_id.as_deref())?;
+    let mut prepared = prepare_playlist_playback(&playlist, resolved_uris, start_item_id.as_deref())?;
+    if shuffle == Some(true) && prepared.tracks.len() > 1 {
+        let mut source = std::fs::File::open("/dev/urandom")
+            .map_err(|error| format!("Falha ao obter aleatoriedade para a playlist: {error}"))?;
+        shuffle_prepared_playlist_playback(&mut prepared, |upper| random_playlist_index(upper, &mut source))?;
+    }
     audio_state
         .0
         .lock()
@@ -1441,6 +1481,67 @@ mod tests {
         assert_eq!(prepare_playlist_playback(&playlist, vec![Some(("first.flac".into(), None)), None],
                     Some("occurrence-1")).err().unwrap(), SELECTED_PLAYLIST_ITEM_UNAVAILABLE);
         assert!(prepare_playlist_playback(&playlist, vec![Some(("first.flac".into(), None))], None).is_err());
+    }
+
+    #[test]
+    fn playlist_shuffle_rejects_zero_playable_items_before_playback() {
+        let empty = playback_playlist(vec![]);
+        assert_eq!(prepare_playlist_playback(&empty, vec![], None).err().unwrap(),
+                   NO_PLAYABLE_PLAYLIST_ITEMS);
+        let unavailable = playback_playlist(vec![local_locator("missing.flac"), local_locator("offline.flac")]);
+        assert_eq!(prepare_playlist_playback(&unavailable, vec![None, None], None).err().unwrap(),
+                   NO_PLAYABLE_PLAYLIST_ITEMS);
+    }
+
+    #[test]
+    fn playlist_shuffle_keeps_one_playable_item() {
+        let playlist = playback_playlist(vec![local_locator("missing.flac"), local_locator("one.flac")]);
+        let mut prepared = prepare_playlist_playback(&playlist, vec![None, Some(("one.flac".into(), None))], None).unwrap();
+        shuffle_prepared_playlist_playback(&mut prepared, |_| panic!("single item needs no randomness")).unwrap();
+        assert_eq!(prepared.playback_uris, ["one.flac"]);
+        assert_eq!(prepared.start_index, 0);
+        assert_eq!(prepared.skipped_count, 1);
+    }
+
+    #[test]
+    fn playlist_shuffle_preserves_playable_occurrences_and_persisted_order() {
+        let plex = MediaLocator::Plex {
+            server_id: "server".into(),
+            part_key: "/library/parts/42/file.flac".into(),
+            rating_key: Some("42".into()),
+            file_path: None,
+        };
+        let playlist = playback_playlist(vec![
+            local_locator("Álbum/one \\\"quote\\\".flac"),
+            local_locator("missing.flac"),
+            plex,
+            local_locator("Álbum/one \\\"quote\\\".flac"),
+            local_locator("unavailable.flac"),
+            local_locator("four.flac"),
+        ]);
+        let original = playlist.clone();
+        let mut prepared = prepare_playlist_playback(&playlist, vec![
+            Some(("Álbum/one \\\"quote\\\".flac".into(), None)),
+            None,
+            Some(("https://plex.test/stream".into(), None)),
+            Some(("Álbum/one \\\"quote\\\".flac".into(), None)),
+            None,
+            Some(("four.flac".into(), None)),
+        ], None).unwrap();
+        let mut before = prepared.tracks.iter().zip(&prepared.playback_uris)
+            .map(|(track, uri)| (track.title.clone(), uri.clone())).collect::<Vec<_>>();
+        let mut choices = [0, 1, 0].into_iter();
+        shuffle_prepared_playlist_playback(&mut prepared, |_| Ok(choices.next().unwrap())).unwrap();
+        let mut after = prepared.tracks.iter().zip(&prepared.playback_uris)
+            .map(|(track, uri)| (track.title.clone(), uri.clone())).collect::<Vec<_>>();
+        assert_ne!(after, before);
+        before.sort();
+        after.sort();
+        assert_eq!(after, before);
+        assert_eq!(prepared.playback_uris.iter().filter(|uri| uri.as_str() == "Álbum/one \\\"quote\\\".flac").count(), 2);
+        assert_eq!(prepared.skipped_count, 2);
+        assert_eq!(prepared.start_index, 0);
+        assert_eq!(playlist, original);
     }
 
     static NEXT_MPD_HEALTH_TEST_ID: AtomicU64 = AtomicU64::new(0);

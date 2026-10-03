@@ -100,6 +100,7 @@
     "addItemCount_other": "Adicionar {{count}} faixas",
     "rename": "Renomear",
     "play": "Tocar",
+    "shuffle": "Embaralhar",
     "playFromTrack": "Tocar a partir desta faixa",
     "preparingPlayback": "Preparando…",
     "skippedCount_one": "{{count}} faixa indisponível foi ignorada.",
