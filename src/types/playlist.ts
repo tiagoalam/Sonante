@@ -13,6 +13,17 @@ export interface PlaylistItem {
   metadata: PlaylistItemMetadata;
 }
 
+export interface NewPlaylistItem {
+  media_locator: MediaLocator;
+  metadata: PlaylistItemMetadata;
+}
+
+export interface PlaylistItemAvailability {
+  item_id: string;
+  status: "available" | "missing" | "unavailable";
+  reason?: string | null;
+}
+
 export interface Playlist {
   id: string;
   name: string;

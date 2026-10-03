@@ -910,6 +910,18 @@ fn is_valid_plex_path(path: &str) -> bool {
         && !path.contains("://")
 }
 
+fn json_boolean(value: Option<&serde_json::Value>) -> Option<bool> {
+    match value? {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::Number(value) => value.as_u64().and_then(|value| match value {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 fn authenticated_plex_url(base_url: &str, path_and_query: &str, token: &str) -> String {
     let separator = if path_and_query.contains('?') { '&' } else { '?' };
     format!(
@@ -1268,6 +1280,36 @@ mod tests {
         )
     }
 
+    fn availability_client_for_test(
+        content_status: &'static str,
+        content_body: serde_json::Value,
+    ) -> (PlexClient, MockServer) {
+        let server = MockServer::start(move |path| {
+            if path.starts_with("/identity") {
+                MockResponse::json(
+                    "200 OK",
+                    serde_json::json!({
+                        "MediaContainer": { "machineIdentifier": "fixture-machine-id" }
+                    }),
+                )
+            } else if path == "/library/sections" {
+                MockResponse::json("200 OK", serde_json::json!({"MediaContainer": {}}))
+            } else {
+                MockResponse::json(content_status, content_body.clone())
+            }
+        });
+        let config = manager_config(&server.base_url, Some("fixture-machine-id"));
+        let manager = test_manager(&config, unreachable_base_url());
+        (
+            PlexClient {
+                connection_manager: Arc::new(manager),
+                playback_mode: "http".to_string(),
+                path_mappings: HashMap::new(),
+            },
+            server,
+        )
+    }
+
     fn media_client_for_test(config: &AppConfig) -> PlexClient {
         let mut path_mappings = HashMap::new();
         if config.playback_mode == "local"
@@ -1289,10 +1331,16 @@ mod tests {
         }
     }
 
-    fn plex_locator(server_id: &str, part_key: &str, file_path: Option<&str>) -> MediaLocator {
+    fn plex_locator(
+        server_id: &str,
+        part_key: &str,
+        rating_key: Option<&str>,
+        file_path: Option<&str>,
+    ) -> MediaLocator {
         MediaLocator::Plex {
             server_id: server_id.to_string(),
             part_key: part_key.to_string(),
+            rating_key: rating_key.map(str::to_string),
             file_path: file_path.map(str::to_string),
         }
     }
@@ -1326,12 +1374,114 @@ mod tests {
             plex_locator(
                 "server-1",
                 "/library/parts/1/file.flac",
+                Some("track-1"),
                 Some("/srv/music/file.flac")
             )
         );
         let serialized = serde_json::to_string(&track).unwrap();
         assert!(!serialized.contains("SECRET"));
         assert!(!serialized.contains("route.invalid"));
+    }
+
+    #[test]
+    fn media_availability_uses_metadata_for_available_and_confirmed_missing() {
+        let existing_body = serde_json::json!({
+            "MediaContainer": {
+                "Metadata": [{
+                    "ratingKey": "track-1",
+                    "parentThumb": "/library/metadata/album-1/thumb/1",
+                    "Media": [{"Part": [{
+                        "key": "/library/parts/1/file.flac",
+                        "exists": true
+                    }]}]
+                }]
+            }
+        });
+        let (existing_client, _existing_server) =
+            availability_client_for_test("200 OK", existing_body);
+        let existing = plex_locator(
+            "fixture-machine-id",
+            "/library/parts/1/file.flac",
+            Some("track-1"),
+            None,
+        );
+        let (availability, artwork) = tauri::async_runtime::block_on(
+            existing_client.media_availability_with_artwork(&existing),
+        );
+        assert_eq!(availability, PlexMediaAvailability::Available);
+        assert_eq!(artwork.unwrap().path, "/library/metadata/album-1/thumb/1");
+
+        let (missing_client, _missing_server) = availability_client_for_test(
+            "404 Not Found",
+            serde_json::json!({"MediaContainer": {}}),
+        );
+        let missing = plex_locator(
+            "fixture-machine-id",
+            "/library/parts/404/file.flac",
+            Some("track-404"),
+            None,
+        );
+        assert_eq!(
+            tauri::async_runtime::block_on(missing_client.media_availability(&missing)),
+            PlexMediaAvailability::Missing
+        );
+    }
+
+    #[test]
+    fn plex_server_and_network_errors_are_unavailable_not_missing() {
+        let locator = plex_locator(
+            "fixture-machine-id",
+            "/library/parts/1/file.flac",
+            Some("track-1"),
+            None,
+        );
+        let (server_error_client, _server) = availability_client_for_test(
+            "500 Internal Server Error",
+            serde_json::json!({"MediaContainer": {}}),
+        );
+        assert!(matches!(
+            tauri::async_runtime::block_on(server_error_client.media_availability(&locator)),
+            PlexMediaAvailability::Unavailable(_)
+        ));
+
+        let config = manager_config(&unreachable_base_url(), Some("fixture-machine-id"));
+        let network_client = media_client_for_test(&config);
+        assert!(matches!(
+            tauri::async_runtime::block_on(network_client.media_availability(&locator)),
+            PlexMediaAvailability::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn unsupported_or_unexpected_plex_responses_are_unavailable() {
+        let locator = plex_locator(
+            "fixture-machine-id",
+            "/library/parts/1/file.flac",
+            Some("track-1"),
+            None,
+        );
+        let (method_client, _method_server) = availability_client_for_test(
+            "405 Method Not Allowed",
+            serde_json::json!({"MediaContainer": {}}),
+        );
+        assert!(matches!(
+            tauri::async_runtime::block_on(method_client.media_availability(&locator)),
+            PlexMediaAvailability::Unavailable(_)
+        ));
+
+        let (unexpected_client, _unexpected_server) = availability_client_for_test(
+            "200 OK",
+            serde_json::json!({
+                "MediaContainer": {
+                    "size": 1,
+                    "Metadata": [{"ratingKey": "different-track"}]
+                }
+            }),
+        );
+        assert!(matches!(
+            tauri::async_runtime::block_on(unexpected_client.media_availability(&locator)),
+            PlexMediaAvailability::Unavailable(_)
+        ));
     }
 
     #[test]
@@ -1358,7 +1508,7 @@ mod tests {
             playback_mode: "http".to_string(),
             path_mappings: HashMap::new(),
         };
-        let locator = plex_locator("server-1", "/library/parts/1/file.flac", None);
+        let locator = plex_locator("server-1", "/library/parts/1/file.flac", None, None);
 
         let first = tauri::async_runtime::block_on(client.resolve_media_locator(&locator)).unwrap();
 
@@ -1390,7 +1540,7 @@ mod tests {
     fn media_reference_for_different_server_is_rejected_without_sensitive_details() {
         let config = manager_config("http://selected-route.invalid", Some("server-1"));
         let client = media_client_for_test(&config);
-        let locator = plex_locator("server-2", "/library/parts/1/file.flac", None);
+        let locator = plex_locator("server-2", "/library/parts/1/file.flac", None, None);
 
         let error = tauri::async_runtime::block_on(client.resolve_media_locator(&locator))
             .unwrap_err();
@@ -1410,6 +1560,7 @@ mod tests {
         let locator = plex_locator(
             "server-1",
             "/library/parts/1/file.flac",
+            None,
             Some("/srv/music/album/file.flac"),
         );
 
@@ -2163,6 +2314,7 @@ pub struct PlexTrack {
     pub rating_key: String,
     pub title: String,
     pub album_title: Option<String>,
+    pub artist: Option<String>,
     pub thumb: Option<PlexImageRef>,
     pub track_index: u32,
     pub duration_ms: u64,
@@ -2176,7 +2328,166 @@ pub struct PlexClient {
     path_mappings: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlexMediaAvailability {
+    Available,
+    Missing,
+    Unavailable(String),
+}
+
 impl PlexClient {
+    pub async fn media_availability(&self, locator: &MediaLocator) -> PlexMediaAvailability {
+        self.media_availability_with_artwork(locator).await.0
+    }
+
+    pub async fn media_availability_with_artwork(
+        &self,
+        locator: &MediaLocator,
+    ) -> (PlexMediaAvailability, Option<PlexImageRef>) {
+        let mut artwork = None;
+        let availability = self.media_availability_inner(locator, &mut artwork).await;
+        (availability, artwork)
+    }
+
+    async fn media_availability_inner(
+        &self,
+        locator: &MediaLocator,
+        artwork: &mut Option<PlexImageRef>,
+    ) -> PlexMediaAvailability {
+        let MediaLocator::Plex {
+            server_id,
+            part_key,
+            rating_key,
+            ..
+        } = locator
+        else {
+            return PlexMediaAvailability::Unavailable(
+                "A referência informada não é uma faixa Plex.".to_string(),
+            );
+        };
+        if !is_valid_plex_path(part_key) || contains_plex_token(part_key) {
+            return PlexMediaAvailability::Unavailable(
+                "A referência Plex é inválida ou contém credencial.".to_string(),
+            );
+        }
+        let Some(rating_key) = rating_key.as_deref() else {
+            return PlexMediaAvailability::Unavailable(
+                "A referência Plex legada não possui identidade de metadata para validação segura."
+                    .to_string(),
+            );
+        };
+        if rating_key.trim().is_empty()
+            || rating_key.contains(['\0', '\r', '\n', '/', '?', '#'])
+        {
+            return PlexMediaAvailability::Unavailable(
+                "A identidade de metadata Plex é inválida.".to_string(),
+            );
+        }
+        let snapshot = match self.connection_manager.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => return PlexMediaAvailability::Unavailable(error.public_message()),
+        };
+        let Some(selected_server_id) = snapshot
+            .identity
+            .as_ref()
+            .map(|identity| identity.machine_identifier.as_str())
+        else {
+            return PlexMediaAvailability::Unavailable(
+                "Não foi possível identificar o servidor Plex selecionado.".to_string(),
+            );
+        };
+        if selected_server_id != server_id {
+            return PlexMediaAvailability::Unavailable(
+                "A referência pertence a outro servidor Plex.".to_string(),
+            );
+        }
+
+        let operation = "validar a disponibilidade da faixa";
+        let path = format!(
+            "/library/metadata/{}?checkFileAvailability=1",
+            urlencoding::encode(rating_key)
+        );
+        let (json, connection): (serde_json::Value, _) =
+            match self.connection_manager.request_json(&path, operation).await {
+                Ok(result) => result,
+                Err(error)
+                    if error.kind == PlexErrorKind::NotFound && error.operation == operation =>
+                {
+                    return PlexMediaAvailability::Missing;
+                }
+                Err(error) => {
+                    return PlexMediaAvailability::Unavailable(error.public_message());
+                }
+            };
+        if connection.server_id != *server_id {
+            return PlexMediaAvailability::Unavailable(
+                "A rota Plex respondeu como outro servidor e foi rejeitada.".to_string(),
+            );
+        }
+        let container = match media_container(&json, operation) {
+            Ok(container) => container,
+            Err(error) => return PlexMediaAvailability::Unavailable(error.public_message()),
+        };
+        let Some(metadata) = container
+            .get("Metadata")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return PlexMediaAvailability::Unavailable(
+                PlexError::invalid_response(operation).public_message(),
+            );
+        };
+        let Some(track) = metadata.iter().find(|item| {
+            item.get("ratingKey").and_then(serde_json::Value::as_str) == Some(rating_key)
+        }) else {
+            return if metadata.is_empty()
+                && container
+                    .get("size")
+                    .and_then(|size| size.as_u64().or_else(|| size.as_str()?.parse().ok()))
+                    == Some(0)
+            {
+                PlexMediaAvailability::Missing
+            } else {
+                PlexMediaAvailability::Unavailable(
+                    "O Plex retornou metadata inesperada para a faixa consultada.".to_string(),
+                )
+            };
+        };
+        *artwork = track["thumb"]
+            .as_str()
+            .or_else(|| track["parentThumb"].as_str())
+            .and_then(|path| PlexImageRef::from_connection(&connection, path));
+        let Some(media_items) = track
+            .get("Media")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return PlexMediaAvailability::Unavailable(
+                "O Plex retornou metadata sem a lista de mídias da faixa.".to_string(),
+            );
+        };
+        let mut parts = Vec::new();
+        for media in media_items {
+            let Some(media_parts) = media.get("Part").and_then(serde_json::Value::as_array) else {
+                return PlexMediaAvailability::Unavailable(
+                    "O Plex retornou metadata sem a lista de arquivos da faixa.".to_string(),
+                );
+            };
+            parts.extend(media_parts);
+        }
+        let matching_part = parts.into_iter().find(|part| {
+            part.get("key").and_then(serde_json::Value::as_str) == Some(part_key.as_str())
+        });
+        let Some(part) = matching_part else {
+            return PlexMediaAvailability::Missing;
+        };
+        match json_boolean(part.get("exists")) {
+            Some(true) => PlexMediaAvailability::Available,
+            Some(false) => PlexMediaAvailability::Missing,
+            None => PlexMediaAvailability::Unavailable(
+                "O Plex não confirmou a existência do arquivo da faixa.".to_string(),
+            ),
+        }
+    }
+
     pub async fn search(&self, query: &str, section_key: Option<&str>) -> Result<PlexSearchResults, String> {
         let mut path = format!("/hubs/search?query={}&limit=12", urlencoding::encode(query));
 
@@ -2279,6 +2590,7 @@ impl PlexClient {
             server_id,
             part_key,
             file_path,
+            ..
         } = locator
         else {
             return match locator {
@@ -2358,6 +2670,7 @@ impl PlexClient {
         let rating_key = item["ratingKey"].as_str()?.to_string();
         let title = item["title"].as_str().unwrap_or("Faixa").to_string();
         let album_title = item["parentTitle"].as_str().map(|s| s.to_string());
+        let artist = item["grandparentTitle"].as_str().map(|s| s.to_string());
         let track_index = item["index"].as_u64().unwrap_or(1) as u32;
         let duration_ms = item["duration"].as_u64().unwrap_or(0);
 
@@ -2372,15 +2685,17 @@ impl PlexClient {
         let part_key = part["key"].as_str().filter(|key| !key.is_empty())?;
 
         Some(PlexTrack {
-            rating_key,
+            rating_key: rating_key.clone(),
             title,
             album_title,
+            artist,
             thumb,
             track_index,
             duration_ms,
             media_locator: MediaLocator::Plex {
                 server_id: connection.server_id.clone(),
                 part_key: part_key.to_string(),
+                rating_key: Some(rating_key.clone()),
                 file_path: (self.playback_mode == "local" && !file_path.is_empty())
                     .then(|| file_path.to_string()),
             },

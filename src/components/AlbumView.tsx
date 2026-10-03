@@ -7,13 +7,17 @@ import {
   User,
   Sparkles,
   Heart,
+  ListPlus,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { PlexAlbum, PlexTrack, SelectedArtist } from "../types/plex";
 import { FavoriteAlbum } from "../types/favorite";
 import { plexService } from "../services/plex";
 import { audioService } from "../services/audio";
 import { PlexImage } from "./PlexImage";
 import { favoritesService } from "../services/favorites";
+import { PlaylistPickerModal } from "./PlaylistPickerModal";
+import type { NewPlaylistItem } from "../types/playlist";
 
 interface Props {
   album: PlexAlbum;
@@ -30,9 +34,11 @@ export const AlbumView: React.FC<Props> = ({
   onToggleFavorite,
   isPlaybackAvailable,
 }) => {
+  const { t } = useTranslation();
   const [tracks, setTracks] = useState<PlexTrack[]>([]);
   const [loading, setLoading] = useState(true);
   const [isFavorite, setIsFavorite] = useState(false);
+  const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
 
   const albumKey = String(album.rating_key || "");
 
@@ -92,6 +98,20 @@ export const AlbumView: React.FC<Props> = ({
       audioService.playTracks(metaTracks, startIndex);
     }
   };
+
+  const toPlaylistItem = (track: PlexTrack): NewPlaylistItem => ({
+    media_locator: track.media_locator,
+    metadata: {
+      title: track.title,
+      artist: album.artist,
+      album: track.album_title || album.title,
+      duration: track.duration_ms
+        ? track.duration_ms / 1000
+        : track.duration && track.duration > 1000
+          ? track.duration / 1000
+          : track.duration,
+    },
+  });
 
   const formatDuration = (ms: number) => {
     const totalSeconds = Math.floor(ms / 1000);
@@ -174,6 +194,17 @@ export const AlbumView: React.FC<Props> = ({
               </button>
 
               <button
+                type="button"
+                onClick={() => setPlaylistItems(tracks.map(toPlaylistItem))}
+                disabled={loading || tracks.length === 0}
+                className="flex items-center space-x-2 rounded-xl border border-[#2B2B2B] bg-[#1E1E1E] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#282828] disabled:opacity-50"
+                title={t("playlists.addAlbum")}
+              >
+                <ListPlus size={16} />
+                <span>{t("playlists.addAlbum")}</span>
+              </button>
+
+              <button
                 onClick={handleToggleFav}
                 className="p-2.5 rounded-xl bg-[#1E1E1E] border border-[#2B2B2B] hover:bg-[#282828] text-white transition-colors cursor-pointer"
                 title={isFavorite ? "Remover dos favoritos" : "Adicionar aos favoritos"}
@@ -191,8 +222,8 @@ export const AlbumView: React.FC<Props> = ({
         <div className="bg-[#141414] border border-[#222222] rounded-xl overflow-hidden divide-y divide-[#1D1D1D]">
           <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[#666666] uppercase tracking-wider bg-[#181818]">
             <span className="col-span-1 text-center">#</span>
-            <span className="col-span-8">Título</span>
-            <span className="col-span-3 text-right flex items-center justify-end space-x-1">
+            <span className="col-span-7">Título</span>
+            <span className="col-span-4 text-right flex items-center justify-end space-x-1">
               <Clock size={12} />
               <span>Duração</span>
             </span>
@@ -222,7 +253,7 @@ export const AlbumView: React.FC<Props> = ({
                   {track.index || idx + 1}
                 </span>
 
-                <div className="col-span-8 flex flex-col pr-2">
+                <div className="col-span-7 flex flex-col pr-2">
                   <span className="font-semibold text-white group-hover:text-[#E5A00D] transition-colors truncate">
                     {track.title}
                   </span>
@@ -230,14 +261,38 @@ export const AlbumView: React.FC<Props> = ({
                     {album.artist}
                   </span>
                 </div>
-		<span className="col-span-3 text-right font-mono text-[#888888]">
-  			{formatDuration(track.duration_ms ?? track.duration ?? 0)}
-		</span>
+                <div className="col-span-4 flex items-center justify-end gap-3">
+                  <span className="font-mono text-[#888888]">
+                    {formatDuration(track.duration_ms ?? track.duration ?? 0)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setPlaylistItems([toPlaylistItem(track)]);
+                    }}
+                    className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                    title={t("playlists.addTrack")}
+                  >
+                    <ListPlus size={15} />
+                  </button>
+                </div>
               </div>
             ))
           )}
         </div>
       </div>
+      {playlistItems && (
+        <PlaylistPickerModal
+          items={playlistItems}
+          title={
+            playlistItems.length === 1
+              ? t("playlists.addTrack")
+              : t("playlists.addAlbum")
+          }
+          onClose={() => setPlaylistItems(null)}
+        />
+      )}
     </div>
   );
 };

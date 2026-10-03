@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from "react";
-import { ArrowLeft, Play, Pause, Disc3, ChevronDown, ChevronUp, User } from "lucide-react";
+import { ArrowLeft, Play, Pause, Disc3, ChevronDown, ChevronUp, User, ListPlus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlexAlbum, PlexTrack, SelectedArtist } from "../types/plex";
 import { PlaybackStatus } from "../types/audio";
 import { plexService } from "../services/plex";
 import { audioService } from "../services/audio";
 import { PlexImage } from "./PlexImage";
+import { PlaylistPickerModal } from "./PlaylistPickerModal";
+import type { NewPlaylistItem } from "../types/playlist";
 
 interface Props {
   artist: SelectedArtist;
@@ -27,6 +29,7 @@ export const ArtistView: React.FC<Props> = ({
   const [topTracks, setTopTracks] = useState<PlexTrack[]>([]);
   const [visibleTracksCount, setVisibleTracksCount] = useState<number>(5);
   const [loading, setLoading] = useState(true);
+  const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -84,6 +87,16 @@ export const ArtistView: React.FC<Props> = ({
       console.error("Falha ao tocar faixas do artista:", err);
     }
   };
+
+  const toPlaylistItem = (track: PlexTrack): NewPlaylistItem => ({
+    media_locator: track.media_locator,
+    metadata: {
+      title: track.title,
+      artist: track.artist || artist.name,
+      album: track.album_title || "",
+      duration: track.duration_ms ? track.duration_ms / 1000 : track.duration,
+    },
+  });
 
   return (
     <main className="flex-1 flex flex-col overflow-y-auto bg-gradient-to-b from-[#1C1812] via-[#121212] to-[#121212] select-none p-8">
@@ -148,7 +161,7 @@ export const ArtistView: React.FC<Props> = ({
                       key={track.rating_key}
                       onClick={() => handlePlayTrack(idx)}
                       aria-disabled={!isPlaybackAvailable}
-                      className={`group grid grid-cols-[40px_48px_1fr_80px] items-center px-4 py-2.5 rounded-lg text-xs transition-colors ${
+                      className={`group grid grid-cols-[40px_48px_1fr_110px] items-center px-4 py-2.5 rounded-lg text-xs transition-colors ${
                         isPlaybackAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-60"
                       } ${
                         active ? "bg-[#251E10] text-[#E5A00D]" : "hover:bg-[#1A1A1A] text-[#CCCCCC]"
@@ -194,9 +207,22 @@ export const ArtistView: React.FC<Props> = ({
                         )}
                       </div>
 
-                      <span className={`text-right font-mono text-[11px] ${active ? "text-[#E5A00D]" : "text-[#777777]"}`}>
-                        {formatTime(track.duration_ms || 0)}
-                      </span>
+                      <div className="flex items-center justify-end gap-3">
+                        <span className={`font-mono text-[11px] ${active ? "text-[#E5A00D]" : "text-[#777777]"}`}>
+                          {formatTime(track.duration_ms || 0)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setPlaylistItems([toPlaylistItem(track)]);
+                          }}
+                          className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                          title={t("playlists.addTrack")}
+                        >
+                          <ListPlus size={15} />
+                        </button>
+                      </div>
                     </div>
                   );
                 })}
@@ -266,6 +292,13 @@ export const ArtistView: React.FC<Props> = ({
             </div>
           </div>
         </div>
+      )}
+      {playlistItems && (
+        <PlaylistPickerModal
+          items={playlistItems}
+          title={t("playlists.addTrack")}
+          onClose={() => setPlaylistItems(null)}
+        />
       )}
     </main>
   );

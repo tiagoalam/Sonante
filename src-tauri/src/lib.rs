@@ -11,14 +11,15 @@ mod supervisor;
 
 use audio::{
     list_audio_devices, AudioDevice, AudioEngine, AudioState, DeviceSwitchSnapshot,
-    MpdProbeFailure, PlaybackStatus, TrackMetadata, VolumeBackend, VolumeStatus,
+    MediaLocator, MpdProbeFailure, PlaybackStatus, TrackMetadata, VolumeBackend, VolumeStatus,
 };
 use analyzer::{AnalyzerState, AudioAnalyzer};
 use config::AppConfig;
 use favorites::FavoriteAlbum;
-use playlists::{Playlist, PlaylistState, PlaylistStore};
+use playlists::{NewPlaylistItem, Playlist, PlaylistState, PlaylistStore};
 use plex::{
-    PlexAlbum, PlexClient, PlexCollection, PlexImageRef, PlexLibrary, PlexSearchResults, PlexTrack,
+    PlexAlbum, PlexClient, PlexCollection, PlexImageRef, PlexLibrary, PlexMediaAvailability,
+    PlexSearchResults, PlexTrack,
 };
 use serde::Serialize;
 use shared_volume::{PipeWireVolume, SharedVolumeBackend};
@@ -389,6 +390,19 @@ fn create_playlist(name: String, state: State<PlaylistState>) -> Result<Playlist
 }
 
 #[tauri::command]
+fn create_playlist_with_items(
+    name: String,
+    items: Vec<NewPlaylistItem>,
+    state: State<PlaylistState>,
+) -> Result<Playlist, String> {
+    state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .create_with_items(&name, items)
+}
+
+#[tauri::command]
 fn rename_playlist(
     id: String,
     name: String,
@@ -408,6 +422,294 @@ fn delete_playlist(id: String, state: State<PlaylistState>) -> Result<(), String
         .lock()
         .map_err(|_| "O estado das playlists está indisponível.".to_string())?
         .delete(&id)
+}
+
+#[tauri::command]
+fn add_playlist_item(
+    playlist_id: String,
+    item: NewPlaylistItem,
+    state: State<PlaylistState>,
+) -> Result<Playlist, String> {
+    state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .add_item(&playlist_id, item)
+}
+
+#[tauri::command]
+fn add_playlist_items(
+    playlist_id: String,
+    items: Vec<NewPlaylistItem>,
+    state: State<PlaylistState>,
+) -> Result<Playlist, String> {
+    state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .add_items(&playlist_id, items)
+}
+
+#[tauri::command]
+fn remove_playlist_item(
+    playlist_id: String,
+    item_id: String,
+    state: State<PlaylistState>,
+) -> Result<Playlist, String> {
+    state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .remove_item(&playlist_id, &item_id)
+}
+
+#[tauri::command]
+fn reorder_playlist_items(
+    playlist_id: String,
+    ordered_item_ids: Vec<String>,
+    state: State<PlaylistState>,
+) -> Result<Playlist, String> {
+    state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .reorder_items(&playlist_id, &ordered_item_ids)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PlaylistItemAvailabilityStatus {
+    Available,
+    Missing,
+    Unavailable,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct PlaylistItemAvailability {
+    item_id: String,
+    status: PlaylistItemAvailabilityStatus,
+    reason: Option<String>,
+}
+
+fn local_playlist_item_availability(
+    item_id: String,
+    result: Result<bool, String>,
+) -> PlaylistItemAvailability {
+    match result {
+        Ok(true) => PlaylistItemAvailability {
+            item_id,
+            status: PlaylistItemAvailabilityStatus::Available,
+            reason: None,
+        },
+        Ok(false) => PlaylistItemAvailability {
+            item_id,
+            status: PlaylistItemAvailabilityStatus::Missing,
+            reason: None,
+        },
+        Err(reason) => PlaylistItemAvailability {
+            item_id,
+            status: PlaylistItemAvailabilityStatus::Unavailable,
+            reason: Some(reason),
+        },
+    }
+}
+
+fn plex_playlist_item_availability(
+    item_id: String,
+    availability: PlexMediaAvailability,
+) -> PlaylistItemAvailability {
+    match availability {
+        PlexMediaAvailability::Available => PlaylistItemAvailability {
+            item_id,
+            status: PlaylistItemAvailabilityStatus::Available,
+            reason: None,
+        },
+        PlexMediaAvailability::Missing => PlaylistItemAvailability {
+            item_id,
+            status: PlaylistItemAvailabilityStatus::Missing,
+            reason: None,
+        },
+        PlexMediaAvailability::Unavailable(reason) => PlaylistItemAvailability {
+            item_id,
+            status: PlaylistItemAvailabilityStatus::Unavailable,
+            reason: Some(reason),
+        },
+    }
+}
+
+#[tauri::command]
+async fn resolve_playlist_items(
+    playlist_id: String,
+    playlist_state: State<'_, PlaylistState>,
+    audio_state: State<'_, AudioState>,
+    plex_state: State<'_, PlexState>,
+) -> Result<Vec<PlaylistItemAvailability>, String> {
+    let playlist = playlist_state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .get(&playlist_id)?;
+    let plex_client = plex_state
+        .0
+        .lock()
+        .map(|client| client.clone())
+        .map_err(|_| "O estado da conexão Plex está indisponível.".to_string());
+    let mut statuses = Vec::with_capacity(playlist.items.len());
+    for item in playlist.items {
+        let status = match &item.media_locator {
+            MediaLocator::Local { uri } => {
+                let result = audio_state
+                    .0
+                    .lock()
+                    .map_err(|_| "O estado da biblioteca local está indisponível.".to_string())
+                    .and_then(|audio| audio.local_media_exists(uri));
+                local_playlist_item_availability(item.id, result)
+            }
+            MediaLocator::Plex { .. } => {
+                let availability = match &plex_client {
+                    Ok(client) => client.media_availability(&item.media_locator).await,
+                    Err(reason) => PlexMediaAvailability::Unavailable(reason.clone()),
+                };
+                plex_playlist_item_availability(item.id, availability)
+            }
+        };
+        statuses.push(status);
+    }
+    Ok(statuses)
+}
+
+const NO_PLAYABLE_PLAYLIST_ITEMS: &str = "playlist_no_playable_items";
+const SELECTED_PLAYLIST_ITEM_UNAVAILABLE: &str = "playlist_selected_item_unavailable";
+
+#[derive(Serialize)]
+struct PlaylistPlaybackResult {
+    skipped_count: usize,
+}
+
+struct PreparedPlaylistPlayback {
+    tracks: Vec<TrackMetadata>,
+    playback_uris: Vec<String>,
+    start_index: usize,
+    skipped_count: usize,
+}
+
+fn prepare_playlist_playback(
+    playlist: &Playlist,
+    resolved_uris: Vec<Option<(String, Option<PlexImageRef>)>>,
+    start_item_id: Option<&str>,
+) -> Result<PreparedPlaylistPlayback, String> {
+    if resolved_uris.len() != playlist.items.len() {
+        return Err("A resolução da playlist retornou uma quantidade inválida de itens.".into());
+    }
+    if let Some(id) = start_item_id {
+        if !playlist.items.iter().any(|item| item.id == id) {
+            return Err("Item da playlist não encontrado.".into());
+        }
+    }
+    let mut tracks = Vec::new();
+    let mut playback_uris = Vec::new();
+    let mut start_index = None;
+    for (item, uri) in playlist.items.iter().zip(resolved_uris) {
+        if let Some((uri, artwork)) = uri {
+            if start_item_id == Some(item.id.as_str()) {
+                start_index = Some(tracks.len());
+            }
+            tracks.push(TrackMetadata {
+                title: item.metadata.title.clone(),
+                artist: item.metadata.artist.clone(),
+                album: item.metadata.album.clone(),
+                thumb: None,
+                plex_image: artwork,
+                media_locator: Some(item.media_locator.clone()),
+                uri: match &item.media_locator {
+                    MediaLocator::Local { uri } => uri.clone(),
+                    MediaLocator::Plex { .. } => String::new(),
+                },
+                duration: item.metadata.duration,
+            });
+            playback_uris.push(uri);
+        } else if start_item_id == Some(item.id.as_str()) {
+            return Err(SELECTED_PLAYLIST_ITEM_UNAVAILABLE.into());
+        }
+    }
+    if tracks.is_empty() {
+        return Err(NO_PLAYABLE_PLAYLIST_ITEMS.into());
+    }
+    Ok(PreparedPlaylistPlayback {
+        skipped_count: playlist.items.len() - tracks.len(),
+        tracks,
+        playback_uris,
+        start_index: start_index.unwrap_or(0),
+    })
+}
+
+#[tauri::command]
+async fn play_playlist(
+    playlist_id: String,
+    start_item_id: Option<String>,
+    playlist_state: State<'_, PlaylistState>,
+    audio_state: State<'_, AudioState>,
+    plex_state: State<'_, PlexState>,
+) -> Result<PlaylistPlaybackResult, String> {
+    let playlist = playlist_state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .get(&playlist_id)?;
+    let plex_client = plex_state
+        .0
+        .lock()
+        .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
+        .clone();
+    let mut resolved_uris = Vec::with_capacity(playlist.items.len());
+    for item in &playlist.items {
+        let uri = match &item.media_locator {
+            MediaLocator::Local { uri } => {
+                let exists = audio_state
+                    .0
+                    .lock()
+                    .map_err(|_| "O estado de reprodução está indisponível.".to_string())?
+                    .local_media_exists(uri);
+                match exists {
+                    Ok(true) => Some((uri.clone(), None)),
+                    Ok(false) => None,
+                    Err(_) => {
+                        eprintln!("[Playlist] Falha ao verificar item local {} no MPD.", item.id);
+                        None
+                    }
+                }
+            }
+            MediaLocator::Plex { .. } => {
+                let (availability, artwork) = plex_client
+                    .media_availability_with_artwork(&item.media_locator).await;
+                match availability {
+                    PlexMediaAvailability::Available => match plex_client
+                        .resolve_media_locator(&item.media_locator).await {
+                        Ok(uri) => Some((uri, artwork)),
+                        Err(_) => {
+                            eprintln!("[Playlist] Falha ao resolver item Plex {}.", item.id);
+                            None
+                        }
+                    },
+                    PlexMediaAvailability::Missing => None,
+                    PlexMediaAvailability::Unavailable(_) => {
+                        eprintln!("[Playlist] Item Plex {} indisponível nesta tentativa.", item.id);
+                        None
+                    }
+                }
+            }
+        };
+        resolved_uris.push(uri);
+    }
+    let prepared = prepare_playlist_playback(&playlist, resolved_uris, start_item_id.as_deref())?;
+    audio_state
+        .0
+        .lock()
+        .map_err(|_| "O estado de reprodução está indisponível.".to_string())?
+        .play_tracks(prepared.tracks, prepared.playback_uris, prepared.start_index)?;
+    Ok(PlaylistPlaybackResult {
+        skipped_count: prepared.skipped_count,
+    })
 }
 
 #[tauri::command]
@@ -971,8 +1273,15 @@ pub fn run() {
             toggle_favorite,
             list_playlists,
             create_playlist,
+            create_playlist_with_items,
             rename_playlist,
             delete_playlist,
+            add_playlist_item,
+            add_playlist_items,
+            remove_playlist_item,
+            reorder_playlist_items,
+            resolve_playlist_items,
+            play_playlist,
             pick_directory,
             rescan_library,
             get_config,
@@ -1036,6 +1345,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use playlists::{PlaylistItem, PlaylistItemMetadata};
     use std::cell::Cell;
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
@@ -1046,6 +1356,92 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
+
+    fn playback_playlist(locators: Vec<MediaLocator>) -> Playlist {
+        Playlist {
+            id: "playlist".into(),
+            name: "Teste".into(),
+            created_at: 1,
+            updated_at: 1,
+            items: locators.into_iter().enumerate().map(|(index, media_locator)| {
+                PlaylistItem {
+                    id: format!("occurrence-{index}"),
+                    media_locator,
+                    metadata: PlaylistItemMetadata {
+                        title: format!("Faixa {index}"),
+                        artist: "Artista".into(),
+                        album: "Álbum".into(),
+                        duration: Some(100.0),
+                    },
+                }
+            }).collect(),
+        }
+    }
+
+    fn local_locator(uri: &str) -> MediaLocator {
+        MediaLocator::Local { uri: uri.into() }
+    }
+
+    #[test]
+    fn playlist_playback_preserves_order_duplicates_and_mixed_sources() {
+        let plex = MediaLocator::Plex {
+            server_id: "server".into(),
+            part_key: "/library/parts/42/file.flac".into(),
+            rating_key: Some("42".into()),
+            file_path: None,
+        };
+        let playlist = playback_playlist(vec![
+            local_locator("Álbum/01 \\\"a\\\".flac"),
+            plex.clone(),
+            local_locator("Álbum/01 \\\"a\\\".flac"),
+        ]);
+        let prepared = prepare_playlist_playback(&playlist, vec![
+            Some(("Álbum/01 \\\"a\\\".flac".into(), None)),
+            Some(("https://plex.test/stream".into(), Some(PlexImageRef {
+                server_id: "server".into(),
+                path: "/library/metadata/42/thumb/1".into(),
+            }))),
+            Some(("Álbum/01 \\\"a\\\".flac".into(), None)),
+        ], None).unwrap();
+        assert_eq!(prepared.tracks.len(), 3);
+        assert_eq!(prepared.start_index, 0);
+        assert_eq!(prepared.skipped_count, 0);
+        assert_eq!(prepared.tracks.iter().map(|track| track.title.as_str()).collect::<Vec<_>>(),
+                   vec!["Faixa 0", "Faixa 1", "Faixa 2"]);
+        assert_eq!(prepared.playback_uris[0], prepared.playback_uris[2]);
+        assert_eq!(prepared.tracks[1].media_locator, Some(plex));
+        assert_eq!(prepared.tracks[1].plex_image.as_ref().unwrap().server_id, "server");
+        assert!(prepared.tracks[1].uri.is_empty());
+
+        let from_duplicate = prepare_playlist_playback(&playlist, vec![
+            Some(("Álbum/01 \\\"a\\\".flac".into(), None)),
+            Some(("https://plex.test/stream".into(), None)),
+            Some(("Álbum/01 \\\"a\\\".flac".into(), None)),
+        ], Some("occurrence-2")).unwrap();
+        assert_eq!(from_duplicate.start_index, 2);
+    }
+
+    #[test]
+    fn playlist_playback_skips_missing_and_unavailable_without_reordering() {
+        let playlist = playback_playlist((0..5).map(|index| local_locator(&format!("{index}.flac"))).collect());
+        let prepared = prepare_playlist_playback(&playlist, vec![
+            Some(("0.flac".into(), None)), None, Some(("2.flac".into(), None)), None,
+            Some(("4.flac".into(), None)),
+        ], Some("occurrence-2")).unwrap();
+        assert_eq!(prepared.playback_uris, vec!["0.flac", "2.flac", "4.flac"]);
+        assert_eq!(prepared.start_index, 1);
+        assert_eq!(prepared.skipped_count, 2);
+    }
+
+    #[test]
+    fn playlist_playback_rejects_unplayable_selection_or_empty_queue_before_mpd() {
+        let playlist = playback_playlist(vec![local_locator("first.flac"), local_locator("second.flac")]);
+        assert_eq!(prepare_playlist_playback(&playlist, vec![None, None], None).err().unwrap(),
+                   NO_PLAYABLE_PLAYLIST_ITEMS);
+        assert_eq!(prepare_playlist_playback(&playlist, vec![Some(("first.flac".into(), None)), None],
+                    Some("occurrence-1")).err().unwrap(), SELECTED_PLAYLIST_ITEM_UNAVAILABLE);
+        assert!(prepare_playlist_playback(&playlist, vec![Some(("first.flac".into(), None))], None).is_err());
+    }
 
     static NEXT_MPD_HEALTH_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -1237,6 +1633,57 @@ mod tests {
                 stream.flush().unwrap();
             }
         })
+    }
+
+    fn spawn_find_server(socket_path: &Path, response: &'static [u8]) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(socket_path).unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"OK MPD 0.23.15\n").unwrap();
+            stream.flush().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(command, "find file \"missing.flac\"\n");
+            stream.write_all(response).unwrap();
+            stream.flush().unwrap();
+        })
+    }
+
+    #[test]
+    fn successful_mpd_query_without_item_is_missing() {
+        let (dir, socket_path, _) = mpd_health_test_paths("playlist-item-missing");
+        let server = spawn_find_server(&socket_path, b"OK\n");
+        let audio = AudioEngine::new(&socket_path.to_string_lossy(), &dir.to_string_lossy());
+
+        let availability = local_playlist_item_availability(
+            "item-1".to_string(),
+            audio.local_media_exists("missing.flac"),
+        );
+
+        assert_eq!(availability.status, PlaylistItemAvailabilityStatus::Missing);
+        assert_eq!(availability.reason, None);
+        server.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unavailable_mpd_query_is_not_missing() {
+        let (dir, socket_path, _) = mpd_health_test_paths("playlist-item-unavailable");
+        let audio = AudioEngine::new(&socket_path.to_string_lossy(), &dir.to_string_lossy());
+
+        let availability = local_playlist_item_availability(
+            "item-1".to_string(),
+            audio.local_media_exists("missing.flac"),
+        );
+
+        assert_eq!(
+            availability.status,
+            PlaylistItemAvailabilityStatus::Unavailable
+        );
+        assert!(availability.reason.is_some());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

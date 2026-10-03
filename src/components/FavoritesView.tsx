@@ -9,6 +9,7 @@ import {
   ArrowLeft,
   Clock,
   AlertTriangle,
+  ListPlus,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { FavoriteAlbum } from "../types/favorite";
@@ -16,6 +17,8 @@ import { favoritesService } from "../services/favorites";
 import { audioService } from "../services/audio";
 import { plexService } from "../services/plex";
 import { PlexImage } from "./PlexImage";
+import { PlaylistPickerModal } from "./PlaylistPickerModal";
+import type { NewPlaylistItem } from "../types/playlist";
 
 interface Props {
   onFavoritesChanged?: () => void;
@@ -38,6 +41,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
     media_locator?: import("../types/audio").MediaLocator;
   }[]>([]);
   const [loadingTracks, setLoadingTracks] = useState(false);
+  const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
 
   const loadFavorites = async () => {
     try {
@@ -165,6 +169,25 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
     const s = Math.floor(secs % 60);
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
+
+  const toPlaylistItem = (track: (typeof tracks)[number]): NewPlaylistItem | null => {
+    const mediaLocator = track.media_locator ?? (track.uri
+      ? { kind: "local" as const, uri: track.uri }
+      : null);
+    if (!mediaLocator || !selectedAlbum) return null;
+    return {
+      media_locator: mediaLocator,
+      metadata: {
+        title: track.title,
+        artist: track.artist,
+        album: selectedAlbum.title,
+        duration: track.duration,
+      },
+    };
+  };
+
+  const albumPlaylistItems = () =>
+    tracks.map(toPlaylistItem).filter((item): item is NewPlaylistItem => item !== null);
 
   const currentList = favorites.filter((f) => f.source === activeTab && Boolean(f.id));
   const filtered = currentList.filter(
@@ -296,6 +319,17 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                   </button>
 
                   <button
+                    type="button"
+                    onClick={() => setPlaylistItems(albumPlaylistItems())}
+                    disabled={tracks.length === 0}
+                    className="flex items-center space-x-2 rounded-xl border border-[#333333] bg-[#222222] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#2A2A2A] disabled:opacity-50"
+                    title={t("playlists.addAlbum")}
+                  >
+                    <ListPlus size={15} />
+                    <span>{t("playlists.addAlbum")}</span>
+                  </button>
+
+                  <button
                     onClick={(e) => handleToggleFav(e, selectedAlbum)}
                     className="flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-[#222222] hover:bg-[#2A2A2A] text-xs font-semibold text-[#E5A00D] border border-[#333333] transition-colors cursor-pointer"
                   >
@@ -323,7 +357,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
 
                 {tracks.map((tItem, idx) => (
                   <div
-                    key={tItem.uri}
+                    key={tItem.uri || (tItem.media_locator?.kind === "plex" ? tItem.media_locator.part_key : `${tItem.title}-${idx}`)}
                     onClick={() => handlePlayAll(idx)}
                     aria-disabled={!isPlaybackAvailable}
                     className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
@@ -341,9 +375,23 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                       </span>
                       <span className="text-[11px] text-[#777777] truncate">{tItem.artist}</span>
                     </div>
-                    <span className="col-span-3 text-right font-mono text-[#888888]">
-                      {formatDuration(tItem.duration)}
-                    </span>
+                    <div className="col-span-3 flex items-center justify-end gap-3">
+                      <span className="font-mono text-[#888888]">
+                        {formatDuration(tItem.duration)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          const item = toPlaylistItem(tItem);
+                          if (item) setPlaylistItems([item]);
+                        }}
+                        className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                        title={t("playlists.addTrack")}
+                      >
+                        <ListPlus size={15} />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -444,6 +492,13 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
           </div>
         )}
       </div>
+      {playlistItems && (
+        <PlaylistPickerModal
+          items={playlistItems}
+          title={playlistItems.length === 1 ? t("playlists.addTrack") : t("playlists.addAlbum")}
+          onClose={() => setPlaylistItems(null)}
+        />
+      )}
     </main>
   );
 };
