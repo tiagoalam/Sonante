@@ -49,6 +49,7 @@
     "exitFullscreen": "Sair da tela cheia",
     "close": "Fechar janela",
     "controlFailed": "O comando não foi aceito pelo motor de áudio.",
+    "spectrum": "Espectro",
     "vuUnavailable": "Inativo",
     "analyzerReason": {
       "current_audio_format_is_dsd": "Inativo · formato atual é DSD/DoP",

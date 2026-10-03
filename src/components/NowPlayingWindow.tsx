@@ -34,6 +34,113 @@ const formatTime = (seconds: number): string => {
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
 };
 
+const SPECTRUM_BANDS = 48;
+const zeroLevels = (): AudioLevelFrame => ({
+  leftRms: 0,
+  rightRms: 0,
+  leftPeak: 0,
+  rightPeak: 0,
+  spectrum: [],
+});
+
+const drawSpectrum = (canvas: HTMLCanvasElement, values: number[]) => {
+  const width = Math.max(1, canvas.clientWidth);
+  const height = Math.max(1, canvas.clientHeight);
+  const pixelRatio = window.devicePixelRatio || 1;
+  const pixelWidth = Math.round(width * pixelRatio);
+  const pixelHeight = Math.round(height * pixelRatio);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, width, height);
+  const gap = Math.max(1, Math.min(3, width / 240));
+  const barWidth = Math.max(1, (width - gap * (SPECTRUM_BANDS - 1)) / SPECTRUM_BANDS);
+  const gradient = context.createLinearGradient(0, height, 0, 0);
+  gradient.addColorStop(0, "rgba(154, 107, 5, 0.55)");
+  gradient.addColorStop(1, "rgba(242, 185, 51, 0.95)");
+  context.fillStyle = gradient;
+  for (let index = 0; index < SPECTRUM_BANDS; index += 1) {
+    const value = Math.max(0, Math.min(1, values[index] ?? 0));
+    const barHeight = value * height;
+    context.fillRect(index * (barWidth + gap), height - barHeight, barWidth, barHeight);
+  }
+};
+
+const SpectrumCanvas: React.FC<{
+  spectrum: number[];
+  active: boolean;
+  label: string;
+}> = ({ spectrum, active, label }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const targetRef = useRef<number[]>(Array(SPECTRUM_BANDS).fill(0));
+  const displayedRef = useRef<number[]>(Array(SPECTRUM_BANDS).fill(0));
+  const animationRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(() => drawSpectrum(canvas, displayedRef.current));
+    observer.observe(canvas);
+    drawSpectrum(canvas, displayedRef.current);
+    return () => {
+      observer.disconnect();
+      if (animationRef.current !== undefined) {
+        window.cancelAnimationFrame(animationRef.current);
+        animationRef.current = undefined;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    targetRef.current = Array.from(
+      { length: SPECTRUM_BANDS },
+      (_, index) => (active ? Math.max(0, Math.min(1, spectrum[index] ?? 0)) : 0),
+    );
+    if (animationRef.current !== undefined) return;
+
+    const animate = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) {
+        animationRef.current = undefined;
+        return;
+      }
+      let moving = false;
+      for (let index = 0; index < SPECTRUM_BANDS; index += 1) {
+        const current = displayedRef.current[index];
+        const target = targetRef.current[index];
+        const factor = target > current ? 0.5 : 0.16;
+        const next = current + (target - current) * factor;
+        if (Math.abs(target - next) > 0.001) {
+          moving = true;
+          displayedRef.current[index] = next;
+        } else {
+          displayedRef.current[index] = target;
+        }
+      }
+      drawSpectrum(canvas, displayedRef.current);
+      if (moving) {
+        animationRef.current = window.requestAnimationFrame(animate);
+      } else {
+        animationRef.current = undefined;
+      }
+    };
+    animationRef.current = window.requestAnimationFrame(animate);
+  }, [active, spectrum]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="block h-20 w-full sm:h-24"
+      role="img"
+      aria-label={label}
+    />
+  );
+};
+
 export const NowPlayingWindow: React.FC = () => {
   const { t } = useTranslation();
   const [snapshot, setSnapshot] = useState<NowPlayingSnapshot | null>(null);
@@ -42,12 +149,7 @@ export const NowPlayingWindow: React.FC = () => {
   const [seekValue, setSeekValue] = useState(0);
   const [previousVolume, setPreviousVolume] = useState(100);
   const [controlFailed, setControlFailed] = useState(false);
-  const [levels, setLevels] = useState<AudioLevelFrame>({
-    leftRms: 0,
-    rightRms: 0,
-    leftPeak: 0,
-    rightPeak: 0,
-  });
+  const [levels, setLevels] = useState<AudioLevelFrame>(zeroLevels);
   const [analyzerAvailable, setAnalyzerAvailable] = useState(false);
   const [analyzerReason, setAnalyzerReason] = useState<string | null>(null);
   const isSeekingRef = useRef(false);
@@ -86,7 +188,7 @@ export const NowPlayingWindow: React.FC = () => {
         setLevels(event.payload);
         window.clearTimeout(levelTimeoutRef.current);
         levelTimeoutRef.current = window.setTimeout(() => {
-          setLevels({ leftRms: 0, rightRms: 0, leftPeak: 0, rightPeak: 0 });
+          setLevels(zeroLevels());
         }, 150);
       }),
       listen<AnalyzerStatus>(ANALYZER_STATUS_EVENT, (event) => {
@@ -94,7 +196,7 @@ export const NowPlayingWindow: React.FC = () => {
         setAnalyzerAvailable(event.payload.available);
         setAnalyzerReason(event.payload.reason);
         if (!event.payload.available) {
-          setLevels({ leftRms: 0, rightRms: 0, leftPeak: 0, rightPeak: 0 });
+          setLevels(zeroLevels());
         }
       }),
     ]).then(async (listeners) => {
@@ -131,7 +233,7 @@ export const NowPlayingWindow: React.FC = () => {
   useEffect(() => {
     if (status?.state !== "play" || !isAvailable || !analyzerAvailable) {
       window.clearTimeout(levelTimeoutRef.current);
-      setLevels({ leftRms: 0, rightRms: 0, leftPeak: 0, rightPeak: 0 });
+      setLevels(zeroLevels());
     }
   }, [status?.state, isAvailable, analyzerAvailable]);
 
@@ -361,6 +463,18 @@ export const NowPlayingWindow: React.FC = () => {
                       </div>
                     );
                   })}
+                  <div className="mt-4 border-t border-white/8 pt-3">
+                    <div className="mb-2 text-[9px] font-bold uppercase tracking-[0.2em] text-white/35">
+                      {t("nowPlaying.spectrum")}
+                    </div>
+                    <SpectrumCanvas
+                      spectrum={levels.spectrum}
+                      active={Boolean(
+                        analyzerAvailable && isAvailable && status.state === "play",
+                      )}
+                      label={t("nowPlaying.spectrum")}
+                    />
+                  </div>
                 </div>
 
                 <div className="mt-7 flex items-center justify-center gap-7">

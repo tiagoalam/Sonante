@@ -49,6 +49,7 @@
     "exitFullscreen": "Exit fullscreen",
     "close": "Close window",
     "controlFailed": "The audio engine did not accept the command.",
+    "spectrum": "Spectrum",
     "vuUnavailable": "Inactive",
     "analyzerReason": {
       "current_audio_format_is_dsd": "Inactive · current format is DSD/DoP",

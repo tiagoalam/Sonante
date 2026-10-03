@@ -74,6 +74,7 @@ export interface AudioLevelFrame {
   rightRms: number;
   leftPeak: number;
   rightPeak: number;
+  spectrum: number[];
 }
 
 export interface AnalyzerStatus {

@@ -1,3 +1,4 @@
+use rustfft::{num_complex::Complex32, Fft, FftPlanner};
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
@@ -17,14 +18,113 @@ const SAMPLE_RATE: usize = 48_000;
 const CHANNELS: usize = 2;
 const BYTES_PER_SAMPLE: usize = 2;
 const FRAMES_PER_EVENT: usize = SAMPLE_RATE / 30;
+const FFT_SIZE: usize = 2048;
+const SPECTRUM_BANDS: usize = 48;
+const SPECTRUM_MIN_HZ: f32 = 40.0;
+const SPECTRUM_MAX_HZ: f32 = 20_000.0;
+const SPECTRUM_FLOOR_DB: f32 = -90.0;
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioLevelFrame {
     pub left_rms: f32,
     pub right_rms: f32,
     pub left_peak: f32,
     pub right_peak: f32,
+    pub spectrum: Vec<f32>,
+}
+
+struct SpectrumAnalyzer {
+    fft: Arc<dyn Fft<f32>>,
+    hann: Vec<f32>,
+    hann_sum: f32,
+    fft_buffer: Vec<Complex32>,
+    history: Vec<f32>,
+    write_index: usize,
+    samples_seen: usize,
+    band_bin_ranges: Vec<(usize, usize)>,
+    bands: Vec<f32>,
+}
+
+impl SpectrumAnalyzer {
+    fn new() -> Self {
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(FFT_SIZE);
+        let hann: Vec<f32> = (0..FFT_SIZE)
+            .map(|index| {
+                let phase = 2.0 * std::f32::consts::PI * index as f32 / (FFT_SIZE - 1) as f32;
+                0.5 * (1.0 - phase.cos())
+            })
+            .collect();
+        let hann_sum = hann.iter().sum();
+        let band_bin_ranges = (0..SPECTRUM_BANDS).map(band_bin_range).collect();
+        Self {
+            fft,
+            hann,
+            hann_sum,
+            fft_buffer: vec![Complex32::new(0.0, 0.0); FFT_SIZE],
+            history: vec![0.0; FFT_SIZE],
+            write_index: 0,
+            samples_seen: 0,
+            band_bin_ranges,
+            bands: vec![0.0; SPECTRUM_BANDS],
+        }
+    }
+
+    fn analyze_pcm(&mut self, bytes: &[u8]) -> Vec<f32> {
+        for frame in bytes.chunks_exact(CHANNELS * BYTES_PER_SAMPLE) {
+            let left = i16::from_le_bytes([frame[0], frame[1]]) as f32 / 32768.0;
+            let right = i16::from_le_bytes([frame[2], frame[3]]) as f32 / 32768.0;
+            self.history[self.write_index] = (left + right) * 0.5;
+            self.write_index = (self.write_index + 1) % FFT_SIZE;
+            self.samples_seen = self.samples_seen.saturating_add(1);
+        }
+        self.analyze_history()
+    }
+
+    fn analyze_history(&mut self) -> Vec<f32> {
+        self.bands.fill(0.0);
+        if self.samples_seen < FFT_SIZE {
+            return self.bands.clone();
+        }
+
+        for index in 0..FFT_SIZE {
+            let sample = self.history[(self.write_index + index) % FFT_SIZE];
+            self.fft_buffer[index] = Complex32::new(sample * self.hann[index], 0.0);
+        }
+        self.fft.process(&mut self.fft_buffer);
+
+        for (band, (start, end)) in self.band_bin_ranges.iter().copied().enumerate() {
+            for bin in start..end {
+                let amplitude = 2.0 * self.fft_buffer[bin].norm() / self.hann_sum;
+                let dbfs = 20.0 * amplitude.max(f32::MIN_POSITIVE).log10();
+                let normalized = ((dbfs - SPECTRUM_FLOOR_DB) / -SPECTRUM_FLOOR_DB).clamp(0.0, 1.0);
+                self.bands[band] = self.bands[band].max(normalized);
+            }
+        }
+        self.bands.clone()
+    }
+}
+
+#[cfg(test)]
+fn frequency_to_band(frequency: f32) -> Option<usize> {
+    if !frequency.is_finite() || !(SPECTRUM_MIN_HZ..=SPECTRUM_MAX_HZ).contains(&frequency) {
+        return None;
+    }
+    let position = (frequency / SPECTRUM_MIN_HZ).ln() / (SPECTRUM_MAX_HZ / SPECTRUM_MIN_HZ).ln();
+    Some(((position * SPECTRUM_BANDS as f32).floor() as usize).min(SPECTRUM_BANDS - 1))
+}
+
+fn band_bin_range(band: usize) -> (usize, usize) {
+    let ratio = SPECTRUM_MAX_HZ / SPECTRUM_MIN_HZ;
+    let lower = SPECTRUM_MIN_HZ * ratio.powf(band as f32 / SPECTRUM_BANDS as f32);
+    let upper = SPECTRUM_MIN_HZ * ratio.powf((band + 1) as f32 / SPECTRUM_BANDS as f32);
+    let bin_hz = SAMPLE_RATE as f32 / FFT_SIZE as f32;
+    let start = ((lower / bin_hz).ceil() as usize).clamp(1, FFT_SIZE / 2);
+    let end = ((upper / bin_hz).ceil() as usize)
+        .max(start + 1)
+        .min(FFT_SIZE / 2 + 1);
+    (start, end)
 }
 
 #[derive(Clone, Serialize)]
@@ -207,6 +307,7 @@ fn read_pcm(
     let mut logged_waiting_for_writer = false;
     let mut logged_first_bytes = false;
     let mut logged_first_frame = false;
+    let mut spectrum_analyzer = SpectrumAnalyzer::new();
 
     while !reader_stop.load(Ordering::Acquire) {
         match fifo.read(&mut chunk) {
@@ -226,13 +327,14 @@ fn read_pcm(
                 }
                 pending.extend_from_slice(&chunk[..count]);
                 while pending.len() >= window_bytes {
-                    let frame = calculate_levels(&pending[..window_bytes]);
+                    let mut frame = calculate_levels(&pending[..window_bytes]);
+                    frame.spectrum = spectrum_analyzer.analyze_pcm(&pending[..window_bytes]);
                     pending.drain(..window_bytes);
                     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
                         match window.emit(LEVEL_EVENT, frame) {
                             Ok(()) if !logged_first_frame => {
                                 println!(
-                                    "[Analyzer] First RMS/peak frame emitted to window '{}'.",
+                                    "[Analyzer] First RMS/peak/spectrum frame emitted to window '{}'.",
                                     WINDOW_LABEL
                                 );
                                 logged_first_frame = true;
@@ -301,6 +403,7 @@ fn calculate_levels(bytes: &[u8]) -> AudioLevelFrame {
         right_rms: rms(1),
         left_peak: peaks[0],
         right_peak: peaks[1],
+        spectrum: Vec::new(),
     }
 }
 
@@ -557,8 +660,63 @@ mod tests {
                 right_rms: 0.0,
                 left_peak: 0.0,
                 right_peak: 0.0,
+                spectrum: Vec::new(),
             }
         );
+    }
+
+    fn sine_pcm(frequency: f32, amplitude: f32, frames: usize) -> Vec<u8> {
+        (0..frames)
+            .flat_map(|index| {
+                let phase =
+                    2.0 * std::f32::consts::PI * frequency * index as f32 / SAMPLE_RATE as f32;
+                let sample = (phase.sin() * amplitude * i16::MAX as f32) as i16;
+                sample.to_le_bytes().into_iter().chain(sample.to_le_bytes())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_kilohertz_sine_is_dominant_in_its_logarithmic_band() {
+        let mut analyzer = SpectrumAnalyzer::new();
+        let spectrum = analyzer.analyze_pcm(&sine_pcm(1_000.0, 0.8, FFT_SIZE));
+        let dominant = spectrum
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .map(|(index, _)| index)
+            .unwrap();
+        assert_eq!(dominant, frequency_to_band(1_000.0).unwrap());
+    }
+
+    #[test]
+    fn spectrum_silence_is_zero() {
+        let mut analyzer = SpectrumAnalyzer::new();
+        let spectrum = analyzer.analyze_pcm(&pcm(&vec![(0, 0); FFT_SIZE]));
+        assert!(spectrum.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn strong_sine_spectrum_is_finite_and_normalized() {
+        let mut analyzer = SpectrumAnalyzer::new();
+        let spectrum = analyzer.analyze_pcm(&sine_pcm(997.0, 1.0, FFT_SIZE));
+        assert!(spectrum
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value)));
+        assert!(spectrum.iter().any(|value| *value > 0.9));
+    }
+
+    #[test]
+    fn frequency_mapping_uses_bounded_logarithmic_bands() {
+        assert_eq!(frequency_to_band(39.9), None);
+        assert_eq!(frequency_to_band(40.0), Some(0));
+        assert_eq!(frequency_to_band(20_000.0), Some(SPECTRUM_BANDS - 1));
+        assert_eq!(frequency_to_band(20_001.0), None);
+        let low = frequency_to_band(100.0).unwrap();
+        let middle = frequency_to_band(1_000.0).unwrap();
+        let high = frequency_to_band(10_000.0).unwrap();
+        assert!(low < middle && middle < high);
+        assert!((middle - low).abs_diff(high - middle) <= 1);
     }
 
     #[test]
