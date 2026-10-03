@@ -210,7 +210,11 @@ export const NowPlayingWindow: React.FC = () => {
       </div>
       <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(8,8,8,0.78),rgba(8,8,8,0.9)_58%,rgba(8,8,8,0.72))]" />
 
-      <div className="relative z-10 flex h-full flex-col p-5 sm:p-7 lg:p-10">
+      <div
+        className={`relative z-10 flex h-full min-h-0 flex-col ${
+          isFullscreen ? "p-5 lg:px-8 lg:py-6" : "p-5 sm:p-7 lg:p-10"
+        }`}
+      >
         <header className="flex items-center justify-between gap-4">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-[#E5A00D]">
@@ -248,8 +252,18 @@ export const NowPlayingWindow: React.FC = () => {
           </div>
         </header>
 
-        <section className="mx-auto grid min-h-0 w-full max-w-6xl flex-1 items-center gap-8 overflow-y-auto py-6 md:grid-cols-[minmax(260px,0.9fr)_minmax(320px,1.1fr)] lg:gap-14">
-          <div className="mx-auto aspect-square w-full max-w-[min(58vh,560px)] overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 shadow-2xl shadow-black/50">
+        <section
+          className={`mx-auto grid min-h-0 w-full flex-1 items-center gap-8 overflow-y-auto md:grid-cols-[minmax(240px,0.75fr)_minmax(400px,1.25fr)] ${
+            isFullscreen
+              ? "max-w-[1500px] grid-rows-[minmax(0,1fr)] py-3 lg:gap-16"
+              : "max-w-6xl py-6 lg:gap-14"
+          }`}
+        >
+          <div
+            className={`mx-auto aspect-square w-full overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 shadow-2xl shadow-black/50 ${
+              isFullscreen ? "max-w-[min(44vh,500px)]" : "max-w-[min(58vh,560px)]"
+            }`}
+          >
             {hasTrack && status?.plex_image ? (
               <PlexImage
                 image={status.plex_image}
@@ -270,12 +284,18 @@ export const NowPlayingWindow: React.FC = () => {
             )}
           </div>
 
-          <div className="flex min-w-0 flex-col justify-center">
+          <div
+            className={`flex min-w-0 flex-col ${
+              isFullscreen ? "h-full min-h-0 self-stretch justify-start" : "justify-center"
+            }`}
+          >
             {!status ? (
               <p className="text-sm text-white/55">{t("nowPlaying.waitingForStatus")}</p>
             ) : (
               <>
-                <div className="mb-4 flex flex-wrap items-center gap-2">
+                <div
+                  className={`flex flex-wrap items-center gap-2 ${isFullscreen ? "mb-2" : "mb-4"}`}
+                >
                   {hasTrack && status.current_media && (
                     <span className="rounded-full border border-[#E5A00D]/35 bg-[#E5A00D]/10 px-3 py-1 text-[10px] font-bold tracking-[0.18em] text-[#F2B933]">
                       {status.current_media.kind === "plex"
@@ -319,7 +339,7 @@ export const NowPlayingWindow: React.FC = () => {
                   <p className="mt-4 text-sm text-red-200/80">{t("nowPlaying.controlFailed")}</p>
                 )}
 
-                <div className="mt-8">
+                <div className={isFullscreen ? "mt-5" : "mt-8"}>
                   <input
                     type="range"
                     min={0}
@@ -345,7 +365,11 @@ export const NowPlayingWindow: React.FC = () => {
                   fullscreen={isFullscreen}
                 />
 
-                <div className="mt-7 flex items-center justify-center gap-7">
+                <div
+                  className={`flex items-center justify-center gap-7 ${
+                    isFullscreen ? "mt-5" : "mt-7"
+                  }`}
+                >
                   <button
                     type="button"
                     disabled={!isAvailable}
@@ -379,7 +403,11 @@ export const NowPlayingWindow: React.FC = () => {
                   </button>
                 </div>
 
-                <div className="mx-auto mt-8 flex w-full max-w-sm flex-col items-center gap-2">
+                <div
+                  className={`mx-auto flex w-full max-w-sm flex-col items-center gap-2 ${
+                    isFullscreen ? "mt-5" : "mt-8"
+                  }`}
+                >
                   <div className="flex w-full items-center gap-3">
                     <button
                       type="button"

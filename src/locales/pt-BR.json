@@ -53,10 +53,15 @@
     "visualizer": {
       "previousMode": "Visualização anterior",
       "nextMode": "Próxima visualização",
+      "left": "ESQUERDO",
+      "right": "DIREITO",
+      "relativeLevel": "NÍVEL RELATIVO",
       "modes": {
         "combo": "VU + Espectro",
-        "vu-horizontal": "VU horizontal",
-        "spectrum-bars": "Barras de espectro"
+        "spectrum-neon": "Espectro neon",
+        "spectrum-segmented": "Espectro segmentado",
+        "vu-amber": "VU âmbar",
+        "vu-blue": "VU azul"
       }
     },
     "vuUnavailable": "Inativo",
