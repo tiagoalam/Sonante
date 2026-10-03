@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   CircleAlert,
   Heart,
+  ListMusic,
   ExternalLink,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -25,6 +26,7 @@ import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
 import { LocalBrowserView } from "./components/LocalBrowserView";
 import { FavoritesView } from "./components/FavoritesView";
+import { PlaylistsView } from "./components/PlaylistsView";
 import { SettingsModal } from "./components/SettingsModal";
 import { AboutModal } from "./components/AboutModal";
 import { WelcomeWizard } from "./components/WelcomeWizard";
@@ -279,7 +281,9 @@ export function App() {
   const { t } = useTranslation();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const [mediaSource, setMediaSource] = useState<"plex" | "local" | "favorites">("local");
+  const [mediaSource, setMediaSource] = useState<"plex" | "local" | "favorites" | "playlists">(
+    "local",
+  );
   const [localSelectedArtist, setLocalSelectedArtist] = useState<string | null>(null);
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
   const [loadingLibraries, setLoadingLibraries] = useState(true);
@@ -830,6 +834,24 @@ export function App() {
               />
               <span>{t("sidebar.favorites")}</span>
             </button>
+
+            <button
+              onClick={() => {
+                resetAllNavigation();
+                setMediaSource("playlists");
+              }}
+              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
+                mediaSource === "playlists"
+                  ? "bg-[#242424] text-white"
+                  : "text-[#888888] hover:bg-[#202020] hover:text-white"
+              }`}
+            >
+              <ListMusic
+                size={16}
+                className={mediaSource === "playlists" ? "text-[#E5A00D]" : ""}
+              />
+              <span>{t("sidebar.playlists")}</span>
+            </button>
           </nav>
 
           {mediaSource === "plex" && (
@@ -902,7 +924,9 @@ export function App() {
         </aside>
 
         {/* Painel Central */}
-        {mediaSource === "favorites" ? (
+        {mediaSource === "playlists" ? (
+          <PlaylistsView />
+        ) : mediaSource === "favorites" ? (
           <FavoritesView
             onFavoritesChanged={refreshPlexFavorites}
             isPlaybackAvailable={isPlaybackAvailable}

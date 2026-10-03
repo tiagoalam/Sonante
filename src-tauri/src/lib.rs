@@ -4,6 +4,7 @@ mod audio;
 mod config;
 mod favorites;
 mod persistence;
+mod playlists;
 mod plex;
 mod shared_volume;
 mod supervisor;
@@ -15,6 +16,7 @@ use audio::{
 use analyzer::{AnalyzerState, AudioAnalyzer};
 use config::AppConfig;
 use favorites::FavoriteAlbum;
+use playlists::{Playlist, PlaylistState, PlaylistStore};
 use plex::{
     PlexAlbum, PlexClient, PlexCollection, PlexImageRef, PlexLibrary, PlexSearchResults, PlexTrack,
 };
@@ -366,6 +368,46 @@ fn toggle_favorite(
         .plex_server_id
         .clone();
     FavoriteAlbum::toggle(album, server_id.as_deref())
+}
+
+#[tauri::command]
+fn list_playlists(state: State<PlaylistState>) -> Result<Vec<Playlist>, String> {
+    state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .list()
+}
+
+#[tauri::command]
+fn create_playlist(name: String, state: State<PlaylistState>) -> Result<Playlist, String> {
+    state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .create(&name)
+}
+
+#[tauri::command]
+fn rename_playlist(
+    id: String,
+    name: String,
+    state: State<PlaylistState>,
+) -> Result<Playlist, String> {
+    state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .rename(&id, &name)
+}
+
+#[tauri::command]
+fn delete_playlist(id: String, state: State<PlaylistState>) -> Result<(), String> {
+    state
+        .0
+        .lock()
+        .map_err(|_| "O estado das playlists está indisponível.".to_string())?
+        .delete(&id)
 }
 
 #[tauri::command]
@@ -905,6 +947,7 @@ pub fn run() {
         .manage(SupervisorState(Mutex::new(supervisor)))
         .manage(ConfigState(Mutex::new(initial_config)))
         .manage(ConfigTransactionState(Mutex::new(())))
+        .manage(PlaylistState(Mutex::new(PlaylistStore::default())))
         .invoke_handler(tauri::generate_handler![
             get_playback_status,
             get_mpd_status_snapshot,
@@ -926,6 +969,10 @@ pub fn run() {
             get_local_albums,
             get_favorites,
             toggle_favorite,
+            list_playlists,
+            create_playlist,
+            rename_playlist,
+            delete_playlist,
             pick_directory,
             rescan_library,
             get_config,
