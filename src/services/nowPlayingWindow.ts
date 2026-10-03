@@ -1,4 +1,5 @@
 import { emitTo } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 import type { NowPlayingSnapshot } from "../types/audio";
@@ -6,6 +7,8 @@ import type { NowPlayingSnapshot } from "../types/audio";
 export const NOW_PLAYING_WINDOW_LABEL = "now-playing";
 export const NOW_PLAYING_SNAPSHOT_EVENT = "now-playing://snapshot";
 export const NOW_PLAYING_READY_EVENT = "now-playing://ready";
+export const AUDIO_LEVEL_EVENT = "now-playing://audio-level";
+export const ANALYZER_STATUS_EVENT = "now-playing://analyzer-status";
 
 let openingWindow: Promise<void> | null = null;
 
@@ -45,3 +48,7 @@ export const openNowPlayingWindow = (title: string): Promise<void> => {
 
 export const publishNowPlayingSnapshot = (snapshot: NowPlayingSnapshot): Promise<void> =>
   emitTo(NOW_PLAYING_WINDOW_LABEL, NOW_PLAYING_SNAPSHOT_EVENT, snapshot);
+
+export const startAudioAnalyzer = (): Promise<void> => invoke("start_audio_analyzer");
+
+export const stopAudioAnalyzer = (): Promise<void> => invoke("stop_audio_analyzer");

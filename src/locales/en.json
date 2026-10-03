@@ -48,7 +48,19 @@
     "enterFullscreen": "Enter fullscreen",
     "exitFullscreen": "Exit fullscreen",
     "close": "Close window",
-    "controlFailed": "The audio engine did not accept the command."
+    "controlFailed": "The audio engine did not accept the command.",
+    "vuUnavailable": "Inactive",
+    "analyzerReason": {
+      "current_audio_format_is_dsd": "Inactive · current format is DSD/DoP",
+      "current_file_is_dsd": "Inactive · current file is DSD/DoP",
+      "stopped": "Inactive",
+      "mpd_unavailable": "Inactive · MPD unavailable",
+      "reader_error": "Inactive · FIFO read error",
+      "output_disable_failed": "Inactive · output control failed",
+      "reconcile_failed": "Inactive · track check failed",
+      "fifo_open_failed": "Inactive · FIFO open failed",
+      "initial_reconcile_failed": "Inactive · MPD setup failed"
+    }
   },
   "queue": {
     "title": "Play Queue",

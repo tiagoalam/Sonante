@@ -1,4 +1,5 @@
 mod alsa_mixer;
+mod analyzer;
 mod audio;
 mod config;
 mod favorites;
@@ -11,6 +12,7 @@ use audio::{
     list_audio_devices, AudioDevice, AudioEngine, AudioState, DeviceSwitchSnapshot,
     MpdProbeFailure, PlaybackStatus, TrackMetadata, VolumeBackend, VolumeStatus,
 };
+use analyzer::{AnalyzerState, AudioAnalyzer};
 use config::AppConfig;
 use favorites::FavoriteAlbum;
 use plex::{
@@ -20,7 +22,7 @@ use serde::Serialize;
 use shared_volume::{PipeWireVolume, SharedVolumeBackend};
 use supervisor::{MpdHealth, MpdProcessObservation, MpdSupervisor, MpdUnavailableReason};
 use std::sync::Mutex;
-use tauri::{Manager, RunEvent, State, Window, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, State, Window, WindowEvent};
 
 pub struct PlexState(pub Mutex<PlexClient>);
 pub struct SupervisorState(pub Mutex<MpdSupervisor>);
@@ -31,6 +33,31 @@ const MAIN_WINDOW_LABEL: &str = "main";
 
 fn should_exit_application_on_window_close(window_label: &str) -> bool {
     window_label == MAIN_WINDOW_LABEL
+}
+
+#[tauri::command]
+fn start_audio_analyzer(
+    app: AppHandle,
+    analyzer_state: State<AnalyzerState>,
+) -> Result<(), String> {
+    println!("[Analyzer] Start requested by window 'now-playing'.");
+    analyzer_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?
+        .start(app)
+}
+
+#[tauri::command]
+fn stop_audio_analyzer(
+    app: AppHandle,
+    analyzer_state: State<AnalyzerState>,
+) -> Result<(), String> {
+    analyzer_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?
+        .stop(Some(&app))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -410,11 +437,13 @@ fn open_external_url(url: String) -> Result<(), String> {
 #[tauri::command]
 async fn save_config(
     new_config: AppConfig,
+    app: AppHandle,
     config_state: State<'_, ConfigState>,
     transaction_state: State<'_, ConfigTransactionState>,
     plex_state: State<'_, PlexState>,
     sup_state: State<'_, SupervisorState>,
     audio_state: State<'_, AudioState>,
+    analyzer_state: State<'_, AnalyzerState>,
 ) -> Result<(), String> {
     let observed_cfg = config_state
         .0
@@ -464,6 +493,7 @@ async fn save_config(
 
     let folders_changed = current_cfg.local_folders != new_config.local_folders;
     let mut playback_snapshot = None;
+    let mut resume_analyzer = false;
 
     if audio_hw_changed {
         // 1. Captura o estado e segundo atual da música sem destruir a fila
@@ -496,6 +526,22 @@ async fn save_config(
                     error.cause
                 ));
             }
+        };
+        resume_analyzer = {
+            let mut analyzer = analyzer_state
+                .0
+                .lock()
+                .map_err(|e| format!("Falha ao acessar o analyzer antes da troca: {}", e))?;
+            let was_active = analyzer.is_active();
+            if was_active {
+                if let Err(error) = analyzer.stop(Some(&app)) {
+                    eprintln!(
+                        "[Analyzer] Falha ao suspender analyzer antes da troca de saída: {}",
+                        error
+                    );
+                }
+            }
+            was_active
         };
         // 2. Reinicia o MPD com a nova saída (liberando o ALSA)
         let switch_result = match sup_state.0.lock() {
@@ -633,6 +679,19 @@ async fn save_config(
 
     plex_guard.update_config(&new_config);
     *config_guard = new_config;
+    drop(plex_guard);
+    drop(config_guard);
+
+    if resume_analyzer {
+        if let Ok(mut analyzer) = analyzer_state.0.lock() {
+            if let Err(error) = analyzer.start(app) {
+                eprintln!(
+                    "[Analyzer] Configuração aplicada, mas o analyzer não pôde ser retomado: {}",
+                    error
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -826,6 +885,10 @@ pub fn run() {
         &socket_path,
         &MpdSupervisor::library_dir().to_string_lossy(),
     );
+    let audio_analyzer = AudioAnalyzer::new(
+        socket_path.clone(),
+        MpdSupervisor::analyzer_fifo_path(),
+    );
     if let Err(e) = audio_engine.rescan_library() {
         eprintln!(
             "[Audio] Falha ao solicitar rescan inicial da biblioteca: {}",
@@ -837,6 +900,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .manage(AudioState(Mutex::new(audio_engine)))
+        .manage(AnalyzerState(Mutex::new(audio_analyzer)))
         .manage(PlexState(Mutex::new(plex_client)))
         .manage(SupervisorState(Mutex::new(supervisor)))
         .manage(ConfigState(Mutex::new(initial_config)))
@@ -844,6 +908,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_playback_status,
             get_mpd_status_snapshot,
+            start_audio_analyzer,
+            stop_audio_analyzer,
             toggle_playback,
             next_track,
             previous_track,
@@ -880,10 +946,18 @@ pub fn run() {
             open_external_url,
         ])
         .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::CloseRequested { .. })
-                && should_exit_application_on_window_close(window.label())
-            {
-                window.app_handle().exit(0);
+            if matches!(event, WindowEvent::CloseRequested { .. }) {
+                if window.label() == "now-playing" {
+                    if let Some(state) = window.app_handle().try_state::<AnalyzerState>() {
+                        if let Ok(mut analyzer) = state.0.lock() {
+                            if let Err(error) = analyzer.stop(Some(window.app_handle())) {
+                                eprintln!("[Analyzer] Falha no cleanup da janela: {}", error);
+                            }
+                        }
+                    }
+                } else if should_exit_application_on_window_close(window.label()) {
+                    window.app_handle().exit(0);
+                }
             }
         })
         .build(tauri::generate_context!())
@@ -892,6 +966,13 @@ pub fn run() {
     app.run(|app_handle, event| {
         match event {
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                if let Some(state) = app_handle.try_state::<AnalyzerState>() {
+                    if let Ok(mut analyzer) = state.0.lock() {
+                        if let Err(error) = analyzer.stop(Some(app_handle)) {
+                            eprintln!("[Analyzer] Falha no shutdown da aplicação: {}", error);
+                        }
+                    }
+                }
                 if let Some(sup_state) = app_handle.try_state::<SupervisorState>() {
                     if let Ok(mut supervisor) = sup_state.0.lock() {
                         if let Err(e) = supervisor.stop() {

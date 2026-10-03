@@ -69,6 +69,18 @@ export interface NowPlayingSnapshot {
   playback: PlaybackStatus;
 }
 
+export interface AudioLevelFrame {
+  leftRms: number;
+  rightRms: number;
+  leftPeak: number;
+  rightPeak: number;
+}
+
+export interface AnalyzerStatus {
+  available: boolean;
+  reason: string | null;
+}
+
 export interface QueueTrack {
   id: number;
   pos: number;
