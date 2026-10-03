@@ -61,6 +61,18 @@ jobs:
 
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+      
+      - name: Build Debian package
+        run: npm run tauri -- build --bundles deb -- --locked
 
-      - name: Build Sonante
-        run: npm run tauri -- build --no-bundle -- --locked
+      - name: Inspect Debian package
+        run: |
+          ls -lh src-tauri/target/release/bundle/deb/
+          dpkg-deb -I src-tauri/target/release/bundle/deb/*.deb
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonante-ubuntu-22.04-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
