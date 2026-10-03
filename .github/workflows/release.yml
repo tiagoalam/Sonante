@@ -1,0 +1,89 @@
+name: Release Debian package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    name: Debian package
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            pkg-config
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          TAURI_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+
+          echo "Release tag:    $VERSION"
+          echo "package.json:   $PACKAGE_VERSION"
+          echo "tauri.conf:     $TAURI_VERSION"
+
+          test "$VERSION" = "$PACKAGE_VERSION"
+          test "$VERSION" = "$TAURI_VERSION"
+          grep -q "^version = \"$VERSION\"" src-tauri/Cargo.toml
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Debian package
+        run: npm run tauri -- build --bundles deb -- --locked
+
+      - name: Inspect package
+        run: |
+          ls -lh src-tauri/target/release/bundle/deb/
+          dpkg-deb -I src-tauri/target/release/bundle/deb/*.deb
+
+      - name: Upload package to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          DEB="$(find src-tauri/target/release/bundle/deb \
+            -maxdepth 1 -type f -name '*.deb' -print -quit)"
+
+          test -n "$DEB"
+
+          gh release upload "$RELEASE_TAG" "$DEB" --clobber
