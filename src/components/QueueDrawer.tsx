@@ -68,7 +68,7 @@ export const QueueDrawer: React.FC<Props> = ({
   if (!isOpen) return null;
 
   return (
-    <aside className="fixed top-0 right-0 bottom-20 w-80 bg-[#161616] border-l border-[#262626] shadow-2xl z-40 flex flex-col select-none animate-in slide-in-from-right duration-200">
+    <aside className="fixed top-0 right-0 bottom-24 w-80 bg-[#161616] border-l border-[#262626] shadow-2xl z-40 flex flex-col select-none animate-in slide-in-from-right duration-200">
       {/* Topo da Gaveta */}
       <div className="p-4 border-b border-[#242424] flex items-center justify-between bg-[#191919]">
         <div>

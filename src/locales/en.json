@@ -17,6 +17,11 @@
   "player": {
     "noTrack": "No track playing",
     "formatReportedByMpd": "Format reported by MPD; it does not confirm the effective ALSA/DAC output.",
+    "source": {
+      "local": "LOCAL",
+      "plex": "PLEX"
+    },
+    "openNowPlaying": "Open Now Playing",
     "queue": "Play Queue",
     "mute": "Mute",
     "unmute": "Unmute",
@@ -32,8 +37,7 @@
     "next": "Next",
     "engineUnavailable": "Audio engine unavailable",
     "engineTransitioning": "Audio engine is changing state",
-    "lastKnown": "Last known playback",
-    "openNowPlaying": "Open Now Playing"
+    "lastKnown": "Last known playback"
   },
   "nowPlaying": {
     "title": "Now Playing",

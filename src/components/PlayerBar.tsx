@@ -20,9 +20,9 @@ interface Props {
   isQueueOpen: boolean;
   onNavigateToArtist?: (artistName: string) => void;
   onNavigateToAlbum?: () => void;
+  onOpenNowPlaying?: () => void;
   status: PlaybackStatus;
   health: MpdHealth;
-  onOpenNowPlaying: () => void;
 }
 
 export const PlayerBar: React.FC<Props> = ({
@@ -30,9 +30,9 @@ export const PlayerBar: React.FC<Props> = ({
   isQueueOpen,
   onNavigateToArtist,
   onNavigateToAlbum,
+  onOpenNowPlaying,
   status,
   health,
-  onOpenNowPlaying,
 }) => {
   const { t } = useTranslation();
   const [isSeeking, setIsSeeking] = useState(false);
@@ -136,16 +136,19 @@ export const PlayerBar: React.FC<Props> = ({
     isAvailable && status.volume.available && status.volume.backend !== "unavailable"
       ? `${status.volume.value}% · ${volumeBackendLabel}`
       : volumeBackendLabel;
+  const sourceLabel = status.current_media
+    ? t(`player.source.${status.current_media.kind}`)
+    : null;
 
   return (
-    <footer className="h-20 bg-[#161616] border-t border-[#262626] flex items-center justify-between px-6 z-40 select-none">
+    <footer className="h-24 bg-[#161616] border-t border-[#2A2A2A] flex items-center justify-between px-6 z-40 select-none shadow-[0_-8px_24px_rgba(0,0,0,0.16)]">
       {/* 1. Metadados e Capa com Links Interativos */}
-      <div className="flex items-center space-x-3.5 w-1/4 min-w-[200px]">
+      <div className="flex items-center gap-4 w-[30%] min-w-[240px]">
         <div
           onClick={() => {
             if (!isNoTrack && onNavigateToAlbum) onNavigateToAlbum();
           }}
-          className={`w-12 h-12 rounded-lg bg-[#202020] border border-[#2B2B2B] overflow-hidden shrink-0 flex items-center justify-center shadow-md group/cover transition-all ${
+          className={`w-[60px] h-[60px] rounded-xl bg-[#202020] border border-[#303030] overflow-hidden shrink-0 flex items-center justify-center shadow-lg group/cover transition-all ${
             !isNoTrack && onNavigateToAlbum
               ? "cursor-pointer hover:border-[#E5A00D] hover:shadow-[0_0_12px_rgba(229,160,13,0.2)]"
               : ""
@@ -165,22 +168,22 @@ export const PlayerBar: React.FC<Props> = ({
               className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
             />
           ) : (
-            <Disc3 size={24} className="text-[#444444]" />
+            <Disc3 size={28} className="text-[#444444]" />
           )}
         </div>
 
-        <div className="flex flex-col min-w-0 pr-2">
+        <div className="flex flex-col min-w-0 pr-2 gap-0.5">
           {!isNoTrack && onNavigateToAlbum ? (
             <button
               type="button"
               onClick={onNavigateToAlbum}
-              className="text-xs font-bold text-white hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
+              className="text-sm leading-tight font-bold text-white hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
               title={displayTitle}
             >
               {displayTitle}
             </button>
           ) : (
-            <span className="text-xs font-bold text-white truncate" title={displayTitle}>
+            <span className="text-sm leading-tight font-bold text-white truncate" title={displayTitle}>
               {displayTitle}
             </span>
           )}
@@ -189,38 +192,59 @@ export const PlayerBar: React.FC<Props> = ({
             <button
               type="button"
               onClick={() => onNavigateToArtist(status.artist)}
-              className="text-[11px] text-[#888888] hover:text-[#E5A00D] transition-colors truncate mt-0.5 text-left cursor-pointer"
+              className="text-xs leading-tight text-[#B0B0B0] hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
               title={displayArtist}
             >
               {displayArtist}
             </button>
           ) : (
-            <span className="text-[11px] text-[#888888] truncate mt-0.5" title={displayArtist}>
+            <span className="text-xs leading-tight text-[#B0B0B0] truncate" title={displayArtist}>
               {displayArtist}
             </span>
           )}
 
-          {!isAvailable && !isNoTrack && (
-            <span className="text-[9px] font-semibold text-[#C9A45D] mt-1">
-              {t("player.lastKnown")}
+          {!isNoTrack && status.album && onNavigateToAlbum ? (
+            <button
+              type="button"
+              onClick={onNavigateToAlbum}
+              className="text-[10px] leading-tight text-[#777777] hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
+              title={status.album}
+            >
+              {status.album}
+            </button>
+          ) : !isNoTrack && status.album ? (
+            <span className="text-[10px] leading-tight text-[#777777] truncate" title={status.album}>
+              {status.album}
             </span>
-          )}
+          ) : null}
 
-          {isAvailable && status.audio_format && (
-            <div className="flex items-center space-x-1.5 mt-1">
+          <div className="flex items-center gap-1.5 mt-1 min-h-4 overflow-hidden">
+            {!isNoTrack && sourceLabel && (
+              <span className="text-[8px] leading-none px-1.5 py-1 rounded border border-[#3A321F] bg-[#211D14] text-[#D7AD52] font-bold tracking-[0.12em]">
+                {sourceLabel}
+              </span>
+            )}
+
+            {!isNoTrack && status.audio_format && (
               <span
-                className="text-[9px] font-mono px-1.5 py-0.2 rounded font-bold uppercase tracking-wider bg-[#252525] text-[#AAAAAA]"
+                className="text-[9px] leading-none font-mono px-1.5 py-1 rounded bg-[#252525] text-[#AAAAAA] whitespace-nowrap"
                 title={t("player.formatReportedByMpd")}
               >
                 {status.audio_format}
               </span>
-            </div>
-          )}
+            )}
+
+            {!isAvailable && !isNoTrack && (
+              <span className="text-[9px] font-semibold text-[#C9A45D] truncate">
+                {t("player.lastKnown")}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
       {/* 2. Controlos de Reprodução & Barra de Progresso */}
-      <div className="flex flex-col items-center justify-center flex-1 max-w-xl px-4 space-y-1.5">
+      <div className="flex flex-col items-center justify-center flex-1 max-w-2xl px-6 gap-2">
         {!isAvailable && (
           <span className="text-[10px] font-semibold text-[#C9A45D]">
             {health.state === "unavailable"
@@ -228,7 +252,7 @@ export const PlayerBar: React.FC<Props> = ({
               : t("player.engineTransitioning")}
           </span>
         )}
-        <div className="flex items-center space-x-5">
+        <div className="flex items-center gap-7">
           <button
             onClick={handlePrevious}
             disabled={!isAvailable}
@@ -241,7 +265,7 @@ export const PlayerBar: React.FC<Props> = ({
           <button
             onClick={handlePlayToggle}
             disabled={!isAvailable}
-            className="w-9 h-9 rounded-full bg-white hover:bg-[#E5A00D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+            className="w-10 h-10 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={isAvailable && status.state === "play" ? t("player.pause") : t("player.play")}
           >
             {isAvailable && status.state === "play" ? (
@@ -262,7 +286,7 @@ export const PlayerBar: React.FC<Props> = ({
         </div>
 
         {/* Barra de Progresso (Seek) */}
-        <div className="w-full flex items-center space-x-2.5 text-[10px] font-mono text-[#777777]">
+        <div className="w-full flex items-center gap-3 text-[10px] font-mono text-[#888888]">
           <span className="w-8 text-right">
             {isAvailable ? formatTime(isSeeking ? seekValue : status.elapsed) : "--:--"}
           </span>
@@ -287,9 +311,9 @@ export const PlayerBar: React.FC<Props> = ({
       </div>
 
       {/* 3. Volume e Botão de Gaveta de Fila */}
-      <div className="flex items-center justify-end space-x-4 w-1/4 min-w-[180px]">
-        <div className="flex flex-col items-center gap-1">
-          <div className="flex items-center space-x-2">
+      <div className="flex items-center justify-end gap-3 w-[30%] min-w-[230px]">
+        <div className="flex flex-col items-end gap-1.5 mr-1">
+          <div className="flex items-center gap-2.5">
             <button
               onClick={handleToggleMute}
               disabled={!isVolumeAvailable}
@@ -306,26 +330,30 @@ export const PlayerBar: React.FC<Props> = ({
               value={isVolumeAvailable ? status.volume.value : 0}
               disabled={!isVolumeAvailable}
               onChange={(e) => handleVolumeChange(parseInt(e.target.value, 10))}
-              className="w-20 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-35 disabled:cursor-not-allowed"
+              className="w-24 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-35 disabled:cursor-not-allowed"
             />
           </div>
 
-          <span className="text-[9px] leading-none text-[#777777] whitespace-nowrap">
+          <span className="text-[9px] leading-none text-[#777777] whitespace-nowrap pr-0.5">
             {volumeStatusLabel}
           </span>
         </div>
 
-        <button
-          onClick={onOpenNowPlaying}
-          className="p-2 rounded-lg border border-[#262626] text-[#888888] hover:text-white hover:bg-[#202020] transition-colors cursor-pointer"
-          title={t("player.openNowPlaying")}
-        >
-          <Maximize2 size={17} />
-        </button>
+        {onOpenNowPlaying && (
+          <button
+            type="button"
+            onClick={onOpenNowPlaying}
+            className="p-2.5 rounded-lg border border-[#2D2D2D] text-[#888888] hover:text-white hover:bg-[#202020] transition-colors cursor-pointer"
+            title={t("player.openNowPlaying")}
+          >
+            <Maximize2 size={17} />
+          </button>
+        )}
 
         <button
+          type="button"
           onClick={onToggleQueue}
-          className={`p-2 rounded-lg border transition-colors cursor-pointer ${
+          className={`p-2.5 rounded-lg border transition-colors cursor-pointer ${
             isQueueOpen
               ? "bg-[#252014] border-[#E5A00D] text-[#E5A00D]"
               : "border-[#262626] text-[#888888] hover:text-white hover:bg-[#202020]"

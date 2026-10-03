@@ -17,6 +17,11 @@
   "player": {
     "noTrack": "Nenhuma faixa em reprodução",
     "formatReportedByMpd": "Formato reportado pelo MPD; não confirma a saída efetiva no ALSA/DAC.",
+    "source": {
+      "local": "LOCAL",
+      "plex": "PLEX"
+    },
+    "openNowPlaying": "Abrir Em Reprodução",
     "queue": "Fila de Reprodução",
     "mute": "Silenciar",
     "unmute": "Restaurar Volume",
@@ -32,8 +37,7 @@
     "next": "Seguinte",
     "engineUnavailable": "Motor de áudio indisponível",
     "engineTransitioning": "Motor de áudio em transição",
-    "lastKnown": "Último estado conhecido",
-    "openNowPlaying": "Abrir Now Playing"
+    "lastKnown": "Último estado conhecido"
   },
   "nowPlaying": {
     "title": "Em reprodução",
