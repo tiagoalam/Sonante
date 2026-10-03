@@ -78,7 +78,7 @@ Não use somente a ausência de erro de compilação como validação do caminho
 
 ## 2. Arquitetura real — retrato mutável
 
-Esta seção descreve o estado observado na versão 0.3.8. Ela pode ficar desatualizada; confirme no código antes de agir e atualize esta seção quando a arquitetura mudar materialmente. As regras da seção 1 continuam valendo.
+Esta seção descreve o estado observado na versão 0.4.0. Ela pode ficar desatualizada; confirme no código antes de agir e atualize esta seção quando a arquitetura mudar materialmente. As regras da seção 1 continuam valendo.
 
 ### Visão geral
 
@@ -137,7 +137,7 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 - A troca de saída é serializada e transacional: captura um snapshot explícito, aplica a nova configuração e tenta rollback em falha. Snapshots Playing e Paused terminam pausados após a troca; Stopped permanece parado.
 - Há polling de status duplicado no frontend.
 - A biblioteca local agrega roots por symlinks e usa o índice do MPD; roots sobrepostos ou álbuns homônimos exigem cuidado.
-- O token Plex ainda aparece em URLs de thumbnails e outros dados já materializados; trate-o como segredo. A fila e `queue_cache.json` usam referências estáveis para streams Plex, mas thumbnails ainda podem reter rota/token anteriores.
+- Streams e artwork Plex usam referências estáveis no frontend e na persistência. O token é resolvido apenas no backend; entradas legadas autenticadas são migradas quando há identidade segura do servidor ou têm somente o artwork inseguro descartado.
 - Há testes unitários Rust para protocolo MPD, escaping, restauração de fila/estado, rollback e lifecycle do supervisor. Eles usam simulações e não comprovam, sozinhos, integração real com MPD/ALSA, hardware ou bit-perfect.
 
 ## 3. Convenções atuais — retrato mutável
@@ -156,7 +156,7 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 
 ## 4. Comandos disponíveis — retrato mutável
 
-Confirme `package.json` e `Cargo.toml` antes de usar. Na versão 0.3.8:
+Confirme `package.json` e `Cargo.toml` antes de usar. Na versão 0.4.0:
 
 ### Frontend
 
@@ -192,8 +192,8 @@ cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ### Empacotamento
 
 - Tauri está configurado com `bundle.targets = "all"`.
-- `sonante-arch/PKGBUILD` reempacota o `.deb` publicado. Verifique versão, dependências runtime, licença e checksum antes de qualquer release.
-- Dependências externas de runtime incluem pelo menos o MPD e utilitários usados pelo código (`aplay`, e atualmente `xdg-open`); valide pacotes limpos, não apenas máquinas de desenvolvimento.
+- `sonante-arch/PKGBUILD` compila a tag correspondente sem gerar bundles Tauri e instala diretamente o binário, o desktop file e os ícones no pacote Arch.
+- Dependências externas de runtime incluem pelo menos MPD, `aplay` e `xdg-open`; `wpctl` é opcional para o controle aprimorado de volume Shared. Valide pacotes limpos, não apenas máquinas de desenvolvimento.
 
 ## 5. Checklist de entrega
 

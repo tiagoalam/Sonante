@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Sonante
+Comment=Play local and Plex music libraries
+Exec=sonante
+Icon=sonante
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupNotify=true
