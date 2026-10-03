@@ -17,6 +17,11 @@
   "player": {
     "noTrack": "Nenhuma faixa em reprodução",
     "formatReportedByMpd": "Formato reportado pelo MPD; não confirma a saída efetiva no ALSA/DAC.",
+    "source": {
+      "local": "LOCAL",
+      "plex": "PLEX"
+    },
+    "openNowPlaying": "Abrir Em Reprodução",
     "queue": "Fila de Reprodução",
     "mute": "Silenciar",
     "unmute": "Restaurar Volume",
