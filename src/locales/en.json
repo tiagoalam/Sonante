@@ -50,6 +50,15 @@
     "close": "Close window",
     "controlFailed": "The audio engine did not accept the command.",
     "spectrum": "Spectrum",
+    "visualizer": {
+      "previousMode": "Previous visualization",
+      "nextMode": "Next visualization",
+      "modes": {
+        "combo": "VU + Spectrum",
+        "vu-horizontal": "Horizontal VU",
+        "spectrum-bars": "Spectrum Bars"
+      }
+    },
     "vuUnavailable": "Inactive",
     "analyzerReason": {
       "current_audio_format_is_dsd": "Inactive · current format is DSD/DoP",

@@ -50,6 +50,15 @@
     "close": "Fechar janela",
     "controlFailed": "O comando não foi aceito pelo motor de áudio.",
     "spectrum": "Espectro",
+    "visualizer": {
+      "previousMode": "Visualização anterior",
+      "nextMode": "Próxima visualização",
+      "modes": {
+        "combo": "VU + Espectro",
+        "vu-horizontal": "VU horizontal",
+        "spectrum-bars": "Barras de espectro"
+      }
+    },
     "vuUnavailable": "Inativo",
     "analyzerReason": {
       "current_audio_format_is_dsd": "Inativo · formato atual é DSD/DoP",
