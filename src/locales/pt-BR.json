@@ -48,7 +48,34 @@
     "enterFullscreen": "Entrar em tela cheia",
     "exitFullscreen": "Sair da tela cheia",
     "close": "Fechar janela",
-    "controlFailed": "O comando não foi aceito pelo motor de áudio."
+    "controlFailed": "O comando não foi aceito pelo motor de áudio.",
+    "spectrum": "Espectro",
+    "visualizer": {
+      "previousMode": "Visualização anterior",
+      "nextMode": "Próxima visualização",
+      "left": "ESQUERDO",
+      "right": "DIREITO",
+      "relativeLevel": "NÍVEL RELATIVO",
+      "modes": {
+        "combo": "VU + Espectro",
+        "spectrum-neon": "Espectro neon",
+        "spectrum-segmented": "Espectro segmentado",
+        "vu-amber": "VU âmbar",
+        "vu-blue": "VU azul"
+      }
+    },
+    "vuUnavailable": "Inativo",
+    "analyzerReason": {
+      "current_audio_format_is_dsd": "Inativo · formato atual é DSD/DoP",
+      "current_file_is_dsd": "Inativo · arquivo atual é DSD/DoP",
+      "stopped": "Inativo",
+      "mpd_unavailable": "Inativo · MPD indisponível",
+      "reader_error": "Inativo · erro de leitura do FIFO",
+      "output_disable_failed": "Inativo · falha ao controlar output",
+      "reconcile_failed": "Inativo · falha ao verificar faixa",
+      "fifo_open_failed": "Inativo · falha ao abrir FIFO",
+      "initial_reconcile_failed": "Inativo · falha ao preparar MPD"
+    }
   },
   "queue": {
     "title": "Fila de Reprodução",

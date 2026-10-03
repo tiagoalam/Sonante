@@ -4,10 +4,10 @@ use crate::config::AppConfig;
 use crate::shared_volume::SharedVolumeBackend;
 use serde::Serialize;
 use std::collections::HashSet;
+use std::ffi::CString;
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::os::unix::fs::symlink;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -19,6 +19,7 @@ pub struct MpdSupervisor {
     socket_path: String,
     pid_path: PathBuf,
     owns_runtime_files: bool,
+    owns_analyzer_fifo: bool,
     health: MpdHealth,
     shared_volume_backend: Option<SharedVolumeBackend>,
     volume_backend: VolumeBackend,
@@ -57,6 +58,7 @@ enum PidFileIdentity {
 }
 
 impl MpdSupervisor {
+    pub const ANALYZER_OUTPUT_NAME: &'static str = "Sonante Analyzer";
     pub fn new(socket_path: &str) -> Self {
         let socket_path = PathBuf::from(socket_path);
         let pid_path = socket_path
@@ -68,6 +70,7 @@ impl MpdSupervisor {
             socket_path: socket_path.to_string_lossy().to_string(),
             pid_path,
             owns_runtime_files: false,
+            owns_analyzer_fifo: false,
             health: MpdHealth::Starting,
             shared_volume_backend: None,
             volume_backend: VolumeBackend::Unavailable,
@@ -81,6 +84,7 @@ impl MpdSupervisor {
             socket_path: socket_path.to_string_lossy().to_string(),
             pid_path: pid_path.to_path_buf(),
             owns_runtime_files: false,
+            owns_analyzer_fifo: false,
             health: MpdHealth::Starting,
             shared_volume_backend: None,
             volume_backend: VolumeBackend::Unavailable,
@@ -125,6 +129,17 @@ impl MpdSupervisor {
 
     pub fn socket_path() -> PathBuf {
         Self::runtime_dir().join("mpd.socket")
+    }
+
+    pub fn analyzer_fifo_path() -> PathBuf {
+        Self::runtime_dir().join("analyzer.pcm")
+    }
+
+    fn analyzer_fifo_path_for_instance(&self) -> PathBuf {
+        Path::new(&self.socket_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("analyzer.pcm")
     }
 
     pub(crate) fn observe_health(&mut self) -> Result<MpdProcessObservation, String> {
@@ -260,6 +275,14 @@ impl MpdSupervisor {
         let socket_path_value = Self::escape_config_value(&self.socket_path)?;
         let alsa_device_value = Self::escape_config_value(&cfg.alsa_device)?;
         let replay_gain_value = Self::escape_config_value(&cfg.replay_gain)?;
+        let analyzer_fifo_path = self.analyzer_fifo_path_for_instance();
+        if !analyzer_fifo_path.is_absolute() {
+            return Err(format!(
+                "O FIFO do analyzer precisa usar um caminho absoluto: {}",
+                analyzer_fifo_path.display()
+            ));
+        }
+        let analyzer_output_section = Self::analyzer_output_section(&analyzer_fifo_path)?;
 
         let is_shared = cfg.audio_output_type == "pipewire"
             || cfg.audio_output_type == "shared"
@@ -305,6 +328,8 @@ decoder {{
 }}
 
 {}
+
+{}
 "#,
             lib_dir_value,
             config_dir_value,
@@ -313,7 +338,8 @@ decoder {{
             socket_path_value,
             cfg.audio_buffer_size_kb,
             replay_gain_value,
-            audio_output_section
+            audio_output_section,
+            analyzer_output_section
         );
 
         fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
@@ -390,6 +416,21 @@ decoder {{
         ))
     }
 
+    fn analyzer_output_section(fifo_path: &Path) -> Result<String, String> {
+        let fifo_path = Self::escape_config_value(&fifo_path.to_string_lossy())?;
+        Ok(format!(
+            r#"audio_output {{
+    type "fifo"
+    name "{}"
+    path "{}"
+    format "48000:16:2"
+    enabled "no"
+}}"#,
+            Self::ANALYZER_OUTPUT_NAME,
+            fifo_path
+        ))
+    }
+
     fn escape_config_value(value: &str) -> Result<String, String> {
         if value.contains(['\0', '\r', '\n']) {
             return Err(
@@ -429,7 +470,6 @@ decoder {{
         self.health = MpdHealth::Starting;
 
         crate::persistence::ensure_sonante_config_dir()?;
-        self.prepare_runtime_files()?;
 
         let dir = Self::sonante_config_dir();
         // Remove arquivos de estado residuais para assegurar inicialização silenciosa
@@ -446,27 +486,47 @@ decoder {{
 
         let (conf_path, volume_backend) =
             self.ensure_config_file(cfg, shared_volume_backend)?;
+        self.prepare_runtime_files()?;
 
         println!(
             "[Supervisor] Iniciando MPD: dispositivo={}, saída={}, buffer={} KB",
             cfg.alsa_device, cfg.audio_output_type, cfg.audio_buffer_size_kb
         );
 
-        let child = Command::new("mpd")
+        let child = match Command::new("mpd")
             .arg("--no-daemon")
             .arg(&conf_path)
             .spawn()
-            .map_err(|e| format!("Falha ao executar o processo do MPD: {}", e))?;
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let failure = format!("Falha ao executar o processo do MPD: {}", error);
+                return match self.cleanup_owned_runtime_files(None, false) {
+                    Ok(()) => Err(failure),
+                    Err(cleanup_error) => Err(format!("{}; cleanup: {}", failure, cleanup_error)),
+                };
+            }
+        };
 
         self.process = Some(child);
 
         self.wait_for_startup(50, Duration::from_millis(50))?;
+        if let Err(error) = crate::analyzer::set_output_enabled(
+            &self.socket_path,
+            Self::ANALYZER_OUTPUT_NAME,
+            false,
+        ) {
+            eprintln!(
+                "[Analyzer] Falha ao confirmar o output desabilitado após iniciar o MPD: {}",
+                error
+            );
+        }
         self.shared_volume_backend = shared_volume_backend;
         self.volume_backend = volume_backend;
         Ok(())
     }
 
-    fn prepare_runtime_files(&self) -> Result<(), String> {
+    fn prepare_runtime_files(&mut self) -> Result<(), String> {
         let socket_path = Path::new(&self.socket_path);
         let runtime_dir = socket_path.parent().ok_or_else(|| {
             format!(
@@ -499,7 +559,66 @@ decoder {{
             Self::remove_runtime_file(socket_path, "socket MPD stale")?;
         }
 
-        Self::remove_runtime_file(&self.pid_path, "PID file MPD stale")
+        Self::remove_runtime_file(&self.pid_path, "PID file MPD stale")?;
+        let fifo_path = self.analyzer_fifo_path_for_instance();
+        Self::prepare_analyzer_fifo_path(&fifo_path)?;
+        self.owns_analyzer_fifo = true;
+        let inode = fs::metadata(&fifo_path)
+            .map_err(|e| format!("Falha ao consultar FIFO preparado: {}", e))?
+            .ino();
+        println!(
+            "[Supervisor] Analyzer FIFO prepared before MPD spawn: path={}, inode={}, mode=0600.",
+            fifo_path.display(),
+            inode
+        );
+        Ok(())
+    }
+
+    pub(crate) fn prepare_analyzer_fifo_path(path: &Path) -> Result<(), String> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_fifo() {
+                    return Err(format!(
+                        "O caminho reservado ao analyzer não é um FIFO: {}",
+                        path.display()
+                    ));
+                }
+                Self::remove_runtime_file(path, "FIFO antigo do analyzer")?;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Falha ao inspecionar FIFO do analyzer ({}): {}",
+                    path.display(),
+                    error
+                ));
+            }
+        }
+
+        let path_bytes = path.as_os_str().as_encoded_bytes();
+        let c_path = CString::new(path_bytes)
+            .map_err(|_| "O caminho do FIFO do analyzer contém NUL.".to_string())?;
+        let result = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        if result != 0 {
+            return Err(format!(
+                "Falha ao criar FIFO do analyzer ({}): {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+            let cleanup = Self::remove_runtime_file(path, "FIFO inseguro do analyzer");
+            let failure = format!(
+                "Falha ao proteger FIFO do analyzer ({}): {}",
+                path.display(),
+                error
+            );
+            return match cleanup {
+                Ok(()) => Err(failure),
+                Err(cleanup_error) => Err(format!("{}; cleanup: {}", failure, cleanup_error)),
+            };
+        }
+        Ok(())
     }
 
     fn wait_for_startup(&mut self, attempts: usize, delay: Duration) -> Result<(), String> {
@@ -749,25 +868,51 @@ decoder {{
         };
         let ownership_confirmed =
             self.owns_runtime_files || pid_was_confirmed || pid_is_still_owned;
-        if !ownership_confirmed {
+        if !ownership_confirmed && !self.owns_analyzer_fifo {
             return Ok(());
         }
 
-        let socket_result = Self::remove_runtime_file(Path::new(&self.socket_path), "socket MPD");
-        let pid_result = if pid_is_still_owned {
+        let socket_result = if ownership_confirmed {
+            Self::remove_runtime_file(Path::new(&self.socket_path), "socket MPD")
+        } else {
+            Ok(())
+        };
+        let pid_result = if ownership_confirmed && pid_is_still_owned {
             Self::remove_runtime_file(&self.pid_path, "PID file MPD")
         } else {
             Ok(())
         };
+        let fifo_path = self.analyzer_fifo_path_for_instance();
+        let fifo_result = if self.owns_analyzer_fifo {
+            Self::remove_runtime_file(&fifo_path, "FIFO do analyzer após término do MPD")
+        } else {
+            Ok(())
+        };
 
-        match (socket_result, pid_result) {
-            (Ok(()), Ok(())) => {
-                self.owns_runtime_files = false;
-                Ok(())
+        let mut failures = Vec::new();
+        if let Err(error) = socket_result {
+            failures.push(error);
+        }
+        if let Err(error) = pid_result {
+            failures.push(error);
+        }
+        match fifo_result {
+            Ok(()) => {
+                if self.owns_analyzer_fifo {
+                    println!(
+                        "[Supervisor] Analyzer FIFO removed after MPD process termination: {}.",
+                        fifo_path.display()
+                    );
+                }
+                self.owns_analyzer_fifo = false;
             }
-            (Err(socket_error), Ok(())) => Err(socket_error),
-            (Ok(()), Err(pid_error)) => Err(pid_error),
-            (Err(socket_error), Err(pid_error)) => Err(format!("{}; {}", socket_error, pid_error)),
+            Err(error) => failures.push(error),
+        }
+        if failures.is_empty() {
+            self.owns_runtime_files = false;
+            Ok(())
+        } else {
+            Err(failures.join("; "))
         }
     }
 
@@ -1081,6 +1226,21 @@ mod tests {
     }
 
     #[test]
+    fn analyzer_output_is_separate_disabled_and_fixed_to_pcm() {
+        let section = MpdSupervisor::analyzer_output_section(Path::new(
+            "/run/user/1000/sonante/analyzer.pcm",
+        ))
+        .unwrap();
+
+        assert!(section.contains("type \"fifo\""));
+        assert!(section.contains("name \"Sonante Analyzer\""));
+        assert!(section.contains("format \"48000:16:2\""));
+        assert!(section.contains("enabled \"no\""));
+        assert!(!section.contains("type \"alsa\""));
+        assert!(!section.contains("dop"));
+    }
+
+    #[test]
     fn shared_output_with_software_backend_keeps_software_mixer() {
         let hardware = MixerSelection::Hardware {
             mixer_device: "hw:CARD=Ignored".to_string(),
@@ -1253,7 +1413,7 @@ mod tests {
         let mut unrelated_child = spawn_sleeping_child();
         fs::write(&pid_path, unrelated_child.id().to_string()).unwrap();
 
-        let supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
         supervisor.prepare_runtime_files().unwrap();
 
         assert!(unrelated_child.try_wait().unwrap().is_none());
@@ -1336,9 +1496,12 @@ mod tests {
         let (dir, socket_path, pid_path) = test_runtime_paths("runtime-cleanup");
         fs::write(&socket_path, "stale socket").unwrap();
         fs::write(&pid_path, "1234").unwrap();
+        let fifo_path = dir.join("analyzer.pcm");
+        MpdSupervisor::prepare_analyzer_fifo_path(&fifo_path).unwrap();
 
         let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
         supervisor.owns_runtime_files = true;
+        supervisor.owns_analyzer_fifo = true;
 
         supervisor
             .cleanup_owned_runtime_files(Some(1234), true)
@@ -1347,8 +1510,28 @@ mod tests {
 
         assert!(!socket_path.exists());
         assert!(!pid_path.exists());
+        assert!(!fifo_path.exists());
         assert!(!supervisor.owns_runtime_files);
 
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn analyzer_fifo_is_private_and_prepared_before_process_start() {
+        let (dir, socket_path, pid_path) = test_runtime_paths("analyzer-fifo-prepare");
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+
+        supervisor.prepare_runtime_files().unwrap();
+
+        let fifo_path = dir.join("analyzer.pcm");
+        let metadata = fs::metadata(&fifo_path).unwrap();
+        assert!(metadata.file_type().is_fifo());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert!(supervisor.process.is_none());
+        assert!(supervisor.owns_analyzer_fifo);
+
+        supervisor.cleanup_owned_runtime_files(None, false).unwrap();
+        assert!(!fifo_path.exists());
         fs::remove_dir_all(dir).unwrap();
     }
 }

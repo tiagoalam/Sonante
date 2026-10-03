@@ -91,6 +91,7 @@ React/TypeScript
 Comandos em src-tauri/src/lib.rs
     │
     ├── AudioEngine ── protocolo MPD por UnixStream
+    ├── AudioAnalyzer ── FIFO PCM opcional para RMS/peak e espectro FFT
     ├── MpdSupervisor ── processo/configuração MPD
     ├── PlexClient ── HTTP Plex
     ├── AppConfig ── config.json
@@ -98,9 +99,8 @@ Comandos em src-tauri/src/lib.rs
                          │
                          ▼
                     MPD dedicado
-                         │ plugin ALSA
-                         ▼
-                hw:* (ALSA Direct) ou default (Shared)
+                    ├── plugin ALSA ──► hw:* (ALSA Direct) ou default (Shared)
+                    └── plugin fifo ──► analyzer Rust, somente enquanto Now Playing solicita
 ```
 
 O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor real de streaming, decodificação, fila e saída de áudio.
@@ -108,11 +108,12 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 ### Responsabilidades atuais
 
 - **Frontend (`src/`)**: React, navegação, biblioteca local/Plex, favoritos, configurações, onboarding, player e fila. Os serviços em `src/services/` são fachadas finas sobre `invoke`; os contratos ficam em `src/types/`.
-- **Composição Tauri (`src-tauri/src/lib.rs`)**: registra comandos IPC e mantém `AudioState`, `SupervisorState`, `ConfigState`, `ConfigTransactionState` e `PlexState` em `Mutex`.
+- **Composição Tauri (`src-tauri/src/lib.rs`)**: registra comandos IPC e mantém `AudioState`, `AnalyzerState`, `SupervisorState`, `ConfigState`, `ConfigTransactionState` e `PlexState` em `Mutex`.
 - **`AudioEngine` (`src-tauri/src/audio.rs`)**: cliente síncrono do protocolo MPD, fila espelhada em memória, `queue_cache.json`, status, seek/volume, listagem da biblioteca local e resolução de covers. Atualmente reúne responsabilidades que podem ser separadas no futuro.
-- **`MpdSupervisor` (`src-tauri/src/supervisor.rs`)**: sincroniza a biblioteca virtual de symlinks, gera `mpd.conf`, inicia/para o processo MPD e administra socket/PID. Mudanças aqui têm impacto direto na disponibilidade do DAC.
+- **`AudioAnalyzer` (`src-tauri/src/analyzer.rs`)**: consumidor opcional do output FIFO `Sonante Analyzer`, calcula RMS/peak estéreo e um espectro FFT mono combinado no backend e emite somente frames normalizados para a janela Now Playing. O supervisor cria o FIFO estável antes do spawn do MPD e só o remove após o processo encerrar; o analyzer apenas abre/fecha seu descritor. O FIFO usa `48000:16:2`, começa desabilitado e permanece inativo para DSD/DoP.
+- **`MpdSupervisor` (`src-tauri/src/supervisor.rs`)**: sincroniza a biblioteca virtual de symlinks, gera `mpd.conf`, inicia/para o processo MPD e administra socket/PID/FIFO. Mudanças aqui têm impacto direto na disponibilidade do DAC.
 - **`PlexClient` (`src-tauri/src/plex.rs`)**: OAuth PIN, consultas a bibliotecas/álbuns/artistas/coleções, parsing de tracks e geração de URIs HTTP ou paths mapeados. Seus clones compartilham um manager que usa `machineIdentifier` como identidade, valida/redescobre rotas Plex transitórias e não mantém locks durante HTTP.
-- **Persistência**: `config.json`, `favorites.json`, `queue_cache.json`, banco/configuração do MPD e diretório virtual ficam sob o diretório de configuração do Sonante. O socket e o PID do MPD ficam em `$XDG_RUNTIME_DIR/sonante/`; quando esse diretório não está disponível, o fallback privado é o subdiretório `runtime/sonante` da configuração do Sonante.
+- **Persistência**: `config.json`, `favorites.json`, `queue_cache.json`, banco/configuração do MPD e diretório virtual ficam sob o diretório de configuração do Sonante. O socket, o PID e o FIFO do analyzer ficam em `$XDG_RUNTIME_DIR/sonante/`; quando esse diretório não está disponível, o fallback privado é o subdiretório `runtime/sonante` da configuração do Sonante.
 
 ### Fluxo de reprodução atual
 
@@ -121,7 +122,7 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 3. Tauri resolve referências Plex para URIs efêmeras com a rota/credencial atual antes de bloquear `AudioState`.
 4. `AudioEngine` resolve covers, valida e escapa os argumentos, envia `clear`/`add`/`play` ao socket MPD e só então publica/persiste a fila lógica após a aceitação do MPD.
 5. Para local, MPD lê a path sob seu `music_directory`; para Plex, MPD abre a URI HTTP com token.
-6. MPD decodifica PCM/DSD e usa seu plugin ALSA.
+6. MPD decodifica PCM/DSD e usa seu plugin ALSA; quando solicitado pela janela Now Playing em PCM, um output FIFO separado alimenta o analyzer sem alterar a configuração do output principal.
 7. O frontend consulta status por IPC e exibe metadata, posição, volume e formato reportado pelo MPD.
 
 ### Shared e ALSA Direct atuais

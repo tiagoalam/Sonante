@@ -17,11 +17,16 @@ import { useTranslation } from "react-i18next";
 
 import { audioService } from "../services/audio";
 import {
+  ANALYZER_STATUS_EVENT,
+  AUDIO_LEVEL_EVENT,
   NOW_PLAYING_READY_EVENT,
   NOW_PLAYING_SNAPSHOT_EVENT,
+  startAudioAnalyzer,
+  stopAudioAnalyzer,
 } from "../services/nowPlayingWindow";
-import type { NowPlayingSnapshot } from "../types/audio";
+import type { AnalyzerStatus, AudioLevelFrame, NowPlayingSnapshot } from "../types/audio";
 import { PlexImage } from "./PlexImage";
+import { VisualizerPanel } from "./visualizer/VisualizerPanel";
 
 const formatTime = (seconds: number): string => {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
@@ -29,6 +34,14 @@ const formatTime = (seconds: number): string => {
   const remainingSeconds = Math.floor(seconds % 60);
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
 };
+
+const zeroLevels = (): AudioLevelFrame => ({
+  leftRms: 0,
+  rightRms: 0,
+  leftPeak: 0,
+  rightPeak: 0,
+  spectrum: [],
+});
 
 export const NowPlayingWindow: React.FC = () => {
   const { t } = useTranslation();
@@ -38,7 +51,11 @@ export const NowPlayingWindow: React.FC = () => {
   const [seekValue, setSeekValue] = useState(0);
   const [previousVolume, setPreviousVolume] = useState(100);
   const [controlFailed, setControlFailed] = useState(false);
+  const [levels, setLevels] = useState<AudioLevelFrame>(zeroLevels);
+  const [analyzerAvailable, setAnalyzerAvailable] = useState(false);
+  const [analyzerReason, setAnalyzerReason] = useState<string | null>(null);
   const isSeekingRef = useRef(false);
+  const levelTimeoutRef = useRef<number | undefined>(undefined);
 
   const status = snapshot?.playback;
   const health = snapshot?.health;
@@ -59,22 +76,41 @@ export const NowPlayingWindow: React.FC = () => {
 
   useEffect(() => {
     let disposed = false;
-    let unlisten: (() => void) | undefined;
+    const cleanups: Array<() => void> = [];
 
-    void listen<NowPlayingSnapshot>(NOW_PLAYING_SNAPSHOT_EVENT, (event) => {
-      if (!disposed) {
-        setSnapshot(event.payload);
-        setControlFailed(false);
-      }
-    }).then(async (cleanup) => {
+    void Promise.all([
+      listen<NowPlayingSnapshot>(NOW_PLAYING_SNAPSHOT_EVENT, (event) => {
+        if (!disposed) {
+          setSnapshot(event.payload);
+          setControlFailed(false);
+        }
+      }),
+      listen<AudioLevelFrame>(AUDIO_LEVEL_EVENT, (event) => {
+        if (disposed) return;
+        setLevels(event.payload);
+        window.clearTimeout(levelTimeoutRef.current);
+        levelTimeoutRef.current = window.setTimeout(() => {
+          setLevels(zeroLevels());
+        }, 150);
+      }),
+      listen<AnalyzerStatus>(ANALYZER_STATUS_EVENT, (event) => {
+        if (disposed) return;
+        setAnalyzerAvailable(event.payload.available);
+        setAnalyzerReason(event.payload.reason);
+        if (!event.payload.available) {
+          setLevels(zeroLevels());
+        }
+      }),
+    ]).then(async (listeners) => {
       if (disposed) {
-        cleanup();
+        listeners.forEach((cleanup) => cleanup());
         return;
       }
-      unlisten = cleanup;
+      cleanups.push(...listeners);
       await emitTo("main", NOW_PLAYING_READY_EVENT);
+      await startAudioAnalyzer();
     }).catch((err) => {
-      if (!disposed) console.error("Falha ao sincronizar a janela Now Playing:", err);
+      if (!disposed) console.error("Falha ao iniciar análise da janela Now Playing:", err);
     });
 
     void getCurrentWindow()
@@ -88,9 +124,20 @@ export const NowPlayingWindow: React.FC = () => {
 
     return () => {
       disposed = true;
-      unlisten?.();
+      window.clearTimeout(levelTimeoutRef.current);
+      cleanups.forEach((cleanup) => cleanup());
+      void stopAudioAnalyzer().catch((err) => {
+        console.error("Falha ao encerrar análise da janela Now Playing:", err);
+      });
     };
   }, []);
+
+  useEffect(() => {
+    if (status?.state !== "play" || !isAvailable || !analyzerAvailable) {
+      window.clearTimeout(levelTimeoutRef.current);
+      setLevels(zeroLevels());
+    }
+  }, [status?.state, isAvailable, analyzerAvailable]);
 
   const runControl = async (control: () => Promise<void>) => {
     if (!isAvailable) return;
@@ -136,6 +183,11 @@ export const NowPlayingWindow: React.FC = () => {
     isAvailable && status?.volume.available && volumeBackend !== "unavailable"
       ? `${status.volume.value}% · ${volumeBackendLabel}`
       : volumeBackendLabel;
+  const analyzerInactiveLabel = analyzerReason
+    ? t(`nowPlaying.analyzerReason.${analyzerReason}`, {
+        defaultValue: analyzerReason,
+      })
+    : t("nowPlaying.vuUnavailable");
 
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-[#0B0B0B] text-white select-none">
@@ -158,7 +210,11 @@ export const NowPlayingWindow: React.FC = () => {
       </div>
       <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(8,8,8,0.78),rgba(8,8,8,0.9)_58%,rgba(8,8,8,0.72))]" />
 
-      <div className="relative z-10 flex h-full flex-col p-5 sm:p-7 lg:p-10">
+      <div
+        className={`relative z-10 flex h-full min-h-0 flex-col ${
+          isFullscreen ? "p-5 lg:px-8 lg:py-6" : "p-5 sm:p-7 lg:p-10"
+        }`}
+      >
         <header className="flex items-center justify-between gap-4">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-[#E5A00D]">
@@ -196,8 +252,18 @@ export const NowPlayingWindow: React.FC = () => {
           </div>
         </header>
 
-        <section className="mx-auto grid min-h-0 w-full max-w-6xl flex-1 items-center gap-8 overflow-y-auto py-6 md:grid-cols-[minmax(260px,0.9fr)_minmax(320px,1.1fr)] lg:gap-14">
-          <div className="mx-auto aspect-square w-full max-w-[min(58vh,560px)] overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 shadow-2xl shadow-black/50">
+        <section
+          className={`mx-auto grid min-h-0 w-full flex-1 items-center gap-8 overflow-y-auto md:grid-cols-[minmax(240px,0.75fr)_minmax(400px,1.25fr)] ${
+            isFullscreen
+              ? "max-w-[1500px] grid-rows-[minmax(0,1fr)] py-3 lg:gap-16"
+              : "max-w-6xl py-6 lg:gap-14"
+          }`}
+        >
+          <div
+            className={`mx-auto aspect-square w-full overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 shadow-2xl shadow-black/50 ${
+              isFullscreen ? "max-w-[min(44vh,500px)]" : "max-w-[min(58vh,560px)]"
+            }`}
+          >
             {hasTrack && status?.plex_image ? (
               <PlexImage
                 image={status.plex_image}
@@ -218,12 +284,18 @@ export const NowPlayingWindow: React.FC = () => {
             )}
           </div>
 
-          <div className="flex min-w-0 flex-col justify-center">
+          <div
+            className={`flex min-w-0 flex-col ${
+              isFullscreen ? "h-full min-h-0 self-stretch justify-start" : "justify-center"
+            }`}
+          >
             {!status ? (
               <p className="text-sm text-white/55">{t("nowPlaying.waitingForStatus")}</p>
             ) : (
               <>
-                <div className="mb-4 flex flex-wrap items-center gap-2">
+                <div
+                  className={`flex flex-wrap items-center gap-2 ${isFullscreen ? "mb-2" : "mb-4"}`}
+                >
                   {hasTrack && status.current_media && (
                     <span className="rounded-full border border-[#E5A00D]/35 bg-[#E5A00D]/10 px-3 py-1 text-[10px] font-bold tracking-[0.18em] text-[#F2B933]">
                       {status.current_media.kind === "plex"
@@ -267,7 +339,7 @@ export const NowPlayingWindow: React.FC = () => {
                   <p className="mt-4 text-sm text-red-200/80">{t("nowPlaying.controlFailed")}</p>
                 )}
 
-                <div className="mt-8">
+                <div className={isFullscreen ? "mt-5" : "mt-8"}>
                   <input
                     type="range"
                     min={0}
@@ -286,7 +358,18 @@ export const NowPlayingWindow: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="mt-7 flex items-center justify-center gap-7">
+                <VisualizerPanel
+                  levels={levels}
+                  active={Boolean(analyzerAvailable && isAvailable && status.state === "play")}
+                  inactiveLabel={!analyzerAvailable ? analyzerInactiveLabel : undefined}
+                  fullscreen={isFullscreen}
+                />
+
+                <div
+                  className={`flex items-center justify-center gap-7 ${
+                    isFullscreen ? "mt-5" : "mt-7"
+                  }`}
+                >
                   <button
                     type="button"
                     disabled={!isAvailable}
@@ -320,7 +403,11 @@ export const NowPlayingWindow: React.FC = () => {
                   </button>
                 </div>
 
-                <div className="mx-auto mt-8 flex w-full max-w-sm flex-col items-center gap-2">
+                <div
+                  className={`mx-auto flex w-full max-w-sm flex-col items-center gap-2 ${
+                    isFullscreen ? "mt-5" : "mt-8"
+                  }`}
+                >
                   <div className="flex w-full items-center gap-3">
                     <button
                       type="button"
