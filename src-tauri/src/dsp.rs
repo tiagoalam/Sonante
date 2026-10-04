@@ -1,10 +1,13 @@
 //! Isolated EQ-1A foundation. No startup, MPD or Tauri command uses this module yet.
 mod activation;
+#[cfg(test)]
+mod harness;
 mod pipewire;
 
 use pipewire::{
-    exact_node, stereo_ports, validate_topology, Direction, DspRoute, PipeWireCommandRunner,
-    PipeWireMonitor, PipeWireRouteManager, RouteStatus, RouteViolation, SystemCommandRunner,
+    exact_node, stereo_ports, validate_paused_topology, validate_topology, Direction, DspRoute,
+    PipeWireCommandRunner, PipeWireMonitor, PipeWireRouteManager, RouteStatus, RouteViolation,
+    SystemCommandRunner,
 };
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -70,6 +73,7 @@ impl DspState {
                 | (Self::Starting, Self::Active)
                 | (Self::Starting, Self::Failed(_))
                 | (Self::Active, Self::Failed(_))
+                | (Self::Active, Self::Starting)
                 | (Self::Starting, Self::Stopping)
                 | (Self::Active, Self::Stopping)
                 | (Self::Failed(_), Self::Stopping)
@@ -121,6 +125,7 @@ pub struct DspSupervisor<R: PipeWireCommandRunner = SystemCommandRunner> {
     route_manager: PipeWireRouteManager<R>,
     route: Option<DspRoute>,
     runtime_dir: Option<PathBuf>,
+    runtime_parent: Option<PathBuf>,
     route_status: RouteStatus,
 }
 
@@ -142,6 +147,7 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
             route_manager: PipeWireRouteManager::new(runner),
             route: None,
             runtime_dir: None,
+            runtime_parent: None,
             route_status: RouteStatus::NotReady,
         }
     }
@@ -158,6 +164,12 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
 
     pub fn capture_node_name(&self) -> Option<&str> {
         self.route.as_ref().map(|route| route.capture_name.as_str())
+    }
+
+    #[cfg(test)]
+    fn with_runtime_parent(mut self, parent: PathBuf) -> Self {
+        self.runtime_parent = Some(parent);
+        self
     }
 
     pub fn start(&mut self, binary: Option<&Path>) -> Result<(u64, String), DspError> {
@@ -192,7 +204,10 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
             sink_name: sink_name.clone(),
         });
         let result: Result<(u64, String), DspError> = (|| {
-            let parent = crate::supervisor::MpdSupervisor::runtime_dir();
+            let parent = self
+                .runtime_parent
+                .clone()
+                .unwrap_or_else(crate::supervisor::MpdSupervisor::runtime_dir);
             fs::create_dir_all(&parent)
                 .map_err(|_| DspError::RuntimeFailed("create runtime parent".into()))?;
             let runtime = parent.join(format!("dsp-{}-{}", std::process::id(), self.generation));
@@ -242,8 +257,15 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
                         RouteViolation::AutoconnectEnabled(capture.into()),
                     ]));
                 }
-                stereo_ports(&graph, cap, Direction::Input)?;
-                stereo_ports(&graph, play, Direction::Output)?;
+                let ports_ready = stereo_ports(&graph, cap, Direction::Input).is_ok()
+                    && stereo_ports(&graph, play, Direction::Output).is_ok();
+                if !ports_ready {
+                    if Instant::now() >= deadline {
+                        return Err(DspError::PortMissing(capture.into()));
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
                 if graph.links.iter().any(|link| {
                     graph.ports.iter().any(|port| {
                         (port.node_id == cap.id && port.id == link.input_port)
@@ -396,7 +418,12 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
         }
     }
 
-    pub fn on_graph_event(&mut self, session: u64) -> Result<(), DspError> {
+    // pw-link monitors topology; link state changes on pause require confirmed MPD state.
+    pub fn on_graph_event(
+        &mut self,
+        session: u64,
+        player_state: activation::PlayerState,
+    ) -> Result<(), DspError> {
         if session != self.generation || self.state != DspState::Active {
             return Ok(());
         }
@@ -409,13 +436,57 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
             }
         };
         let route = self.route.as_ref().ok_or(DspError::InvalidTransition)?;
-        self.route_status = validate_topology(&graph, route, true);
-        if self.route_manager.owned_links().len() != 4
+        if player_state == activation::PlayerState::Stopped
+            && route.mpd_name.as_deref().is_some_and(|name| {
+                matches!(
+                    exact_node(&graph, name, "Stream/Output/Audio"),
+                    Err(DspError::NodeMissing(_))
+                )
+            })
+        {
+            // MPD may remove its stream on stop. The null destination must still be valid.
+            let only_missing_mpd = matches!(
+                validate_paused_topology(&graph, route),
+                RouteStatus::Invalid(ref violations)
+                    if !violations.is_empty()
+                        && violations.iter().all(|violation| matches!(
+                            violation,
+                            RouteViolation::MissingNode(name)
+                                if Some(name.as_str()) == route.mpd_name.as_deref()
+                        ))
+            );
+            if let (Ok(sink), Ok(_), Ok(_)) = (
+                exact_node(&graph, &route.sink_name, "Audio/Sink"),
+                exact_node(&graph, &route.capture_name, "Stream/Input/Audio"),
+                exact_node(&graph, &route.playback_name, "Stream/Output/Audio"),
+            ) {
+                if sink.virtual_sink && only_missing_mpd {
+                    if let Err(error) = self.route_manager.remove_owned_links() {
+                        self.state = DspState::Failed(error.clone());
+                        return Err(error);
+                    }
+                    self.route_status = RouteStatus::CamillaReady;
+                    if let Some(route) = self.route.as_mut() {
+                        route.mpd_name = None;
+                    }
+                    self.state.transition(DspState::Starting)?;
+                    return Ok(());
+                }
+            }
+        }
+        self.route_status = match player_state {
+            activation::PlayerState::Playing => validate_topology(&graph, route, true),
+            activation::PlayerState::Paused | activation::PlayerState::Stopped => {
+                validate_paused_topology(&graph, route)
+            }
+        };
+        if (self.route_manager.owned_links().len() != 4
             || self
                 .route_manager
                 .owned_links()
                 .iter()
-                .any(|id| !graph.links.iter().any(|link| link.id == *id))
+                .any(|id| !graph.links.iter().any(|link| link.id == *id)))
+            && self.route_status == RouteStatus::RouteReady
         {
             self.route_status = RouteStatus::Invalid(vec![RouteViolation::MissingMpdStream]);
         }
@@ -433,7 +504,7 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
         Ok(())
     }
 
-    pub fn drain_monitor(&mut self) -> Result<(), DspError> {
+    pub fn drain_monitor(&mut self, player_state: activation::PlayerState) -> Result<(), DspError> {
         let pending = match self.monitor.as_mut() {
             Some(monitor) => (
                 monitor.session,
@@ -448,7 +519,7 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
             None => return Ok(()),
         };
         if pending.1 {
-            self.on_graph_event(pending.0)?;
+            self.on_graph_event(pending.0, player_state)?;
         }
         Ok(())
     }
@@ -544,6 +615,8 @@ mod tests {
             Err(DspError::InvalidTransition)
         );
         state.transition(DspState::Active).unwrap();
+        state.transition(DspState::Starting).unwrap();
+        state.transition(DspState::Active).unwrap();
         state
             .transition(DspState::Failed(DspError::CamillaExited))
             .unwrap();
@@ -601,7 +674,9 @@ mod tests {
         let mut supervisor = DspSupervisor::new(NoPipeWire);
         supervisor.state = DspState::Active;
         supervisor.generation = 7;
-        supervisor.on_graph_event(6).unwrap();
+        supervisor
+            .on_graph_event(6, activation::PlayerState::Playing)
+            .unwrap();
         assert_eq!(supervisor.state(), &DspState::Active);
         supervisor.stop().unwrap();
     }
@@ -612,7 +687,7 @@ mod tests {
         supervisor.state = DspState::Active;
         supervisor.generation = 8;
         assert_eq!(
-            supervisor.on_graph_event(8),
+            supervisor.on_graph_event(8, activation::PlayerState::Playing),
             Err(DspError::SnapshotFailed("fake runner".into()))
         );
         assert_eq!(

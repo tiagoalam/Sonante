@@ -1,5 +1,6 @@
 use super::DspError;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TrySendError};
@@ -166,9 +167,9 @@ pub fn stereo_ports<'a>(
     let ports: Vec<_> = graph
         .ports
         .iter()
-        .filter(|p| p.node_id == node.id)
+        .filter(|p| p.node_id == node.id && p.direction == direction)
         .collect();
-    if ports.len() != 2 || ports.iter().any(|p| p.direction != direction) {
+    if ports.len() != 2 {
         return Err(DspError::PortMissing(node.name.clone()));
     }
     let channel = |name: &str| -> Result<&'a Port, DspError> {
@@ -487,6 +488,7 @@ fn sanitize_stderr(stderr: &[u8]) -> String {
 pub struct PipeWireRouteManager<R: PipeWireCommandRunner> {
     runner: R,
     owned_links: Vec<u32>,
+    owned_edges: HashMap<u32, (u32, u32)>,
 }
 
 impl<R: PipeWireCommandRunner> PipeWireRouteManager<R> {
@@ -494,6 +496,7 @@ impl<R: PipeWireCommandRunner> PipeWireRouteManager<R> {
         Self {
             runner,
             owned_links: Vec::new(),
+            owned_edges: HashMap::new(),
         }
     }
 
@@ -554,17 +557,52 @@ impl<R: PipeWireCommandRunner> PipeWireRouteManager<R> {
                 return Err(DspError::LinkCreateFailed);
             }
             self.owned_links.push(matches[0].id);
+            self.owned_edges
+                .insert(matches[0].id, (source[index].id, destination[index].id));
         }
         Ok(())
     }
 
     pub fn remove_owned_links(&mut self) -> Result<(), DspError> {
+        if self.owned_links.is_empty() {
+            return Ok(());
+        }
         let mut errors = false;
+        let mut existing = self.snapshot()?.links;
         for id in std::mem::take(&mut self.owned_links).into_iter().rev() {
-            let args = ["-d".into(), id.to_string()];
-            if self.runner.run("pw-link", "remove link", &args).is_err() {
+            let Some(&(output_port, input_port)) = self.owned_edges.get(&id) else {
                 self.owned_links.push(id);
                 errors = true;
+                continue;
+            };
+            if !existing.iter().any(|link| {
+                link.id == id && link.output_port == output_port && link.input_port == input_port
+            }) {
+                self.owned_edges.remove(&id);
+                continue;
+            }
+            let args = ["-d".into(), id.to_string()];
+            match self.runner.run("pw-link", "remove link", &args) {
+                Ok(_) => {
+                    existing.retain(|link| link.id != id);
+                    self.owned_edges.remove(&id);
+                }
+                Err(_) => match self.snapshot() {
+                    Ok(graph)
+                        if !graph.links.iter().any(|link| {
+                            link.id == id
+                                && link.output_port == output_port
+                                && link.input_port == input_port
+                        }) =>
+                    {
+                        existing = graph.links;
+                        self.owned_edges.remove(&id);
+                    }
+                    _ => {
+                        self.owned_links.push(id);
+                        errors = true;
+                    }
+                },
             }
         }
         if errors {
@@ -590,6 +628,7 @@ impl PipeWireMonitor {
     pub fn start(session: u64) -> Result<Self, DspError> {
         let mut child = Command::new("pw-link")
             .arg("-m")
+            .arg("-l")
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -871,6 +910,30 @@ mod tests {
     }
 
     #[test]
+    fn capture_monitor_ports_do_not_confuse_stereo_input_discovery() {
+        let (mut graph, _) = graph();
+        let capture = graph.nodes[1].clone();
+        graph.ports.push(Port {
+            id: 90,
+            node_id: capture.id,
+            name: "monitor_FL".into(),
+            channel: "FL".into(),
+            direction: Direction::Output,
+        });
+        graph.ports.push(Port {
+            id: 91,
+            node_id: capture.id,
+            name: "monitor_FR".into(),
+            channel: "FR".into(),
+            direction: Direction::Output,
+        });
+        assert_eq!(
+            stereo_ports(&graph, &capture, Direction::Input).unwrap()[0].channel,
+            "FL"
+        );
+    }
+
+    #[test]
     fn node_discovery_zero_one_duplicate_and_class() {
         let (mut graph, _) = graph();
         assert_eq!(
@@ -1057,5 +1120,52 @@ mod tests {
             Err(DspError::LinkRemoveFailed)
         );
         assert_eq!(manager.owned_links().len(), 2);
+    }
+
+    #[test]
+    fn vanished_owned_link_is_already_clean_and_real_failure_is_reported() {
+        let (graph, _) = graph();
+        let mut manager = PipeWireRouteManager::new(FakeRunner {
+            graph,
+            calls: Vec::new(),
+            fail_remove: true,
+        });
+        manager.owned_links = vec![100, 999];
+        manager.owned_edges.insert(100, (10, 20));
+        manager.owned_edges.insert(999, (10, 20));
+        assert_eq!(
+            manager.remove_owned_links(),
+            Err(DspError::LinkRemoveFailed)
+        );
+        assert_eq!(manager.owned_links(), &[100]);
+        assert!(!manager
+            .runner
+            .calls
+            .iter()
+            .any(|(_, args)| args == &["-d", "999"]));
+        manager.runner.graph.links.clear();
+        assert_eq!(manager.remove_owned_links(), Ok(()));
+        assert!(manager.owned_links().is_empty());
+    }
+
+    #[test]
+    fn recycled_pipewire_id_never_removes_a_foreign_link() {
+        let (mut graph, _) = graph();
+        graph.links[0].output_port = 900;
+        let mut manager = PipeWireRouteManager::new(FakeRunner {
+            graph,
+            calls: Vec::new(),
+            fail_remove: false,
+        });
+        manager.owned_links.push(100);
+        manager.owned_edges.insert(100, (10, 20));
+        manager.remove_owned_links().unwrap();
+        assert!(manager.owned_links().is_empty());
+        assert_eq!(manager.runner.graph.links[0].output_port, 900);
+        assert!(!manager
+            .runner
+            .calls
+            .iter()
+            .any(|(_, args)| args == &["-d", "100"]));
     }
 }

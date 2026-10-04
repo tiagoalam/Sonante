@@ -449,7 +449,11 @@ impl MpdSocketControl {
         Self { socket }
     }
 
-    fn command(&self, operation: &'static str, line: &str) -> Result<Vec<String>, DspError> {
+    pub(super) fn command(
+        &self,
+        operation: &'static str,
+        line: &str,
+    ) -> Result<Vec<String>, DspError> {
         let mut stream =
             UnixStream::connect(&self.socket).map_err(|_| DspError::MpdCommandFailed(operation))?;
         stream
