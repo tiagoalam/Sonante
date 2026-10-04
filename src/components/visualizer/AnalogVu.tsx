@@ -83,7 +83,6 @@ const drawMeter = (
   width: number,
   height: number,
   rms: number,
-  peak: number,
   label: string,
   relativeLabel: string,
   theme: VuTheme,
@@ -140,32 +139,31 @@ const drawMeter = (
     );
   });
 
-  const peakAngle = valueAngle(peak);
+  const angle = valueAngle(rms);
   context.strokeStyle = theme.accent;
   context.lineWidth = 3;
   context.shadowColor = theme.glow;
   context.shadowBlur = 8;
   context.beginPath();
   context.moveTo(
-    centerX + Math.cos(peakAngle) * (radius + 1),
-    centerY + Math.sin(peakAngle) * (radius + 1),
+    centerX + Math.cos(angle) * (radius + 1),
+    centerY + Math.sin(angle) * (radius + 1),
   );
   context.lineTo(
-    centerX + Math.cos(peakAngle) * (radius - 10),
-    centerY + Math.sin(peakAngle) * (radius - 10),
+    centerX + Math.cos(angle) * (radius - 10),
+    centerY + Math.sin(angle) * (radius - 10),
   );
   context.stroke();
 
-  const needleAngle = valueAngle(rms);
   context.strokeStyle = theme.needle;
   context.lineWidth = 2;
   context.shadowColor = theme.glow;
   context.shadowBlur = 10;
   context.beginPath();
-  context.moveTo(centerX - Math.cos(needleAngle) * 10, centerY - Math.sin(needleAngle) * 10);
+  context.moveTo(centerX - Math.cos(angle) * 10, centerY - Math.sin(angle) * 10);
   context.lineTo(
-    centerX + Math.cos(needleAngle) * (radius - 15),
-    centerY + Math.sin(needleAngle) * (radius - 15),
+    centerX + Math.cos(angle) * (radius - 15),
+    centerY + Math.sin(angle) * (radius - 15),
   );
   context.stroke();
   context.shadowBlur = 0;
@@ -199,8 +197,8 @@ export const AnalogVu: React.FC<AnalogVuProps> = ({
   fullscreen = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const targetRef = useRef({ rms: [0, 0], peak: [0, 0] });
-  const displayedRef = useRef({ rms: [0, 0], peak: [0, 0] });
+  const targetRef = useRef([0, 0]);
+  const displayedRef = useRef([0, 0]);
   const animationRef = useRef<number | undefined>(undefined);
   const drawRef = useRef<() => void>(() => undefined);
 
@@ -219,8 +217,7 @@ export const AnalogVu: React.FC<AnalogVuProps> = ({
       0,
       meterWidth,
       height,
-      displayedRef.current.rms[0],
-      displayedRef.current.peak[0],
+      displayedRef.current[0],
       leftLabel,
       relativeLabel,
       theme,
@@ -231,8 +228,7 @@ export const AnalogVu: React.FC<AnalogVuProps> = ({
       0,
       meterWidth,
       height,
-      displayedRef.current.rms[1],
-      displayedRef.current.peak[1],
+      displayedRef.current[1],
       rightLabel,
       relativeLabel,
       theme,
@@ -254,25 +250,19 @@ export const AnalogVu: React.FC<AnalogVuProps> = ({
 
   useEffect(() => {
     targetRef.current = active
-      ? {
-          rms: [normalized(levels.leftRms), normalized(levels.rightRms)],
-          peak: [normalized(levels.leftPeak), normalized(levels.rightPeak)],
-        }
-      : { rms: [0, 0], peak: [0, 0] };
+      ? [normalized(levels.leftRms), normalized(levels.rightRms)]
+      : [0, 0];
     if (animationRef.current !== undefined) return;
 
     const animate = () => {
       let moving = false;
       for (let channel = 0; channel < 2; channel += 1) {
-        for (const metric of ["rms", "peak"] as const) {
-          const current = displayedRef.current[metric][channel];
-          const target = targetRef.current[metric][channel];
-          const factor = target > current ? (metric === "peak" ? 0.34 : 0.24) : 0.09;
-          const next = current + (target - current) * factor;
-          displayedRef.current[metric][channel] =
-            Math.abs(target - next) < 0.0008 ? target : next;
-          if (Math.abs(displayedRef.current[metric][channel] - target) > 0.0008) moving = true;
-        }
+        const current = displayedRef.current[channel];
+        const target = targetRef.current[channel];
+        const factor = target > current ? 0.24 : 0.09;
+        const next = current + (target - current) * factor;
+        displayedRef.current[channel] = Math.abs(target - next) < 0.0008 ? target : next;
+        if (Math.abs(displayedRef.current[channel] - target) > 0.0008) moving = true;
       }
       drawRef.current();
       if (moving) {
@@ -282,7 +272,7 @@ export const AnalogVu: React.FC<AnalogVuProps> = ({
       }
     };
     animationRef.current = window.requestAnimationFrame(animate);
-  }, [active, levels.leftPeak, levels.leftRms, levels.rightPeak, levels.rightRms, variant]);
+  }, [active, levels.leftRms, levels.rightRms, variant]);
 
   return (
     <canvas

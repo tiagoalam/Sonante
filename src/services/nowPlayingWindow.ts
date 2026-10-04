@@ -19,14 +19,19 @@ const createNowPlayingWindow = async (title: string): Promise<void> => {
     return;
   }
 
+  const availableWidth = window.screen.availWidth || 1360;
+  const availableHeight = window.screen.availHeight || 860;
+  const width = Math.min(1360, Math.max(1, availableWidth - 64));
+  const height = Math.min(860, Math.max(1, availableHeight - 64));
+
   await new Promise<void>((resolve, reject) => {
     const window = new WebviewWindow(NOW_PLAYING_WINDOW_LABEL, {
       url: "index.html?window=now-playing",
       title,
-      width: 1100,
-      height: 760,
-      minWidth: 720,
-      minHeight: 560,
+      width,
+      height,
+      minWidth: Math.min(1024, width),
+      minHeight: Math.min(700, height),
       center: true,
       resizable: true,
       fullscreen: false,
