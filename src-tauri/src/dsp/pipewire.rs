@@ -36,7 +36,14 @@ pub struct Link {
     pub id: u32,
     pub output_port: u32,
     pub input_port: u32,
-    pub active: bool,
+    pub state: LinkState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkState {
+    Active,
+    Paused,
+    Other,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -121,7 +128,11 @@ pub fn parse_snapshot(bytes: &[u8]) -> Result<Graph, DspError> {
                         id,
                         output_port,
                         input_port,
-                        active: object["info"]["state"] == "active",
+                        state: match object["info"]["state"].as_str() {
+                            Some("active") => LinkState::Active,
+                            Some("paused") => LinkState::Paused,
+                            _ => LinkState::Other,
+                        },
                     });
                 }
             }
@@ -243,6 +254,20 @@ fn ports_for<'a>(
 }
 
 pub fn validate_topology(graph: &Graph, route: &DspRoute, require_mpd: bool) -> RouteStatus {
+    validate_topology_with_paused(graph, route, require_mpd, false)
+}
+
+// A paused link is acceptable only after this session observed the same link active.
+pub fn validate_paused_topology(graph: &Graph, route: &DspRoute) -> RouteStatus {
+    validate_topology_with_paused(graph, route, true, true)
+}
+
+fn validate_topology_with_paused(
+    graph: &Graph,
+    route: &DspRoute,
+    require_mpd: bool,
+    allow_paused: bool,
+) -> RouteStatus {
     if require_mpd
         && route
             .mpd_name
@@ -308,7 +333,9 @@ pub fn validate_topology(graph: &Graph, route: &DspRoute, require_mpd: bool) -> 
                 violations.push(RouteViolation::ExtraLink(link.id));
             } else if !observed.insert(pair) {
                 violations.push(RouteViolation::DuplicateLink(pair.0, pair.1));
-            } else if !link.active {
+            } else if link.state != LinkState::Active
+                && !(allow_paused && link.state == LinkState::Paused)
+            {
                 violations.push(RouteViolation::InactiveLink(link.id));
             }
         }
@@ -684,7 +711,7 @@ mod tests {
                 id: 100 + id as u32,
                 output_port,
                 input_port,
-                active: true,
+                state: LinkState::Active,
             })
             .collect();
         (
@@ -749,7 +776,7 @@ mod tests {
             id: 105,
             output_port: 10,
             input_port: 40,
-            active: true,
+            state: LinkState::Active,
         });
         assert!(
             matches!(validate_topology(&graph, &route, true), RouteStatus::Invalid(v)
@@ -787,11 +814,31 @@ mod tests {
     #[test]
     fn inactive_link_never_validates_route() {
         let (mut graph, route) = graph();
-        graph.links[0].active = false;
+        graph.links[0].state = LinkState::Other;
         assert!(
             matches!(validate_topology(&graph, &route, true), RouteStatus::Invalid(v)
             if v.contains(&RouteViolation::InactiveLink(100)))
         );
+    }
+
+    #[test]
+    fn paused_links_require_explicit_paused_validation() {
+        let (mut graph, route) = graph();
+        graph.links[0].state = LinkState::Paused;
+        graph.links[1].state = LinkState::Paused;
+        assert!(matches!(
+            validate_topology(&graph, &route, true),
+            RouteStatus::Invalid(_)
+        ));
+        assert_eq!(
+            validate_paused_topology(&graph, &route),
+            RouteStatus::RouteReady
+        );
+        graph.links[0].state = LinkState::Other;
+        assert!(matches!(
+            validate_paused_topology(&graph, &route),
+            RouteStatus::Invalid(_)
+        ));
     }
 
     #[test]
@@ -859,7 +906,7 @@ mod tests {
         assert!(graph.nodes[1].virtual_sink);
         assert_eq!(graph.ports[0].direction, Direction::Output);
         assert_eq!(graph.links[0].output_port, 10);
-        assert!(graph.links[0].active);
+        assert_eq!(graph.links[0].state, LinkState::Active);
         assert!(parse_snapshot(b"not json").is_err());
     }
 
@@ -907,7 +954,7 @@ mod tests {
                     .iter()
                     .map(|l| {
                         json!({"id":l.id,
-                    "type":"PipeWire:Interface:Link","info":{"state":if l.active {"active"} else {"error"},"props":{
+                    "type":"PipeWire:Interface:Link","info":{"state":match l.state { LinkState::Active => "active", LinkState::Paused => "paused", LinkState::Other => "error" },"props":{
                         "link.output.port":l.output_port,"link.input.port":l.input_port}}})
                     })
                     .collect();
@@ -941,7 +988,7 @@ mod tests {
                     id: 200 + self.graph.links.len() as u32,
                     output_port: out,
                     input_port: input,
-                    active: true,
+                    state: LinkState::Active,
                 });
             }
             Ok(Vec::new())
@@ -956,7 +1003,7 @@ mod tests {
             id: 1,
             output_port: 90,
             input_port: 91,
-            active: true,
+            state: LinkState::Active,
         });
         let ports = graph.ports.clone();
         let nodes = graph.nodes.clone();

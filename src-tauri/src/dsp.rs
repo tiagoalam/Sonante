@@ -1,4 +1,5 @@
 //! Isolated EQ-1A foundation. No startup, MPD or Tauri command uses this module yet.
+mod activation;
 mod pipewire;
 
 use pipewire::{
@@ -10,7 +11,10 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,6 +44,13 @@ pub enum DspError {
     MonitorFailed,
     CleanupFailed(String),
     RuntimeFailed(String),
+    FirstStreamTimeout,
+    MpdNodeUnsafe,
+    ActivationCancelled,
+    PlaybackSnapshotFailed,
+    PlaybackRestoreFailed,
+    MpdCommandFailed(&'static str),
+    SessionStale,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +114,8 @@ fn camilla_command(binary: &Path, config: &Path) -> Command {
 pub struct DspSupervisor<R: PipeWireCommandRunner = SystemCommandRunner> {
     state: DspState,
     generation: u64,
+    activation_generation: Arc<AtomicU64>,
+    activation_claim: Arc<AtomicU64>,
     process: Option<Child>,
     monitor: Option<PipeWireMonitor>,
     route_manager: PipeWireRouteManager<R>,
@@ -122,6 +135,8 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
         Self {
             state: DspState::Inactive,
             generation: 0,
+            activation_generation: Arc::new(AtomicU64::new(0)),
+            activation_claim: Arc::new(AtomicU64::new(0)),
             process: None,
             monitor: None,
             route_manager: PipeWireRouteManager::new(runner),
@@ -141,16 +156,25 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
         self.generation
     }
 
-    pub fn start(&mut self, binary: Option<&Path>, sink_name: String) -> Result<u64, DspError> {
+    pub fn capture_node_name(&self) -> Option<&str> {
+        self.route.as_ref().map(|route| route.capture_name.as_str())
+    }
+
+    pub fn start(&mut self, binary: Option<&Path>) -> Result<(u64, String), DspError> {
         if self.state != DspState::Inactive {
             return Err(DspError::InvalidTransition);
         }
         let binary = resolve_camilla_binary(binary)?;
-        if sink_name.is_empty() || sink_name.contains(['\0', '\n', '\r']) {
-            return Err(DspError::InvalidIdentifier);
-        }
         self.state.transition(DspState::Starting)?;
         self.generation = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+        self.activation_generation
+            .store(self.generation, Ordering::SeqCst);
+        self.activation_claim.store(0, Ordering::SeqCst);
+        let sink_name = format!(
+            "sonante_dsp_null_{}_{}",
+            std::process::id(),
+            self.generation
+        );
         let capture = format!(
             "sonante_dsp_{}_{}_capture",
             std::process::id(),
@@ -165,9 +189,9 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
             mpd_name: None,
             capture_name: capture.clone(),
             playback_name: playback.clone(),
-            sink_name,
+            sink_name: sink_name.clone(),
         });
-        let result: Result<u64, DspError> = (|| {
+        let result: Result<(u64, String), DspError> = (|| {
             let parent = crate::supervisor::MpdSupervisor::runtime_dir();
             fs::create_dir_all(&parent)
                 .map_err(|_| DspError::RuntimeFailed("create runtime parent".into()))?;
@@ -194,7 +218,7 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
             self.monitor = Some(PipeWireMonitor::start(self.generation)?);
             self.wait_for_camilla(&capture, &playback)?;
             self.route_status = RouteStatus::CamillaReady;
-            Ok(self.generation)
+            Ok((self.generation, sink_name))
         })();
         if let Err(error) = result {
             let cleanup = self.stop();
@@ -260,6 +284,14 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
 
     // EQ-1A intentionally accepts only a virtual sink. MPD stream creation belongs to EQ-1B.
     pub fn activate_null_route(&mut self, mpd_name: String) -> Result<RouteStatus, DspError> {
+        let status = self.connect_null_route(mpd_name)?;
+        if status == RouteStatus::RouteReady {
+            self.state.transition(DspState::Active)?;
+        }
+        Ok(status)
+    }
+
+    fn connect_null_route(&mut self, mpd_name: String) -> Result<RouteStatus, DspError> {
         if self.state != DspState::Starting {
             return Err(DspError::InvalidTransition);
         }
@@ -329,19 +361,30 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
                 .link_stereo(playback, play_ports, sink, sink_ports)?;
             self.route_manager
                 .link_stereo(mpd, mpd_ports, capture, cap_ports)?;
-            let current = self.route_manager.snapshot()?;
-            match validate_topology(&current, route, true) {
-                RouteStatus::RouteReady => Ok(RouteStatus::RouteReady),
-                RouteStatus::Invalid(v) => Err(DspError::TopologyInvalid(v)),
-                _ => Err(DspError::TopologyInvalid(vec![
-                    RouteViolation::MissingMpdStream,
-                ])),
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                let current = self.route_manager.snapshot()?;
+                match validate_topology(&current, route, true) {
+                    RouteStatus::RouteReady => break Ok(RouteStatus::RouteReady),
+                    RouteStatus::Invalid(v)
+                        if v.iter()
+                            .all(|item| matches!(item, RouteViolation::InactiveLink(_)))
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    RouteStatus::Invalid(v) => break Err(DspError::TopologyInvalid(v)),
+                    _ => {
+                        break Err(DspError::TopologyInvalid(vec![
+                            RouteViolation::MissingMpdStream,
+                        ]))
+                    }
+                }
             }
         })();
         match result {
             Ok(status) => {
                 self.route_status = status.clone();
-                self.state.transition(DspState::Active)?;
                 Ok(status)
             }
             Err(error) => {
@@ -367,6 +410,15 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
         };
         let route = self.route.as_ref().ok_or(DspError::InvalidTransition)?;
         self.route_status = validate_topology(&graph, route, true);
+        if self.route_manager.owned_links().len() != 4
+            || self
+                .route_manager
+                .owned_links()
+                .iter()
+                .any(|id| !graph.links.iter().any(|link| link.id == *id))
+        {
+            self.route_status = RouteStatus::Invalid(vec![RouteViolation::MissingMpdStream]);
+        }
         match &self.route_status {
             RouteStatus::Invalid(violations) => {
                 self.state = DspState::Failed(DspError::TopologyInvalid(violations.clone()));
@@ -406,6 +458,8 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
             return Ok(());
         }
         self.state.transition(DspState::Stopping)?;
+        self.activation_generation.store(0, Ordering::SeqCst);
+        self.activation_claim.store(0, Ordering::SeqCst);
         self.generation = NEXT_SESSION.fetch_add(1, Ordering::Relaxed); // Invalidate old events first.
         let mut problems = Vec::new();
         if let Some(monitor) = self.monitor.take() {
@@ -502,10 +556,7 @@ mod tests {
         let mut supervisor = DspSupervisor::new(NoPipeWire);
         assert_eq!(supervisor.stop(), Ok(()));
         supervisor.state = DspState::Starting;
-        assert_eq!(
-            supervisor.start(None, "sink".into()),
-            Err(DspError::InvalidTransition)
-        );
+        assert_eq!(supervisor.start(None), Err(DspError::InvalidTransition));
         supervisor.stop().unwrap();
         assert_eq!(supervisor.stop(), Ok(()));
     }
