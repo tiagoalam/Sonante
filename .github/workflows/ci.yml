@@ -53,6 +53,9 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Test localization consistency
+        run: npm run test:i18n
+
       - name: Test Plex artwork cache
         run: node tests/plexArtworkCache.test.mjs
 
