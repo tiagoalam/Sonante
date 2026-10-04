@@ -40,7 +40,8 @@
     "deb": {
       "depends": [
         "mpd",
-        "libasound2"
+        "libasound2",
+        "xdg-utils"
       ]
     }
   }

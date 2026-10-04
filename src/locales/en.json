@@ -100,6 +100,7 @@
     "addItemCount_other": "Add {{count}} tracks",
     "rename": "Rename",
     "play": "Play",
+    "shuffle": "Shuffle",
     "playFromTrack": "Play from this track",
     "preparingPlayback": "Preparing…",
     "skippedCount_one": "{{count}} unavailable track was skipped.",

@@ -49,6 +49,17 @@ export const openNowPlayingWindow = (title: string): Promise<void> => {
 export const publishNowPlayingSnapshot = (snapshot: NowPlayingSnapshot): Promise<void> =>
   emitTo(NOW_PLAYING_WINDOW_LABEL, NOW_PLAYING_SNAPSHOT_EVENT, snapshot);
 
-export const startAudioAnalyzer = (): Promise<void> => invoke("start_audio_analyzer");
+let analyzerTransition: Promise<void> = Promise.resolve();
 
-export const stopAudioAnalyzer = (): Promise<void> => invoke("stop_audio_analyzer");
+// Mantém start/stop na ordem do mesmo webview, inclusive no replay de efeitos do StrictMode.
+const queueAnalyzerTransition = (action: () => Promise<void>): Promise<void> => {
+  const next = analyzerTransition.catch(() => {}).then(action);
+  analyzerTransition = next;
+  return next;
+};
+
+export const startAudioAnalyzer = (sessionId: string): Promise<void> =>
+  queueAnalyzerTransition(() => invoke("start_audio_analyzer", { sessionId }));
+
+export const stopAudioAnalyzer = (sessionId: string): Promise<void> =>
+  queueAnalyzerTransition(() => invoke("stop_audio_analyzer", { sessionId }));

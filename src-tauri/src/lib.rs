@@ -23,6 +23,7 @@ use plex::{
 };
 use serde::Serialize;
 use shared_volume::{PipeWireVolume, SharedVolumeBackend};
+use std::io::Read;
 use supervisor::{MpdHealth, MpdProcessObservation, MpdSupervisor, MpdUnavailableReason};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, RunEvent, State, Window, WindowEvent};
@@ -40,19 +41,27 @@ fn should_exit_application_on_window_close(window_label: &str) -> bool {
 
 #[tauri::command]
 fn start_audio_analyzer(
+    session_id: String,
+    window: Window,
     app: AppHandle,
     analyzer_state: State<AnalyzerState>,
 ) -> Result<(), String> {
-    println!("[Analyzer] Start requested by window 'now-playing'.");
-    analyzer_state
+    if window.label() != "now-playing" || app.get_webview_window("now-playing").is_none() {
+        return Err("A janela Now Playing não está disponível para iniciar o analyzer.".into());
+    }
+    let mut analyzer = analyzer_state
         .0
         .lock()
-        .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?
-        .start(app)
+        .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?;
+    if app.get_webview_window("now-playing").is_none() {
+        return Err("A janela Now Playing foi fechada antes de iniciar o analyzer.".into());
+    }
+    analyzer.start_for_window(session_id, app)
 }
 
 #[tauri::command]
 fn stop_audio_analyzer(
+    session_id: String,
     app: AppHandle,
     analyzer_state: State<AnalyzerState>,
 ) -> Result<(), String> {
@@ -60,7 +69,7 @@ fn stop_audio_analyzer(
         .0
         .lock()
         .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?
-        .stop(Some(&app))
+        .stop_for_window(&session_id, &app)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -347,28 +356,21 @@ fn list_local_directory(
 }
 
 #[tauri::command]
-fn get_favorites(config_state: State<ConfigState>) -> Result<Vec<FavoriteAlbum>, String> {
-    let server_id = config_state
-        .0
-        .lock()
-        .map_err(|_| "O estado da configuração está indisponível.".to_string())?
-        .plex_server_id
-        .clone();
-    FavoriteAlbum::load_all(server_id.as_deref())
+fn get_favorites() -> Result<Vec<FavoriteAlbum>, String> {
+    let config = match AppConfig::load() {
+        Ok(config) => Some(config),
+        Err(error) => {
+            eprintln!("[Favoritos] Configuração indisponível; artwork preservado: {error}");
+            None
+        }
+    };
+    FavoriteAlbum::load_all(config.as_ref())
 }
 
 #[tauri::command]
-fn toggle_favorite(
-    album: FavoriteAlbum,
-    config_state: State<ConfigState>,
-) -> Result<bool, String> {
-    let server_id = config_state
-        .0
-        .lock()
-        .map_err(|_| "O estado da configuração está indisponível.".to_string())?
-        .plex_server_id
-        .clone();
-    FavoriteAlbum::toggle(album, server_id.as_deref())
+fn toggle_favorite(album: FavoriteAlbum) -> Result<bool, String> {
+    let config = AppConfig::load()?;
+    FavoriteAlbum::toggle(album, &config)
 }
 
 #[tauri::command]
@@ -643,14 +645,48 @@ fn prepare_playlist_playback(
     })
 }
 
+fn shuffle_prepared_playlist_playback(
+    prepared: &mut PreparedPlaylistPlayback,
+    mut random_index: impl FnMut(usize) -> Result<usize, String>,
+) -> Result<(), String> {
+    for end in (1..prepared.tracks.len()).rev() {
+        let index = random_index(end + 1)?;
+        if index > end {
+            return Err("Índice aleatório inválido para a playlist.".into());
+        }
+        prepared.tracks.swap(index, end);
+        prepared.playback_uris.swap(index, end);
+    }
+    prepared.start_index = 0;
+    Ok(())
+}
+
+fn random_playlist_index(upper: usize, source: &mut impl Read) -> Result<usize, String> {
+    let upper = upper as u64;
+    let threshold = upper.wrapping_neg() % upper;
+    loop {
+        let mut bytes = [0u8; 8];
+        source.read_exact(&mut bytes)
+            .map_err(|error| format!("Falha ao obter aleatoriedade para a playlist: {error}"))?;
+        let value = u64::from_ne_bytes(bytes);
+        if value >= threshold {
+            return Ok((value % upper) as usize);
+        }
+    }
+}
+
 #[tauri::command]
 async fn play_playlist(
     playlist_id: String,
     start_item_id: Option<String>,
+    shuffle: Option<bool>,
     playlist_state: State<'_, PlaylistState>,
     audio_state: State<'_, AudioState>,
     plex_state: State<'_, PlexState>,
 ) -> Result<PlaylistPlaybackResult, String> {
+    if shuffle == Some(true) && start_item_id.is_some() {
+        return Err("Não é possível combinar embaralhamento com início em uma faixa.".into());
+    }
     let playlist = playlist_state
         .0
         .lock()
@@ -701,7 +737,12 @@ async fn play_playlist(
         };
         resolved_uris.push(uri);
     }
-    let prepared = prepare_playlist_playback(&playlist, resolved_uris, start_item_id.as_deref())?;
+    let mut prepared = prepare_playlist_playback(&playlist, resolved_uris, start_item_id.as_deref())?;
+    if shuffle == Some(true) && prepared.tracks.len() > 1 {
+        let mut source = std::fs::File::open("/dev/urandom")
+            .map_err(|error| format!("Falha ao obter aleatoriedade para a playlist: {error}"))?;
+        shuffle_prepared_playlist_playback(&mut prepared, |upper| random_playlist_index(upper, &mut source))?;
+    }
     audio_state
         .0
         .lock()
@@ -746,6 +787,7 @@ fn rescan_library(state: State<AudioState>) -> Result<(), String> {
 
 #[tauri::command]
 fn get_config(state: State<ConfigState>) -> Result<AppConfig, String> {
+    AppConfig::load()?;
     Ok(state.0.lock().unwrap().clone())
 }
 
@@ -789,6 +831,7 @@ async fn save_config(
     audio_state: State<'_, AudioState>,
     analyzer_state: State<'_, AnalyzerState>,
 ) -> Result<(), String> {
+    AppConfig::load()?;
     let observed_cfg = config_state
         .0
         .lock()
@@ -1028,11 +1071,13 @@ async fn save_config(
 
     if resume_analyzer {
         if let Ok(mut analyzer) = analyzer_state.0.lock() {
-            if let Err(error) = analyzer.start(app) {
-                eprintln!(
-                    "[Analyzer] Configuração aplicada, mas o analyzer não pôde ser retomado: {}",
-                    error
-                );
+            if analyzer.has_window_session() && app.get_webview_window("now-playing").is_some() {
+                if let Err(error) = analyzer.start(app) {
+                    eprintln!(
+                        "[Analyzer] Configuração aplicada, mas o analyzer não pôde ser retomado: {}",
+                        error
+                    );
+                }
             }
         }
     }
@@ -1218,11 +1263,21 @@ async fn get_plex_image(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let socket_path = MpdSupervisor::socket_path().to_string_lossy().to_string();
-    let initial_config = AppConfig::load();
+    let (initial_config, config_valid) = match AppConfig::load() {
+        Ok(config) => (config, true),
+        Err(error) => {
+            eprintln!("[Persistência] {error}");
+            (AppConfig::default(), false)
+        }
+    };
 
     let mut supervisor = MpdSupervisor::new(&socket_path);
-    if let Err(e) = supervisor.start(&initial_config) {
-        eprintln!("[Aviso] Erro no supervisor de áudio: {}", e);
+    if config_valid {
+        if let Err(e) = supervisor.start(&initial_config) {
+            eprintln!("[Aviso] Erro no supervisor de áudio: {}", e);
+        }
+    } else {
+        supervisor.mark_unavailable(MpdUnavailableReason::StartupFailed);
     }
 
     let audio_engine = AudioEngine::new(
@@ -1233,11 +1288,13 @@ pub fn run() {
         socket_path.clone(),
         MpdSupervisor::analyzer_fifo_path(),
     );
-    if let Err(e) = audio_engine.rescan_library() {
-        eprintln!(
-            "[Audio] Falha ao solicitar rescan inicial da biblioteca: {}",
-            e
-        );
+    if config_valid {
+        if let Err(e) = audio_engine.rescan_library() {
+            eprintln!(
+                "[Audio] Falha ao solicitar rescan inicial da biblioteca: {}",
+                e
+            );
+        }
     }
 
     let plex_client = PlexClient::from_config(&initial_config);
@@ -1306,7 +1363,7 @@ pub fn run() {
                 if window.label() == "now-playing" {
                     if let Some(state) = window.app_handle().try_state::<AnalyzerState>() {
                         if let Ok(mut analyzer) = state.0.lock() {
-                            if let Err(error) = analyzer.stop(Some(window.app_handle())) {
+                            if let Err(error) = analyzer.stop_for_window_close(window.app_handle()) {
                                 eprintln!("[Analyzer] Falha no cleanup da janela: {}", error);
                             }
                         }
@@ -1441,6 +1498,67 @@ mod tests {
         assert_eq!(prepare_playlist_playback(&playlist, vec![Some(("first.flac".into(), None)), None],
                     Some("occurrence-1")).err().unwrap(), SELECTED_PLAYLIST_ITEM_UNAVAILABLE);
         assert!(prepare_playlist_playback(&playlist, vec![Some(("first.flac".into(), None))], None).is_err());
+    }
+
+    #[test]
+    fn playlist_shuffle_rejects_zero_playable_items_before_playback() {
+        let empty = playback_playlist(vec![]);
+        assert_eq!(prepare_playlist_playback(&empty, vec![], None).err().unwrap(),
+                   NO_PLAYABLE_PLAYLIST_ITEMS);
+        let unavailable = playback_playlist(vec![local_locator("missing.flac"), local_locator("offline.flac")]);
+        assert_eq!(prepare_playlist_playback(&unavailable, vec![None, None], None).err().unwrap(),
+                   NO_PLAYABLE_PLAYLIST_ITEMS);
+    }
+
+    #[test]
+    fn playlist_shuffle_keeps_one_playable_item() {
+        let playlist = playback_playlist(vec![local_locator("missing.flac"), local_locator("one.flac")]);
+        let mut prepared = prepare_playlist_playback(&playlist, vec![None, Some(("one.flac".into(), None))], None).unwrap();
+        shuffle_prepared_playlist_playback(&mut prepared, |_| panic!("single item needs no randomness")).unwrap();
+        assert_eq!(prepared.playback_uris, ["one.flac"]);
+        assert_eq!(prepared.start_index, 0);
+        assert_eq!(prepared.skipped_count, 1);
+    }
+
+    #[test]
+    fn playlist_shuffle_preserves_playable_occurrences_and_persisted_order() {
+        let plex = MediaLocator::Plex {
+            server_id: "server".into(),
+            part_key: "/library/parts/42/file.flac".into(),
+            rating_key: Some("42".into()),
+            file_path: None,
+        };
+        let playlist = playback_playlist(vec![
+            local_locator("Álbum/one \\\"quote\\\".flac"),
+            local_locator("missing.flac"),
+            plex,
+            local_locator("Álbum/one \\\"quote\\\".flac"),
+            local_locator("unavailable.flac"),
+            local_locator("four.flac"),
+        ]);
+        let original = playlist.clone();
+        let mut prepared = prepare_playlist_playback(&playlist, vec![
+            Some(("Álbum/one \\\"quote\\\".flac".into(), None)),
+            None,
+            Some(("https://plex.test/stream".into(), None)),
+            Some(("Álbum/one \\\"quote\\\".flac".into(), None)),
+            None,
+            Some(("four.flac".into(), None)),
+        ], None).unwrap();
+        let mut before = prepared.tracks.iter().zip(&prepared.playback_uris)
+            .map(|(track, uri)| (track.title.clone(), uri.clone())).collect::<Vec<_>>();
+        let mut choices = [0, 1, 0].into_iter();
+        shuffle_prepared_playlist_playback(&mut prepared, |_| Ok(choices.next().unwrap())).unwrap();
+        let mut after = prepared.tracks.iter().zip(&prepared.playback_uris)
+            .map(|(track, uri)| (track.title.clone(), uri.clone())).collect::<Vec<_>>();
+        assert_ne!(after, before);
+        before.sort();
+        after.sort();
+        assert_eq!(after, before);
+        assert_eq!(prepared.playback_uris.iter().filter(|uri| uri.as_str() == "Álbum/one \\\"quote\\\".flac").count(), 2);
+        assert_eq!(prepared.skipped_count, 2);
+        assert_eq!(prepared.start_index, 0);
+        assert_eq!(playlist, original);
     }
 
     static NEXT_MPD_HEALTH_TEST_ID: AtomicU64 = AtomicU64::new(0);

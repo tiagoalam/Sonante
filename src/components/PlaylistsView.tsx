@@ -11,6 +11,7 @@ import {
   Pencil,
   Play,
   Plus,
+  Shuffle,
   Trash2,
   X,
 } from "lucide-react";
@@ -227,14 +228,14 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
   const formatDate = (timestamp: number) =>
     new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium" }).format(timestamp);
 
-  const playPlaylist = async (playlistId: string, startItemId?: string) => {
+  const playPlaylist = async (playlistId: string, startItemId?: string, shuffle = false) => {
     if (!isPlaybackAvailable || playRequestInFlight.current) return;
     playRequestInFlight.current = true;
     setPreparingPlayback(true);
     setError(null);
     setPlaybackFeedback(null);
     try {
-      const result = await playlistsService.play(playlistId, startItemId);
+      const result = await playlistsService.play(playlistId, startItemId, shuffle);
       if (selectedIdRef.current === playlistId && result.skipped_count > 0) {
         setPlaybackFeedback(t("playlists.skippedCount", { count: result.skipped_count }));
       }
@@ -341,6 +342,15 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
                 >
                   {preparingPlayback ? <LoaderCircle size={15} className="animate-spin" /> : <Play size={15} fill="currentColor" />}
                   <span>{preparingPlayback ? t("playlists.preparingPlayback") : t("playlists.play")}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void playPlaylist(selected.id, undefined, true)}
+                  disabled={!isPlaybackAvailable || preparingPlayback || busy}
+                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-[#E5A00D] bg-[#202020] px-4 py-2 text-xs font-bold text-[#E5A00D] hover:bg-[#2A2A2A] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Shuffle size={15} />
+                  <span>{t("playlists.shuffle")}</span>
                 </button>
                 <button
                   type="button"
