@@ -2,6 +2,8 @@ mod alsa_mixer;
 mod analyzer;
 mod audio;
 mod config;
+#[allow(dead_code)] // Fundação EQ-1A; integração ao playback ocorrerá em fase posterior.
+mod dsp;
 mod favorites;
 mod persistence;
 mod playlists;
