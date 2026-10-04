@@ -57,6 +57,7 @@
       "left": "ESQUERDO",
       "right": "DIREITO",
       "relativeLevel": "NÍVEL RELATIVO",
+      "legend": "RMS · PICO · 48 FAIXAS",
       "modes": {
         "combo": "VU + Espectro",
         "spectrum-neon": "Espectro neon",
@@ -147,6 +148,7 @@
     "emptyHint": "Clique no coração nos cartões de álbuns para adicioná-los aqui.",
     "playAlbum": "Tocar Álbum",
     "removeFavorite": "Remover dos Favoritos",
+    "addFavorite": "Adicionar aos Favoritos",
     "missingDisk": "Disco Ausente",
     "missingDiskAlert": "A pasta deste álbum não foi encontrada no disco. Verifique se o HD/pendrive está conectado.",
     "back": "Voltar aos Favoritos",
@@ -167,6 +169,9 @@
     "emptyFolder": "Pasta vazia.",
     "loadingFolder": "Carregando pasta...",
     "playAlbum": "Tocar Álbum",
+    "viewDiscography": "Ver discografia",
+    "trackCount_one": "{{count}} faixa",
+    "trackCount_other": "{{count}} faixas",
     "back": "Voltar aos Álbuns"
   },
   "plex": {
@@ -189,7 +194,15 @@
     "backToCollections": "Voltar para Coleções",
     "itemsCount_one": "{{count}} álbum",
     "itemsCount_other": "{{count}} itens",
-    "playAlbum": "Tocar Álbum"
+    "playAlbum": "Tocar Álbum",
+    "backToLibrary": "Voltar para a biblioteca",
+    "plexAlbum": "Álbum Plex",
+    "trackCount_one": "{{count}} faixa",
+    "trackCount_other": "{{count}} faixas",
+    "trackTitle": "Título",
+    "duration": "Duração",
+    "loadingTracks": "Carregando faixas do servidor...",
+    "noAlbumTracks": "Nenhuma faixa encontrada neste álbum."
   },
   "settings": {
     "title": "Preferências do Sistema",
@@ -229,7 +242,12 @@
     "pipewireNotice": "O áudio é enviado ao servidor de som do sistema (PipeWire / PulseAudio), permitindo ouvir músicas juntamente com navegadores, jogos e notificações sem travar o DAC.",
     "directNotice": "Direciona o MPD ao endpoint de hardware ALSA selecionado, normalmente hw:*. Isso, isoladamente, não confirma integridade bit a bit, ausência de conversão nem o formato recebido pelo DAC.",
     "sharedActiveNotice": "O áudio sairá pelo dispositivo de som padrão configurado no painel do seu sistema operacional.",
-    "dopOnlyDirect": "O DoP pode ser solicitado apenas no modo ALSA Direct e exige compatibilidade entre MPD, caminho ALSA e DAC."
+    "dopOnlyDirect": "O DoP pode ser solicitado apenas no modo ALSA Direct e exige compatibilidade entre MPD, caminho ALSA e DAC.",
+    "plexConnectionError": "Não foi possível conectar aos servidores do Plex.",
+    "savePersistenceError": "Falha ao persistir a configuração.",
+    "saveOutputError": "Falha ao alterar a saída/configuração.",
+    "backendDiagnostic": "Etapa reportada pelo backend:",
+    "manualTokenPlaceholder": "Token manual"
  },
   "wizard": {
     "step1Shared": "O modo compartilhado integra o som ao servidor padrão do sistema (PipeWire / PulseAudio), permitindo reprodução simultânea com outros aplicativos.",
@@ -238,7 +256,8 @@
     "enabled": "Ativado",
     "disabled": "Desativado",
     "connected": "Conectado",
-    "foldersCount": "{{count}} pasta(s)",
+    "foldersCount_one": "{{count}} pasta",
+    "foldersCount_other": "{{count}} pastas",
     "step1Title": "Escolha sua Saída de Áudio",
     "step1Desc": "Escolha Áudio Compartilhado para a saída padrão do sistema ou ALSA Direct para um endpoint de hardware selecionado.",
     "step1Direct": "ALSA Direct aponta o MPD para o endpoint de hardware selecionado. Exclusividade efetiva, conversão e formatos suportados dependem da configuração ALSA e do DAC.",
@@ -255,7 +274,10 @@
     "back": "Voltar",
     "next": "Avançar",
     "start": "Iniciar Sonante",
-    "starting": "Inicializando..."
+    "starting": "Inicializando...",
+    "plexConnectionError": "Não foi possível conectar aos servidores do Plex.",
+    "saveError": "Ocorreu um erro ao salvar as preferências iniciais.",
+    "selectSourceError": "Selecione pelo menos uma fonte de música (Armazenamento Local ou Servidor Plex)."
   },
   "about": {
     "title": "Sobre o Sonante",

@@ -92,7 +92,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
         </div>
         <div className="shrink-0 text-right text-[8px] tracking-[0.16em] text-white/25">
           <p>{String(currentIndex).padStart(2, "0")} / {String(MODES.length).padStart(2, "0")}</p>
-          <p className="mt-1">RMS · PEAK · 48 BAND</p>
+          <p className="mt-1">{t("nowPlaying.visualizer.legend")}</p>
         </div>
       </div>
 

@@ -333,7 +333,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
                   {t("playlists.updated", { date: formatDate(selected.updated_at) })}
                 </p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => void playPlaylist(selected.id)}

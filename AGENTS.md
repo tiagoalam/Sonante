@@ -148,7 +148,7 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 
 - TypeScript estrito, componentes funcionais React e hooks.
 - Estilos majoritariamente por classes utilitárias Tailwind diretamente no JSX.
-- UI internacionalizada com `react-i18next`; recursos em `src/locales/en.json` e `src/locales/pt-BR.json`. Novas strings visíveis devem ser adicionadas aos dois idiomas.
+- UI internacionalizada com `react-i18next`; recursos em `src/locales/en.json`, `src/locales/pt-BR.json` e `src/locales/es.json`. Novas strings visíveis devem ser adicionadas aos três idiomas.
 - Serviços de IPC separados em `src/services/audio.ts`, `config.ts`, `favorites.ts` e `plex.ts`.
 - Tipos de frontend separados em `src/types/`; nomes serializados seguem os campos `snake_case` do Rust.
 - Backend dividido em módulos Rust pequenos, mas `audio.rs`, `plex.rs` e `lib.rs` ainda concentram lógica.

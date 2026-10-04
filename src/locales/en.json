@@ -57,6 +57,7 @@
       "left": "LEFT",
       "right": "RIGHT",
       "relativeLevel": "RELATIVE LEVEL",
+      "legend": "RMS · PEAK · 48 BANDS",
       "modes": {
         "combo": "VU + Spectrum",
         "spectrum-neon": "Neon Spectrum",
@@ -147,6 +148,7 @@
     "emptyHint": "Click the heart icon on album cards to add them here.",
     "playAlbum": "Play Album",
     "removeFavorite": "Remove from Favorites",
+    "addFavorite": "Add to Favorites",
     "missingDisk": "Missing Drive",
     "missingDiskAlert": "Album folder not found on disk. Check if the external drive is plugged in.",
     "back": "Back to Favorites",
@@ -167,6 +169,9 @@
     "emptyFolder": "Empty folder.",
     "loadingFolder": "Loading folder...",
     "playAlbum": "Play Album",
+    "viewDiscography": "View discography",
+    "trackCount_one": "{{count}} track",
+    "trackCount_other": "{{count}} tracks",
     "back": "Back to Albums"
   },
   "plex": {
@@ -189,7 +194,15 @@
     "backToCollections": "Back to Collections",
     "itemsCount_one": "{{count}} album",
     "itemsCount_other": "{{count}} items",
-    "playAlbum": "Play Album"
+    "playAlbum": "Play Album",
+    "backToLibrary": "Back to library",
+    "plexAlbum": "Plex album",
+    "trackCount_one": "{{count}} track",
+    "trackCount_other": "{{count}} tracks",
+    "trackTitle": "Title",
+    "duration": "Duration",
+    "loadingTracks": "Loading tracks...",
+    "noAlbumTracks": "No tracks found in this album."
   },
   "settings": {
     "title": "System Preferences",
@@ -229,7 +242,12 @@
     "pipewireNotice": "Audio is routed to your system sound server (PipeWire / PulseAudio), allowing playback alongside browsers, games, and notifications without locking the DAC.",
     "directNotice": "Routes MPD to the selected ALSA hardware endpoint, normally hw:*. This alone does not confirm bit-for-bit integrity, absence of conversion, or the format received by the DAC.",
     "sharedActiveNotice": "Audio will automatically play through the default output configured in your desktop system settings.",
-    "dopOnlyDirect": "DoP can be requested only in ALSA Direct mode and requires compatible MPD, ALSA path, and DAC."
+    "dopOnlyDirect": "DoP can be requested only in ALSA Direct mode and requires compatible MPD, ALSA path, and DAC.",
+    "plexConnectionError": "Could not connect to Plex servers.",
+    "savePersistenceError": "Could not save the configuration.",
+    "saveOutputError": "Could not change the output or configuration.",
+    "backendDiagnostic": "Backend reported this step:",
+    "manualTokenPlaceholder": "Manual token"
   },
   "wizard": {
     "step1Shared": "Shared mode integrates audio with your system sound server (PipeWire / PulseAudio), allowing simultaneous playback with other applications.",
@@ -238,7 +256,8 @@
     "enabled": "Enabled",
     "disabled": "Disabled",
     "connected": "Connected",
-    "foldersCount": "{{count}} folder(s)",
+    "foldersCount_one": "{{count}} folder",
+    "foldersCount_other": "{{count}} folders",
     "step1Title": "Choose Audio Output",
     "step1Desc": "Choose Shared Audio for the system default output or ALSA Direct for a selected hardware endpoint.",
     "step1Direct": "ALSA Direct points MPD to the selected hardware endpoint. Actual exclusivity, conversion, and supported formats depend on the ALSA configuration and DAC.",
@@ -255,7 +274,10 @@
     "back": "Back",
     "next": "Next",
     "start": "Launch Sonante",
-    "starting": "Initializing..."
+    "starting": "Initializing...",
+    "plexConnectionError": "Could not connect to Plex servers.",
+    "saveError": "Could not save the initial preferences.",
+    "selectSourceError": "Select at least one music source (Local Storage or Plex Server)."
   },
   "about": {
     "title": "About Sonante",

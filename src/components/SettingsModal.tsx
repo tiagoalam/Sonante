@@ -142,7 +142,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
     } catch (err) {
       console.error("Erro ao gerar PIN do Plex:", err);
       setIsPollingPin(false);
-      alert("Não foi possível conectar aos servidores do Plex.");
+      alert(t("settings.plexConnectionError"));
     }
   };
 
@@ -227,9 +227,9 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
         );
       }
       const summary = diagnostic.startsWith("Falha ao persistir configuração:")
-        ? "Falha ao persistir a configuração."
-        : "Falha ao alterar a saída/configuração.";
-      alert(`${summary}\n\nEtapa reportada pelo backend:\n${diagnostic}`);
+        ? t("settings.savePersistenceError")
+        : t("settings.saveOutputError");
+      alert(`${summary}\n\n${t("settings.backendDiagnostic")}\n${diagnostic}`);
     } finally {
       setSaving(false);
     }
@@ -266,11 +266,11 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
               <Languages size={14} />
               <span>{t("settings.language")}</span>
             </h3>
-            <div className="flex space-x-3">
+            <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => handleLanguageChange("pt-BR")}
-                className={`flex-1 py-2.5 px-4 rounded-xl border font-semibold text-xs transition-all cursor-pointer ${
+                className={`flex-1 min-w-[120px] py-2.5 px-3 rounded-xl border font-semibold text-xs transition-all cursor-pointer ${
                   selectedLang.startsWith("pt")
                     ? "border-[#E5A00D] bg-[#221B0E] text-[#E5A00D]"
                     : "border-[#2B2B2B] bg-[#121212] text-[#888888] hover:text-white"
@@ -282,13 +282,24 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
               <button
                 type="button"
                 onClick={() => handleLanguageChange("en")}
-                className={`flex-1 py-2.5 px-4 rounded-xl border font-semibold text-xs transition-all cursor-pointer ${
+                className={`flex-1 min-w-[120px] py-2.5 px-3 rounded-xl border font-semibold text-xs transition-all cursor-pointer ${
                   selectedLang.startsWith("en")
                     ? "border-[#E5A00D] bg-[#221B0E] text-[#E5A00D]"
                     : "border-[#2B2B2B] bg-[#121212] text-[#888888] hover:text-white"
                 }`}
               >
                 English (US)
+              </button>
+              <button
+                type="button"
+                onClick={() => handleLanguageChange("es")}
+                className={`flex-1 min-w-[120px] py-2.5 px-3 rounded-xl border font-semibold text-xs transition-all cursor-pointer ${
+                  selectedLang.startsWith("es")
+                    ? "border-[#E5A00D] bg-[#221B0E] text-[#E5A00D]"
+                    : "border-[#2B2B2B] bg-[#121212] text-[#888888] hover:text-white"
+                }`}
+              >
+                Español
               </button>
             </div>
           </div>
@@ -667,7 +678,7 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
                       type="password"
                       value={config.plex_token}
                       onChange={(e) => setConfig({ ...config, plex_token: e.target.value })}
-                      placeholder="Token manual"
+                      placeholder={t("settings.manualTokenPlaceholder")}
                       className="w-full bg-[#121212] border border-[#333333] rounded-lg px-3 py-1.5 text-white outline-none focus:border-[#E5A00D]"
                     />
                   </div>

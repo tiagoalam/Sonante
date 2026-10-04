@@ -96,7 +96,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
     } catch (err) {
       console.error("Falha ao iniciar autenticação Plex:", err);
       setIsPollingPin(false);
-      alert("Não foi possível conectar aos servidores do Plex.");
+      alert(t("wizard.plexConnectionError"));
     }
   };
 
@@ -159,7 +159,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
       onFinish(finalConfig);
     } catch (err) {
       console.error("Falha ao salvar configuração inicial:", err);
-      alert("Ocorreu um erro ao salvar as preferências iniciais.");
+      alert(t("wizard.saveError"));
     } finally {
       setIsFinishing(false);
     }
@@ -169,7 +169,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
 
   const nextStep = () => {
     if (step === 2 && !useLocal && !usePlex) {
-      alert("Selecione pelo menos uma fonte de música (Armazenamento Local ou Servidor Plex).");
+      alert(t("wizard.selectSourceError"));
       return;
     }
     setStep((s) => s + 1);
@@ -217,6 +217,16 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                 }`}
               >
                 EN
+              </button>
+              <button
+                type="button"
+                onClick={() => handleLanguageChange("es")}
+                className={`px-2 py-0.5 rounded font-semibold transition-colors cursor-pointer ${
+                  selectedLang.startsWith("es") ? "bg-[#E5A00D] text-black" : "text-[#777777] hover:text-white"
+                }`}
+                title="Español"
+              >
+                ES
               </button>
             </div>
 

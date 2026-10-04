@@ -305,10 +305,10 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                 <p className="text-base text-[#CCCCCC] font-medium">{selectedAlbum.artist}</p>
                 <p className="text-xs text-[#777777]">
                   {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
-                  {tracks.length} {t("favorites.tracks")}
+                  {t("playlists.itemCount", { count: tracks.length })}
                 </p>
 
-                <div className="pt-2 flex items-center space-x-3">
+                <div className="pt-2 flex flex-wrap items-center gap-3">
                   <button
                     onClick={() => handlePlayAll(0)}
                     disabled={!isPlaybackAvailable || tracks.length === 0}

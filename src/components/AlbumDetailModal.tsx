@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { X, Play, Clock, Disc3 } from "lucide-react";
 import { PlexAlbum, PlexTrack } from "../types/plex";
 import { plexService } from "../services/plex";
@@ -11,6 +12,7 @@ interface Props {
 }
 
 export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
+  const { t } = useTranslation();
   const [tracks, setTracks] = useState<PlexTrack[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -62,7 +64,7 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
               <h3 className="text-xl font-bold text-white tracking-tight">{album.title}</h3>
               <p className="text-sm text-[#AAAAAA] mt-0.5">{album.artist}</p>
               {album.year && (
-                <p className="text-xs text-[#777777] mt-1">{album.year} • {tracks.length} faixas</p>
+                <p className="text-xs text-[#777777] mt-1">{album.year} • {t("plex.trackCount", { count: tracks.length })}</p>
               )}
             </div>
           </div>
@@ -73,7 +75,7 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
               className="flex items-center space-x-2 px-4 py-2 bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs rounded-lg transition-transform active:scale-95 cursor-pointer shadow"
             >
               <Play size={16} fill="black" />
-              <span>Reproduzir Álbum</span>
+              <span>{t("plex.playAlbum")}</span>
             </button>
             <button
               onClick={onClose}
@@ -87,9 +89,9 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
         {/* Lista de Faixas */}
         <div className="flex-1 overflow-y-auto p-4 space-y-1">
           {loading ? (
-            <div className="py-12 text-center text-sm text-[#666666]">Carregando faixas...</div>
+            <div className="py-12 text-center text-sm text-[#666666]">{t("plex.loadingTracks")}</div>
           ) : tracks.length === 0 ? (
-            <div className="py-12 text-center text-sm text-[#666666]">Nenhuma faixa localizada.</div>
+            <div className="py-12 text-center text-sm text-[#666666]">{t("plex.noAlbumTracks")}</div>
           ) : (
             tracks.map((track, idx) => (
               <div

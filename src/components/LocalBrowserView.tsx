@@ -447,16 +447,16 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     setSelectedAlbum(null);
                   }}
                   className="text-base text-[#CCCCCC] hover:text-[#E5A00D] font-medium transition-colors cursor-pointer text-left block"
-                  title={t("localBrowser.viewDiscography", "Ver discografia")}
+                  title={t("localBrowser.viewDiscography")}
                 >
                   {selectedAlbum.artist}
                 </button>
                 <p className="text-xs text-[#777777]">
                   {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
-                  {albumTracks.length} {t("favorites.tracks")}
+                  {t("localBrowser.trackCount", { count: albumTracks.length })}
                 </p>
 
-                <div className="pt-2 flex items-center space-x-3">
+                <div className="pt-2 flex flex-wrap items-center gap-3">
                   <button
                     onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, 0)}
                     disabled={!isPlaybackAvailable}
@@ -484,7 +484,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   <button
                     onClick={(e) => handleToggleFavoriteLocal(e, selectedAlbum, albumCover)}
                     className="p-2.5 rounded-xl bg-[#1E1E1E] border border-[#2B2B2B] hover:bg-[#282828] text-white transition-colors cursor-pointer"
-                    title={favoriteIds.has(selectedAlbum.folder_path) ? t("favorites.removeFavorite") : t("favorites.title")}
+                    title={favoriteIds.has(selectedAlbum.folder_path) ? t("favorites.removeFavorite") : t("favorites.addFavorite")}
                   >
                     <Heart
                       size={16}

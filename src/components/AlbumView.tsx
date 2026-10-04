@@ -128,7 +128,7 @@ export const AlbumView: React.FC<Props> = ({
           className="flex items-center space-x-2 text-xs font-semibold text-[#888888] hover:text-white transition-colors cursor-pointer"
         >
           <ArrowLeft size={16} />
-          <span>Voltar para a biblioteca</span>
+          <span>{t("plex.backToLibrary")}</span>
         </button>
       </div>
 
@@ -149,7 +149,7 @@ export const AlbumView: React.FC<Props> = ({
           <div className="space-y-3">
             <span className="text-xs font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1">
               <Sparkles size={13} />
-              <span>Álbum Plex</span>
+              <span>{t("plex.plexAlbum")}</span>
             </span>
 
             <h1 className="text-3xl font-black text-white">{album.title}</h1>
@@ -180,17 +180,17 @@ export const AlbumView: React.FC<Props> = ({
               )}
 
               <span className="text-[#666666]">•</span>
-              <span className="text-[#888888]">{tracks.length} faixas</span>
+              <span className="text-[#888888]">{t("plex.trackCount", { count: tracks.length })}</span>
             </div>
 
-            <div className="pt-2 flex items-center space-x-3">
+            <div className="pt-2 flex flex-wrap items-center gap-3">
               <button
                 onClick={() => handlePlayTracks(0)}
                 disabled={!isPlaybackAvailable || loading || tracks.length === 0}
                 className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50"
               >
                 <Play size={16} fill="black" />
-                <span>Tocar Álbum</span>
+                <span>{t("plex.playAlbum")}</span>
               </button>
 
               <button
@@ -207,7 +207,7 @@ export const AlbumView: React.FC<Props> = ({
               <button
                 onClick={handleToggleFav}
                 className="p-2.5 rounded-xl bg-[#1E1E1E] border border-[#2B2B2B] hover:bg-[#282828] text-white transition-colors cursor-pointer"
-                title={isFavorite ? "Remover dos favoritos" : "Adicionar aos favoritos"}
+                title={isFavorite ? t("favorites.removeFavorite") : t("favorites.addFavorite")}
               >
                 <Heart
                   size={16}
@@ -222,20 +222,20 @@ export const AlbumView: React.FC<Props> = ({
         <div className="bg-[#141414] border border-[#222222] rounded-xl overflow-hidden divide-y divide-[#1D1D1D]">
           <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[#666666] uppercase tracking-wider bg-[#181818]">
             <span className="col-span-1 text-center">#</span>
-            <span className="col-span-7">Título</span>
+            <span className="col-span-7">{t("plex.trackTitle")}</span>
             <span className="col-span-4 text-right flex items-center justify-end space-x-1">
               <Clock size={12} />
-              <span>Duração</span>
+              <span>{t("plex.duration")}</span>
             </span>
           </div>
 
           {loading ? (
             <div className="p-8 text-center text-xs text-[#666666]">
-              Carregando faixas do servidor...
+              {t("plex.loadingTracks")}
             </div>
           ) : tracks.length === 0 ? (
             <div className="p-8 text-center text-xs text-[#666666]">
-              Nenhuma faixa encontrada neste álbum.
+              {t("plex.noAlbumTracks")}
             </div>
           ) : (
             tracks.map((track, idx) => (
