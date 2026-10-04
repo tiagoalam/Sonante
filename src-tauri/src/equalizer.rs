@@ -11,19 +11,19 @@ const FILE_NAME: &str = "equalizer.json";
 const SCHEMA_VERSION: u32 = 1;
 const FLAT_ID: &str = "flat";
 const MAX_USER_PRESETS: usize = 64;
-const MAX_BANDS: usize = 64; // Allows imported/AutoEQ filters beyond the ten-band UI.
+pub(crate) const MAX_BANDS: usize = 64; // Allows imported/AutoEQ filters beyond the ten-band UI.
 const MAX_NAME_CHARS: usize = 80;
 const MAX_ID_CHARS: usize = 96;
 const MAX_FILE_BYTES: u64 = 1_048_576;
-const MIN_FREQUENCY_HZ: f64 = 20.0;
-const MAX_FREQUENCY_HZ: f64 = 20_000.0;
-const MIN_GAIN_DB: f64 = -12.0;
-const MAX_GAIN_DB: f64 = 12.0;
-const MIN_PREAMP_DB: f64 = -24.0;
-const MAX_PREAMP_DB: f64 = 12.0;
+pub(crate) const MIN_FREQUENCY_HZ: f64 = 20.0;
+pub(crate) const MAX_FREQUENCY_HZ: f64 = 20_000.0;
+pub(crate) const MIN_GAIN_DB: f64 = -12.0;
+pub(crate) const MAX_GAIN_DB: f64 = 12.0;
+pub(crate) const MIN_PREAMP_DB: f64 = -24.0;
+pub(crate) const MAX_PREAMP_DB: f64 = 12.0;
 // CamillaDSP 4.1.3 requires Q > 0 and declares no maximum. This is a product bound.
-const MIN_Q: f64 = 0.1;
-const MAX_Q: f64 = 30.0;
+pub(crate) const MIN_Q: f64 = 0.1;
+pub(crate) const MAX_Q: f64 = 30.0;
 static NEXT_PRESET_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,7 +134,7 @@ pub fn flat_preset() -> EqPreset {
     }
 }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID_CHARS
         && id
@@ -153,7 +153,7 @@ fn normalized_name(name: &str) -> Result<String, EqError> {
     Ok(trimmed.to_owned())
 }
 
-fn validate_preset(preset: &EqPreset) -> Result<(), EqError> {
+pub(crate) fn validate_preset(preset: &EqPreset) -> Result<(), EqError> {
     if !valid_id(&preset.id) {
         return Err(EqError::InvalidPresetId);
     }
