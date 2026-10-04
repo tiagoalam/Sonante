@@ -76,6 +76,8 @@ export const NowPlayingWindow: React.FC = () => {
 
   useEffect(() => {
     let disposed = false;
+    let startRequested = false;
+    const sessionId = window.crypto.randomUUID();
     const cleanups: Array<() => void> = [];
 
     void Promise.all([
@@ -108,7 +110,10 @@ export const NowPlayingWindow: React.FC = () => {
       }
       cleanups.push(...listeners);
       await emitTo("main", NOW_PLAYING_READY_EVENT);
-      await startAudioAnalyzer();
+      // O handshake pode terminar depois do cleanup (fechamento ou StrictMode).
+      if (disposed) return;
+      startRequested = true;
+      await startAudioAnalyzer(sessionId);
     }).catch((err) => {
       if (!disposed) console.error("Falha ao iniciar análise da janela Now Playing:", err);
     });
@@ -126,9 +131,11 @@ export const NowPlayingWindow: React.FC = () => {
       disposed = true;
       window.clearTimeout(levelTimeoutRef.current);
       cleanups.forEach((cleanup) => cleanup());
-      void stopAudioAnalyzer().catch((err) => {
-        console.error("Falha ao encerrar análise da janela Now Playing:", err);
-      });
+      if (startRequested) {
+        void stopAudioAnalyzer(sessionId).catch((err) => {
+          console.error("Falha ao encerrar análise da janela Now Playing:", err);
+        });
+      }
     };
   }, []);
 

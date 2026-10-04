@@ -139,6 +139,7 @@ pub struct AnalyzerState(pub std::sync::Mutex<AudioAnalyzer>);
 pub struct AudioAnalyzer {
     socket_path: String,
     fifo_path: PathBuf,
+    active_session: Option<String>,
     controller_stop: Option<Arc<AtomicBool>>,
     reader_stop: Option<Arc<AtomicBool>>,
     reader: Option<JoinHandle<()>>,
@@ -150,11 +151,41 @@ impl AudioAnalyzer {
         Self {
             socket_path,
             fifo_path,
+            active_session: None,
             controller_stop: None,
             reader_stop: None,
             reader: None,
             controller: None,
         }
+    }
+
+    pub fn start_for_window(&mut self, session_id: String, app: AppHandle) -> Result<(), String> {
+        if self.session_matches(&session_id) {
+            return self.start(app);
+        }
+        if self.active_session.is_some() {
+            self.stop(Some(&app))?;
+        }
+        self.start(app)?;
+        self.active_session = Some(session_id);
+        Ok(())
+    }
+
+    pub fn stop_for_window(&mut self, session_id: &str, app: &AppHandle) -> Result<(), String> {
+        if !self.session_matches(session_id) {
+            return Ok(());
+        }
+        self.active_session = None;
+        self.stop(Some(app))
+    }
+
+    pub fn stop_for_window_close(&mut self, app: &AppHandle) -> Result<(), String> {
+        self.active_session = None;
+        self.stop(Some(app))
+    }
+
+    fn session_matches(&self, session_id: &str) -> bool {
+        self.active_session.as_deref() == Some(session_id)
     }
 
     pub fn start(&mut self, app: AppHandle) -> Result<(), String> {
@@ -209,6 +240,10 @@ impl AudioAnalyzer {
 
     pub fn is_active(&self) -> bool {
         self.controller_stop.is_some()
+    }
+
+    pub fn has_window_session(&self) -> bool {
+        self.active_session.is_some()
     }
 
     pub fn stop(&mut self, app: Option<&AppHandle>) -> Result<(), String> {
@@ -643,6 +678,16 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     static NEXT_FIFO_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn window_sessions_do_not_match_stale_cleanup_and_inactive_stop_is_idempotent() {
+        let mut analyzer = AudioAnalyzer::new("/missing/mpd.socket".into(), "/missing/analyzer.pcm".into());
+        analyzer.active_session = Some("new-window".into());
+        assert!(!analyzer.session_matches("old-window"));
+        assert!(analyzer.session_matches("new-window"));
+        analyzer.stop(None).unwrap();
+        analyzer.stop(None).unwrap();
+    }
 
     fn pcm(samples: &[(i16, i16)]) -> Vec<u8> {
         samples

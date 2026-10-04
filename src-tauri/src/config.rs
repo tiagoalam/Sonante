@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct AppConfig {
@@ -81,27 +82,32 @@ impl AppConfig {
         crate::persistence::sonante_config_dir().join("config.json")
     }
 
-    pub fn load() -> Self {
-        let path = Self::config_path();
-        if let Err(error) = crate::persistence::prepare_private_file_for_load(&path, "config.json")
-        {
-            eprintln!("[Persistência] {}", error);
-        }
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&content) {
-                    cfg.apply_legacy_migrations();
-                    return cfg;
-                }
-            }
-        }
-        Self::default()
+    pub fn load() -> Result<Self, String> {
+        Self::load_from_path(&Self::config_path())
+    }
+
+    pub(crate) fn load_from_path(path: &Path) -> Result<Self, String> {
+        crate::persistence::prepare_private_file_for_load(path, "config.json")?;
+        let content = match fs::read(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(format!("Falha ao ler config.json: {error}")),
+        };
+        let mut cfg: Self = serde_json::from_slice(&content)
+            .map_err(|error| format!("config.json contém dados inválidos e foi preservado: {error}"))?;
+        cfg.apply_legacy_migrations();
+        Ok(cfg)
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::config_path();
+        self.save_to_path(&Self::config_path())
+    }
+
+    fn save_to_path(&self, path: &Path) -> Result<(), String> {
+        // Nunca substitua um arquivo existente que não pôde ser carregado.
+        Self::load_from_path(path)?;
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        crate::persistence::atomic_write_private(&path, json.as_bytes(), "config.json")
+        crate::persistence::atomic_write_private(path, json.as_bytes(), "config.json")
     }
 
     fn apply_legacy_migrations(&mut self) {
@@ -115,6 +121,20 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn test_path() -> PathBuf {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("sonante-config-{}-{id}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        dir.join("config.json")
+    }
+
+    fn remove_test_path(path: &Path) {
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 
     const LEGACY_CONFIG: &str = r#"{
         "first_run": false,
@@ -130,6 +150,44 @@ mod tests {
         "audio_buffer_size_kb": 8192,
         "replay_gain": "off"
     }"#;
+
+    #[test]
+    fn absent_file_loads_defaults() {
+        let path = test_path();
+        assert_eq!(AppConfig::load_from_path(&path).unwrap(), AppConfig::default());
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn valid_040_config_preserves_roots_and_plex() {
+        let path = test_path();
+        fs::write(&path, LEGACY_CONFIG).unwrap();
+        let config = AppConfig::load_from_path(&path).unwrap();
+        assert_eq!(config.local_folders, vec!["/media/plex"]);
+        assert_eq!(config.plex_url, "https://legacy-route.example.invalid:32400");
+        assert_eq!(config.plex_token, "TEST_ACCOUNT_TOKEN");
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn invalid_json_is_an_error_and_cannot_be_overwritten() {
+        let path = test_path();
+        let original = b"{invalid config bytes";
+        fs::write(&path, original).unwrap();
+        assert!(AppConfig::load_from_path(&path).is_err());
+        assert!(AppConfig::default().save_to_path(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn existing_unreadable_config_is_an_error() {
+        let path = test_path();
+        fs::create_dir(&path).unwrap();
+        assert!(AppConfig::load_from_path(&path).is_err());
+        assert!(AppConfig::default().save_to_path(&path).is_err());
+        remove_test_path(&path);
+    }
 
     #[test]
     fn legacy_config_without_server_identity_still_deserializes() {

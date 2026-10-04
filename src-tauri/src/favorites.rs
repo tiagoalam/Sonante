@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use crate::config::AppConfig;
 use crate::plex::{contains_plex_token, legacy_plex_image_ref, PlexImageRef};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -70,7 +72,8 @@ impl FavoriteAlbum {
 
         let mut changed = false;
         if self.plex_image.as_ref().is_some_and(|image| {
-            !image.is_valid() || Some(image.server_id.as_str()) != selected_server_id
+            !image.is_valid()
+                || selected_server_id.is_some_and(|server_id| image.server_id != server_id)
         }) {
             self.plex_image = None;
             changed = true;
@@ -84,26 +87,22 @@ impl FavoriteAlbum {
         changed
     }
 
-    pub fn load_all(selected_server_id: Option<&str>) -> Result<Vec<FavoriteAlbum>, String> {
-        let path = Self::favorites_file_path();
-        if let Err(error) =
-            crate::persistence::prepare_private_file_for_load(&path, "favorites.json")
-        {
-            eprintln!("[Persistência] {}", error);
-        }
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
+    pub fn load_all(config: Option<&AppConfig>) -> Result<Vec<FavoriteAlbum>, String> {
+        Self::load_all_from_path(&Self::favorites_file_path(), config)
+    }
 
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return Ok(Vec::new()),
+    fn load_all_from_path(path: &Path, config: Option<&AppConfig>) -> Result<Vec<FavoriteAlbum>, String> {
+        crate::persistence::prepare_private_file_for_load(path, "favorites.json")?;
+        let content = match fs::read(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(format!("Falha ao ler favorites.json: {error}")),
         };
-
-        let mut list: Vec<FavoriteAlbum> = serde_json::from_str(&content).unwrap_or_default();
-
-        // Remove entradas fantasmas ou corrompidas com ID em branco
-        list.retain(|fav| !fav.id.trim().is_empty() && !fav.source.trim().is_empty());
+        let mut list: Vec<FavoriteAlbum> = serde_json::from_slice(&content)
+            .map_err(|error| format!("favorites.json contém dados inválidos e foi preservado: {error}"))?;
+        if list.iter().any(|fav| fav.id.trim().is_empty() || fav.source.trim().is_empty()) {
+            return Err("favorites.json contém favoritos sem identidade válida e foi preservado.".to_string());
+        }
 
         for fav in &mut list {
             if fav.source == "local" {
@@ -113,38 +112,46 @@ impl FavoriteAlbum {
             }
         }
 
-        let changed = list
-            .iter_mut()
-            .fold(false, |changed, fav| fav.sanitize_artwork(selected_server_id) || changed);
-        if changed {
-            Self::save_all(&list)?;
+        // Sem configuração confiável, proteger a resposta em memória sem gravar migrações.
+        let changed = list.iter_mut().fold(false, |changed, fav| {
+            fav.sanitize_artwork(config.and_then(|config| config.plex_server_id.as_deref())) || changed
+        });
+        if config.is_some() && changed {
+            Self::save_all_to_path(path, &list)?;
         }
 
         Ok(list)
     }
 
-    pub fn save_all(list: &[FavoriteAlbum]) -> Result<(), String> {
-        let path = Self::favorites_file_path();
+    fn save_all_to_path(path: &Path, list: &[FavoriteAlbum]) -> Result<(), String> {
         let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
-        crate::persistence::atomic_write_private(&path, json.as_bytes(), "favorites.json")
+        crate::persistence::atomic_write_private(path, json.as_bytes(), "favorites.json")
     }
 
     pub fn toggle(
+        album: FavoriteAlbum,
+        config: &AppConfig,
+    ) -> Result<bool, String> {
+        Self::toggle_at_path(&Self::favorites_file_path(), album, config)
+    }
+
+    fn toggle_at_path(
+        path: &Path,
         mut album: FavoriteAlbum,
-        selected_server_id: Option<&str>,
+        config: &AppConfig,
     ) -> Result<bool, String> {
         let clean_id = album.id.trim().to_string();
         if clean_id.is_empty() {
             return Err("ID do álbum inválido".to_string());
         }
 
-        album.sanitize_artwork(selected_server_id);
-        let mut list = Self::load_all(selected_server_id)?;
+        album.sanitize_artwork(config.plex_server_id.as_deref());
+        let mut list = Self::load_all_from_path(path, Some(config))?;
         let exists_index = list.iter().position(|item| item.id == clean_id && item.source == album.source);
 
         if let Some(idx) = exists_index {
             list.remove(idx);
-            Self::save_all(&list)?;
+            Self::save_all_to_path(path, &list)?;
             Ok(false)
         } else {
             let mut new_fav = album;
@@ -153,7 +160,7 @@ impl FavoriteAlbum {
                 new_fav.exists = check_local_path_exists(&new_fav.path_or_key);
             }
             list.push(new_fav);
-            Self::save_all(&list)?;
+            Self::save_all_to_path(path, &list)?;
             Ok(true)
         }
     }
@@ -162,6 +169,159 @@ impl FavoriteAlbum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn test_path() -> PathBuf {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("sonante-favorites-{}-{id}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        dir.join("favorites.json")
+    }
+
+    fn remove_test_path(path: &Path) {
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    fn plain_favorite() -> FavoriteAlbum {
+        FavoriteAlbum {
+            thumb: None,
+            ..legacy_favorite()
+        }
+    }
+
+    fn config_with_server() -> AppConfig {
+        AppConfig {
+            plex_server_id: Some("server-1".into()),
+            ..AppConfig::default()
+        }
+    }
+
+    fn favorite_with_artwork() -> FavoriteAlbum {
+        FavoriteAlbum {
+            thumb: None,
+            plex_image: Some(PlexImageRef {
+                server_id: "server-1".into(),
+                path: "/library/metadata/42/thumb/1".into(),
+            }),
+            ..plain_favorite()
+        }
+    }
+
+    #[test]
+    fn absent_file_is_an_empty_list() {
+        let path = test_path();
+        assert!(FavoriteAlbum::load_all_from_path(&path, None).unwrap().is_empty());
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn valid_json_loads_and_normal_toggle_preserves_other_favorites() {
+        let path = test_path();
+        let config = config_with_server();
+        let first = plain_favorite();
+        fs::write(&path, serde_json::to_vec(&vec![first.clone()]).unwrap()).unwrap();
+        let loaded = FavoriteAlbum::load_all_from_path(&path, Some(&config)).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, first.id);
+
+        let mut second = plain_favorite();
+        second.id = "43".into();
+        assert!(FavoriteAlbum::toggle_at_path(&path, second.clone(), &config).unwrap());
+        assert_eq!(FavoriteAlbum::load_all_from_path(&path, Some(&config)).unwrap().len(), 2);
+        assert!(!FavoriteAlbum::toggle_at_path(&path, second, &config).unwrap());
+        assert_eq!(FavoriteAlbum::load_all_from_path(&path, Some(&config)).unwrap().len(), 1);
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn valid_config_keeps_matching_plex_artwork_without_rewriting_file() {
+        let path = test_path();
+        let original = serde_json::to_vec(&vec![favorite_with_artwork()]).unwrap();
+        fs::write(&path, &original).unwrap();
+        let list = FavoriteAlbum::load_all_from_path(&path, Some(&config_with_server())).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].plex_image.is_some());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn valid_config_without_server_preserves_stable_artwork() {
+        let path = test_path();
+        let original = serde_json::to_vec(&vec![favorite_with_artwork()]).unwrap();
+        fs::write(&path, &original).unwrap();
+        let list = FavoriteAlbum::load_all_from_path(&path, Some(&AppConfig::default())).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].plex_image.is_some());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn valid_config_with_different_server_removes_stale_artwork() {
+        let path = test_path();
+        fs::write(&path, serde_json::to_vec(&vec![favorite_with_artwork()]).unwrap()).unwrap();
+        let config = AppConfig {
+            plex_server_id: Some("server-2".into()),
+            ..AppConfig::default()
+        };
+        let list = FavoriteAlbum::load_all_from_path(&path, Some(&config)).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].plex_image.is_none());
+        assert_eq!(fs::read(&path).unwrap(), serde_json::to_vec_pretty(&list).unwrap());
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn invalid_config_does_not_change_valid_favorites_or_artwork() {
+        let path = test_path();
+        let config_path = path.parent().unwrap().join("config.json");
+        fs::write(&config_path, b"{invalid config").unwrap();
+        let original = serde_json::to_vec(&vec![favorite_with_artwork()]).unwrap();
+        fs::write(&path, &original).unwrap();
+
+        let config = AppConfig::load_from_path(&config_path).ok();
+        assert!(config.is_none());
+        let list = FavoriteAlbum::load_all_from_path(&path, config.as_ref()).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].plex_image.is_some());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn unavailable_config_keeps_legacy_file_but_omits_authenticated_thumb_from_response() {
+        let path = test_path();
+        let original = serde_json::to_vec(&vec![legacy_favorite()]).unwrap();
+        fs::write(&path, &original).unwrap();
+        let list = FavoriteAlbum::load_all_from_path(&path, None).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].thumb.is_none());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn invalid_json_blocks_toggle_without_changing_original_bytes() {
+        let path = test_path();
+        let original = b"{invalid favorites bytes";
+        fs::write(&path, original).unwrap();
+        assert!(FavoriteAlbum::load_all_from_path(&path, None).is_err());
+        assert!(FavoriteAlbum::toggle_at_path(&path, plain_favorite(), &AppConfig::default()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn existing_unreadable_favorites_is_an_error() {
+        let path = test_path();
+        fs::create_dir(&path).unwrap();
+        assert!(FavoriteAlbum::load_all_from_path(&path, None).is_err());
+        assert!(FavoriteAlbum::toggle_at_path(&path, plain_favorite(), &AppConfig::default()).is_err());
+        remove_test_path(&path);
+    }
 
     fn legacy_favorite() -> FavoriteAlbum {
         FavoriteAlbum {

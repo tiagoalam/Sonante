@@ -41,19 +41,27 @@ fn should_exit_application_on_window_close(window_label: &str) -> bool {
 
 #[tauri::command]
 fn start_audio_analyzer(
+    session_id: String,
+    window: Window,
     app: AppHandle,
     analyzer_state: State<AnalyzerState>,
 ) -> Result<(), String> {
-    println!("[Analyzer] Start requested by window 'now-playing'.");
-    analyzer_state
+    if window.label() != "now-playing" || app.get_webview_window("now-playing").is_none() {
+        return Err("A janela Now Playing não está disponível para iniciar o analyzer.".into());
+    }
+    let mut analyzer = analyzer_state
         .0
         .lock()
-        .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?
-        .start(app)
+        .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?;
+    if app.get_webview_window("now-playing").is_none() {
+        return Err("A janela Now Playing foi fechada antes de iniciar o analyzer.".into());
+    }
+    analyzer.start_for_window(session_id, app)
 }
 
 #[tauri::command]
 fn stop_audio_analyzer(
+    session_id: String,
     app: AppHandle,
     analyzer_state: State<AnalyzerState>,
 ) -> Result<(), String> {
@@ -61,7 +69,7 @@ fn stop_audio_analyzer(
         .0
         .lock()
         .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?
-        .stop(Some(&app))
+        .stop_for_window(&session_id, &app)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -348,28 +356,21 @@ fn list_local_directory(
 }
 
 #[tauri::command]
-fn get_favorites(config_state: State<ConfigState>) -> Result<Vec<FavoriteAlbum>, String> {
-    let server_id = config_state
-        .0
-        .lock()
-        .map_err(|_| "O estado da configuração está indisponível.".to_string())?
-        .plex_server_id
-        .clone();
-    FavoriteAlbum::load_all(server_id.as_deref())
+fn get_favorites() -> Result<Vec<FavoriteAlbum>, String> {
+    let config = match AppConfig::load() {
+        Ok(config) => Some(config),
+        Err(error) => {
+            eprintln!("[Favoritos] Configuração indisponível; artwork preservado: {error}");
+            None
+        }
+    };
+    FavoriteAlbum::load_all(config.as_ref())
 }
 
 #[tauri::command]
-fn toggle_favorite(
-    album: FavoriteAlbum,
-    config_state: State<ConfigState>,
-) -> Result<bool, String> {
-    let server_id = config_state
-        .0
-        .lock()
-        .map_err(|_| "O estado da configuração está indisponível.".to_string())?
-        .plex_server_id
-        .clone();
-    FavoriteAlbum::toggle(album, server_id.as_deref())
+fn toggle_favorite(album: FavoriteAlbum) -> Result<bool, String> {
+    let config = AppConfig::load()?;
+    FavoriteAlbum::toggle(album, &config)
 }
 
 #[tauri::command]
@@ -786,6 +787,7 @@ fn rescan_library(state: State<AudioState>) -> Result<(), String> {
 
 #[tauri::command]
 fn get_config(state: State<ConfigState>) -> Result<AppConfig, String> {
+    AppConfig::load()?;
     Ok(state.0.lock().unwrap().clone())
 }
 
@@ -829,6 +831,7 @@ async fn save_config(
     audio_state: State<'_, AudioState>,
     analyzer_state: State<'_, AnalyzerState>,
 ) -> Result<(), String> {
+    AppConfig::load()?;
     let observed_cfg = config_state
         .0
         .lock()
@@ -1068,11 +1071,13 @@ async fn save_config(
 
     if resume_analyzer {
         if let Ok(mut analyzer) = analyzer_state.0.lock() {
-            if let Err(error) = analyzer.start(app) {
-                eprintln!(
-                    "[Analyzer] Configuração aplicada, mas o analyzer não pôde ser retomado: {}",
-                    error
-                );
+            if analyzer.has_window_session() && app.get_webview_window("now-playing").is_some() {
+                if let Err(error) = analyzer.start(app) {
+                    eprintln!(
+                        "[Analyzer] Configuração aplicada, mas o analyzer não pôde ser retomado: {}",
+                        error
+                    );
+                }
             }
         }
     }
@@ -1258,11 +1263,21 @@ async fn get_plex_image(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let socket_path = MpdSupervisor::socket_path().to_string_lossy().to_string();
-    let initial_config = AppConfig::load();
+    let (initial_config, config_valid) = match AppConfig::load() {
+        Ok(config) => (config, true),
+        Err(error) => {
+            eprintln!("[Persistência] {error}");
+            (AppConfig::default(), false)
+        }
+    };
 
     let mut supervisor = MpdSupervisor::new(&socket_path);
-    if let Err(e) = supervisor.start(&initial_config) {
-        eprintln!("[Aviso] Erro no supervisor de áudio: {}", e);
+    if config_valid {
+        if let Err(e) = supervisor.start(&initial_config) {
+            eprintln!("[Aviso] Erro no supervisor de áudio: {}", e);
+        }
+    } else {
+        supervisor.mark_unavailable(MpdUnavailableReason::StartupFailed);
     }
 
     let audio_engine = AudioEngine::new(
@@ -1273,11 +1288,13 @@ pub fn run() {
         socket_path.clone(),
         MpdSupervisor::analyzer_fifo_path(),
     );
-    if let Err(e) = audio_engine.rescan_library() {
-        eprintln!(
-            "[Audio] Falha ao solicitar rescan inicial da biblioteca: {}",
-            e
-        );
+    if config_valid {
+        if let Err(e) = audio_engine.rescan_library() {
+            eprintln!(
+                "[Audio] Falha ao solicitar rescan inicial da biblioteca: {}",
+                e
+            );
+        }
     }
 
     let plex_client = PlexClient::from_config(&initial_config);
@@ -1346,7 +1363,7 @@ pub fn run() {
                 if window.label() == "now-playing" {
                     if let Some(state) = window.app_handle().try_state::<AnalyzerState>() {
                         if let Ok(mut analyzer) = state.0.lock() {
-                            if let Err(error) = analyzer.stop(Some(window.app_handle())) {
+                            if let Err(error) = analyzer.stop_for_window_close(window.app_handle()) {
                                 eprintln!("[Analyzer] Falha no cleanup da janela: {}", error);
                             }
                         }
