@@ -2,13 +2,16 @@
 mod activation;
 #[cfg(test)]
 mod harness;
+mod peq;
 mod pipewire;
+mod runtime;
 
 use pipewire::{
     exact_node, stereo_ports, validate_paused_topology, validate_topology, Direction, DspRoute,
     PipeWireCommandRunner, PipeWireMonitor, PipeWireRouteManager, RouteStatus, RouteViolation,
     SystemCommandRunner,
 };
+use runtime::{CamillaRuntimeController, LocalWebSocketTransport, RuntimeEndpoint, RuntimeShared};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -100,13 +103,15 @@ pub fn resolve_camilla_binary(explicit: Option<&Path>) -> Result<PathBuf, DspErr
     Ok(path)
 }
 
-fn flat_config(capture: &str, playback: &str) -> String {
-    format!("devices:\n  samplerate: 48000\n  chunksize: 1024\n  enable_rate_adjust: false\n  resampler: null\n  capture:\n    type: PipeWire\n    channels: 2\n    node_name: {capture}\n    node_group_name: sonante_dsp\n  playback:\n    type: PipeWire\n    channels: 2\n    node_name: {playback}\n    node_group_name: sonante_dsp\npipeline: []\n")
+fn flat_config(capture: &str, playback: &str, title: &str) -> String {
+    format!("title: {title}\ndevices:\n  samplerate: 48000\n  chunksize: 1024\n  volume_ramp_time: 100\n  enable_rate_adjust: false\n  resampler: null\n  capture:\n    type: PipeWire\n    channels: 2\n    node_name: {capture}\n    node_group_name: sonante_dsp\n  playback:\n    type: PipeWire\n    channels: 2\n    node_name: {playback}\n    node_group_name: sonante_dsp\npipeline: []\n")
 }
 
-fn camilla_command(binary: &Path, config: &Path) -> Command {
+fn camilla_command(binary: &Path, config: &Path, port: u16) -> Command {
     let mut command = Command::new(binary);
     command
+        .args(["--address", "127.0.0.1", "--port"])
+        .arg(port.to_string())
         .arg(config)
         .env("PIPEWIRE_AUTOCONNECT", "0")
         .stdin(Stdio::null())
@@ -126,6 +131,8 @@ pub struct DspSupervisor<R: PipeWireCommandRunner = SystemCommandRunner> {
     route: Option<DspRoute>,
     runtime_dir: Option<PathBuf>,
     runtime_parent: Option<PathBuf>,
+    runtime_endpoint: Option<RuntimeEndpoint>,
+    runtime_shared: Arc<RuntimeShared>,
     route_status: RouteStatus,
 }
 
@@ -148,6 +155,8 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
             route: None,
             runtime_dir: None,
             runtime_parent: None,
+            runtime_endpoint: None,
+            runtime_shared: Arc::new(RuntimeShared::default()),
             route_status: RouteStatus::NotReady,
         }
     }
@@ -166,6 +175,23 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
         self.route.as_ref().map(|route| route.capture_name.as_str())
     }
 
+    pub fn runtime_controller(&mut self) -> Result<CamillaRuntimeController, DspError> {
+        if self.state != DspState::Active {
+            return Err(DspError::InvalidTransition);
+        }
+        self.check_process()?;
+        let endpoint = self
+            .runtime_endpoint
+            .clone()
+            .ok_or(DspError::InvalidTransition)?;
+        Ok(CamillaRuntimeController::new(
+            endpoint,
+            Arc::clone(&self.activation_generation),
+            Arc::clone(&self.runtime_shared),
+            LocalWebSocketTransport,
+        ))
+    }
+
     #[cfg(test)]
     fn with_runtime_parent(mut self, parent: PathBuf) -> Self {
         self.runtime_parent = Some(parent);
@@ -182,6 +208,7 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
         self.activation_generation
             .store(self.generation, Ordering::SeqCst);
         self.activation_claim.store(0, Ordering::SeqCst);
+        self.runtime_shared = Arc::new(RuntimeShared::default());
         let sink_name = format!(
             "sonante_dsp_null_{}_{}",
             std::process::id(),
@@ -216,6 +243,11 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
             self.runtime_dir = Some(runtime.clone());
             fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
                 .map_err(|_| DspError::RuntimeFailed("protect DSP runtime directory".into()))?;
+            let endpoint =
+                RuntimeEndpoint::reserve(self.generation, capture.clone(), playback.clone())
+                    .map_err(|_| {
+                        DspError::RuntimeFailed("reserve local CamillaDSP control endpoint".into())
+                    })?;
             let config_path = runtime.join("flat.yml");
             let mut config = OpenOptions::new()
                 .write(true)
@@ -223,15 +255,44 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
                 .open(&config_path)
                 .map_err(|_| DspError::RuntimeFailed("create DSP config".into()))?;
             config
-                .write_all(flat_config(&capture, &playback).as_bytes())
+                .write_all(flat_config(&capture, &playback, &endpoint.title).as_bytes())
                 .map_err(|_| DspError::RuntimeFailed("write DSP config".into()))?;
             self.process = Some(
-                camilla_command(&binary, &config_path)
+                camilla_command(&binary, &config_path, endpoint.port)
                     .spawn()
                     .map_err(|_| DspError::CamillaStartFailed)?,
             );
+            self.runtime_endpoint = Some(endpoint.clone());
             self.monitor = Some(PipeWireMonitor::start(self.generation)?);
             self.wait_for_camilla(&capture, &playback)?;
+            let controller = CamillaRuntimeController::new(
+                endpoint,
+                Arc::clone(&self.activation_generation),
+                Arc::clone(&self.runtime_shared),
+                LocalWebSocketTransport,
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut last_error;
+            loop {
+                self.check_process()?;
+                match controller.probe_owned() {
+                    Ok(()) => break,
+                    Err(runtime::RuntimeError::UnexpectedConfig) => {
+                        return Err(DspError::RuntimeFailed(
+                            "CamillaDSP control endpoint has wrong session identity".into(),
+                        ));
+                    }
+                    Err(error) => {
+                        last_error = error;
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err(DspError::RuntimeFailed(format!(
+                        "CamillaDSP control endpoint unavailable: {last_error:?}"
+                    )));
+                }
+                thread::sleep(Duration::from_millis(40));
+            }
             self.route_status = RouteStatus::CamillaReady;
             Ok((self.generation, sink_name))
         })();
@@ -531,6 +592,7 @@ impl<R: PipeWireCommandRunner> DspSupervisor<R> {
         self.state.transition(DspState::Stopping)?;
         self.activation_generation.store(0, Ordering::SeqCst);
         self.activation_claim.store(0, Ordering::SeqCst);
+        self.runtime_endpoint = None;
         self.generation = NEXT_SESSION.fetch_add(1, Ordering::Relaxed); // Invalidate old events first.
         let mut problems = Vec::new();
         if let Some(monitor) = self.monitor.take() {
@@ -644,11 +706,17 @@ mod tests {
 
     #[test]
     fn flat_config_has_no_processing_and_uses_pipewire() {
-        let config = flat_config("capture", "playback");
+        let config = flat_config("capture", "playback", "session_token");
         assert!(config.contains("pipeline: []"));
         assert_eq!(config.matches("type: PipeWire").count(), 2);
         assert!(config.contains("resampler: null"));
-        let command = camilla_command(Path::new("/camilladsp"), Path::new("/flat.yml"));
+        assert!(config.contains("title: session_token"));
+        let command = camilla_command(Path::new("/camilladsp"), Path::new("/flat.yml"), 12345);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args[0], "--address");
+        assert_eq!(args[1], "127.0.0.1");
+        assert_eq!(args[2], "--port");
+        assert_eq!(args[3], "12345");
         assert!(command
             .get_envs()
             .any(|(key, value)| key == "PIPEWIRE_AUTOCONNECT"

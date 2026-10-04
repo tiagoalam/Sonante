@@ -3,10 +3,12 @@ use super::activation::{
     dsp_mpd_command, dsp_mpd_output_config, DspActivationTransaction, FirstStreamPlayback,
     MpdSocketControl, PlayerState,
 };
+use super::peq::PcmFormat;
 use super::pipewire::{
     exact_node, validate_topology, PipeWireRouteManager, RouteStatus, SystemCommandRunner,
 };
 use super::{DspState, DspSupervisor};
+use crate::equalizer::flat_preset;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -47,11 +49,8 @@ fn write_wav(path: &Path) -> Result<(), String> {
     file.write_all(&(samples * 4).to_le_bytes())
         .map_err(|error| error.to_string())?;
     for index in 0..samples {
-        let sample = if index % 48 < 24 {
-            8_000_i16
-        } else {
-            -8_000_i16
-        };
+        let phase = 2.0 * std::f64::consts::PI * f64::from(index % 48) / 48.0;
+        let sample = (phase.sin() * 8_000.0) as i16;
         file.write_all(&sample.to_le_bytes())
             .map_err(|error| error.to_string())?;
         file.write_all(&sample.to_le_bytes())
@@ -187,6 +186,290 @@ fn no_hardware_fallback(probe: &mut Probe, mpd_name: &str) -> Result<(), String>
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn route_identity(
+    probe: &mut Probe,
+) -> Result<(u32, (u32, Option<u64>), (u32, Option<u64>), Vec<u32>), String> {
+    let graph = probe
+        .dsp
+        .route_manager
+        .snapshot()
+        .map_err(|e| format!("snapshot: {e:?}"))?;
+    let route = probe.dsp.route.as_ref().ok_or("route missing")?;
+    if validate_topology(&graph, route, true) != RouteStatus::RouteReady {
+        return Err("route changed during preset update".into());
+    }
+    let capture = exact_node(&graph, &route.capture_name, "Stream/Input/Audio")
+        .map_err(|e| format!("capture: {e:?}"))?;
+    let playback = exact_node(&graph, &route.playback_name, "Stream/Output/Audio")
+        .map_err(|e| format!("playback: {e:?}"))?;
+    let mut links = probe.dsp.route_manager.owned_links().to_vec();
+    links.sort_unstable();
+    if links.len() != 4 {
+        return Err("expected exactly four owned links".into());
+    }
+    let pid = probe
+        .dsp
+        .process
+        .as_ref()
+        .ok_or("Camilla process missing")?
+        .id();
+    Ok((
+        pid,
+        (capture.id, capture.serial),
+        (playback.id, playback.serial),
+        links,
+    ))
+}
+
+fn runtime_switch_probe(probe: &mut Probe, session: u64) -> Result<(), String> {
+    let baseline = route_identity(probe)?;
+    let controller = probe
+        .dsp
+        .runtime_controller()
+        .map_err(|e| format!("controller: {e:?}"))?;
+    let flat = flat_preset();
+    let mut a = flat.clone();
+    a.id = "probe_a".into();
+    a.name = "Probe A".into();
+    a.bands.truncate(1);
+    a.bands[0].frequency_hz = 1000.0;
+    a.bands[0].gain_db = -6.0;
+    let mut b = flat.clone();
+    b.id = "probe_b".into();
+    b.name = "Probe B".into();
+    b.preamp_db = -3.0;
+    b.bands[5].gain_db = 3.0;
+    let format = PcmFormat {
+        sample_rate_hz: 48_000,
+        channels: 2,
+    };
+    for (label, preset) in [("Flat", &flat), ("A", &a), ("B", &b), ("Flat again", &flat)] {
+        controller
+            .apply_preset(session, preset, format)
+            .map_err(|e| format!("apply {label}: {e:?}"))?;
+        let after = route_identity(probe)?;
+        println!(
+            "preset {label}: PID={}, capture={:?}, playback={:?}, links={:?}",
+            after.0, after.1, after.2, after.3
+        );
+        if after != baseline {
+            return Err(format!("preset {label} recreated nodes or links"));
+        }
+    }
+    // Same filter identity across zero gain, enable, and parameter edits.
+    let mut changed = a.clone();
+    changed.bands[0].gain_db = 0.0;
+    for gain in [3.0, 0.0] {
+        changed.bands[0].gain_db = gain;
+        controller
+            .apply_preset(session, &changed, format)
+            .map_err(|e| format!("gain {gain}: {e:?}"))?;
+        if route_identity(probe)? != baseline {
+            return Err("gain update recreated route".into());
+        }
+    }
+    changed.bands[0].enabled = false;
+    controller
+        .apply_preset(session, &changed, format)
+        .map_err(|e| format!("disable: {e:?}"))?;
+    changed.bands[0].enabled = true;
+    changed.bands[0].frequency_hz = 1200.0;
+    changed.bands[0].q = 2.0;
+    changed.bands[0].gain_db = -3.0;
+    controller
+        .apply_preset(session, &changed, format)
+        .map_err(|e| format!("freq/Q: {e:?}"))?;
+    controller
+        .apply_preset(session, &flat, format)
+        .map_err(|e| format!("restore Flat: {e:?}"))?;
+    if route_identity(probe)? != baseline {
+        return Err("final route differs".into());
+    }
+    Ok(())
+}
+
+fn wav_left_samples(path: &Path) -> Result<Vec<i16>, String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    let start = bytes
+        .windows(4)
+        .position(|window| window == b"data")
+        .ok_or("recording has no data chunk")?
+        + 8;
+    if start >= bytes.len() {
+        return Err("empty recording".into());
+    }
+    let samples: Vec<i16> = bytes[start..]
+        .chunks_exact(4)
+        .map(|frame| i16::from_le_bytes([frame[0], frame[1]]))
+        .collect();
+    if samples.len() < 80_000 {
+        return Err(format!("short recording: {} frames", samples.len()));
+    }
+    Ok(samples)
+}
+
+fn rms(samples: &[i16], start: usize, end: usize) -> f64 {
+    let sum: f64 = samples[start..end]
+        .iter()
+        .map(|sample| f64::from(*sample).powi(2))
+        .sum();
+    (sum / (end - start) as f64).sqrt()
+}
+
+fn max_step(samples: &[i16], start: usize, end: usize) -> i32 {
+    samples[start..end]
+        .windows(2)
+        .map(|pair| (i32::from(pair[1]) - i32::from(pair[0])).abs())
+        .max()
+        .unwrap_or(0)
+}
+
+fn max_cycle_peak_change(samples: &[i16], start: usize, end: usize) -> i32 {
+    // The test tone is 1 kHz at 48 kHz: one cycle is exactly 48 frames.
+    let peaks: Vec<i32> = samples[start..end]
+        .chunks_exact(48)
+        .map(|cycle| {
+            cycle
+                .iter()
+                .map(|sample| i32::from(*sample).abs())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    peaks
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .max()
+        .unwrap_or(0)
+}
+
+fn record_transition(
+    probe: &mut Probe,
+    label: &str,
+    apply: impl FnOnce() -> Result<(), String>,
+) -> Result<(f64, f64, i32), String> {
+    let sink_name = probe
+        .dsp
+        .route
+        .as_ref()
+        .ok_or("route missing")?
+        .sink_name
+        .clone();
+    let graph = probe
+        .dsp
+        .route_manager
+        .snapshot()
+        .map_err(|e| format!("snapshot: {e:?}"))?;
+    let sink =
+        exact_node(&graph, &sink_name, "Audio/Sink").map_err(|e| format!("null sink: {e:?}"))?;
+    if !sink.virtual_sink {
+        return Err("record target is not a virtual sink".into());
+    }
+    if graph.nodes.iter().any(|node| node.name == "pw-record") {
+        return Err("another pw-record is present".into());
+    }
+    let path = probe.root.join(format!("transition_{label}.wav"));
+    let mut child = Command::new("pw-record")
+        .args([
+            "--target",
+            "0",
+            "--rate",
+            "48000",
+            "--channels",
+            "2",
+            "--format",
+            "s16",
+            "-n",
+            "96000",
+        ])
+        .arg(&path)
+        .env("PIPEWIRE_AUTOCONNECT", "0")
+        .spawn()
+        .map_err(|e| format!("pw-record: {e}"))?;
+    let result = (|| {
+        wait_for(Duration::from_secs(2), || {
+            probe.dsp.route_manager.snapshot().is_ok_and(|graph| {
+                graph
+                    .nodes
+                    .iter()
+                    .any(|node| node.name == "pw-record" && node.autoconnect == Some(false))
+            })
+        })?;
+        for channel in ["FL", "FR"] {
+            command(
+                "pw-link",
+                &[
+                    &format!("{sink_name}:monitor_{channel}"),
+                    &format!("pw-record:input_{channel}"),
+                ],
+            )?;
+        }
+        thread::sleep(Duration::from_millis(750));
+        apply()?;
+        wait_for(Duration::from_secs(4), || {
+            child.try_wait().is_ok_and(|status| status.is_some())
+        })?;
+        let samples = wav_left_samples(&path)?;
+        let before = rms(&samples, 12_000, 24_000);
+        let after = rms(&samples, 72_000, 84_000);
+        let step = max_step(&samples, 30_000, 65_000);
+        let cycle_change = max_cycle_peak_change(&samples, 30_000, 65_000);
+        println!("{label}: RMS before={before:.1}, after={after:.1}, ratio={:.3}, max adjacent step={step}, max cycle peak change={cycle_change}", after / before);
+        Ok((before, after, step))
+    })();
+    if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    result
+}
+
+fn signal_probe(probe: &mut Probe, session: u64) -> Result<(), String> {
+    let controller = probe
+        .dsp
+        .runtime_controller()
+        .map_err(|e| format!("controller: {e:?}"))?;
+    let format = PcmFormat {
+        sample_rate_hz: 48_000,
+        channels: 2,
+    };
+    let flat = flat_preset();
+    let mut plus = flat.clone();
+    plus.bands.truncate(1);
+    plus.bands[0].frequency_hz = 1000.0;
+    plus.bands[0].gain_db = 6.0;
+    let mut minus = plus.clone();
+    minus.bands[0].gain_db = -6.0;
+    let (_, _, baseline_step) = record_transition(probe, "flat_flat", || {
+        controller
+            .apply_preset(session, &flat, format)
+            .map_err(|e| format!("flat apply: {e:?}"))
+    })?;
+    let (flat_rms, plus_rms, plus_step) = record_transition(probe, "flat_plus6", || {
+        controller
+            .apply_preset(session, &plus, format)
+            .map_err(|e| format!("plus apply: {e:?}"))
+    })?;
+    let (plus_before, minus_rms, minus_step) = record_transition(probe, "plus6_minus6", || {
+        controller
+            .apply_preset(session, &minus, format)
+            .map_err(|e| format!("minus apply: {e:?}"))
+    })?;
+    let (minus_before, flat_again, flat_step) = record_transition(probe, "minus6_flat", || {
+        controller
+            .apply_preset(session, &flat, format)
+            .map_err(|e| format!("flat restore: {e:?}"))
+    })?;
+    println!("transition max steps: baseline={baseline_step}, Flat->+6={plus_step}, +6->-6={minus_step}, -6->Flat={flat_step}");
+    if !(1.7..2.3).contains(&(plus_rms / flat_rms))
+        || !(0.20..0.32).contains(&(minus_rms / plus_before))
+        || !(1.7..2.3).contains(&(flat_again / minus_before))
+    {
+        return Err("measured PEQ response outside expected ranges".into());
     }
     Ok(())
 }
@@ -374,6 +657,9 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
     if queue_after != queue_before {
         return Err("queue changed".into());
     }
+
+    runtime_switch_probe(&mut probe, session)?;
+    signal_probe(&mut probe, session)?;
 
     let _ = probe
         .dsp
