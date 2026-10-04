@@ -4,6 +4,8 @@ mod audio;
 mod config;
 #[allow(dead_code)] // Fundação EQ-1A; integração ao playback ocorrerá em fase posterior.
 mod dsp;
+#[allow(dead_code)] // Modelo EQ-2 isolado; nenhum comando ou startup carrega presets nesta fase.
+mod equalizer;
 mod favorites;
 mod persistence;
 mod playlists;
