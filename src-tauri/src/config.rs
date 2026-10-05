@@ -60,12 +60,12 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             first_run: true,
-            alsa_device: "hw:CARD=R2R,DEV=0".to_string(),
-            audio_output_type: "alsa".to_string(),
+            alsa_device: "default".to_string(),
+            audio_output_type: "pipewire".to_string(),
             local_folders: Vec::new(),
             plex_server_id: None,
             plex_server_name: None,
-            plex_url: "http://192.168.1.100:32400".to_string(),
+            plex_url: "".to_string(),
             plex_token: "".to_string(),
             playback_mode: "http".to_string(),
             local_mount_path: "".to_string(),
@@ -156,6 +156,16 @@ mod tests {
         let path = test_path();
         assert_eq!(AppConfig::load_from_path(&path).unwrap(), AppConfig::default());
         remove_test_path(&path);
+    }
+
+    #[test]
+    fn defaults_are_portable_for_first_run() {
+        let config = AppConfig::default();
+
+        assert!(config.first_run);
+        assert_eq!(config.audio_output_type, "pipewire");
+        assert_eq!(config.alsa_device, "default");
+        assert!(config.plex_url.is_empty());
     }
 
     #[test]
