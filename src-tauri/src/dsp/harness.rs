@@ -1,26 +1,29 @@
 //! Explicit host-only lifecycle probe: cargo test dsp::harness -- --ignored --nocapture
 use super::activation::{
     dsp_mpd_command, dsp_mpd_output_config, DspActivationTransaction, FirstStreamPlayback,
-    MpdSocketControl, PlayerState,
+    FirstStreamRoute, MpdSocketControl, PlaybackSnapshot, PlayerState,
 };
 use super::peq::PcmFormat;
 use super::pipewire::{
     exact_node, validate_topology, PipeWireRouteManager, RouteStatus, SystemCommandRunner,
 };
 use super::runtime::{
-    CamillaRuntimeController, LocalWebSocketTransport, RuntimeError, RuntimeTransport,
+    CamillaRuntimeController, LocalWebSocketTransport, RuntimeError, RuntimeHealth,
+    RuntimeTransport,
 };
 use super::{DspState, DspSupervisor};
 use crate::equalizer::flat_preset;
 use serde_json::{json, Value};
 use std::fs::{self, File};
 use std::io::{Read, Write};
+use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tungstenite::{client, Message};
 
 fn command(program: &str, args: &[&str]) -> Result<Output, String> {
     let output = Command::new(program)
@@ -68,8 +71,167 @@ fn write_wav(path: &Path) -> Result<(), String> {
 struct Probe {
     root: PathBuf,
     mpd: Option<Child>,
+    pure_mpd: Option<Child>,
     null_module: Option<String>,
     dsp: DspSupervisor<SystemCommandRunner>,
+}
+
+#[derive(Clone)]
+struct ActivationTrace {
+    started: Instant,
+    events: Arc<Mutex<Vec<(String, Duration, Option<PlaybackSnapshot>)>>>,
+}
+
+impl ActivationTrace {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            events: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+    fn record(&self, label: &str, snapshot: Option<PlaybackSnapshot>) {
+        if let Ok(mut events) = self.events.lock() {
+            events.push((label.into(), self.started.elapsed(), snapshot));
+        }
+    }
+    fn print(&self, label: &str) -> Result<(), String> {
+        let events = self
+            .events
+            .lock()
+            .map_err(|_| "activation trace poisoned")?;
+        for (name, at, snapshot) in events.iter() {
+            println!(
+                "{label} trace t={:.3}s {name} {snapshot:?}",
+                at.as_secs_f64()
+            );
+        }
+        Ok(())
+    }
+    fn contains(&self, label: &str) -> Result<bool, String> {
+        Ok(self
+            .events
+            .lock()
+            .map_err(|_| "activation trace poisoned")?
+            .iter()
+            .any(|(name, _, _)| name == label))
+    }
+    fn first_status(&self) -> Result<PlaybackSnapshot, String> {
+        self.events
+            .lock()
+            .map_err(|_| "activation trace poisoned")?
+            .iter()
+            .find_map(|(_, _, snapshot)| snapshot.clone())
+            .ok_or_else(|| "activation trace has no status".into())
+    }
+    fn status_after(&self, label: &str) -> Result<PlaybackSnapshot, String> {
+        let events = self
+            .events
+            .lock()
+            .map_err(|_| "activation trace poisoned")?;
+        let index = events
+            .iter()
+            .position(|(name, _, _)| name == label)
+            .ok_or_else(|| format!("activation trace missing {label}"))?;
+        events[index + 1..]
+            .iter()
+            .find_map(|(_, _, snapshot)| snapshot.clone())
+            .ok_or_else(|| format!("activation trace has no status after {label}"))
+    }
+}
+
+struct TracedPlayback<'a> {
+    inner: &'a mut MpdSocketControl,
+    trace: ActivationTrace,
+}
+impl FirstStreamPlayback for TracedPlayback<'_> {
+    fn snapshot(&mut self) -> Result<PlaybackSnapshot, super::DspError> {
+        let result = self.inner.snapshot();
+        self.trace.record("status", result.as_ref().ok().cloned());
+        result
+    }
+    fn contains_song(&mut self, id: u32) -> Result<bool, super::DspError> {
+        self.inner.contains_song(id)
+    }
+    fn play_id(&mut self, id: u32) -> Result<(), super::DspError> {
+        self.trace.record("playid intent", None);
+        let result = self.inner.play_id(id);
+        self.trace.record("playid accepted", None);
+        result
+    }
+    fn pause(&mut self) -> Result<(), super::DspError> {
+        self.trace.record("pause intent", None);
+        let result = self.inner.pause();
+        self.trace.record("pause accepted", None);
+        result
+    }
+    fn seek_id(&mut self, id: u32, elapsed: f64) -> Result<(), super::DspError> {
+        self.trace.record("seek intent", None);
+        let result = self.inner.seek_id(id, elapsed);
+        self.trace.record("seek accepted", None);
+        result
+    }
+    fn resume(&mut self) -> Result<(), super::DspError> {
+        self.trace.record("resume intent", None);
+        let result = self.inner.resume();
+        self.trace.record("resume accepted", None);
+        result
+    }
+    fn stop(&mut self) -> Result<(), super::DspError> {
+        self.inner.stop()
+    }
+}
+
+struct TracedRoute<'a> {
+    inner: &'a mut DspSupervisor<SystemCommandRunner>,
+    trace: ActivationTrace,
+}
+impl FirstStreamRoute for TracedRoute<'_> {
+    fn ready(&self) -> bool {
+        self.inner.ready()
+    }
+    fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+    fn preflight(&mut self, name: &str) -> Result<bool, super::DspError> {
+        self.trace.record("preflight start", None);
+        let result = self.inner.preflight(name);
+        self.trace.record(
+            if result.as_ref().is_ok_and(|found| *found) {
+                "stream available"
+            } else {
+                "preflight end"
+            },
+            None,
+        );
+        result
+    }
+    fn connect_running(&mut self, name: &str) -> Result<(), super::DspError> {
+        self.trace.record("connect start", None);
+        let result = self.inner.connect_running(name);
+        self.trace.record("connect end", None);
+        result
+    }
+    fn validate_paused(&mut self) -> Result<(), super::DspError> {
+        self.trace.record("validate paused start", None);
+        let result = self.inner.validate_paused();
+        self.trace.record("validate paused end", None);
+        result
+    }
+    fn validate_running(&mut self) -> Result<(), super::DspError> {
+        self.trace.record("validate running start", None);
+        let result = self.inner.validate_running();
+        self.trace.record("validate running end", None);
+        result
+    }
+    fn commit(&mut self) -> Result<(), super::DspError> {
+        self.trace.record("commit start", None);
+        let result = self.inner.commit();
+        self.trace.record("commit end", None);
+        result
+    }
+    fn abort(&mut self, reason: super::DspError) -> Result<(), super::DspError> {
+        self.inner.abort(reason)
+    }
 }
 
 impl Probe {
@@ -85,6 +247,7 @@ impl Probe {
             dsp: DspSupervisor::new(SystemCommandRunner).with_runtime_parent(root.clone()),
             root,
             mpd: None,
+            pure_mpd: None,
             null_module: None,
         })
     }
@@ -102,6 +265,16 @@ impl Probe {
             }
             if let Err(error) = mpd.wait() {
                 problems.push(format!("MPD wait: {error}"));
+            }
+        }
+        if let Some(mut mpd) = self.pure_mpd.take() {
+            if mpd.try_wait().map_err(|e| e.to_string())?.is_none() {
+                if let Err(error) = mpd.kill() {
+                    problems.push(format!("pure MPD kill: {error}"));
+                }
+            }
+            if let Err(error) = mpd.wait() {
+                problems.push(format!("pure MPD wait: {error}"));
             }
         }
         if let Some(module) = self.null_module.take() {
@@ -193,6 +366,92 @@ fn no_hardware_fallback(probe: &mut Probe, mpd_name: &str) -> Result<(), String>
             }
         }
     }
+    Ok(())
+}
+
+fn reactivation_probe(
+    probe: &mut Probe,
+    player: &mut MpdSocketControl,
+    song_id: u32,
+    mpd_name: &str,
+    queue_before: &[String],
+    label: &str,
+    expected_state: PlayerState,
+) -> Result<(), String> {
+    let before = player
+        .snapshot()
+        .map_err(|e| format!("{label} before: {e:?}"))?;
+    if before.state != expected_state {
+        return Err(format!("{label}: wrong initial state {before:?}"));
+    }
+    probe
+        .dsp
+        .route_manager
+        .remove_owned_links()
+        .map_err(|e| format!("{label} disconnect: {e:?}"))?;
+    probe.dsp.route.as_mut().ok_or("route missing")?.mpd_name = None;
+    probe.dsp.route_status = RouteStatus::CamillaReady;
+    probe
+        .dsp
+        .state
+        .transition(DspState::Starting)
+        .map_err(|e| format!("{label} prepare: {e:?}"))?;
+    no_hardware_fallback(probe, mpd_name)?;
+    let trace = ActivationTrace::new();
+    let transaction =
+        DspActivationTransaction::new(song_id, mpd_name.into(), probe.dsp.activation_gate());
+    transaction
+        .execute(
+            &mut TracedPlayback {
+                inner: player,
+                trace: trace.clone(),
+            },
+            &mut TracedRoute {
+                inner: &mut probe.dsp,
+                trace: trace.clone(),
+            },
+        )
+        .map_err(|e| format!("{label} activation: {e:?}"))?;
+    trace.print(label)?;
+    let after = player
+        .snapshot()
+        .map_err(|e| format!("{label} after: {e:?}"))?;
+    if expected_state == PlayerState::Playing {
+        if trace.contains("playid intent")?
+            || trace.contains("seek intent")?
+            || trace.contains("pause intent")?
+            || after.elapsed < trace.first_status()?.elapsed
+        {
+            return Err(format!("{label}: playing position was reset"));
+        }
+    } else {
+        let restored = trace.status_after("seek accepted")?;
+        if restored.state != PlayerState::Paused || (restored.elapsed - before.elapsed).abs() > 0.15
+        {
+            return Err(format!(
+                "{label}: paused seek restored {restored:?} from {before:?}"
+            ));
+        }
+    }
+    if after.song_id != Some(song_id)
+        || after.state != PlayerState::Playing
+        || player
+            .command("playlistinfo", "playlistinfo")
+            .map_err(|e| format!("{label} queue: {e:?}"))?
+            != queue_before
+    {
+        return Err(format!("{label}: state or queue changed"));
+    }
+    if route_identity(probe).is_err() {
+        return Err(format!("{label}: route invalid"));
+    }
+    println!(
+        "{label}: before={:.3}s {:?}, after={:.3}s, activation={:.3}s",
+        before.elapsed,
+        before.state,
+        after.elapsed,
+        trace.started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -320,6 +579,222 @@ fn runtime_switch_probe(probe: &mut Probe, session: u64) -> Result<(), String> {
     if route_identity(probe)? != baseline {
         return Err("final route differs".into());
     }
+    Ok(())
+}
+
+fn websocket_control_probe(probe: &mut Probe, session: u64) -> Result<(), String> {
+    let endpoint = probe
+        .dsp
+        .runtime_endpoint
+        .clone()
+        .ok_or("endpoint missing")?;
+    let before = probe
+        .dsp
+        .runtime_controller()
+        .map_err(|e| format!("controller: {e:?}"))?
+        .published_preset()
+        .map_err(|e| format!("published: {e:?}"))?;
+    let stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, endpoint.port))
+        .map_err(|e| format!("real WebSocket TCP: {e}"))?;
+    let (mut socket, _) = client(format!("ws://127.0.0.1:{}/", endpoint.port), stream)
+        .map_err(|e| format!("real WebSocket handshake: {e}"))?;
+    socket
+        .send(Message::Text("\"GetState\"".into()))
+        .map_err(|e| format!("GetState send: {e}"))?;
+    socket.read().map_err(|e| format!("GetState read: {e}"))?;
+    socket
+        .get_mut()
+        .shutdown(Shutdown::Both)
+        .map_err(|e| format!("WebSocket shutdown: {e}"))?;
+    let closed = socket.read().expect_err("closed WebSocket read succeeded");
+    println!("real Camilla WebSocket closed by client: {closed:?}; controller uses a new connection per request");
+    let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .map_err(|e| format!("refused port reserve: {e}"))?;
+    let refused_port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    drop(listener);
+    let mut refused_endpoint = endpoint.clone();
+    refused_endpoint.port = refused_port;
+    let refused = CamillaRuntimeController::new(
+        refused_endpoint,
+        Arc::clone(&probe.dsp.activation_generation),
+        Arc::clone(&probe.dsp.runtime_shared),
+        LocalWebSocketTransport,
+    );
+    let result = refused.apply_preset(
+        session,
+        &flat_preset(),
+        PcmFormat {
+            sample_rate_hz: 48_000,
+            channels: 2,
+        },
+    );
+    if result != Err(RuntimeError::WebSocketConnectFailed) {
+        return Err(format!("refused connection: {result:?}"));
+    }
+    let after = probe
+        .dsp
+        .runtime_controller()
+        .map_err(|e| format!("controller: {e:?}"))?
+        .published_preset()
+        .map_err(|e| format!("published: {e:?}"))?;
+    if before != after {
+        return Err("WebSocket failures published a preset".into());
+    }
+    assert_transition_gain_zero(probe)?;
+    println!(
+        "real TCP refusal: WebSocketConnectFailed, preset unchanged, Camilla control still healthy"
+    );
+    Ok(())
+}
+
+fn exercise_stop_play(
+    player: &mut MpdSocketControl,
+    child: &mut Child,
+    song_id: u32,
+    label: &str,
+) -> Result<(), String> {
+    for sequence in ["stop_play", "pause_play", "stop_playid"]
+        .into_iter()
+        .cycle()
+        .take(9)
+    {
+        match sequence {
+            "pause_play" => player
+                .pause()
+                .map_err(|e| format!("{label} pause: {e:?}"))?,
+            _ => player.stop().map_err(|e| format!("{label} stop: {e:?}"))?,
+        }
+        let before = player
+            .snapshot()
+            .map_err(|e| format!("{label} {sequence} before: {e:?}"))?;
+        if sequence == "stop_playid" {
+            player
+                .play_id(song_id)
+                .map_err(|e| format!("{label} playid: {e:?}"))?;
+        } else {
+            player
+                .command("play", "play")
+                .map_err(|e| format!("{label} play: {e:?}"))?;
+        }
+        wait_for(Duration::from_secs(2), || {
+            player
+                .snapshot()
+                .is_ok_and(|now| now.state == PlayerState::Playing)
+        })?;
+        thread::sleep(Duration::from_millis(100));
+        let after = player
+            .snapshot()
+            .map_err(|e| format!("{label} {sequence} after: {e:?}"))?;
+        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+            return Err(format!("{label} exited during {sequence}"));
+        }
+        println!(
+            "{label} {sequence}: {:?} {:.3}s -> {:?} {:.3}s, MPD alive",
+            before.state, before.elapsed, after.state, after.elapsed
+        );
+    }
+    Ok(())
+}
+
+fn pure_pipewire_mpd_probe(
+    probe: &mut Probe,
+    music: &Path,
+    sink_name: &str,
+    mpd_name: &str,
+) -> Result<(), String> {
+    let root = probe.root.join("pure_mpd");
+    fs::create_dir(&root).map_err(|e| e.to_string())?;
+    let socket = root.join("mpd.sock");
+    let output_name = format!("EQ3D pure {}", std::process::id());
+    let node_name = format!("mpd.{output_name}");
+    let output = dsp_mpd_output_config(&output_name, sink_name)
+        .map_err(|e| format!("pure output: {e:?}"))?;
+    let config = format!("music_directory \"{}\"\nplaylist_directory \"{}\"\ndb_file \"{}\"\nlog_file \"{}\"\npid_file \"{}\"\nbind_to_address \"{}\"\nauto_update \"no\"\nreplaygain \"off\"\n{}\n",
+        music.display(), root.display(), root.join("db").display(), root.join("mpd.log").display(), root.join("mpd.pid").display(), socket.display(), output);
+    let config_path = root.join("mpd.conf");
+    fs::write(&config_path, config).map_err(|e| e.to_string())?;
+    probe.pure_mpd = Some(
+        dsp_mpd_command(Path::new("mpd"), &config_path)
+            .spawn()
+            .map_err(|e| format!("pure MPD spawn: {e}"))?,
+    );
+    let mut player = MpdSocketControl::new(socket);
+    wait_for(Duration::from_secs(3), || player.snapshot().is_ok())?;
+    player
+        .command("update", "update")
+        .map_err(|e| format!("pure update: {e:?}"))?;
+    wait_for(Duration::from_secs(3), || {
+        player
+            .command("status", "status")
+            .is_ok_and(|lines| !lines.iter().any(|line| line.starts_with("updating_db:")))
+    })?;
+    player
+        .command("add", "add \"real_track.wav\"")
+        .map_err(|e| format!("pure add: {e:?}"))?;
+    let queue = player
+        .command("playlistinfo", "playlistinfo")
+        .map_err(|e| format!("pure queue: {e:?}"))?;
+    let id = queue
+        .iter()
+        .find_map(|line| {
+            line.strip_prefix("Id: ")
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .ok_or("pure song id missing")?;
+    player
+        .play_id(id)
+        .map_err(|e| format!("pure initial play: {e:?}"))?;
+    wait_for(Duration::from_secs(2), || {
+        probe
+            .dsp
+            .route_manager
+            .snapshot()
+            .is_ok_and(|graph| exact_node(&graph, &node_name, "Stream/Output/Audio").is_ok())
+    })?;
+    let graph = probe
+        .dsp
+        .route_manager
+        .snapshot()
+        .map_err(|e| format!("pure graph: {e:?}"))?;
+    let pure = exact_node(&graph, &node_name, "Stream/Output/Audio")
+        .map_err(|e| format!("pure node: {e:?}"))?;
+    if pure.autoconnect != Some(false)
+        || graph.links.iter().any(|link| {
+            graph
+                .ports
+                .iter()
+                .any(|port| port.node_id == pure.id && port.id == link.output_port)
+        })
+    {
+        return Err("pure MPD autoconnected or linked to a sink".into());
+    }
+    let child = probe.pure_mpd.as_mut().ok_or("pure MPD child missing")?;
+    exercise_stop_play(&mut player, child, id, "pure PipeWire")?;
+    let graph = probe
+        .dsp
+        .route_manager
+        .snapshot()
+        .map_err(|e| format!("pure final graph: {e:?}"))?;
+    let pure = exact_node(&graph, &node_name, "Stream/Output/Audio")
+        .map_err(|e| format!("pure final node: {e:?}"))?;
+    if pure.autoconnect != Some(false)
+        || graph.links.iter().any(|link| {
+            graph
+                .ports
+                .iter()
+                .any(|port| port.node_id == pure.id && port.id == link.output_port)
+        })
+    {
+        return Err("pure MPD gained an output link".into());
+    }
+    if player
+        .command("playlistinfo", "playlistinfo")
+        .map_err(|e| format!("pure queue: {e:?}"))?
+        != queue
+    {
+        return Err("pure MPD queue changed".into());
+    }
+    no_hardware_fallback(probe, mpd_name)?;
     Ok(())
 }
 
@@ -592,6 +1067,7 @@ enum FaultMode {
     LostReply,
     Timeout,
     RollbackRejected,
+    RealSocketDrop,
 }
 
 struct FaultTransport {
@@ -627,6 +1103,24 @@ impl RuntimeTransport for FaultTransport {
                     } else {
                         RuntimeError::WebSocketConnectFailed
                     });
+                }
+                FaultMode::RealSocketDrop => {
+                    let stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+                        .map_err(|_| RuntimeError::WebSocketConnectFailed)?;
+                    let (mut socket, _) = client(format!("ws://127.0.0.1:{port}/"), stream)
+                        .map_err(|_| RuntimeError::WebSocketConnectFailed)?;
+                    socket
+                        .send(Message::Text(command.to_string().into()))
+                        .map_err(|_| RuntimeError::WebSocketClosed)?;
+                    socket
+                        .get_mut()
+                        .shutdown(Shutdown::Both)
+                        .map_err(|_| RuntimeError::WebSocketClosed)?;
+                    let error = socket
+                        .read()
+                        .expect_err("dropped WebSocket returned a reply");
+                    println!("real PatchConfig socket drop: tungstenite {error:?}");
+                    return Err(RuntimeError::WebSocketClosed);
                 }
                 FaultMode::RollbackRejected => unreachable!(),
             }
@@ -673,6 +1167,11 @@ fn rollback_signal_probe(probe: &mut Probe, session: u64, mpd_name: &str) -> Res
             "lost_reply",
             FaultMode::LostReply,
             RuntimeError::WebSocketConnectFailed,
+        ),
+        (
+            "real_socket_drop",
+            FaultMode::RealSocketDrop,
+            RuntimeError::WebSocketClosed,
         ),
         ("timeout", FaultMode::Timeout, RuntimeError::RequestTimeout),
     ] {
@@ -759,9 +1258,12 @@ fn rollback_signal_probe(probe: &mut Probe, session: u64, mpd_name: &str) -> Res
             .published_preset()
             .map_err(|e| format!("published: {e:?}"))?
             != Some(a.id.clone())
-            || controller.apply_preset(session, &a, format) != Err(RuntimeError::UnexpectedConfig)
+            || controller.apply_preset(session, &a, format) != Err(RuntimeError::RuntimePoisoned)
         {
             return Err("rollback failure published or accepted another apply".into());
+        }
+        if controller.health() != RuntimeHealth::Poisoned {
+            return Err("rollback failure did not poison runtime".into());
         }
         if route_identity(probe)? != baseline {
             return Err("rollback failure changed route".into());
@@ -785,7 +1287,8 @@ impl RuntimeTransport for CrashTransport<'_> {
                 .map_err(|_| RuntimeError::RuntimeUnavailable)?
                 .kill()
                 .map_err(|_| RuntimeError::RuntimeUnavailable)?;
-            return Err(RuntimeError::WebSocketConnectFailed);
+            thread::sleep(Duration::from_millis(20));
+            return LocalWebSocketTransport.request(port, command);
         }
         LocalWebSocketTransport.request(port, command)
     }
@@ -864,7 +1367,7 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
     }
     let binary = super::resolve_camilla_binary(None).map_err(|e| format!("CamillaDSP: {e:?}"))?;
     for tool in ["mpd", "pw-dump", "pw-link", "pactl"] {
-        let _ = command(
+        let output = command(
             tool,
             &[if tool == "mpd" {
                 "--version"
@@ -874,16 +1377,31 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
                 "--help"
             }],
         )?;
+        if tool == "mpd" {
+            let version = String::from_utf8_lossy(&output.stdout);
+            if !version.contains("pipewire") {
+                return Err("MPD has no PipeWire output plugin".into());
+            }
+            println!(
+                "MPD under test: {} (PipeWire output available)",
+                version.lines().next().unwrap_or("unknown")
+            );
+        }
     }
     let default_before = default_sink()?;
     let mut probe = Probe::new()?;
     let music = probe.root.join("music");
     fs::create_dir(&music).map_err(|e| e.to_string())?;
     write_wav(&music.join("real_track.wav"))?;
+    let camilla_start = Instant::now();
     let (session, sink_name) = probe
         .dsp
         .start(Some(&binary))
         .map_err(|e| format!("DSP start: {e:?}"))?;
+    println!(
+        "Camilla/runtime initialization: {:.3}s",
+        camilla_start.elapsed().as_secs_f64()
+    );
     let capture = probe
         .dsp
         .capture_node_name()
@@ -983,9 +1501,20 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
     }
     let transaction =
         DspActivationTransaction::new(song_id, mpd_name.clone(), probe.dsp.activation_gate());
+    let first_trace = ActivationTrace::new();
     transaction
-        .execute(&mut player, &mut probe.dsp)
+        .execute(
+            &mut TracedPlayback {
+                inner: &mut player,
+                trace: first_trace.clone(),
+            },
+            &mut TracedRoute {
+                inner: &mut probe.dsp,
+                trace: first_trace.clone(),
+            },
+        )
         .map_err(|e| format!("first activation: {e:?}"))?;
+    first_trace.print("first")?;
     let first = player.snapshot().map_err(|e| format!("status: {e:?}"))?;
     let graph = probe
         .dsp
@@ -1020,11 +1549,17 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
     }
 
     runtime_switch_probe(&mut probe, session)?;
-    if std::env::var("SONANTE_DSP_HARNESS_FAST").as_deref() != Ok("1") {
-        signal_probe(&mut probe, session, false)?;
-        signal_probe(&mut probe, session, true)?;
+    websocket_control_probe(&mut probe, session)?;
+    if std::env::var("SONANTE_DSP_EQ3D_FOCUS").as_deref() == Ok("1") {
+        pure_pipewire_mpd_probe(&mut probe, &music, &sink_name, &mpd_name)?;
     }
-    rollback_signal_probe(&mut probe, session, &mpd_name)?;
+    if std::env::var("SONANTE_DSP_EQ3D_FOCUS").as_deref() != Ok("1") {
+        if std::env::var("SONANTE_DSP_HARNESS_FAST").as_deref() != Ok("1") {
+            signal_probe(&mut probe, session, false)?;
+            signal_probe(&mut probe, session, true)?;
+        }
+        rollback_signal_probe(&mut probe, session, &mpd_name)?;
+    }
     if std::env::var("SONANTE_DSP_EQ3C_ONLY").as_deref() == Ok("1") {
         no_hardware_fallback(&mut probe, &mpd_name)?;
         if player
@@ -1105,6 +1640,7 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
     let before = player
         .snapshot()
         .map_err(|e| format!("snapshot nonzero: {e:?}"))?;
+    let position_anchor = Instant::now();
     if before.elapsed < 3.0 {
         return Err(format!("nonzero snapshot too early: {before:?}"));
     }
@@ -1135,18 +1671,40 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
     no_hardware_fallback(&mut probe, &mpd_name)?;
     let transaction =
         DspActivationTransaction::new(song_id, mpd_name.clone(), probe.dsp.activation_gate());
+    let second_trace = ActivationTrace::new();
     transaction
-        .execute(&mut player, &mut probe.dsp)
+        .execute(
+            &mut TracedPlayback {
+                inner: &mut player,
+                trace: second_trace.clone(),
+            },
+            &mut TracedRoute {
+                inner: &mut probe.dsp,
+                trace: second_trace.clone(),
+            },
+        )
         .map_err(|e| format!("existing stream activation: {e:?}"))?;
+    second_trace.print("existing")?;
     let after = player
         .snapshot()
         .map_err(|e| format!("status nonzero: {e:?}"))?;
     let position_error = after.elapsed - before.elapsed;
+    let elapsed_wall = position_anchor.elapsed().as_secs_f64();
+    let semantic_start = second_trace.first_status()?;
     println!(
-        "existing stream activation: before={:.3}s, after={:.3}s, error={:+.3}s",
-        before.elapsed, after.elapsed, position_error
+        "existing stream activation: before={:.3}s, transaction_start={:.3}s, after={:.3}s, advance={:+.3}s, wall={:.3}s",
+        before.elapsed, semantic_start.elapsed, after.elapsed, position_error, elapsed_wall
     );
-    if after.elapsed < 3.0 || position_error.abs() > 1.5 {
+    // MPD reports decoder/output progress in coarse chunks on this host. For
+    // an already-playing stream the semantic invariant is monotonic progress
+    // without replay, pause or seek while the queue and song ID stay fixed.
+    if after.elapsed < semantic_start.elapsed
+        || semantic_start.elapsed < before.elapsed
+        || second_trace.contains("playid intent")?
+        || second_trace.contains("pause intent")?
+        || second_trace.contains("seek intent")?
+        || second_trace.contains("resume intent")?
+    {
         return Err("existing stream lost position".into());
     }
     if player
@@ -1156,6 +1714,45 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
     {
         return Err("queue changed on second activation".into());
     }
+
+    player
+        .seek_id(song_id, 30.0)
+        .map_err(|e| format!("seek 30 playing: {e:?}"))?;
+    reactivation_probe(
+        &mut probe,
+        &mut player,
+        song_id,
+        &mpd_name,
+        &queue_before,
+        "playing near 30",
+        PlayerState::Playing,
+    )?;
+    player.pause().map_err(|e| format!("pause 30: {e:?}"))?;
+    player
+        .seek_id(song_id, 30.0)
+        .map_err(|e| format!("seek 30 paused: {e:?}"))?;
+    reactivation_probe(
+        &mut probe,
+        &mut player,
+        song_id,
+        &mpd_name,
+        &queue_before,
+        "paused near 30",
+        PlayerState::Paused,
+    )?;
+    player.pause().map_err(|e| format!("pause 3: {e:?}"))?;
+    player
+        .seek_id(song_id, 3.0)
+        .map_err(|e| format!("seek 3 paused: {e:?}"))?;
+    reactivation_probe(
+        &mut probe,
+        &mut player,
+        song_id,
+        &mpd_name,
+        &queue_before,
+        "paused near 3",
+        PlayerState::Paused,
+    )?;
 
     // Kill only the Child owned by this supervisor, then check fail-closed behavior.
     probe
@@ -1180,6 +1777,12 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
     transaction
         .execute(&mut player, &mut probe.dsp)
         .map_err(|e| format!("third activation: {e:?}"))?;
+    exercise_stop_play(
+        &mut player,
+        probe.mpd.as_mut().ok_or("MPD child missing")?,
+        song_id,
+        "Camilla route",
+    )?;
     player.stop().map_err(|e| format!("stop: {e:?}"))?;
     thread::sleep(Duration::from_millis(100));
     let stop_event = probe
@@ -1242,16 +1845,22 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
     let mut inspector = PipeWireRouteManager::new(SystemCommandRunner);
     let marker = format!("sonante_dsp_{}", std::process::id());
     let null_marker = format!("sonante_dsp_null_{}", std::process::id());
+    let pure_mpd_name = format!("mpd.EQ3D pure {}", std::process::id());
     wait_for(Duration::from_secs(2), || {
         inspector.snapshot().is_ok_and(|graph| {
             !graph.nodes.iter().any(|node| {
                 node.name.starts_with(&marker)
                     || node.name.starts_with(&null_marker)
                     || node.name == mpd_name
+                    || node.name == pure_mpd_name
             })
         })
     })?;
-    if probe.root.exists() || probe.mpd.is_some() || probe.dsp.process.is_some() {
+    if probe.root.exists()
+        || probe.mpd.is_some()
+        || probe.pure_mpd.is_some()
+        || probe.dsp.process.is_some()
+    {
         return Err("owned process or temporary runtime remains".into());
     }
     println!("cleanup: no EQ-1C processes, nodes, links or runtime files remain");

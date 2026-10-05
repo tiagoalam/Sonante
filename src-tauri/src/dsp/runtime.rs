@@ -22,7 +22,9 @@ const VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
 const VERIFY_TIMEOUT: Duration = Duration::from_millis(120);
 const VERIFY_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_REPLY_BYTES: usize = 2 * 1024 * 1024;
-// Configured volume_ramp_time is 100 ms; one extra 1024-frame chunk and margin.
+// EQ-3C null-sink measurements: keep 100 ms ramp, -60 dB attenuation and
+// 150 ms settle until another host validates a shorter interruption.
+pub(super) const VOLUME_RAMP_MS: u32 = 100;
 const TRANSITION_SETTLE: Duration = Duration::from_millis(150);
 const TRANSITION_ATTENUATION_DB: f64 = -60.0;
 
@@ -31,6 +33,8 @@ pub enum RuntimeError {
     Conversion(PeqConversionError),
     RuntimeUnavailable,
     WebSocketConnectFailed,
+    WebSocketClosed,
+    WebSocketTransportFailed,
     RequestTimeout,
     UnexpectedReply,
     UnexpectedConfig,
@@ -39,6 +43,7 @@ pub enum RuntimeError {
     RollbackFailed,
     SessionStale,
     ConcurrentApply,
+    RuntimePoisoned,
     CamillaNotRunning,
 }
 
@@ -100,6 +105,30 @@ pub trait RuntimeTransport: Send + Sync {
 
 pub struct LocalWebSocketTransport;
 
+fn classify_socket_error(error: tungstenite::Error) -> RuntimeError {
+    match error {
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => {
+            RuntimeError::WebSocketClosed
+        }
+        tungstenite::Error::Protocol(
+            tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+        ) => RuntimeError::WebSocketClosed,
+        tungstenite::Error::Io(error) => match error.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                RuntimeError::RequestTimeout
+            }
+            std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::BrokenPipe => RuntimeError::WebSocketClosed,
+            _ => RuntimeError::WebSocketTransportFailed,
+        },
+        tungstenite::Error::Protocol(_) | tungstenite::Error::Utf8(_) => {
+            RuntimeError::UnexpectedReply
+        }
+        _ => RuntimeError::WebSocketTransportFailed,
+    }
+}
+
 impl RuntimeTransport for LocalWebSocketTransport {
     fn request(&self, port: u16, command: Value) -> Result<Value, RuntimeError> {
         let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
@@ -116,7 +145,7 @@ impl RuntimeTransport for LocalWebSocketTransport {
             client(url, stream).map_err(|_| RuntimeError::WebSocketConnectFailed)?;
         socket
             .send(Message::Text(command.to_string().into()))
-            .map_err(|_| RuntimeError::RequestTimeout)?;
+            .map_err(classify_socket_error)?;
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -126,7 +155,7 @@ impl RuntimeTransport for LocalWebSocketTransport {
             socket
                 .get_mut()
                 .set_read_timeout(Some(remaining))
-                .map_err(|_| RuntimeError::RequestTimeout)?;
+                .map_err(|_| RuntimeError::WebSocketTransportFailed)?;
             match socket.read() {
                 Ok(Message::Text(text)) => {
                     if text.len() > MAX_REPLY_BYTES {
@@ -136,7 +165,7 @@ impl RuntimeTransport for LocalWebSocketTransport {
                 }
                 Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
                 Ok(_) => return Err(RuntimeError::UnexpectedReply),
-                Err(_) => return Err(RuntimeError::RequestTimeout),
+                Err(error) => return Err(classify_socket_error(error)),
             }
         }
     }
@@ -152,7 +181,15 @@ pub struct CamillaRuntimeController<T: RuntimeTransport = LocalWebSocketTranspor
 #[derive(Default)]
 pub(super) struct RuntimeShared {
     applying: AtomicBool,
+    poisoned: AtomicBool,
     published_preset: Mutex<Option<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeHealth {
+    Healthy,
+    ApplyInProgress,
+    Poisoned,
 }
 
 struct ApplyClaim<'a>(&'a AtomicBool);
@@ -254,6 +291,16 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
             .map_err(|_| RuntimeError::RuntimeUnavailable)
     }
 
+    pub fn health(&self) -> RuntimeHealth {
+        if self.shared.poisoned.load(Ordering::Acquire) {
+            RuntimeHealth::Poisoned
+        } else if self.shared.applying.load(Ordering::Acquire) {
+            RuntimeHealth::ApplyInProgress
+        } else {
+            RuntimeHealth::Healthy
+        }
+    }
+
     fn volume_target(&self, generation: u64) -> Result<f64, RuntimeError> {
         self.request(generation, Command::GetVolume)?
             .get("value")
@@ -325,11 +372,17 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
     ) -> Result<(), RuntimeError> {
         let desired = convert_preset(preset, format).map_err(RuntimeError::Conversion)?;
         self.current(generation)?;
+        if self.shared.poisoned.load(Ordering::Acquire) {
+            return Err(RuntimeError::RuntimePoisoned);
+        }
         self.shared
             .applying
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| RuntimeError::ConcurrentApply)?;
         let _claim = ApplyClaim(&self.shared.applying);
+        if self.shared.poisoned.load(Ordering::Acquire) {
+            return Err(RuntimeError::RuntimePoisoned);
+        }
         self.running(generation)?;
         let previous = self.config(generation)?;
         if previous
@@ -342,7 +395,7 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
         if previous
             .pointer("/devices/volume_ramp_time")
             .and_then(Value::as_f64)
-            != Some(100.0)
+            != Some(f64::from(VOLUME_RAMP_MS))
             || self.volume_target(generation)?.abs() > 0.001
         {
             return Err(RuntimeError::UnexpectedConfig);
@@ -356,8 +409,10 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
                 if error == RuntimeError::SessionStale {
                     return Err(error);
                 }
-                self.set_transition_gain(generation, 0.0)
-                    .map_err(|_| RuntimeError::RollbackFailed)?;
+                self.set_transition_gain(generation, 0.0).map_err(|_| {
+                    self.shared.poisoned.store(true, Ordering::Release);
+                    RuntimeError::RollbackFailed
+                })?;
                 return Err(error);
             }
             std::thread::sleep(settle);
@@ -384,6 +439,7 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
                 self.set_transition_gain(generation, 0.0)
             })();
             if let Err(rollback_error) = rollback {
+                self.shared.poisoned.store(true, Ordering::Release);
                 // The effective config is unknown. Keep the owned session attenuated
                 // and reject later applies until the supervisor recovers the session.
                 if let Err(gain_error) =
@@ -750,6 +806,7 @@ mod tests {
             assert!(same_dsp(&state.config.lock().unwrap(), &before).unwrap());
             assert_eq!(controller.published_preset().unwrap(), Some(flat.id));
             assert_eq!(*state.volume.lock().unwrap(), 0.0);
+            assert_eq!(controller.health(), RuntimeHealth::Healthy);
         }
     }
 
@@ -764,6 +821,7 @@ mod tests {
         );
         assert_eq!(controller.published_preset().unwrap(), None);
         assert_eq!(*state.volume.lock().unwrap(), 0.0);
+        assert_eq!(controller.health(), RuntimeHealth::Healthy);
         assert!(state.config.lock().unwrap()["pipeline"]
             .as_array()
             .unwrap()
@@ -777,9 +835,15 @@ mod tests {
         );
         assert_eq!(controller.published_preset().unwrap(), None);
         assert_eq!(*state.volume.lock().unwrap(), TRANSITION_ATTENUATION_DB);
+        assert_eq!(controller.health(), RuntimeHealth::Poisoned);
         assert_eq!(
             controller.apply_preset(7, &preset, pcm(48_000)),
-            Err(RuntimeError::UnexpectedConfig)
+            Err(RuntimeError::RuntimePoisoned)
+        );
+        *state.volume.lock().unwrap() = 0.0;
+        assert_eq!(
+            controller.apply_preset(7, &preset, pcm(48_000)),
+            Err(RuntimeError::RuntimePoisoned)
         );
     }
 
@@ -819,6 +883,35 @@ mod tests {
             Err(RuntimeError::RollbackFailed)
         );
         assert_eq!(controller.published_preset().unwrap(), None);
+    }
+
+    #[test]
+    fn real_socket_close_is_distinct_from_timeout() {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket.read().unwrap();
+            socket.get_mut().shutdown(std::net::Shutdown::Both).unwrap();
+        });
+        assert_eq!(
+            LocalWebSocketTransport.request(port, json!("GetState")),
+            Err(RuntimeError::WebSocketClosed)
+        );
+        server.join().unwrap();
+        assert_eq!(
+            classify_socket_error(tungstenite::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::TimedOut,
+            ))),
+            RuntimeError::RequestTimeout
+        );
+        assert_eq!(
+            classify_socket_error(tungstenite::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            ))),
+            RuntimeError::WebSocketTransportFailed
+        );
     }
 
     #[test]
@@ -882,6 +975,7 @@ mod tests {
         let handle =
             std::thread::spawn(move || worker.apply_preset(7, &flat_preset(), pcm(48_000)));
         entered.wait();
+        assert_eq!(other_controller.health(), RuntimeHealth::ApplyInProgress);
         assert_eq!(
             other_controller.apply_preset(7, &flat_preset(), pcm(48_000)),
             Err(RuntimeError::ConcurrentApply)
