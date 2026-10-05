@@ -39,6 +39,18 @@ pub struct ConfigTransactionState(pub Mutex<()>);
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
+fn should_start_mpd_on_startup(config_valid: bool, config: &AppConfig) -> bool {
+    config_valid && !config.first_run
+}
+
+fn is_finishing_first_run(current_config: &AppConfig, new_config: &AppConfig) -> bool {
+    current_config.first_run && !new_config.first_run
+}
+
+fn should_prepare_device_switch(audio_hw_changed: bool, finishing_first_run: bool) -> bool {
+    audio_hw_changed && !finishing_first_run
+}
+
 fn should_exit_application_on_window_close(window_label: &str) -> bool {
     window_label == MAIN_WINDOW_LABEL
 }
@@ -842,11 +854,13 @@ async fn save_config(
         .map_err(|e| format!("Falha ao acessar a configuração atual: {}", e))?
         .clone();
 
-    let output_change_expected = observed_cfg.audio_output_type != new_config.audio_output_type
-        || observed_cfg.alsa_device != new_config.alsa_device
-        || observed_cfg.dop_enabled != new_config.dop_enabled
-        || observed_cfg.audio_buffer_size_kb != new_config.audio_buffer_size_kb
-        || observed_cfg.replay_gain != new_config.replay_gain;
+    let observed_finishing_first_run = is_finishing_first_run(&observed_cfg, &new_config);
+    let output_change_expected = !observed_finishing_first_run
+        && (observed_cfg.audio_output_type != new_config.audio_output_type
+            || observed_cfg.alsa_device != new_config.alsa_device
+            || observed_cfg.dop_enabled != new_config.dop_enabled
+            || observed_cfg.audio_buffer_size_kb != new_config.audio_buffer_size_kb
+            || observed_cfg.replay_gain != new_config.replay_gain);
     let playback_uris = if output_change_expected {
         let queue = audio_state
             .0
@@ -876,6 +890,7 @@ async fn save_config(
         );
     }
 
+    let finishing_first_run = is_finishing_first_run(&current_cfg, &new_config);
     let audio_hw_changed = current_cfg.audio_output_type != new_config.audio_output_type
         || current_cfg.alsa_device != new_config.alsa_device
         || current_cfg.dop_enabled != new_config.dop_enabled
@@ -886,7 +901,14 @@ async fn save_config(
     let mut playback_snapshot = None;
     let mut resume_analyzer = false;
 
-    if audio_hw_changed {
+    if finishing_first_run {
+        sup_state
+            .0
+            .lock()
+            .map_err(|e| format!("Falha ao iniciar MPD ao concluir a configuração inicial: {}", e))?
+            .start(&new_config)
+            .map_err(|e| format!("Falha ao iniciar MPD ao concluir a configuração inicial: {}", e))?;
+    } else if should_prepare_device_switch(audio_hw_changed, finishing_first_run) {
         // 1. Captura o estado e segundo atual da música sem destruir a fila
         let preparation = audio_state
             .0
@@ -1001,6 +1023,7 @@ async fn save_config(
         };
         if let Err(library_error) = update_library() {
             let rollback = rollback_applied_config_change(
+                finishing_first_run,
                 audio_hw_changed,
                 folders_changed,
                 &current_cfg,
@@ -1021,6 +1044,7 @@ async fn save_config(
         Err(e) => {
             let original = format!("Falha ao publicar a nova configuração: {}", e);
             let rollback = rollback_applied_config_change(
+                finishing_first_run,
                 audio_hw_changed,
                 folders_changed,
                 &current_cfg,
@@ -1038,6 +1062,7 @@ async fn save_config(
             drop(config_guard);
             let original = format!("Falha ao atualizar a configuração do Plex: {}", e);
             let rollback = rollback_applied_config_change(
+                finishing_first_run,
                 audio_hw_changed,
                 folders_changed,
                 &current_cfg,
@@ -1054,6 +1079,7 @@ async fn save_config(
         drop(plex_guard);
         drop(config_guard);
         let rollback = rollback_applied_config_change(
+            finishing_first_run,
             audio_hw_changed,
             folders_changed,
             &current_cfg,
@@ -1130,6 +1156,7 @@ fn rollback_audio_switch(
 }
 
 fn rollback_applied_config_change(
+    finishing_first_run: bool,
     audio_hw_changed: bool,
     folders_changed: bool,
     previous_config: &AppConfig,
@@ -1138,6 +1165,10 @@ fn rollback_applied_config_change(
     sup_state: &State<'_, SupervisorState>,
     audio_state: &State<'_, AudioState>,
 ) -> Result<(), String> {
+    if finishing_first_run {
+        return rollback_first_run_completion(folders_changed, previous_config, sup_state);
+    }
+
     let mut failures = Vec::new();
     if folders_changed {
         let library_rollback = MpdSupervisor::sync_library_symlinks(&previous_config.local_folders)
@@ -1164,6 +1195,34 @@ fn rollback_applied_config_change(
             )
         {
             failures.push(format!("saída de áudio: {}", error));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+fn rollback_first_run_completion(
+    folders_changed: bool,
+    previous_config: &AppConfig,
+    sup_state: &State<'_, SupervisorState>,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    if let Err(error) = sup_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar o supervisor durante rollback: {}", e))?
+        .stop()
+    {
+        failures.push(format!("MPD: {}", error));
+    }
+
+    if folders_changed {
+        if let Err(error) = MpdSupervisor::sync_library_symlinks(&previous_config.local_folders) {
+            failures.push(format!("biblioteca: {}", error));
         }
     }
 
@@ -1276,7 +1335,7 @@ pub fn run() {
     };
 
     let mut supervisor = MpdSupervisor::new(&socket_path);
-    if config_valid {
+    if should_start_mpd_on_startup(config_valid, &initial_config) {
         if let Err(e) = supervisor.start(&initial_config) {
             eprintln!("[Aviso] Erro no supervisor de áudio: {}", e);
         }
@@ -1292,7 +1351,7 @@ pub fn run() {
         socket_path.clone(),
         MpdSupervisor::analyzer_fifo_path(),
     );
-    if config_valid {
+    if should_start_mpd_on_startup(config_valid, &initial_config) {
         if let Err(e) = audio_engine.rescan_library() {
             eprintln!(
                 "[Audio] Falha ao solicitar rescan inicial da biblioteca: {}",
@@ -1575,6 +1634,31 @@ mod tests {
     #[test]
     fn secondary_window_close_does_not_request_application_exit() {
         assert!(!should_exit_application_on_window_close("now-playing"));
+    }
+
+    #[test]
+    fn configured_installation_is_eligible_for_startup() {
+        let mut config = AppConfig::default();
+        config.first_run = false;
+
+        assert!(should_start_mpd_on_startup(true, &config));
+    }
+
+    #[test]
+    fn first_run_is_not_eligible_for_automatic_startup() {
+        assert!(!should_start_mpd_on_startup(true, &AppConfig::default()));
+    }
+
+    #[test]
+    fn finishing_first_run_is_explicit_and_skips_device_switch_preparation() {
+        let current = AppConfig::default();
+        let mut completed = current.clone();
+        completed.first_run = false;
+
+        assert!(is_finishing_first_run(&current, &completed));
+        assert!(!is_finishing_first_run(&completed, &completed));
+        assert!(!should_prepare_device_switch(true, true));
+        assert!(should_prepare_device_switch(true, false));
     }
 
     fn playback_with_mpd_volume(value: i32) -> PlaybackStatus {
