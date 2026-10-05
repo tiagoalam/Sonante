@@ -24,6 +24,8 @@ export const audioService = {
   getLocalCover: (path: string): Promise<string | null> =>
     invoke<string | null>("get_local_cover", { path }),
   getLocalAlbums: (): Promise<LocalAlbum[]> => invoke<LocalAlbum[]>("get_local_albums"),
+  resolveLocalLibraryPath: (path: string): Promise<string> =>
+    invoke<string>("resolve_local_library_path", { path }),
   pickDirectory: (): Promise<string | null> => invoke<string | null>("pick_directory"),
   rescanLibrary: (): Promise<void> => invoke<void>("rescan_library"),
 };

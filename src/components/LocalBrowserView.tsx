@@ -22,6 +22,7 @@ import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
 import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDiscs";
 import { LocalAlbumCatalog, emptyLocalAlbumCatalogState } from "../utils/localAlbumCatalog";
+import { albumLocationSources } from "../utils/localAlbumLocations";
 
 const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
 
@@ -202,6 +203,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, isLibraryUpdating);
   const [albumSearch, setAlbumSearch] = useState("");
   const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(null);
+  const [albumLocations, setAlbumLocations] = useState<{
+    album: LocalAlbum;
+    paths: { label: string | null; absolutePath: string }[];
+  } | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(initialArtist || null);
   const [albumTracks, setAlbumTracks] = useState<LocalItem[]>([]);
   const [albumSections, setAlbumSections] = useState<ReturnType<typeof flattenAlbumDiscs>["sections"]>([]);
@@ -252,6 +257,29 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   }, [initialArtist]);
 
   useEffect(() => {
+    if (!selectedAlbum) return;
+    let active = true;
+    const album = selectedAlbum;
+    const sources = albumLocationSources(album);
+    void Promise.allSettled(
+      sources.map((source) => audioService.resolveLocalLibraryPath(source.path)),
+    ).then((results) => {
+      if (!active) return;
+      const paths = results.flatMap((result, index) => {
+        if (result.status === "rejected") {
+          console.error("Falha ao resolver localização do álbum local:", result.reason);
+          return [];
+        }
+        return [{ label: sources[index].label, absolutePath: result.value }];
+      });
+      setAlbumLocations({ album, paths });
+    });
+    return () => {
+      active = false;
+    };
+  }, [selectedAlbum]);
+
+  useEffect(() => {
     if (viewMode === "folders") {
       setLoadingFolders(true);
       Promise.all([
@@ -295,6 +323,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const handleSelectAlbum = async (album: LocalAlbum) => {
     const request = ++albumRequest.current;
     setSelectedAlbum(album);
+    setAlbumLocations(null);
     setAlbumTracks([]);
     setAlbumSections([]);
     setAlbumCover(null);
@@ -504,6 +533,22 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
                   {albumTracks.length} {t("favorites.tracks")}
                 </p>
+                {albumLocations?.album === selectedAlbum && albumLocations.paths.length > 0 && (
+                  <div className="space-y-1 text-[11px] text-[#777777] min-w-0">
+                    <p className="font-semibold">{t("localBrowser.location")}</p>
+                    {albumLocations.paths.map((location, index) => (
+                      <div key={`${location.absolutePath}-${index}`} className="min-w-0">
+                        {location.label && <span className="block text-[#999999]">{location.label}</span>}
+                        <span
+                          className="block w-full max-w-xl truncate select-text cursor-text"
+                          title={location.absolutePath}
+                        >
+                          {location.absolutePath}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 <div className="pt-2 flex items-center space-x-3">
                   <button

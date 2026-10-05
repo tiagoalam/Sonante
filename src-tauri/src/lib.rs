@@ -24,6 +24,7 @@ use plex::{
 use serde::Serialize;
 use shared_volume::{PipeWireVolume, SharedVolumeBackend};
 use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use supervisor::{MpdHealth, MpdProcessObservation, MpdSupervisor, MpdUnavailableReason};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, RunEvent, State, Window, WindowEvent};
@@ -93,6 +94,58 @@ fn database_exists() -> Result<bool, String> {
     MpdSupervisor::database_path()
         .try_exists()
         .map_err(|e| format!("Falha ao verificar database MPD: {e}"))
+}
+
+fn resolve_local_library_path_in(
+    library_dir: &Path,
+    relative_path: &str,
+    local_folders: &[String],
+) -> Result<PathBuf, String> {
+    let path = Path::new(relative_path);
+    let mut components = path.components();
+    let first = match components.next() {
+        Some(Component::Normal(name)) => name,
+        _ => return Err("Caminho local relativo inválido".into()),
+    };
+    if components.any(|component| !matches!(component, Component::Normal(_))) {
+        return Err("Caminho local relativo inválido".into());
+    }
+    if !std::fs::symlink_metadata(library_dir)
+        .map_err(|e| format!("Biblioteca local indisponível: {e}"))?
+        .file_type()
+        .is_dir()
+    {
+        return Err("Biblioteca local inválida".into());
+    }
+
+    let roots = local_folders
+        .iter()
+        .filter(|folder| Path::new(folder).is_dir())
+        .map(|folder| {
+            std::fs::canonicalize(folder)
+                .map_err(|e| format!("Falha ao resolver pasta local configurada: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let link = library_dir.join(first);
+    if !std::fs::symlink_metadata(&link)
+        .map_err(|e| format!("Entrada da biblioteca local indisponível: {e}"))?
+        .file_type()
+        .is_symlink()
+    {
+        return Err("Entrada da biblioteca local inválida".into());
+    }
+    let link_target = std::fs::canonicalize(&link)
+        .map_err(|e| format!("Symlink da biblioteca local indisponível: {e}"))?;
+    if !roots.contains(&link_target) {
+        return Err("Entrada fora das pastas locais configuradas".into());
+    }
+
+    let resolved = std::fs::canonicalize(library_dir.join(path))
+        .map_err(|e| format!("Caminho local indisponível: {e}"))?;
+    if !resolved.is_dir() || !roots.iter().any(|root| resolved.starts_with(root)) {
+        return Err("Caminho fora das pastas locais configuradas".into());
+    }
+    Ok(resolved)
 }
 
 fn request_library_refresh(socket_path: &str, refresh: LibraryRefresh) -> Result<(), String> {
@@ -428,6 +481,30 @@ fn list_local_directory(
     state: State<AudioState>,
 ) -> Result<Vec<audio::LocalItem>, String> {
     state.0.lock().unwrap().list_directory(&path)
+}
+
+#[tauri::command]
+async fn resolve_local_library_path(
+    path: String,
+    config_state: State<'_, ConfigState>,
+) -> Result<String, String> {
+    let local_folders = config_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar pastas locais: {e}"))?
+        .local_folders
+        .clone();
+    let library_dir = MpdSupervisor::library_dir();
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_local_library_path_in(&library_dir, &path, &local_folders).and_then(|resolved| {
+            resolved
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "Caminho local não pode ser exibido em UTF-8".to_string())
+        })
+    })
+    .await
+    .map_err(|e| format!("Falha ao resolver localização local: {e}"))?
 }
 
 #[tauri::command]
@@ -1538,6 +1615,7 @@ pub fn run() {
             clear_queue,
             set_window_title,
             list_local_directory,
+            resolve_local_library_path,
             get_local_cover,
             get_local_albums,
             get_favorites,
@@ -1620,6 +1698,7 @@ mod tests {
     use std::cell::Cell;
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
@@ -1627,6 +1706,105 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
+
+    static NEXT_LOCAL_PATH_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct LocalPathFixture {
+        root: PathBuf,
+        library: PathBuf,
+    }
+
+    impl LocalPathFixture {
+        fn new() -> Self {
+            let id = NEXT_LOCAL_PATH_TEST_ID.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir()
+                .join(format!("sonante-local-path-{}-{id}", std::process::id()));
+            let library = root.join("library");
+            fs::create_dir_all(&library).unwrap();
+            Self { root, library }
+        }
+    }
+
+    impl Drop for LocalPathFixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn local_library_path_resolves_configured_root_and_specific_duplicate_name() {
+        let fixture = LocalPathFixture::new();
+        let first = fixture.root.join("first/Music");
+        let second = fixture.root.join("second/Music");
+        fs::create_dir_all(first.join("Album")).unwrap();
+        fs::create_dir_all(second.join("Album")).unwrap();
+        symlink(&first, fixture.library.join("Music")).unwrap();
+        symlink(&second, fixture.library.join("Music (2)")).unwrap();
+        let folders = vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ];
+
+        assert_eq!(
+            resolve_local_library_path_in(&fixture.library, "Music/Album", &folders).unwrap(),
+            first.join("Album")
+        );
+        assert_eq!(
+            resolve_local_library_path_in(&fixture.library, "Music (2)/Album", &folders).unwrap(),
+            second.join("Album")
+        );
+        assert_eq!(
+            resolve_local_library_path_in(&fixture.library, "Music", &folders).unwrap(),
+            first
+        );
+    }
+
+    #[test]
+    fn local_library_path_rejects_absolute_parent_and_empty_paths() {
+        let fixture = LocalPathFixture::new();
+        let root = fixture.root.join("Music");
+        fs::create_dir(&root).unwrap();
+        symlink(&root, fixture.library.join("Music")).unwrap();
+        let folders = vec![root.to_string_lossy().into_owned()];
+
+        for invalid in ["", "/Music", "../Music", "Music/../Music"] {
+            assert!(
+                resolve_local_library_path_in(&fixture.library, invalid, &folders).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_library_path_rejects_missing_path_and_unconfigured_link() {
+        let fixture = LocalPathFixture::new();
+        let configured = fixture.root.join("configured");
+        let other = fixture.root.join("other");
+        fs::create_dir(&configured).unwrap();
+        fs::create_dir(&other).unwrap();
+        symlink(&configured, fixture.library.join("Music")).unwrap();
+        symlink(&other, fixture.library.join("Other")).unwrap();
+        let folders = vec![configured.to_string_lossy().into_owned()];
+
+        assert!(
+            resolve_local_library_path_in(&fixture.library, "Music/Missing", &folders).is_err()
+        );
+        assert!(resolve_local_library_path_in(&fixture.library, "Other", &folders).is_err());
+    }
+
+    #[test]
+    fn local_library_path_rejects_symlink_escape_from_configured_root() {
+        let fixture = LocalPathFixture::new();
+        let configured = fixture.root.join("configured");
+        let outside = fixture.root.join("outside");
+        fs::create_dir(&configured).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&configured, fixture.library.join("Music")).unwrap();
+        symlink(&outside, configured.join("Escape")).unwrap();
+        let folders = vec![configured.to_string_lossy().into_owned()];
+
+        assert!(resolve_local_library_path_in(&fixture.library, "Music/Escape", &folders).is_err());
+    }
 
     fn playback_playlist(locators: Vec<MediaLocator>) -> Playlist {
         Playlist {
