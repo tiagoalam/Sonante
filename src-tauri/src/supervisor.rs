@@ -115,6 +115,10 @@ impl MpdSupervisor {
         crate::persistence::sonante_config_dir()
     }
 
+    pub fn database_path() -> PathBuf {
+        Self::sonante_config_dir().join("mpd.db")
+    }
+
     pub fn library_dir() -> PathBuf {
         Self::sonante_config_dir().join("library")
     }
@@ -266,7 +270,7 @@ impl MpdSupervisor {
         let lib_dir = Self::sync_library_symlinks(&cfg.local_folders)?;
 
         let conf_path = dir.join("mpd.conf");
-        let db_path = dir.join("mpd.db");
+        let db_path = Self::database_path();
         let dop_flag = if cfg.dop_enabled { "yes" } else { "no" };
         let lib_dir_value = Self::escape_config_value(&lib_dir.to_string_lossy())?;
         let config_dir_value = Self::escape_config_value(&dir.to_string_lossy())?;

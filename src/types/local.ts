@@ -15,4 +15,12 @@ export interface LocalAlbum {
   year?: string;
   folder_path: string;
   track_count: number;
+  discs: LocalAlbumDisc[];
+}
+
+export interface LocalAlbumDisc {
+  number: number;
+  label: string;
+  folder_path: string;
+  track_count: number;
 }

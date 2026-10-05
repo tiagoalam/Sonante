@@ -39,6 +39,20 @@ fn should_start_mpd_on_startup(config_valid: bool, config: &AppConfig) -> bool {
     config_valid && !config.first_run
 }
 
+fn should_rescan_library_on_startup(
+    config_valid: bool,
+    config: &AppConfig,
+    database_exists: bool,
+) -> bool {
+    should_start_mpd_on_startup(config_valid, config)
+        && !config.local_folders.is_empty()
+        && !database_exists
+}
+
+fn local_folders_changed(current: &AppConfig, next: &AppConfig) -> bool {
+    current.local_folders != next.local_folders
+}
+
 fn is_finishing_first_run(current_config: &AppConfig, new_config: &AppConfig) -> bool {
     current_config.first_run && !new_config.first_run
 }
@@ -893,7 +907,7 @@ async fn save_config(
         || current_cfg.audio_buffer_size_kb != new_config.audio_buffer_size_kb
         || current_cfg.replay_gain != new_config.replay_gain;
 
-    let folders_changed = current_cfg.local_folders != new_config.local_folders;
+    let folders_changed = local_folders_changed(&current_cfg, &new_config);
     let mut playback_snapshot = None;
     let mut resume_analyzer = false;
 
@@ -1230,8 +1244,13 @@ fn rollback_first_run_completion(
 }
 
 #[tauri::command]
-fn get_local_albums(state: State<AudioState>) -> Result<Vec<audio::LocalAlbum>, String> {
-    state.0.lock().unwrap().get_local_albums()
+async fn get_local_albums(state: State<'_, AudioState>) -> Result<Vec<audio::LocalAlbum>, String> {
+    let socket_path = state.0.lock()
+        .map_err(|e| format!("Falha ao acessar conexão da biblioteca local: {e}"))?
+        .local_album_socket_path();
+    tauri::async_runtime::spawn_blocking(move || AudioEngine::get_local_albums_at(&socket_path))
+        .await
+        .map_err(|e| format!("Falha na tarefa de consulta da biblioteca local: {e}"))?
 }
 
 #[tauri::command]
@@ -1330,14 +1349,37 @@ pub fn run() {
         }
     };
 
+    let should_start_mpd = should_start_mpd_on_startup(config_valid, &initial_config);
+    let startup_rescan = if should_start_mpd {
+        match MpdSupervisor::database_path().try_exists() {
+            Ok(database_exists) => {
+                should_rescan_library_on_startup(config_valid, &initial_config, database_exists)
+            }
+            Err(error) => {
+                eprintln!(
+                    "[Audio] Falha ao verificar database MPD no startup: {}",
+                    error
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+
     let mut supervisor = MpdSupervisor::new(&socket_path);
-    if should_start_mpd_on_startup(config_valid, &initial_config) {
-        if let Err(e) = supervisor.start(&initial_config) {
-            eprintln!("[Aviso] Erro no supervisor de áudio: {}", e);
+    let mpd_started = if should_start_mpd {
+        match supervisor.start(&initial_config) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[Aviso] Erro no supervisor de áudio: {}", error);
+                false
+            }
         }
     } else {
         supervisor.mark_unavailable(MpdUnavailableReason::StartupFailed);
-    }
+        false
+    };
 
     let audio_engine = AudioEngine::new(
         &socket_path,
@@ -1347,7 +1389,7 @@ pub fn run() {
         socket_path.clone(),
         MpdSupervisor::analyzer_fifo_path(),
     );
-    if should_start_mpd_on_startup(config_valid, &initial_config) {
+    if mpd_started && startup_rescan {
         if let Err(e) = audio_engine.rescan_library() {
             eprintln!(
                 "[Audio] Falha ao solicitar rescan inicial da biblioteca: {}",
@@ -1638,11 +1680,49 @@ mod tests {
         config.first_run = false;
 
         assert!(should_start_mpd_on_startup(true, &config));
+        assert!(!should_start_mpd_on_startup(false, &config));
     }
 
     #[test]
     fn first_run_is_not_eligible_for_automatic_startup() {
         assert!(!should_start_mpd_on_startup(true, &AppConfig::default()));
+    }
+
+    #[test]
+    fn startup_rescan_only_recovers_a_missing_database_with_local_folders() {
+        let mut config = AppConfig::default();
+        config.first_run = false;
+        config.local_folders = vec!["/music".to_string()];
+
+        assert!(!should_rescan_library_on_startup(true, &config, true));
+        assert!(should_rescan_library_on_startup(true, &config, false));
+        assert!(!should_rescan_library_on_startup(false, &config, false));
+
+        config.local_folders.clear();
+        assert!(!should_rescan_library_on_startup(true, &config, false));
+
+        config.local_folders.push("/music".to_string());
+        config.first_run = true;
+        assert!(!should_rescan_library_on_startup(true, &config, false));
+    }
+
+    #[test]
+    fn database_path_matches_supervisor_configuration_directory() {
+        assert_eq!(
+            MpdSupervisor::database_path(),
+            MpdSupervisor::sonante_config_dir().join("mpd.db")
+        );
+    }
+
+    #[test]
+    fn changing_local_folders_keeps_save_config_rescan_condition() {
+        let mut current = AppConfig::default();
+        current.first_run = false;
+        let mut next = current.clone();
+        assert!(!local_folders_changed(&current, &next));
+
+        next.local_folders.push("/music".to_string());
+        assert!(local_folders_changed(&current, &next));
     }
 
     #[test]

@@ -20,6 +20,7 @@ import { audioService } from "../services/audio";
 import { favoritesService } from "../services/favorites";
 import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
+import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDiscs";
 
 class LruMemoryCache {
   private maxSize: number;
@@ -58,6 +59,31 @@ class LruMemoryCache {
 
 const coverMemoryCache = new LruMemoryCache(150);
 
+async function getLocalAlbumCover(album: LocalAlbum): Promise<string | null> {
+  const cached = coverMemoryCache.get(album.folder_path);
+  if (cached) return cached;
+  const paths = [album.folder_path, ...album.discs.map((disc) => disc.folder_path)];
+  for (const path of new Set(paths)) {
+    try {
+      const cover = await audioService.getLocalCover(path);
+      if (cover) {
+        coverMemoryCache.set(album.folder_path, cover);
+        return cover;
+      }
+    } catch (error) {
+      console.error("Falha ao carregar capa local do álbum:", error);
+    }
+  }
+  return null;
+}
+
+async function loadAlbumDiscTracks(album: LocalAlbum): Promise<AlbumDiscTracks[]> {
+  return Promise.all(album.discs.map(async (disc) => ({
+    disc,
+    tracks: (await audioService.listLocalDirectory(disc.folder_path)).filter((item) => item.item_type === "file"),
+  })));
+}
+
 const LocalAlbumCard: React.FC<{
   album: LocalAlbum;
   isFavorite: boolean;
@@ -79,7 +105,7 @@ const LocalAlbumCard: React.FC<{
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0].isIntersecting) {
-          audioService.getLocalCover(album.folder_path).then((c) => {
+          getLocalAlbumCover(album).then((c) => {
             if (isMounted && c) {
               coverMemoryCache.set(album.folder_path, c);
               setCover(c);
@@ -172,7 +198,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(initialArtist || null);
   const [albumTracks, setAlbumTracks] = useState<LocalItem[]>([]);
+  const [albumSections, setAlbumSections] = useState<ReturnType<typeof flattenAlbumDiscs>["sections"]>([]);
   const [albumCover, setAlbumCover] = useState<string | null>(null);
+  const albumRequest = useRef(0);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
 
@@ -259,14 +287,18 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   };
 
   const handleSelectAlbum = async (album: LocalAlbum) => {
+    const request = ++albumRequest.current;
     setSelectedAlbum(album);
+    setAlbumTracks([]);
+    setAlbumSections([]);
+    setAlbumCover(null);
     try {
-      const cov = coverMemoryCache.get(album.folder_path) || (await audioService.getLocalCover(album.folder_path));
-      if (cov) coverMemoryCache.set(album.folder_path, cov);
+      const [cov, groups] = await Promise.all([getLocalAlbumCover(album), loadAlbumDiscTracks(album)]);
+      if (request !== albumRequest.current) return;
       setAlbumCover(cov);
-
-      const trackList = await audioService.listLocalDirectory(album.folder_path);
-      setAlbumTracks(trackList.filter((i) => i.item_type === "file"));
+      const flattened = flattenAlbumDiscs(groups);
+      setAlbumTracks(flattened.tracks);
+      setAlbumSections(flattened.sections);
     } catch (err) {
       console.error("Falha ao carregar faixas do álbum:", err);
     }
@@ -275,8 +307,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const handlePlayEntireAlbum = async (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => {
     if (!isPlaybackAvailable) return;
     try {
-      const files = trackItems || (await audioService.listLocalDirectory(album.folder_path)).filter((i) => i.item_type === "file");
-      const cov = albumCover || coverMemoryCache.get(album.folder_path) || (await audioService.getLocalCover(album.folder_path));
+      const files = trackItems ?? flattenAlbumDiscs(await loadAlbumDiscTracks(album)).tracks;
+      const cov = (selectedAlbum?.id === album.id ? albumCover : null) || await getLocalAlbumCover(album);
       const meta = files.map((f) => ({
         title: f.title || f.name,
         artist: f.artist || album.artist,
@@ -286,7 +318,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 	duration: f.duration,
       }));
       if (meta.length > 0) {
-        audioService.playTracks(meta, startIdx);
+        await audioService.playTracks(meta, startIdx);
       }
     } catch (err) {
       console.error("Erro ao tocar álbum:", err);
@@ -458,7 +490,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
                 <div className="pt-2 flex items-center space-x-3">
                   <button
-                    onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, 0)}
+                    onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks.length ? albumTracks : undefined, 0)}
                     disabled={!isPlaybackAvailable}
                     className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
@@ -506,10 +538,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 </span>
               </div>
 
-              {albumTracks.map((track, idx) => (
-                <div
-                  key={track.path}
-                  onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, idx)}
+              {albumSections.map((section) => (
+                <React.Fragment key={section.disc.folder_path}>
+                  {selectedAlbum.discs.length > 1 && (
+                    <div className="px-4 py-2.5 text-xs font-bold text-[#E5A00D] bg-[#181818]">
+                      {section.disc.label}
+                    </div>
+                  )}
+                  {section.tracks.map((track, idx) => (
+                    <div
+                      key={track.path}
+                      onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, section.startIndex + idx)}
                   aria-disabled={!isPlaybackAvailable}
                   className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
                     isPlaybackAvailable
@@ -544,7 +583,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       <ListPlus size={15} />
                     </button>
                   </div>
-                </div>
+                    </div>
+                  ))}
+                </React.Fragment>
               ))}
             </div>
           </div>
