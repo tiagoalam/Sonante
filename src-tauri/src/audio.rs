@@ -880,7 +880,15 @@ impl AudioEngine {
     }
 
     pub fn rescan_library(&self) -> Result<(), String> {
-        self.send_command("rescan").map(|_| ())
+        Self::rescan_library_at(&self.socket_path)
+    }
+
+    pub fn rescan_library_at(socket_path: &str) -> Result<(), String> {
+        Self::send_command_to_socket(socket_path, "rescan").map(|_| ())
+    }
+
+    pub fn update_library(socket_path: &str) -> Result<(), String> {
+        Self::send_command_to_socket(socket_path, "update").map(|_| ())
     }
 
     fn save_queue_cache(&self) -> Result<(), String> {
@@ -2156,6 +2164,33 @@ mod tests {
             std::fs::remove_file(path).unwrap();
         });
         (socket_path, server)
+    }
+
+    #[test]
+    fn library_update_and_rescan_send_distinct_mpd_commands() {
+        for command in ["update", "rescan"] {
+            let (path, server) = fake_album_mpd(vec![(command, "updating_db: 1\nOK\n")]);
+            let audio = AudioEngine {
+                socket_path: path,
+                music_dir: String::new(),
+                queue: Vec::new(),
+            };
+            if command == "update" {
+                AudioEngine::update_library(&audio.socket_path).unwrap();
+            } else {
+                audio.rescan_library().unwrap();
+            }
+            server.join().unwrap();
+        }
+
+        let (path, server) = fake_album_mpd(vec![("update", "ACK [5@0] {update} failure\n")]);
+        let audio = AudioEngine {
+            socket_path: path,
+            music_dir: String::new(),
+            queue: Vec::new(),
+        };
+        assert!(AudioEngine::update_library(&audio.socket_path).is_err());
+        server.join().unwrap();
     }
 
     #[test]

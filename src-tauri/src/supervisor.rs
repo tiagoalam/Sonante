@@ -25,6 +25,11 @@ pub struct MpdSupervisor {
     volume_backend: VolumeBackend,
 }
 
+pub struct LibrarySyncResult {
+    pub library_dir: PathBuf,
+    pub changed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", content = "reason", rename_all = "snake_case")]
 pub enum MpdHealth {
@@ -190,49 +195,112 @@ impl MpdSupervisor {
         self.health.clone()
     }
 
-    pub fn sync_library_symlinks(folders: &[String]) -> Result<PathBuf, String> {
+    pub fn sync_library_symlinks(folders: &[String]) -> Result<LibrarySyncResult, String> {
         crate::persistence::ensure_sonante_config_dir()?;
         let lib_dir = Self::library_dir();
-        fs::create_dir_all(&lib_dir).map_err(|e| e.to_string())?;
+        Self::reconcile_library_symlinks(&lib_dir, folders)
+    }
 
-        let entries = fs::read_dir(&lib_dir).map_err(|e| {
-            format!(
-                "Falha ao listar a biblioteca virtual ({}): {}",
-                lib_dir.display(),
-                e
-            )
-        })?;
-        for entry in entries {
-            let p = entry
-                .map_err(|e| format!("Falha ao ler item da biblioteca virtual: {}", e))?
-                .path();
-            if p.is_symlink() || p.is_file() {
-                fs::remove_file(&p).map_err(|e| {
-                    format!("Falha ao remover item antigo ({}): {}", p.display(), e)
-                })?;
-            } else if p.is_dir() {
-                fs::remove_dir_all(&p).map_err(|e| {
-                    format!("Falha ao remover diretório antigo ({}): {}", p.display(), e)
-                })?;
+    fn reconcile_library_symlinks(
+        lib_dir: &Path,
+        folders: &[String],
+    ) -> Result<LibrarySyncResult, String> {
+        match fs::symlink_metadata(lib_dir) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "A biblioteca virtual não é um diretório real: {}",
+                    lib_dir.display()
+                ))
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                fs::create_dir(lib_dir).map_err(|e| {
+                    format!(
+                        "Falha ao criar biblioteca virtual ({}): {}",
+                        lib_dir.display(),
+                        e
+                    )
+                })?
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Falha ao examinar biblioteca virtual ({}): {}",
+                    lib_dir.display(),
+                    error
+                ))
             }
         }
-
         let mut unique_folders = Vec::new();
+        let mut desired_targets = HashSet::new();
         for f in folders {
             let p = Path::new(f);
             if p.exists() && p.is_dir() {
                 let canonical = fs::canonicalize(p).map_err(|e| {
                     format!("Falha ao resolver pasta local ({}): {}", p.display(), e)
                 })?;
-                if !unique_folders.contains(&canonical) {
+                if desired_targets.insert(canonical.clone()) {
                     unique_folders.push(canonical);
                 }
             }
         }
 
+        let mut entries = fs::read_dir(lib_dir)
+            .map_err(|e| {
+                format!(
+                    "Falha ao listar a biblioteca virtual ({}): {}",
+                    lib_dir.display(),
+                    e
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Falha ao ler item da biblioteca virtual: {}", e))?;
+        entries.sort_by_key(|entry| entry.file_name());
+
         let mut used_names = HashSet::new();
+        let mut preserved_targets = HashSet::new();
+        let mut changed = false;
+        for entry in entries {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|e| {
+                format!(
+                    "Falha ao examinar item da biblioteca virtual ({}): {}",
+                    path.display(),
+                    e
+                )
+            })?;
+            if !metadata.file_type().is_symlink() {
+                used_names.insert(entry.file_name());
+                continue;
+            }
+            let keep = match fs::canonicalize(&path) {
+                Ok(target) => desired_targets.contains(&target) && preserved_targets.insert(target),
+                Err(error) if error.kind() == ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(format!(
+                        "Falha ao resolver symlink da biblioteca ({}): {}",
+                        path.display(),
+                        error
+                    ))
+                }
+            };
+            if keep {
+                used_names.insert(entry.file_name());
+            } else {
+                fs::remove_file(&path).map_err(|e| {
+                    format!(
+                        "Falha ao remover symlink antigo ({}): {}",
+                        path.display(),
+                        e
+                    )
+                })?;
+                changed = true;
+            }
+        }
 
         for target_path in unique_folders {
+            if preserved_targets.contains(&target_path) {
+                continue;
+            }
             let base_name = target_path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -241,11 +309,11 @@ impl MpdSupervisor {
 
             let mut final_name = base_name.clone();
             let mut counter = 2;
-            while used_names.contains(&final_name) {
+            while used_names.contains(&std::ffi::OsString::from(final_name.as_str())) {
                 final_name = format!("{} ({})", base_name, counter);
                 counter += 1;
             }
-            used_names.insert(final_name.clone());
+            used_names.insert(std::ffi::OsString::from(final_name.as_str()));
 
             let symlink_path = lib_dir.join(&final_name);
             symlink(&target_path, &symlink_path).map_err(|e| {
@@ -255,24 +323,28 @@ impl MpdSupervisor {
                     e
                 )
             })?;
+            changed = true;
         }
 
-        Ok(lib_dir)
+        Ok(LibrarySyncResult {
+            library_dir: lib_dir.to_path_buf(),
+            changed,
+        })
     }
 
     fn ensure_config_file(
         &self,
         cfg: &AppConfig,
         shared_volume_backend: Option<SharedVolumeBackend>,
-    ) -> Result<(PathBuf, VolumeBackend), String> {
+    ) -> Result<(PathBuf, VolumeBackend, LibrarySyncResult), String> {
         let dir = crate::persistence::ensure_sonante_config_dir()?;
 
-        let lib_dir = Self::sync_library_symlinks(&cfg.local_folders)?;
+        let library_sync = Self::sync_library_symlinks(&cfg.local_folders)?;
 
         let conf_path = dir.join("mpd.conf");
         let db_path = Self::database_path();
         let dop_flag = if cfg.dop_enabled { "yes" } else { "no" };
-        let lib_dir_value = Self::escape_config_value(&lib_dir.to_string_lossy())?;
+        let lib_dir_value = Self::escape_config_value(&library_sync.library_dir.to_string_lossy())?;
         let config_dir_value = Self::escape_config_value(&dir.to_string_lossy())?;
         let db_path_value = Self::escape_config_value(&db_path.to_string_lossy())?;
         let pid_path_value = Self::escape_config_value(&self.pid_path.to_string_lossy())?;
@@ -347,7 +419,7 @@ decoder {{
         );
 
         fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
-        Ok((conf_path, volume_backend))
+        Ok((conf_path, volume_backend, library_sync))
     }
 
     fn public_volume_backend(
@@ -445,12 +517,12 @@ decoder {{
         Ok(value.replace('\\', "\\\\").replace('"', "\\\""))
     }
 
-    pub fn start(&mut self, cfg: &AppConfig) -> Result<(), String> {
+    pub fn start(&mut self, cfg: &AppConfig) -> Result<LibrarySyncResult, String> {
         let result = self.start_inner(cfg);
         match result {
-            Ok(()) => {
+            Ok(library_sync) => {
                 self.health = MpdHealth::Available;
-                Ok(())
+                Ok(library_sync)
             }
             Err(error) => {
                 self.health = MpdHealth::Unavailable(MpdUnavailableReason::StartupFailed);
@@ -459,7 +531,7 @@ decoder {{
         }
     }
 
-    fn start_inner(&mut self, cfg: &AppConfig) -> Result<(), String> {
+    fn start_inner(&mut self, cfg: &AppConfig) -> Result<LibrarySyncResult, String> {
         let is_shared = cfg.audio_output_type == "pipewire"
             || cfg.audio_output_type == "shared"
             || cfg.alsa_device == "default";
@@ -488,7 +560,7 @@ decoder {{
             }
         }
 
-        let (conf_path, volume_backend) =
+        let (conf_path, volume_backend, library_sync) =
             self.ensure_config_file(cfg, shared_volume_backend)?;
         self.prepare_runtime_files()?;
 
@@ -527,7 +599,7 @@ decoder {{
         }
         self.shared_volume_backend = shared_volume_backend;
         self.volume_backend = volume_backend;
-        Ok(())
+        Ok(library_sync)
     }
 
     fn prepare_runtime_files(&mut self) -> Result<(), String> {
@@ -998,6 +1070,196 @@ mod tests {
         let socket_path = dir.join("mpd.socket");
         let pid_path = dir.join("mpd.pid");
         (dir, socket_path, pid_path)
+    }
+
+    fn library_test_paths(test_name: &str) -> (PathBuf, PathBuf) {
+        let (root, _, _) = test_runtime_paths(test_name);
+        let library = root.join("library");
+        fs::create_dir(&library).unwrap();
+        (root, library)
+    }
+
+    fn configured_folder(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn library_links_are_added_reused_and_removed_incrementally() {
+        let (root, library) = library_test_paths("library-incremental");
+        let a = root.join("A");
+        let b = root.join("B");
+        let c = root.join("C");
+        for folder in [&a, &b, &c] {
+            fs::create_dir(folder).unwrap();
+        }
+
+        let first =
+            MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&a)]).unwrap();
+        assert!(first.changed);
+        assert_eq!(first.library_dir, library);
+        let a_inode = fs::symlink_metadata(library.join("A")).unwrap().ino();
+
+        let same =
+            MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&a)]).unwrap();
+        assert!(!same.changed);
+        assert_eq!(
+            fs::symlink_metadata(library.join("A")).unwrap().ino(),
+            a_inode
+        );
+
+        let added = MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&a), configured_folder(&b)],
+        )
+        .unwrap();
+        assert!(added.changed);
+        assert_eq!(
+            fs::symlink_metadata(library.join("A")).unwrap().ino(),
+            a_inode
+        );
+        assert!(library.join("B").is_symlink());
+
+        let removed =
+            MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&a)]).unwrap();
+        assert!(removed.changed);
+        assert_eq!(
+            fs::symlink_metadata(library.join("A")).unwrap().ino(),
+            a_inode
+        );
+        assert!(!library.join("B").exists());
+
+        let rollback = MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&a), configured_folder(&b)],
+        )
+        .unwrap();
+        assert!(rollback.changed);
+        assert_eq!(
+            fs::symlink_metadata(library.join("A")).unwrap().ino(),
+            a_inode
+        );
+        assert!(library.join("B").is_symlink());
+        MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&a)]).unwrap();
+
+        let added_c = MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&a), configured_folder(&c)],
+        )
+        .unwrap();
+        assert!(added_c.changed);
+        assert_eq!(
+            fs::symlink_metadata(library.join("A")).unwrap().ino(),
+            a_inode
+        );
+        assert!(library.join("C").is_symlink());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_basenames_keep_their_link_names_when_reordered_or_removed() {
+        let (root, library) = library_test_paths("library-names");
+        let first = root.join("one").join("Music");
+        let second = root.join("two").join("Music");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let folders = [configured_folder(&first), configured_folder(&second)];
+        assert!(
+            MpdSupervisor::reconcile_library_symlinks(&library, &folders)
+                .unwrap()
+                .changed
+        );
+        assert_eq!(fs::canonicalize(library.join("Music")).unwrap(), first);
+        assert_eq!(fs::canonicalize(library.join("Music (2)")).unwrap(), second);
+        let second_inode = fs::symlink_metadata(library.join("Music (2)"))
+            .unwrap()
+            .ino();
+
+        let reordered = MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&second), configured_folder(&first)],
+        )
+        .unwrap();
+        assert!(!reordered.changed);
+        assert_eq!(
+            fs::symlink_metadata(library.join("Music (2)"))
+                .unwrap()
+                .ino(),
+            second_inode
+        );
+
+        let removed =
+            MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&second)])
+                .unwrap();
+        assert!(removed.changed);
+        assert!(!library.join("Music").exists());
+        assert_eq!(fs::canonicalize(library.join("Music (2)")).unwrap(), second);
+        assert_eq!(
+            fs::symlink_metadata(library.join("Music (2)"))
+                .unwrap()
+                .ino(),
+            second_inode
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_targets_and_broken_links_are_reconciled_without_removing_regular_entries() {
+        let (root, library) = library_test_paths("library-broken");
+        let folder = root.join("Music");
+        fs::create_dir(&folder).unwrap();
+        let alias = root.join("alias");
+        symlink(&folder, &alias).unwrap();
+        symlink(root.join("missing"), library.join("Broken")).unwrap();
+        fs::write(library.join("Notes"), "keep").unwrap();
+
+        let result = MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&folder), configured_folder(&alias)],
+        )
+        .unwrap();
+        assert!(result.changed);
+        assert!(!library.join("Broken").is_symlink());
+        assert_eq!(fs::read_to_string(library.join("Notes")).unwrap(), "keep");
+        assert!(library.join("Music").is_symlink());
+        assert!(!library.join("Music (2)").exists());
+        assert!(
+            !MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&folder)])
+                .unwrap()
+                .changed
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn library_root_symlink_is_rejected_without_touching_its_target() {
+        let (root, _, _) = test_runtime_paths("library-root-link");
+        let outside = root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), "untouched").unwrap();
+        let library = root.join("library");
+        symlink(&outside, &library).unwrap();
+        assert!(MpdSupervisor::reconcile_library_symlinks(&library, &[]).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.join("keep")).unwrap(),
+            "untouched"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn regular_entry_collision_is_preserved_and_new_link_gets_a_suffix() {
+        let (root, library) = library_test_paths("library-regular-collision");
+        let folder = root.join("Music");
+        fs::create_dir(&folder).unwrap();
+        fs::write(library.join("Music"), "keep").unwrap();
+
+        let sync =
+            MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&folder)])
+                .unwrap();
+        assert!(sync.changed);
+        assert_eq!(fs::read_to_string(library.join("Music")).unwrap(), "keep");
+        assert_eq!(fs::canonicalize(library.join("Music (2)")).unwrap(), folder);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn spawn_sleeping_child() -> Child {

@@ -53,6 +53,55 @@ fn local_folders_changed(current: &AppConfig, next: &AppConfig) -> bool {
     current.local_folders != next.local_folders
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibraryRefresh {
+    Update,
+    Rescan,
+}
+
+fn library_refresh(
+    changed: bool,
+    database_exists: bool,
+    has_folders: bool,
+) -> Option<LibraryRefresh> {
+    if !changed {
+        None
+    } else if database_exists {
+        Some(LibraryRefresh::Update)
+    } else if has_folders {
+        Some(LibraryRefresh::Rescan)
+    } else {
+        None
+    }
+}
+
+fn library_refresh_after_sync(
+    sync_changed: bool,
+    start_changed: bool,
+    finishing_first_run: bool,
+    database_exists: bool,
+    has_folders: bool,
+) -> Option<LibraryRefresh> {
+    library_refresh(
+        sync_changed || start_changed || (finishing_first_run && !database_exists && has_folders),
+        database_exists,
+        has_folders,
+    )
+}
+
+fn database_exists() -> Result<bool, String> {
+    MpdSupervisor::database_path()
+        .try_exists()
+        .map_err(|e| format!("Falha ao verificar database MPD: {e}"))
+}
+
+fn request_library_refresh(socket_path: &str, refresh: LibraryRefresh) -> Result<(), String> {
+    match refresh {
+        LibraryRefresh::Update => AudioEngine::update_library(socket_path),
+        LibraryRefresh::Rescan => AudioEngine::rescan_library_at(socket_path),
+    }
+}
+
 fn is_finishing_first_run(current_config: &AppConfig, new_config: &AppConfig) -> bool {
     current_config.first_run && !new_config.first_run
 }
@@ -807,8 +856,26 @@ fn pick_directory() -> Option<String> {
 }
 
 #[tauri::command]
-fn rescan_library(state: State<AudioState>) -> Result<(), String> {
-    state.0.lock().unwrap().rescan_library()
+fn rescan_library(
+    state: State<AudioState>,
+    config_state: State<ConfigState>,
+) -> Result<(), String> {
+    // O nome IPC permanece para compatibilidade; com database existente, o refresh é incremental.
+    let has_folders = !config_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar pastas locais: {e}"))?
+        .local_folders
+        .is_empty();
+    if let Some(refresh) = library_refresh(true, database_exists()?, has_folders) {
+        let socket_path = state
+            .0
+            .lock()
+            .map_err(|e| format!("Falha ao acessar a biblioteca local: {e}"))?
+            .local_album_socket_path();
+        request_library_refresh(&socket_path, refresh)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -908,16 +975,35 @@ async fn save_config(
         || current_cfg.replay_gain != new_config.replay_gain;
 
     let folders_changed = local_folders_changed(&current_cfg, &new_config);
+    let database_existed = if folders_changed || finishing_first_run || audio_hw_changed {
+        database_exists()?
+    } else {
+        true
+    };
+    let mut library_changed_during_start = false;
     let mut playback_snapshot = None;
     let mut resume_analyzer = false;
 
     if finishing_first_run {
-        sup_state
+        let start_result = sup_state
             .0
             .lock()
-            .map_err(|e| format!("Falha ao iniciar MPD ao concluir a configuração inicial: {}", e))?
-            .start(&new_config)
-            .map_err(|e| format!("Falha ao iniciar MPD ao concluir a configuração inicial: {}", e))?;
+            .map_err(|e| format!("Falha ao acessar MPD na configuração inicial: {}", e))?
+            .start(&new_config);
+        library_changed_during_start = match start_result {
+            Ok(sync) => sync.changed,
+            Err(error) => {
+                let rollback =
+                    rollback_first_run_completion(folders_changed, &current_cfg, &sup_state);
+                return Err(error_with_rollback(
+                    format!(
+                        "Falha ao iniciar MPD ao concluir a configuração inicial: {}",
+                        error
+                    ),
+                    rollback,
+                ));
+            }
+        };
     } else if should_prepare_device_switch(audio_hw_changed, finishing_first_run) {
         // 1. Captura o estado e segundo atual da música sem destruir a fila
         let preparation = audio_state
@@ -982,20 +1068,22 @@ async fn save_config(
                 return Err(error_with_rollback(original, rollback));
             }
         };
-        if let Err(switch_error) = switch_result {
-            let rollback =
-                rollback_audio_switch(
+        library_changed_during_start = match switch_result {
+            Ok(sync) => sync.changed,
+            Err(switch_error) => {
+                let rollback = rollback_audio_switch(
                     &current_cfg,
                     playback_snapshot,
                     &playback_uris,
                     &sup_state,
                     &audio_state,
                 );
-            return Err(error_with_rollback(
-                format!("Falha ao iniciar nova saída: {}", switch_error),
-                rollback,
-            ));
-        }
+                return Err(error_with_rollback(
+                    format!("Falha ao iniciar nova saída: {}", switch_error),
+                    rollback,
+                ));
+            }
+        };
 
         // 3. Restaura fila/faixa/posição quando possível; Playing/Paused terminam pausados e Stopped permanece parado
         let restore_result = match audio_state.0.lock() {
@@ -1021,15 +1109,30 @@ async fn save_config(
         }
     }
 
-    if folders_changed {
+    if folders_changed
+        || library_changed_during_start
+        || (finishing_first_run && !new_config.local_folders.is_empty())
+    {
         let update_library = || -> Result<(), String> {
-            MpdSupervisor::sync_library_symlinks(&new_config.local_folders)?;
-            let mut audio = audio_state
-                .0
-                .lock()
-                .map_err(|e| format!("Falha ao acessar a biblioteca local: {}", e))?;
-            audio.set_music_dir(&MpdSupervisor::library_dir().to_string_lossy());
-            audio.rescan_library()
+            let sync = MpdSupervisor::sync_library_symlinks(&new_config.local_folders)?;
+            let socket_path = {
+                let mut audio = audio_state
+                    .0
+                    .lock()
+                    .map_err(|e| format!("Falha ao acessar a biblioteca local: {}", e))?;
+                audio.set_music_dir(&sync.library_dir.to_string_lossy());
+                audio.local_album_socket_path()
+            };
+            if let Some(refresh) = library_refresh_after_sync(
+                sync.changed,
+                library_changed_during_start,
+                finishing_first_run,
+                database_existed,
+                !new_config.local_folders.is_empty(),
+            ) {
+                request_library_refresh(&socket_path, refresh)?;
+            }
+            Ok(())
         };
         if let Err(library_error) = update_library() {
             let rollback = rollback_applied_config_change(
@@ -1182,12 +1285,22 @@ fn rollback_applied_config_change(
     let mut failures = Vec::new();
     if folders_changed {
         let library_rollback = MpdSupervisor::sync_library_symlinks(&previous_config.local_folders)
-            .and_then(|_| {
-                audio_state
-                    .0
-                    .lock()
-                    .map_err(|e| format!("Falha ao acessar a biblioteca durante rollback: {}", e))?
-                    .rescan_library()
+            .and_then(|sync| {
+                if let Some(refresh) = library_refresh(
+                    sync.changed,
+                    database_exists()?,
+                    !previous_config.local_folders.is_empty(),
+                ) {
+                    let socket_path = audio_state
+                        .0
+                        .lock()
+                        .map_err(|e| {
+                            format!("Falha ao acessar a biblioteca durante rollback: {}", e)
+                        })?
+                        .local_album_socket_path();
+                    request_library_refresh(&socket_path, refresh)?;
+                }
+                Ok(())
             });
         if let Err(error) = library_rollback {
             failures.push(format!("biblioteca: {}", error));
@@ -1370,7 +1483,7 @@ pub fn run() {
     let mut supervisor = MpdSupervisor::new(&socket_path);
     let mpd_started = if should_start_mpd {
         match supervisor.start(&initial_config) {
-            Ok(()) => true,
+            Ok(_) => true,
             Err(error) => {
                 eprintln!("[Aviso] Erro no supervisor de áudio: {}", error);
                 false
@@ -1707,6 +1820,41 @@ mod tests {
     }
 
     #[test]
+    fn library_refresh_uses_update_for_existing_database_and_rescan_for_first_database() {
+        assert_eq!(
+            library_refresh(true, true, true),
+            Some(LibraryRefresh::Update)
+        );
+        assert_eq!(
+            library_refresh(true, true, false),
+            Some(LibraryRefresh::Update)
+        );
+        assert_eq!(
+            library_refresh(true, false, true),
+            Some(LibraryRefresh::Rescan)
+        );
+        assert_eq!(library_refresh(true, false, false), None);
+        assert_eq!(library_refresh(false, true, true), None);
+        assert_eq!(library_refresh(false, false, true), None);
+        assert_eq!(
+            library_refresh_after_sync(false, false, false, true, true),
+            None
+        );
+        assert_eq!(
+            library_refresh_after_sync(false, true, false, true, true),
+            Some(LibraryRefresh::Update)
+        );
+        assert_eq!(
+            library_refresh_after_sync(false, false, true, false, true),
+            Some(LibraryRefresh::Rescan)
+        );
+        assert_eq!(
+            library_refresh_after_sync(true, true, true, false, true),
+            Some(LibraryRefresh::Rescan)
+        );
+    }
+
+    #[test]
     fn database_path_matches_supervisor_configuration_directory() {
         assert_eq!(
             MpdSupervisor::database_path(),
@@ -1715,7 +1863,7 @@ mod tests {
     }
 
     #[test]
-    fn changing_local_folders_keeps_save_config_rescan_condition() {
+    fn changing_local_folders_is_detected_for_library_reconciliation() {
         let mut current = AppConfig::default();
         current.first_run = false;
         let mut next = current.clone();
