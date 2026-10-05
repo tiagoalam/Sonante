@@ -198,6 +198,8 @@
     "alsaDevice": "Dispositivo de Hardware ALSA",
     "currentDevice": "Dispositivo Atual ({{id}})",
     "localFolders": "Pastas de Armazenamento Local",
+    "onlineArtwork": "Buscar capas ausentes online",
+    "onlineArtworkDescription": "Quando ativado, o Sonante pode enviar nomes de álbum e artista aos serviços públicos MusicBrainz e Cover Art Archive.",
     "checkNew": "Verificar Novidades",
     "addFolder": "Adicionar",
     "noFolders": "Nenhuma pasta local configurada.",

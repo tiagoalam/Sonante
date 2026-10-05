@@ -941,6 +941,7 @@ export function App() {
             onClearInitialArtist={() => setLocalSelectedArtist(null)}
             isPlaybackAvailable={isPlaybackAvailable}
             isLibraryUpdating={playbackStatus.is_updating}
+            onlineArtworkEnabled={config?.online_artwork_enabled ?? false}
           />
         ) : !isPlexConnected ? (
           <main className="flex-1 flex flex-col items-center justify-center bg-[#121212] select-none p-8 text-center animate-in fade-in duration-200">

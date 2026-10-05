@@ -3,6 +3,7 @@ export interface AppConfig {
   alsa_device: string;
   audio_output_type: "alsa" | "pipewire";
   local_folders: string[];
+  online_artwork_enabled: boolean;
   plex_server_id?: string | null;
   plex_server_name?: string | null;
   /** Legacy initial route retained for configuration compatibility. */

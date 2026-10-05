@@ -3,6 +3,7 @@ mod analyzer;
 mod audio;
 mod config;
 mod favorites;
+mod online_artwork;
 mod persistence;
 mod playlists;
 mod plex;
@@ -917,6 +918,19 @@ async fn get_local_cover(path: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+async fn get_online_album_cover(
+    request: online_artwork::OnlineAlbumCoverRequest,
+    config_state: State<'_, ConfigState>,
+) -> Result<Option<String>, String> {
+    let enabled = config_state
+        .0
+        .lock()
+        .map_err(|_| "Configuração indisponível.".to_string())?
+        .online_artwork_enabled;
+    online_artwork::get_online_album_cover(request, enabled).await
+}
+
+#[tauri::command]
 fn pick_directory() -> Option<String> {
     rfd::FileDialog::new()
         .set_title("Selecionar Pasta de Músicas")
@@ -1609,6 +1623,7 @@ pub fn run() {
             list_local_directory,
             resolve_local_library_path,
             get_local_cover,
+            get_online_album_cover,
             get_local_albums,
             get_favorites,
             toggle_favorite,

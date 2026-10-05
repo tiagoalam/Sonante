@@ -450,6 +450,19 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
             </div>
           </div>
 
+          <label className="flex items-start gap-2 pt-3 border-t border-[#242424] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={config.online_artwork_enabled}
+              onChange={(event) => setConfig({ ...config, online_artwork_enabled: event.target.checked })}
+              className="mt-0.5 accent-[#E5A00D]"
+            />
+            <span className="space-y-1">
+              <span className="block text-xs text-white">{t("settings.onlineArtwork")}</span>
+              <span className="block text-[11px] text-[#888888]">{t("settings.onlineArtworkDescription")}</span>
+            </span>
+          </label>
+
           {/* Seção 3: Motor de Áudio */}
           <div className="space-y-3 pt-3 border-t border-[#242424]">
             <h3 className="text-[11px] font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1.5">

@@ -198,6 +198,8 @@
     "alsaDevice": "ALSA Hardware Device",
     "currentDevice": "Current Device ({{id}})",
     "localFolders": "Local Storage Folders",
+    "onlineArtwork": "Find missing covers online",
+    "onlineArtworkDescription": "When enabled, Sonante may send album and artist names to the public MusicBrainz and Cover Art Archive services.",
     "checkNew": "Check for Updates",
     "addFolder": "Add",
     "noFolders": "No local folders configured.",
