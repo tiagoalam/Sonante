@@ -275,6 +275,54 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
         preset: &EqPreset,
         format: PcmFormat,
     ) -> Result<(), RuntimeError> {
+        self.apply_preset_inner(
+            generation,
+            preset,
+            format,
+            true,
+            TRANSITION_ATTENUATION_DB,
+            TRANSITION_SETTLE,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_without_transition_for_probe(
+        &self,
+        generation: u64,
+        preset: &EqPreset,
+        format: PcmFormat,
+    ) -> Result<(), RuntimeError> {
+        self.apply_preset_inner(
+            generation,
+            preset,
+            format,
+            false,
+            TRANSITION_ATTENUATION_DB,
+            TRANSITION_SETTLE,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_transition_for_probe(
+        &self,
+        generation: u64,
+        preset: &EqPreset,
+        format: PcmFormat,
+        attenuation_db: f64,
+        settle: Duration,
+    ) -> Result<(), RuntimeError> {
+        self.apply_preset_inner(generation, preset, format, true, attenuation_db, settle)
+    }
+
+    fn apply_preset_inner(
+        &self,
+        generation: u64,
+        preset: &EqPreset,
+        format: PcmFormat,
+        mitigate: bool,
+        attenuation_db: f64,
+        settle: Duration,
+    ) -> Result<(), RuntimeError> {
         let desired = convert_preset(preset, format).map_err(RuntimeError::Conversion)?;
         self.current(generation)?;
         self.shared
@@ -303,19 +351,27 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
             serde_json::to_value(&desired).map_err(|_| RuntimeError::UnexpectedConfig)?;
         let patch = dsp_patch(&previous, &desired_value)?;
         // Main fader is temporary transition gain. Preset preamp remains in filters.
-        if let Err(error) = self.set_transition_gain(generation, TRANSITION_ATTENUATION_DB) {
-            if error == RuntimeError::SessionStale {
+        if mitigate {
+            if let Err(error) = self.set_transition_gain(generation, attenuation_db) {
+                if error == RuntimeError::SessionStale {
+                    return Err(error);
+                }
+                self.set_transition_gain(generation, 0.0)
+                    .map_err(|_| RuntimeError::RollbackFailed)?;
                 return Err(error);
             }
-            self.set_transition_gain(generation, 0.0)
-                .map_err(|_| RuntimeError::RollbackFailed)?;
-            return Err(error);
+            std::thread::sleep(settle);
         }
-        std::thread::sleep(TRANSITION_SETTLE);
         let update = self
             .request(generation, Command::PatchConfig(patch))
             .and_then(|_| self.verify(generation, &desired_value, &previous))
-            .and_then(|_| self.set_transition_gain(generation, 0.0));
+            .and_then(|_| {
+                if mitigate {
+                    self.set_transition_gain(generation, 0.0)
+                } else {
+                    Ok(())
+                }
+            });
         if let Err(error) = update {
             if error == RuntimeError::SessionStale {
                 return Err(error);
@@ -327,7 +383,14 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
                 self.verify(generation, &previous, &previous)?;
                 self.set_transition_gain(generation, 0.0)
             })();
-            if rollback.is_err() {
+            if let Err(rollback_error) = rollback {
+                // The effective config is unknown. Keep the owned session attenuated
+                // and reject later applies until the supervisor recovers the session.
+                if let Err(gain_error) =
+                    self.set_transition_gain(generation, TRANSITION_ATTENUATION_DB)
+                {
+                    eprintln!("DSP rollback and fail-safe attenuation failed: {rollback_error:?}; {gain_error:?}");
+                }
                 return Err(RuntimeError::RollbackFailed);
             }
             return Err(error);
@@ -436,6 +499,8 @@ mod tests {
         reject_patch: AtomicUsize,
         skip_patch: AtomicUsize,
         timeout_patch: AtomicUsize,
+        drop_patch: AtomicUsize,
+        stale_on_patch: AtomicUsize,
         stale_patch: AtomicBool,
         unavailable: AtomicBool,
         generation: Arc<AtomicU64>,
@@ -484,8 +549,14 @@ mod tests {
             if self.0.stale_patch.swap(false, Ordering::SeqCst) {
                 self.0.generation.store(99, Ordering::SeqCst);
             }
+            if self.0.stale_on_patch.load(Ordering::SeqCst) == number {
+                self.0.generation.store(99, Ordering::SeqCst);
+            }
             if self.0.timeout_patch.load(Ordering::SeqCst) == number {
                 return Err(RuntimeError::RequestTimeout);
+            }
+            if self.0.drop_patch.load(Ordering::SeqCst) == number {
+                return Err(RuntimeError::WebSocketConnectFailed);
             }
             if self.0.reject_patch.load(Ordering::SeqCst) == number {
                 return Ok(json!({"PatchConfig":{"result":{"ConfigValidationError":"rejected"}}}));
@@ -523,6 +594,8 @@ mod tests {
             reject_patch: AtomicUsize::new(0),
             skip_patch: AtomicUsize::new(0),
             timeout_patch: AtomicUsize::new(0),
+            drop_patch: AtomicUsize::new(0),
+            stale_on_patch: AtomicUsize::new(0),
             stale_patch: AtomicBool::new(false),
             unavailable: AtomicBool::new(false),
             generation: Arc::clone(&generation),
@@ -559,6 +632,7 @@ mod tests {
             let mut flat = flat_preset();
             assert_eq!(controller.published_preset().unwrap(), None);
             controller.apply_preset(7, &flat, pcm(rate)).unwrap();
+            assert_eq!(*state.volume.lock().unwrap(), 0.0);
             assert_eq!(
                 controller.published_preset().unwrap(),
                 Some(flat.id.clone())
@@ -573,6 +647,7 @@ mod tests {
             flat.bands.truncate(1);
             flat.id = "one".into();
             controller.apply_preset(7, &flat, pcm(rate)).unwrap();
+            assert_eq!(*state.volume.lock().unwrap(), 0.0);
             assert_eq!(controller.published_preset().unwrap(), Some("one".into()));
             assert_eq!(
                 state.config.lock().unwrap()["pipeline"]
@@ -674,6 +749,7 @@ mod tests {
             );
             assert!(same_dsp(&state.config.lock().unwrap(), &before).unwrap());
             assert_eq!(controller.published_preset().unwrap(), Some(flat.id));
+            assert_eq!(*state.volume.lock().unwrap(), 0.0);
         }
     }
 
@@ -687,6 +763,7 @@ mod tests {
             Err(RuntimeError::VerificationFailed)
         );
         assert_eq!(controller.published_preset().unwrap(), None);
+        assert_eq!(*state.volume.lock().unwrap(), 0.0);
         assert!(state.config.lock().unwrap()["pipeline"]
             .as_array()
             .unwrap()
@@ -696,6 +773,49 @@ mod tests {
         state.reject_patch.store(2, Ordering::SeqCst);
         assert_eq!(
             controller.apply_preset(7, &preset, pcm(48_000)),
+            Err(RuntimeError::RollbackFailed)
+        );
+        assert_eq!(controller.published_preset().unwrap(), None);
+        assert_eq!(*state.volume.lock().unwrap(), TRANSITION_ATTENUATION_DB);
+        assert_eq!(
+            controller.apply_preset(7, &preset, pcm(48_000)),
+            Err(RuntimeError::UnexpectedConfig)
+        );
+    }
+
+    #[test]
+    fn websocket_drop_during_patch_rolls_back_and_consecutive_applies_clear_gain() {
+        let (controller, state) = fixture(48_000);
+        let mut a = flat_preset();
+        a.id = "a".into();
+        a.bands[0].gain_db = 6.0;
+        let mut b = a.clone();
+        b.id = "b".into();
+        b.bands[0].gain_db = -6.0;
+        controller.apply_preset(7, &a, pcm(48_000)).unwrap();
+        let before = state.config.lock().unwrap().clone();
+        state.drop_patch.store(2, Ordering::SeqCst);
+        assert_eq!(
+            controller.apply_preset(7, &b, pcm(48_000)),
+            Err(RuntimeError::WebSocketConnectFailed)
+        );
+        assert!(same_dsp(&state.config.lock().unwrap(), &before).unwrap());
+        assert_eq!(controller.published_preset().unwrap(), Some("a".into()));
+        assert_eq!(*state.volume.lock().unwrap(), 0.0);
+        state.drop_patch.store(0, Ordering::SeqCst);
+        for preset in [&b, &a, &b, &a] {
+            controller.apply_preset(7, preset, pcm(48_000)).unwrap();
+            assert_eq!(*state.volume.lock().unwrap(), 0.0);
+        }
+    }
+
+    #[test]
+    fn stale_generation_during_rollback_never_publishes() {
+        let (controller, state) = fixture(48_000);
+        state.skip_patch.store(1, Ordering::SeqCst);
+        state.stale_on_patch.store(2, Ordering::SeqCst);
+        assert_eq!(
+            controller.apply_preset(7, &flat_preset(), pcm(48_000)),
             Err(RuntimeError::RollbackFailed)
         );
         assert_eq!(controller.published_preset().unwrap(), None);
@@ -730,6 +850,8 @@ mod tests {
             reject_patch: AtomicUsize::new(0),
             skip_patch: AtomicUsize::new(0),
             timeout_patch: AtomicUsize::new(0),
+            drop_patch: AtomicUsize::new(0),
+            stale_on_patch: AtomicUsize::new(0),
             stale_patch: AtomicBool::new(false),
             unavailable: AtomicBool::new(false),
             generation: Arc::clone(&generation),

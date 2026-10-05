@@ -7,12 +7,18 @@ use super::peq::PcmFormat;
 use super::pipewire::{
     exact_node, validate_topology, PipeWireRouteManager, RouteStatus, SystemCommandRunner,
 };
+use super::runtime::{
+    CamillaRuntimeController, LocalWebSocketTransport, RuntimeError, RuntimeTransport,
+};
 use super::{DspState, DspSupervisor};
 use crate::equalizer::flat_preset;
+use serde_json::{json, Value};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -39,7 +45,7 @@ fn default_sink() -> Result<String, String> {
 }
 
 fn write_wav(path: &Path) -> Result<(), String> {
-    let samples = 48000_u32 * 30;
+    let samples = 48000_u32 * 120;
     let mut file = File::create(path).map_err(|error| error.to_string())?;
     file.write_all(b"RIFF").map_err(|error| error.to_string())?;
     file.write_all(&(36 + samples * 4).to_le_bytes())
@@ -199,8 +205,12 @@ fn route_identity(
         .snapshot()
         .map_err(|e| format!("snapshot: {e:?}"))?;
     let route = probe.dsp.route.as_ref().ok_or("route missing")?;
-    if validate_topology(&graph, route, true) != RouteStatus::RouteReady {
-        return Err("route changed during preset update".into());
+    let status = validate_topology(&graph, route, true);
+    if status != RouteStatus::RouteReady {
+        return Err(format!(
+            "route changed during preset update: {status:?}, owned links={:?}",
+            probe.dsp.route_manager.owned_links()
+        ));
     }
     let capture = exact_node(&graph, &route.capture_name, "Stream/Input/Audio")
         .map_err(|e| format!("capture: {e:?}"))?;
@@ -223,6 +233,26 @@ fn route_identity(
         (playback.id, playback.serial),
         links,
     ))
+}
+
+fn assert_transition_gain_zero(probe: &Probe) -> Result<(), String> {
+    let port = probe
+        .dsp
+        .runtime_endpoint
+        .as_ref()
+        .ok_or("endpoint missing")?
+        .port;
+    let reply = LocalWebSocketTransport
+        .request(port, json!("GetVolume"))
+        .map_err(|e| format!("GetVolume: {e:?}"))?;
+    let gain = reply
+        .pointer("/GetVolume/value")
+        .and_then(Value::as_f64)
+        .ok_or("GetVolume has no numeric value")?;
+    if gain != 0.0 {
+        return Err(format!("transition gain remained {gain} dB"));
+    }
+    Ok(())
 }
 
 fn runtime_switch_probe(probe: &mut Probe, session: u64) -> Result<(), String> {
@@ -259,6 +289,7 @@ fn runtime_switch_probe(probe: &mut Probe, session: u64) -> Result<(), String> {
         if after != baseline {
             return Err(format!("preset {label} recreated nodes or links"));
         }
+        assert_transition_gain_zero(probe)?;
     }
     // Same filter identity across zero gain, enable, and parameter edits.
     let mut changed = a.clone();
@@ -290,26 +321,6 @@ fn runtime_switch_probe(probe: &mut Probe, session: u64) -> Result<(), String> {
         return Err("final route differs".into());
     }
     Ok(())
-}
-
-fn wav_left_samples(path: &Path) -> Result<Vec<i16>, String> {
-    let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    let start = bytes
-        .windows(4)
-        .position(|window| window == b"data")
-        .ok_or("recording has no data chunk")?
-        + 8;
-    if start >= bytes.len() {
-        return Err("empty recording".into());
-    }
-    let samples: Vec<i16> = bytes[start..]
-        .chunks_exact(4)
-        .map(|frame| i16::from_le_bytes([frame[0], frame[1]]))
-        .collect();
-    if samples.len() < 80_000 {
-        return Err(format!("short recording: {} frames", samples.len()));
-    }
-    Ok(samples)
 }
 
 fn rms(samples: &[i16], start: usize, end: usize) -> f64 {
@@ -347,6 +358,33 @@ fn max_cycle_peak_change(samples: &[i16], start: usize, end: usize) -> i32 {
         .unwrap_or(0)
 }
 
+fn periodic_residual(samples: &[i16], start: usize, end: usize) -> (f64, f64) {
+    // A 1 kHz sine at 48 kHz satisfies this recurrence at *any* amplitude.
+    // A large residual therefore isolates nonperiodic transition energy from
+    // the ordinary slope of an amplified sine.
+    let coefficient = 2.0 * (2.0 * std::f64::consts::PI / 48.0).cos();
+    let residuals = (start.max(2)..end).map(|n| {
+        f64::from(samples[n]) - coefficient * f64::from(samples[n - 1]) + f64::from(samples[n - 2])
+    });
+    let mut peak: f64 = 0.0;
+    let mut energy = 0.0;
+    let mut count = 0;
+    for value in residuals {
+        peak = peak.max(value.abs());
+        energy += value * value;
+        count += 1;
+    }
+    (peak, (energy / f64::from(count)).sqrt())
+}
+
+fn low_level_frames(samples: &[i16], start: usize, end: usize, threshold: f64) -> usize {
+    samples[start..end]
+        .chunks_exact(48)
+        .filter(|cycle| rms(cycle, 0, 48) < threshold)
+        .count()
+        * 48
+}
+
 fn record_transition(
     probe: &mut Probe,
     label: &str,
@@ -372,7 +410,11 @@ fn record_transition(
     if graph.nodes.iter().any(|node| node.name == "pw-record") {
         return Err("another pw-record is present".into());
     }
-    let path = probe.root.join(format!("transition_{label}.wav"));
+    let sample_count = if label == "rollback_timeout" {
+        "240000"
+    } else {
+        "96000"
+    };
     let mut child = Command::new("pw-record")
         .args([
             "--target",
@@ -383,14 +425,35 @@ fn record_transition(
             "2",
             "--format",
             "s16",
+            "-a",
             "-n",
-            "96000",
+            sample_count,
+            "-",
         ])
-        .arg(&path)
         .env("PIPEWIRE_AUTOCONNECT", "0")
+        .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("pw-record: {e}"))?;
-    let result = (|| {
+    let mut stdout = child.stdout.take().ok_or("pw-record stdout missing")?;
+    let frame_count = Arc::new(AtomicUsize::new(0));
+    let reader_count = Arc::clone(&frame_count);
+    let reader = thread::spawn(move || -> Result<Vec<i16>, String> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let count = stdout.read(&mut chunk).map_err(|e| e.to_string())?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+            reader_count.store(bytes.len() / 4, Ordering::Release);
+        }
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|frame| i16::from_le_bytes([frame[0], frame[1]]))
+            .collect())
+    });
+    let result: Result<(Instant, Instant, usize, usize), String> = (|| {
         wait_for(Duration::from_secs(2), || {
             probe.dsp.route_manager.snapshot().is_ok_and(|graph| {
                 graph
@@ -409,26 +472,48 @@ fn record_transition(
             )?;
         }
         thread::sleep(Duration::from_millis(750));
+        let start_time = Instant::now();
+        let start_frame = frame_count.load(Ordering::Acquire);
         apply()?;
-        wait_for(Duration::from_secs(4), || {
+        let end_time = Instant::now();
+        let end_frame = frame_count.load(Ordering::Acquire);
+        wait_for(Duration::from_secs(7), || {
             child.try_wait().is_ok_and(|status| status.is_some())
         })?;
-        let samples = wav_left_samples(&path)?;
-        let before = rms(&samples, 12_000, 24_000);
-        let after = rms(&samples, 72_000, 84_000);
-        let step = max_step(&samples, 30_000, 65_000);
-        let cycle_change = max_cycle_peak_change(&samples, 30_000, 65_000);
-        println!("{label}: RMS before={before:.1}, after={after:.1}, ratio={:.3}, max adjacent step={step}, max cycle peak change={cycle_change}", after / before);
-        Ok((before, after, step))
+        Ok((start_time, end_time, start_frame, end_frame))
     })();
     if child.try_wait().map_err(|e| e.to_string())?.is_none() {
-        let _ = child.kill();
+        child.kill().map_err(|e| e.to_string())?;
     }
-    let _ = child.wait();
-    result
+    child.wait().map_err(|e| e.to_string())?;
+    let samples = reader.join().map_err(|_| "recorder reader panicked")??;
+    let (start_time, end_time, start_frame, end_frame) = result?;
+    if samples.len() < 80_000 || start_frame < 9_600 || end_frame + 14_400 >= samples.len() {
+        return Err(format!(
+            "short or misaligned recording: {} frames, operation {start_frame}..{end_frame}",
+            samples.len()
+        ));
+    }
+    let before = rms(&samples, start_frame - 9_600, start_frame - 4_800);
+    let after = rms(&samples, end_frame + 9_600, end_frame + 14_400);
+    let window_start = start_frame - 2_400;
+    let window_end = end_frame + 9_600;
+    let step = max_step(&samples, window_start, window_end);
+    let cycle_change = max_cycle_peak_change(&samples, window_start, window_end);
+    let peak = samples[window_start..window_end]
+        .iter()
+        .map(|sample| i32::from(*sample).abs())
+        .max()
+        .unwrap_or(0);
+    let (residual_peak, residual_rms) = periodic_residual(&samples, window_start, window_end);
+    let (baseline_peak, baseline_rms) =
+        periodic_residual(&samples, start_frame - 9_600, start_frame - 4_800);
+    let dip_frames = low_level_frames(&samples, start_frame, window_end, before.min(after) * 0.1);
+    println!("{label}: operation frames={start_frame}..{end_frame}, wall={:?}..{:?}, duration_ms={:.1}, RMS={before:.1}->{after:.1}, peak={peak}, step={step}, cycle_peak_change={cycle_change}, periodic_residual peak={residual_peak:.1} baseline={baseline_peak:.1}, rms={residual_rms:.1} baseline={baseline_rms:.1}, dip_ms={:.1}", start_time, end_time, (end_time - start_time).as_secs_f64() * 1000.0, dip_frames as f64 / 48.0);
+    Ok((before, after, step))
 }
 
-fn signal_probe(probe: &mut Probe, session: u64) -> Result<(), String> {
+fn signal_probe(probe: &mut Probe, session: u64, mitigate: bool) -> Result<(), String> {
     let controller = probe
         .dsp
         .runtime_controller()
@@ -444,33 +529,309 @@ fn signal_probe(probe: &mut Probe, session: u64) -> Result<(), String> {
     plus.bands[0].gain_db = 6.0;
     let mut minus = plus.clone();
     minus.bands[0].gain_db = -6.0;
-    let (_, _, baseline_step) = record_transition(probe, "flat_flat", || {
-        controller
-            .apply_preset(session, &flat, format)
-            .map_err(|e| format!("flat apply: {e:?}"))
-    })?;
-    let (flat_rms, plus_rms, plus_step) = record_transition(probe, "flat_plus6", || {
-        controller
-            .apply_preset(session, &plus, format)
-            .map_err(|e| format!("plus apply: {e:?}"))
-    })?;
-    let (plus_before, minus_rms, minus_step) = record_transition(probe, "plus6_minus6", || {
-        controller
-            .apply_preset(session, &minus, format)
-            .map_err(|e| format!("minus apply: {e:?}"))
-    })?;
-    let (minus_before, flat_again, flat_step) = record_transition(probe, "minus6_flat", || {
-        controller
-            .apply_preset(session, &flat, format)
-            .map_err(|e| format!("flat restore: {e:?}"))
-    })?;
-    println!("transition max steps: baseline={baseline_step}, Flat->+6={plus_step}, +6->-6={minus_step}, -6->Flat={flat_step}");
+    let mut ten = flat.clone();
+    ten.id = "ten_band".into();
+    for (index, band) in ten.bands.iter_mut().enumerate() {
+        band.gain_db = if index % 2 == 0 { 3.0 } else { -3.0 };
+    }
+    let mode = if mitigate { "ramp" } else { "direct" };
+    let apply = |preset: &crate::equalizer::EqPreset| {
+        let result = if mitigate {
+            controller.apply_preset(session, preset, format)
+        } else {
+            controller.apply_without_transition_for_probe(session, preset, format)
+        };
+        result.map_err(|e| format!("{mode} apply: {e:?}"))
+    };
+    apply(&flat)?;
+    let (_, _, baseline_step) =
+        record_transition(probe, &format!("{mode}_flat_flat"), || apply(&flat))?;
+    let (flat_rms, plus_rms, plus_step) =
+        record_transition(probe, &format!("{mode}_flat_plus6"), || apply(&plus))?;
+    let (plus_before, minus_rms, minus_step) =
+        record_transition(probe, &format!("{mode}_plus6_minus6"), || apply(&minus))?;
+    let (minus_before, flat_again, flat_step) =
+        record_transition(probe, &format!("{mode}_minus6_flat"), || apply(&flat))?;
+    record_transition(probe, &format!("{mode}_flat_ten"), || apply(&ten))?;
+    println!("{mode} transition max steps: baseline={baseline_step}, Flat->+6={plus_step}, +6->-6={minus_step}, -6->Flat={flat_step}");
     if !(1.7..2.3).contains(&(plus_rms / flat_rms))
         || !(0.20..0.32).contains(&(minus_rms / plus_before))
         || !(1.7..2.3).contains(&(flat_again / minus_before))
     {
         return Err("measured PEQ response outside expected ranges".into());
     }
+    if mitigate {
+        for (label, attenuation, settle_ms) in [
+            ("settle125", -60.0, 125),
+            ("settle75", -60.0, 75),
+            ("attenuation40", -40.0, 150),
+        ] {
+            controller
+                .apply_preset(session, &plus, format)
+                .map_err(|e| format!("variant setup: {e:?}"))?;
+            record_transition(probe, label, || {
+                controller
+                    .apply_transition_for_probe(
+                        session,
+                        &minus,
+                        format,
+                        attenuation,
+                        Duration::from_millis(settle_ms),
+                    )
+                    .map_err(|e| format!("variant {label}: {e:?}"))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum FaultMode {
+    Invalid,
+    Semantic,
+    LostReply,
+    Timeout,
+    RollbackRejected,
+}
+
+struct FaultTransport {
+    mode: FaultMode,
+    armed: AtomicBool,
+    patches: AtomicUsize,
+}
+
+impl RuntimeTransport for FaultTransport {
+    fn request(&self, port: u16, mut command: Value) -> Result<Value, RuntimeError> {
+        if command.get("PatchConfig").is_some() {
+            let patch_number = self.patches.fetch_add(1, Ordering::SeqCst) + 1;
+            if matches!(self.mode, FaultMode::RollbackRejected) {
+                command["PatchConfig"]["pipeline"] = if patch_number == 1 {
+                    json!([])
+                } else {
+                    json!("invalid")
+                };
+                return LocalWebSocketTransport.request(port, command);
+            }
+        }
+        if command.get("PatchConfig").is_some() && self.armed.swap(false, Ordering::SeqCst) {
+            match self.mode {
+                FaultMode::Invalid => command["PatchConfig"]["pipeline"] = json!("invalid"),
+                FaultMode::Semantic => command["PatchConfig"]["pipeline"] = json!([]),
+                FaultMode::LostReply | FaultMode::Timeout => {
+                    LocalWebSocketTransport.request(port, command)?;
+                    if matches!(self.mode, FaultMode::Timeout) {
+                        thread::sleep(Duration::from_millis(2_100));
+                    }
+                    return Err(if matches!(self.mode, FaultMode::Timeout) {
+                        RuntimeError::RequestTimeout
+                    } else {
+                        RuntimeError::WebSocketConnectFailed
+                    });
+                }
+                FaultMode::RollbackRejected => unreachable!(),
+            }
+        }
+        LocalWebSocketTransport.request(port, command)
+    }
+}
+
+fn rollback_signal_probe(probe: &mut Probe, session: u64, mpd_name: &str) -> Result<(), String> {
+    let baseline = route_identity(probe)?;
+    let controller = probe
+        .dsp
+        .runtime_controller()
+        .map_err(|e| format!("controller: {e:?}"))?;
+    let format = PcmFormat {
+        sample_rate_hz: 48_000,
+        channels: 2,
+    };
+    let flat = flat_preset();
+    let mut a = flat.clone();
+    a.id = "rollback_a".into();
+    a.bands.truncate(1);
+    a.bands[0].frequency_hz = 1000.0;
+    a.bands[0].gain_db = 6.0;
+    let mut b = a.clone();
+    b.id = "rollback_b".into();
+    b.bands[0].gain_db = -6.0;
+    controller
+        .apply_preset(session, &flat, format)
+        .map_err(|e| format!("Flat: {e:?}"))?;
+    let (_, a_rms, _) = record_transition(probe, "rollback_flat_a", || {
+        controller
+            .apply_preset(session, &a, format)
+            .map_err(|e| format!("A: {e:?}"))
+    })?;
+    for (label, mode, expected) in [
+        ("invalid", FaultMode::Invalid, RuntimeError::ApplyRejected),
+        (
+            "semantic",
+            FaultMode::Semantic,
+            RuntimeError::VerificationFailed,
+        ),
+        (
+            "lost_reply",
+            FaultMode::LostReply,
+            RuntimeError::WebSocketConnectFailed,
+        ),
+        ("timeout", FaultMode::Timeout, RuntimeError::RequestTimeout),
+    ] {
+        let fault = CamillaRuntimeController::new(
+            probe
+                .dsp
+                .runtime_endpoint
+                .clone()
+                .ok_or("endpoint missing")?,
+            Arc::clone(&probe.dsp.activation_generation),
+            Arc::clone(&probe.dsp.runtime_shared),
+            FaultTransport {
+                mode,
+                armed: AtomicBool::new(true),
+                patches: AtomicUsize::new(0),
+            },
+        );
+        let (before, after, _) = record_transition(probe, &format!("rollback_{label}"), || {
+            let result = fault.apply_preset(session, &b, format);
+            if result != Err(expected.clone()) {
+                return Err(format!("{label}: unexpected apply result {result:?}"));
+            }
+            Ok(())
+        })?;
+        if (before / a_rms - 1.0).abs() > 0.03 || (after / a_rms - 1.0).abs() > 0.03 {
+            return Err(format!("{label}: A signal not restored: A={a_rms:.1}, before={before:.1}, after={after:.1}"));
+        }
+        if controller
+            .published_preset()
+            .map_err(|e| format!("published: {e:?}"))?
+            != Some(a.id.clone())
+        {
+            return Err(format!("{label}: B published"));
+        }
+        if route_identity(probe)? != baseline {
+            return Err(format!("{label}: route changed"));
+        }
+        assert_transition_gain_zero(probe)?;
+        no_hardware_fallback(probe, mpd_name)?;
+        println!("rollback {label}: A RMS={a_rms:.1}, before={before:.1}, after={after:.1}, PID/nodes/4 links stable");
+    }
+    if std::env::var("SONANTE_DSP_ROLLBACK_FAIL").as_deref() == Ok("1") {
+        let fault = CamillaRuntimeController::new(
+            probe
+                .dsp
+                .runtime_endpoint
+                .clone()
+                .ok_or("endpoint missing")?,
+            Arc::clone(&probe.dsp.activation_generation),
+            Arc::clone(&probe.dsp.runtime_shared),
+            FaultTransport {
+                mode: FaultMode::RollbackRejected,
+                armed: AtomicBool::new(true),
+                patches: AtomicUsize::new(0),
+            },
+        );
+        let (before, after, _) = record_transition(probe, "rollback_rejected", || {
+            let result = fault.apply_preset(session, &b, format);
+            if result != Err(RuntimeError::RollbackFailed) {
+                return Err(format!("rollback rejection: {result:?}"));
+            }
+            Ok(())
+        })?;
+        if after > before / 100.0 {
+            return Err(format!(
+                "rollback failure did not attenuate signal: {before:.1}->{after:.1}"
+            ));
+        }
+        let gain = LocalWebSocketTransport
+            .request(
+                probe
+                    .dsp
+                    .runtime_endpoint
+                    .as_ref()
+                    .ok_or("endpoint missing")?
+                    .port,
+                json!("GetVolume"),
+            )
+            .map_err(|e| format!("GetVolume: {e:?}"))?;
+        if gain.pointer("/GetVolume/value").and_then(Value::as_f64) != Some(-60.0) {
+            return Err(format!("rollback failure left unknown gain: {gain}"));
+        }
+        if controller
+            .published_preset()
+            .map_err(|e| format!("published: {e:?}"))?
+            != Some(a.id.clone())
+            || controller.apply_preset(session, &a, format) != Err(RuntimeError::UnexpectedConfig)
+        {
+            return Err("rollback failure published or accepted another apply".into());
+        }
+        if route_identity(probe)? != baseline {
+            return Err("rollback failure changed route".into());
+        }
+        no_hardware_fallback(probe, mpd_name)?;
+        println!("rollback rejected: A RMS={before:.1}, fail-safe RMS={after:.1}, RollbackFailed, no new apply or fallback");
+    }
+    Ok(())
+}
+
+struct CrashTransport<'a> {
+    child: Mutex<&'a mut Child>,
+    armed: AtomicBool,
+}
+
+impl RuntimeTransport for CrashTransport<'_> {
+    fn request(&self, port: u16, command: Value) -> Result<Value, RuntimeError> {
+        if command.get("PatchConfig").is_some() && self.armed.swap(false, Ordering::SeqCst) {
+            self.child
+                .lock()
+                .map_err(|_| RuntimeError::RuntimeUnavailable)?
+                .kill()
+                .map_err(|_| RuntimeError::RuntimeUnavailable)?;
+            return Err(RuntimeError::WebSocketConnectFailed);
+        }
+        LocalWebSocketTransport.request(port, command)
+    }
+}
+
+fn crash_during_apply_probe(probe: &mut Probe, session: u64, mpd_name: &str) -> Result<(), String> {
+    let endpoint = probe
+        .dsp
+        .runtime_endpoint
+        .clone()
+        .ok_or("endpoint missing")?;
+    let generation = Arc::clone(&probe.dsp.activation_generation);
+    let shared = Arc::clone(&probe.dsp.runtime_shared);
+    let child = probe.dsp.process.as_mut().ok_or("Camilla child missing")?;
+    let controller = CamillaRuntimeController::new(
+        endpoint,
+        generation,
+        shared,
+        CrashTransport {
+            child: Mutex::new(child),
+            armed: AtomicBool::new(true),
+        },
+    );
+    let result = controller.apply_preset(
+        session,
+        &flat_preset(),
+        PcmFormat {
+            sample_rate_hz: 48_000,
+            channels: 2,
+        },
+    );
+    if result != Err(RuntimeError::RollbackFailed) {
+        return Err(format!("crash during apply: {result:?}"));
+    }
+    if controller
+        .published_preset()
+        .map_err(|e| format!("published: {e:?}"))?
+        != Some("rollback_a".into())
+    {
+        return Err("crashed apply published preset".into());
+    }
+    if probe.dsp.check_process() != Err(super::DspError::CamillaExited) {
+        return Err("supervisor did not identify dead Camilla".into());
+    }
+    no_hardware_fallback(probe, mpd_name)?;
+    println!("crash during apply: RollbackFailed, A remains published, supervisor reports CamillaExited, no fallback");
     Ok(())
 }
 
@@ -659,7 +1020,29 @@ fn real_dsp_lifecycle_null_sink_only() -> Result<(), String> {
     }
 
     runtime_switch_probe(&mut probe, session)?;
-    signal_probe(&mut probe, session)?;
+    if std::env::var("SONANTE_DSP_HARNESS_FAST").as_deref() != Ok("1") {
+        signal_probe(&mut probe, session, false)?;
+        signal_probe(&mut probe, session, true)?;
+    }
+    rollback_signal_probe(&mut probe, session, &mpd_name)?;
+    if std::env::var("SONANTE_DSP_EQ3C_ONLY").as_deref() == Ok("1") {
+        no_hardware_fallback(&mut probe, &mpd_name)?;
+        if player
+            .command("playlistinfo", "playlistinfo")
+            .map_err(|e| format!("queue: {e:?}"))?
+            != queue_before
+        {
+            return Err("EQ-3C changed the queue".into());
+        }
+        if std::env::var("SONANTE_DSP_ROLLBACK_FAIL").as_deref() != Ok("1") {
+            crash_during_apply_probe(&mut probe, session, &mpd_name)?;
+        }
+        probe.close()?;
+        if default_sink()? != default_before {
+            return Err("default sink changed after EQ-3C cleanup".into());
+        }
+        return Ok(());
+    }
 
     let _ = probe
         .dsp
