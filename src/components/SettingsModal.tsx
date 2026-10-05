@@ -25,11 +25,13 @@ import { PlexServerResource } from "../types/plex";
 import { configService } from "../services/config";
 import { audioService } from "../services/audio";
 import { plexService } from "../services/plex";
+import { audioRestartExpected } from "../utils/audioConfigChange";
 
 interface Props {
   onClose: () => void;
-  onSaved: () => void;
-  onSaveStarted?: () => void;
+  onSaved: (audioRestartExpected: boolean) => void;
+  onSaveStarted?: (audioRestartExpected: boolean) => void;
+  isLibraryUpdating: boolean;
 }
 
 const formatConfigError = (error: unknown): string => {
@@ -52,7 +54,7 @@ const formatConfigError = (error: unknown): string => {
     .replace(/(ACK\s+\[[^\]]+\]\s+\{add\}).*/gi, "$1 [ADD DETAILS REDACTED]");
 };
 
-export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted }) => {
+export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted, isLibraryUpdating }) => {
   const { t, i18n } = useTranslation();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
@@ -69,10 +71,12 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
   const [loadingServers, setLoadingServers] = useState(false);
   const [showManualPlex, setShowManualPlex] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
+  const originalConfigRef = useRef<AppConfig | null>(null);
 
   useEffect(() => {
     Promise.all([configService.getConfig(), configService.getAudioDevices()])
       .then(([cfg, devs]) => {
+        originalConfigRef.current = { ...cfg, local_folders: [...cfg.local_folders] };
         if (devs.length > 0 && (!cfg.alsa_device || !devs.some((d) => d.id === cfg.alsa_device))) {
           cfg.alsa_device = devs[0].id;
         }
@@ -208,17 +212,21 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
 
   const handleSave = async () => {
     if (!config) return;
-    onSaveStarted?.();
+    const restartExpected = originalConfigRef.current
+      ? audioRestartExpected(originalConfigRef.current, config)
+      : true;
+    onSaveStarted?.(restartExpected);
     setSaving(true);
     try {
       await configService.saveConfig(config);
-      onSaved();
+      onSaved(restartExpected);
       onClose();
     } catch (err) {
       const diagnostic = formatConfigError(err);
       console.error("Falha em saveConfig:", diagnostic);
       try {
         const confirmedConfig = await configService.getConfig();
+        originalConfigRef.current = { ...confirmedConfig, local_folders: [...confirmedConfig.local_folders] };
         setConfig(confirmedConfig);
       } catch (reloadError) {
         console.error(
@@ -396,11 +404,11 @@ export const SettingsModal: React.FC<Props> = ({ onClose, onSaved, onSaveStarted
                 <button
                   type="button"
                   onClick={handleForceRescan}
-                  disabled={scanning}
+                  disabled={scanning || isLibraryUpdating}
                   className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-[#242424] hover:bg-[#2C2C2C] text-[#CCCCCC] hover:text-white transition-colors cursor-pointer"
                   title={t("settings.checkNew")}
                 >
-                  <RefreshCw size={12} className={scanning ? "animate-spin text-[#E5A00D]" : ""} />
+                  <RefreshCw size={12} className={scanning || isLibraryUpdating ? "animate-spin text-[#E5A00D]" : ""} />
                   <span>{t("settings.checkNew")}</span>
                 </button>
 

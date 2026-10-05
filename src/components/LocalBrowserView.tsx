@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useSyncExternalStore } from "react";
 import {
   Folder,
   Music,
@@ -21,6 +21,9 @@ import { favoritesService } from "../services/favorites";
 import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
 import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDiscs";
+import { LocalAlbumCatalog, emptyLocalAlbumCatalogState } from "../utils/localAlbumCatalog";
+
+const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
 
 class LruMemoryCache {
   private maxSize: number;
@@ -183,17 +186,20 @@ export interface LocalBrowserViewProps {
   initialArtist?: string | null;
   onClearInitialArtist?: () => void;
   isPlaybackAvailable: boolean;
+  isLibraryUpdating: boolean;
 }
 
 export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   initialArtist,
   onClearInitialArtist,
   isPlaybackAvailable,
+  isLibraryUpdating,
 }) => {
   const { t } = useTranslation();
   const [viewMode, setViewMode] = useState<"albums" | "folders">("albums");
-  const [albums, setAlbums] = useState<LocalAlbum[]>([]);
-  const [loadingAlbums, setLoadingAlbums] = useState(false);
+  const catalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
+  const albums = catalog.albums;
+  const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, isLibraryUpdating);
   const [albumSearch, setAlbumSearch] = useState("");
   const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(initialArtist || null);
@@ -201,6 +207,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const [albumSections, setAlbumSections] = useState<ReturnType<typeof flattenAlbumDiscs>["sections"]>([]);
   const [albumCover, setAlbumCover] = useState<string | null>(null);
   const albumRequest = useRef(0);
+  const initialCatalogMountHandled = useRef(false);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
 
@@ -211,18 +218,6 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
   useEffect(() => {
     let isMounted = true;
-    setLoadingAlbums(true);
-
-    audioService
-      .getLocalAlbums()
-      .then((data) => {
-        if (isMounted) setAlbums(data);
-      })
-      .catch(console.error)
-      .finally(() => {
-        if (isMounted) setLoadingAlbums(false);
-      });
-
     favoritesService
       .getFavorites()
       .then((favs) => {
@@ -236,6 +231,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!initialCatalogMountHandled.current) {
+      initialCatalogMountHandled.current = true;
+      localAlbumCatalog.setUpdating(isLibraryUpdating, true);
+    }
+  }, []);
+
+  useEffect(() => {
+    localAlbumCatalog.setUpdating(isLibraryUpdating);
+  }, [isLibraryUpdating]);
 
   useEffect(() => {
     if (initialArtist) {
@@ -454,6 +460,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         )}
       </div>
 
+      {isLibraryUpdating && (
+        <div className="px-8 py-2 text-xs text-[#E5A00D] flex items-center gap-2 border-b border-[#222222]">
+          <Disc3 size={14} className="animate-spin" />
+          <span>{t("sidebar.indexingTooltip")}</span>
+        </div>
+      )}
+      {catalog.error && (
+        <div role="alert" className="px-8 py-2 text-xs text-red-400 border-b border-[#222222]">
+          {catalog.error}
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto p-8">
         {selectedAlbum ? (
           <div className="space-y-8 animate-in fade-in duration-100">
@@ -591,7 +608,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           </div>
         ) : selectedArtist ? (
           <div className="space-y-6 animate-in fade-in duration-100">
-            {artistAlbums.length === 0 ? (
+            {artistAlbums.length === 0 && emptyCatalogState === "indexing" ? (
+              <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+                {t(isLibraryUpdating ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
+              </div>
+            ) : emptyCatalogState === "error" ? null : artistAlbums.length === 0 ? (
               <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
                 <Disc3 size={40} className="opacity-40" />
                 <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
@@ -616,11 +637,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
             )}
           </div>
         ) : viewMode === "albums" ? (
-          loadingAlbums ? (
+          emptyCatalogState === "indexing" ? (
             <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
-              {t("localBrowser.organizing")}
+              {t(isLibraryUpdating ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
             </div>
-          ) : filteredAlbums.length === 0 ? (
+          ) : emptyCatalogState === "error" ? null
+          : filteredAlbums.length === 0 ? (
             <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
               <Disc3 size={40} className="opacity-40" />
               <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>

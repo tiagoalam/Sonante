@@ -940,6 +940,7 @@ export function App() {
             initialArtist={localSelectedArtist}
             onClearInitialArtist={() => setLocalSelectedArtist(null)}
             isPlaybackAvailable={isPlaybackAvailable}
+            isLibraryUpdating={playbackStatus.is_updating}
           />
         ) : !isPlexConnected ? (
           <main className="flex-1 flex flex-col items-center justify-center bg-[#121212] select-none p-8 text-center animate-in fade-in duration-200">
@@ -1351,9 +1352,12 @@ export function App() {
       {showSettings && (
         <SettingsModal
           onClose={() => setShowSettings(false)}
-          onSaveStarted={invalidateStatusRequests}
-          onSaved={() => {
-            invalidateStatusRequests();
+          isLibraryUpdating={playbackStatus.is_updating}
+          onSaveStarted={(audioRestartExpected) => {
+            if (audioRestartExpected) invalidateStatusRequests();
+          }}
+          onSaved={(audioRestartExpected) => {
+            if (audioRestartExpected) invalidateStatusRequests();
             configService.getConfig().then(setConfig).catch(console.error);
             refreshPlexFavorites();
           }}
