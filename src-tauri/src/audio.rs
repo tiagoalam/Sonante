@@ -2,7 +2,7 @@ use crate::plex::{contains_plex_token, legacy_plex_image_ref, PlexImageRef};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -206,6 +206,21 @@ fn get_queue_cache_path() -> Option<PathBuf> {
     Some(base.join("sonante").join("queue_cache.json"))
 }
 
+const MAX_LOCAL_COVER_BYTES: usize = 8 * 1024 * 1024;
+const MAX_EMBEDDED_COVER_TRACK_PROBES: usize = 3;
+
+struct PictureChunk {
+    total_size: usize,
+    mime: Option<String>,
+    bytes: Vec<u8>,
+}
+
+enum PictureResponse {
+    Missing,
+    TooLarge,
+    Chunk(PictureChunk),
+}
+
 pub fn find_folder_cover_path(dir: &Path) -> Option<String> {
     let candidate_names = [
         "cover.jpg", "cover.jpeg", "cover.png",
@@ -218,7 +233,7 @@ pub fn find_folder_cover_path(dir: &Path) -> Option<String> {
         let p = dir.join(name);
         if p.is_file() {
             if let Ok(bytes) = std::fs::read(&p) {
-                if bytes.len() <= 8 * 1024 * 1024 {
+                if bytes.len() <= MAX_LOCAL_COVER_BYTES {
                     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("jpeg").to_lowercase();
                     let mime = if ext == "png" { "image/png" } else { "image/jpeg" };
                     let b64 = BASE64.encode(&bytes);
@@ -1096,6 +1111,227 @@ impl AudioEngine {
             .map_err(|e| format!("Falha ao concluir envio do comando ao MPD: {}", e))?;
 
         Self::read_mpd_response(&mut reader)
+    }
+
+    pub fn get_local_cover_at(
+        socket_path: &str,
+        library_dir: &Path,
+        path: &str,
+    ) -> Result<Option<String>, String> {
+        let relative = Path::new(path);
+        let full_path = if relative.is_absolute() {
+            relative.to_path_buf()
+        } else {
+            library_dir.join(relative)
+        };
+        let local_cover = if full_path.is_dir() {
+            find_folder_cover_path(&full_path)
+        } else {
+            full_path.parent().and_then(find_folder_cover_path)
+        };
+        if local_cover.is_some() {
+            return Ok(local_cover);
+        }
+        if relative.is_absolute() || path.is_empty() {
+            return Ok(None);
+        }
+        Self::embedded_cover_for_folder(socket_path, path)
+    }
+
+    fn embedded_cover_for_folder(
+        socket_path: &str,
+        folder: &str,
+    ) -> Result<Option<String>, String> {
+        let command = format!("lsinfo {}", Self::quote_mpd_argument(folder)?);
+        let lines = Self::send_command_to_socket(socket_path, &command)?;
+        let tracks = lines
+            .iter()
+            .filter_map(|line| line.strip_prefix("file: "))
+            .filter(|uri| Path::new(uri).parent() == Some(Path::new(folder)))
+            .take(MAX_EMBEDDED_COVER_TRACK_PROBES);
+        for uri in tracks {
+            if let Some(cover) = Self::embedded_cover_for_track(socket_path, uri)? {
+                return Ok(Some(cover));
+            }
+        }
+        Ok(None)
+    }
+
+    fn embedded_cover_for_track(socket_path: &str, uri: &str) -> Result<Option<String>, String> {
+        let mut image = Vec::new();
+        let mut expected_size = None;
+        let mut mime = None;
+        loop {
+            let response = Self::read_picture_chunk(socket_path, uri, image.len())?;
+            let chunk = match response {
+                PictureResponse::Missing | PictureResponse::TooLarge => return Ok(None),
+                PictureResponse::Chunk(chunk) => chunk,
+            };
+            if let Some(size) = expected_size {
+                if size != chunk.total_size {
+                    return Err("Tamanho da imagem MPD mudou entre chunks".into());
+                }
+            } else {
+                expected_size = Some(chunk.total_size);
+                image.reserve(chunk.total_size);
+            }
+            if let Some(kind) = chunk.mime {
+                if mime.as_ref().is_some_and(|previous| previous != &kind) {
+                    return Err("Tipo da imagem MPD mudou entre chunks".into());
+                }
+                mime = Some(kind);
+            }
+            if chunk.bytes.is_empty() {
+                return Err("Chunk vazio em imagem MPD incompleta".into());
+            }
+            image.extend_from_slice(&chunk.bytes);
+            if image.len() == chunk.total_size {
+                let kind = match Self::safe_picture_mime(mime.as_deref(), &image) {
+                    Some(kind) => kind,
+                    None => return Ok(None),
+                };
+                return Ok(Some(format!("data:{kind};base64,{}", BASE64.encode(image))));
+            }
+        }
+    }
+
+    fn safe_picture_mime(reported: Option<&str>, bytes: &[u8]) -> Option<&'static str> {
+        if let Some(kind) = reported {
+            return match kind {
+                "image/jpeg" => Some("image/jpeg"),
+                "image/png" => Some("image/png"),
+                "image/webp" => Some("image/webp"),
+                _ => None,
+            };
+        }
+        if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+            Some("image/jpeg")
+        } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            Some("image/png")
+        } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+            Some("image/webp")
+        } else {
+            None
+        }
+    }
+
+    fn read_picture_chunk(
+        socket_path: &str,
+        uri: &str,
+        offset: usize,
+    ) -> Result<PictureResponse, String> {
+        let stream = UnixStream::connect(socket_path)
+            .map_err(|e| format!("Falha ao conectar para readpicture: {e}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .map_err(|e| format!("Falha ao configurar leitura de readpicture: {e}"))?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .map_err(|e| format!("Falha ao configurar escrita de readpicture: {e}"))?;
+        let mut reader = BufReader::new(stream);
+        let welcome = Self::read_picture_line(&mut reader)?;
+        if !welcome.starts_with("OK MPD ") {
+            return Err("Handshake inválido de readpicture".into());
+        }
+        let command = format!("readpicture {} {offset}\n", Self::quote_mpd_argument(uri)?);
+        reader
+            .get_mut()
+            .write_all(command.as_bytes())
+            .map_err(|e| format!("Falha ao enviar readpicture: {e}"))?;
+        reader
+            .get_mut()
+            .flush()
+            .map_err(|e| format!("Falha ao concluir readpicture: {e}"))?;
+
+        let mut total_size = None;
+        let mut mime = None;
+        loop {
+            let line = Self::read_picture_line(&mut reader)?;
+            if line == "OK" {
+                return if total_size.unwrap_or(0) == 0 {
+                    Ok(PictureResponse::Missing)
+                } else {
+                    Err("Resposta readpicture sem bloco binário".into())
+                };
+            }
+            if line.starts_with("ACK") {
+                return Ok(PictureResponse::Missing);
+            }
+            if let Some(value) = line.strip_prefix("size: ") {
+                let size = value
+                    .parse::<usize>()
+                    .map_err(|_| "Tamanho inválido de readpicture".to_string())?;
+                if size > MAX_LOCAL_COVER_BYTES {
+                    return Ok(PictureResponse::TooLarge);
+                }
+                total_size = Some(size);
+            } else if let Some(value) = line.strip_prefix("type: ") {
+                mime = Some(value.to_ascii_lowercase());
+            } else if let Some(value) = line.strip_prefix("binary: ") {
+                let length = value
+                    .parse::<usize>()
+                    .map_err(|_| "Tamanho binário inválido de readpicture".to_string())?;
+                let size = total_size.ok_or("Resposta readpicture sem tamanho total")?;
+                if length > MAX_LOCAL_COVER_BYTES
+                    || offset.checked_add(length).is_none_or(|end| end > size)
+                {
+                    return Err("Bloco binário excede o tamanho declarado".into());
+                }
+                let mut bytes = vec![0; length];
+                reader
+                    .read_exact(&mut bytes)
+                    .map_err(|e| format!("Bloco binário readpicture incompleto: {e}"))?;
+                let mut separator = [0];
+                reader
+                    .read_exact(&mut separator)
+                    .map_err(|e| format!("Separador binário readpicture ausente: {e}"))?;
+                if separator != [b'\n'] {
+                    return Err("Separador binário readpicture inválido".into());
+                }
+                match Self::read_picture_line(&mut reader)?.as_str() {
+                    "OK" => {
+                        return Ok(PictureResponse::Chunk(PictureChunk {
+                            total_size: size,
+                            mime,
+                            bytes,
+                        }))
+                    }
+                    value if value.starts_with("ACK") => return Ok(PictureResponse::Missing),
+                    _ => return Err("Resposta final inválida de readpicture".into()),
+                }
+            }
+        }
+    }
+
+    fn read_picture_line<R: BufRead>(reader: &mut R) -> Result<String, String> {
+        const MAX_PICTURE_LINE_BYTES: usize = 4096;
+        let mut line = Vec::new();
+        loop {
+            let available = reader
+                .fill_buf()
+                .map_err(|e| format!("Falha ao ler cabeçalho readpicture: {e}"))?;
+            if available.is_empty() {
+                return Err("Conexão readpicture encerrada antes da resposta final".into());
+            }
+            let count = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|index| index + 1)
+                .unwrap_or(available.len());
+            if line.len() + count > MAX_PICTURE_LINE_BYTES {
+                return Err("Cabeçalho readpicture excede limite".into());
+            }
+            line.extend_from_slice(&available[..count]);
+            reader.consume(count);
+            if line.last() == Some(&b'\n') {
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                return String::from_utf8(line)
+                    .map_err(|_| "Cabeçalho readpicture não é UTF-8".into());
+            }
+        }
     }
 
     fn read_mpd_response<R: BufRead>(reader: &mut R) -> Result<Vec<String>, String> {
@@ -2164,6 +2400,322 @@ mod tests {
             std::fs::remove_file(path).unwrap();
         });
         (socket_path, server)
+    }
+
+    fn cover_test_dir() -> PathBuf {
+        let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("sonante-cover-{}-{id}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    fn fake_cover_mpd(responses: Vec<(String, Vec<u8>)>) -> (String, thread::JoinHandle<()>) {
+        let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("sonante-cover-{}-{id}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let socket_path = path.to_string_lossy().into_owned();
+        let server = thread::spawn(move || {
+            for (expected, response) in responses {
+                let started = std::time::Instant::now();
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && started.elapsed() < Duration::from_secs(3) =>
+                        {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("Conexão MPD simulada ausente: {error}"),
+                    }
+                };
+                stream.write_all(b"OK MPD 0.23.5\n").unwrap();
+                let mut command = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut command)
+                    .unwrap();
+                assert_eq!(command, format!("{expected}\n"));
+                stream.write_all(&response).unwrap();
+            }
+            std::fs::remove_file(path).unwrap();
+        });
+        (socket_path, server)
+    }
+
+    fn picture_response(size: usize, mime: Option<&str>, bytes: &[u8]) -> Vec<u8> {
+        let mut response = format!("size: {size}\n").into_bytes();
+        if let Some(kind) = mime {
+            response.extend_from_slice(format!("type: {kind}\n").as_bytes());
+        }
+        response.extend_from_slice(format!("binary: {}\n", bytes.len()).as_bytes());
+        response.extend_from_slice(bytes);
+        response.extend_from_slice(b"\nOK\n");
+        response
+    }
+
+    fn lsinfo_files(folder: &str, names: &[&str]) -> Vec<u8> {
+        let mut response = String::new();
+        for name in names {
+            response.push_str(&format!("file: {folder}/{name}\n"));
+        }
+        response.push_str("OK\n");
+        response.into_bytes()
+    }
+
+    #[test]
+    fn local_cover_has_priority_without_contacting_mpd() {
+        let dir = cover_test_dir();
+        let folder = dir.join("Music");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("cover.jpg"), b"local cover").unwrap();
+        let cover =
+            AudioEngine::get_local_cover_at("/nonexistent/mpd.socket", &dir, "Music").unwrap();
+        assert_eq!(
+            cover,
+            Some(format!(
+                "data:image/jpeg;base64,{}",
+                BASE64.encode(b"local cover")
+            ))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn embedded_jpeg_png_and_webp_are_returned_as_safe_data_uris() {
+        for (kind, bytes) in [
+            ("image/jpeg", b"\xff\xd8\xffJPEG".as_slice()),
+            ("image/png", b"\x89PNG\r\n\x1a\nPNG".as_slice()),
+            ("image/webp", b"RIFF1234WEBPdata".as_slice()),
+        ] {
+            let dir = cover_test_dir();
+            let (socket, server) = fake_cover_mpd(vec![
+                (
+                    "lsinfo \"Music\"".into(),
+                    lsinfo_files("Music", &["one.flac"]),
+                ),
+                (
+                    "readpicture \"Music/one.flac\" 0".into(),
+                    picture_response(bytes.len(), Some(kind), bytes),
+                ),
+            ]);
+            let cover = AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap();
+            assert_eq!(
+                cover,
+                Some(format!("data:{kind};base64,{}", BASE64.encode(bytes)))
+            );
+            server.join().unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_picture_and_ack_try_the_next_direct_track() {
+        let dir = cover_test_dir();
+        let jpeg = b"\xff\xd8\xffnext";
+        let (socket, server) = fake_cover_mpd(vec![
+            (
+                "lsinfo \"Music\"".into(),
+                lsinfo_files("Music", &["one.flac", "two.flac"]),
+            ),
+            ("readpicture \"Music/one.flac\" 0".into(), b"OK\n".to_vec()),
+            (
+                "readpicture \"Music/two.flac\" 0".into(),
+                picture_response(jpeg.len(), Some("image/jpeg"), jpeg),
+            ),
+        ]);
+        assert_eq!(
+            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            Some(format!("data:image/jpeg;base64,{}", BASE64.encode(jpeg)))
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let dir = cover_test_dir();
+        let (socket, server) = fake_cover_mpd(vec![
+            (
+                "lsinfo \"Music\"".into(),
+                lsinfo_files("Music", &["one.flac"]),
+            ),
+            (
+                "readpicture \"Music/one.flac\" 0".into(),
+                b"ACK [5@0] {readpicture} unsupported\n".to_vec(),
+            ),
+        ]);
+        assert_eq!(
+            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            None
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn embedded_cover_probes_at_most_three_direct_tracks() {
+        let dir = cover_test_dir();
+        let mut responses = vec![(
+            "lsinfo \"Music\"".into(),
+            lsinfo_files("Music", &["1.flac", "2.flac", "3.flac", "4.flac"]),
+        )];
+        for name in ["1.flac", "2.flac", "3.flac"] {
+            responses.push((format!("readpicture \"Music/{name}\" 0"), b"OK\n".to_vec()));
+        }
+        let (socket, server) = fake_cover_mpd(responses);
+        assert_eq!(
+            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            None
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_picture_is_rejected_before_binary_download() {
+        let dir = cover_test_dir();
+        let (socket, server) = fake_cover_mpd(vec![
+            (
+                "lsinfo \"Music\"".into(),
+                lsinfo_files("Music", &["one.flac"]),
+            ),
+            (
+                "readpicture \"Music/one.flac\" 0".into(),
+                format!("size: {}\n", MAX_LOCAL_COVER_BYTES + 1).into_bytes(),
+            ),
+        ]);
+        assert_eq!(
+            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            None
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn picture_chunks_are_joined_at_exact_offsets() {
+        let dir = cover_test_dir();
+        let jpeg = b"\xff\xd8\xff12345";
+        let (socket, server) = fake_cover_mpd(vec![
+            (
+                "lsinfo \"Music\"".into(),
+                lsinfo_files("Music", &["one.flac"]),
+            ),
+            (
+                "readpicture \"Music/one.flac\" 0".into(),
+                picture_response(jpeg.len(), Some("image/jpeg"), &jpeg[..3]),
+            ),
+            (
+                "readpicture \"Music/one.flac\" 3".into(),
+                picture_response(jpeg.len(), Some("image/jpeg"), &jpeg[3..]),
+            ),
+        ]);
+        assert_eq!(
+            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            Some(format!("data:image/jpeg;base64,{}", BASE64.encode(jpeg)))
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_or_truncated_picture_fails_without_panicking() {
+        for response in [
+            b"size: 2\nbinary: 3\n".to_vec(),
+            b"size: 4\nbinary: 4\n\xff\xd8".to_vec(),
+            b"size: 999999999999999999999999999999\n".to_vec(),
+        ] {
+            let dir = cover_test_dir();
+            let (socket, server) = fake_cover_mpd(vec![
+                (
+                    "lsinfo \"Music\"".into(),
+                    lsinfo_files("Music", &["one.flac"]),
+                ),
+                ("readpicture \"Music/one.flac\" 0".into(), response),
+            ]);
+            assert!(AudioEngine::get_local_cover_at(&socket, &dir, "Music").is_err());
+            server.join().unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn unknown_mime_is_not_embedded_in_data_uri() {
+        let dir = cover_test_dir();
+        let (socket, server) = fake_cover_mpd(vec![
+            (
+                "lsinfo \"Music\"".into(),
+                lsinfo_files("Music", &["one.flac"]),
+            ),
+            (
+                "readpicture \"Music/one.flac\" 0".into(),
+                picture_response(4, Some("image/svg+xml"), b"<svg"),
+            ),
+        ]);
+        assert_eq!(
+            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            None
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_mime_uses_known_image_signature_only() {
+        let dir = cover_test_dir();
+        let jpeg = b"\xff\xd8\xffimage";
+        let (socket, server) = fake_cover_mpd(vec![
+            (
+                "lsinfo \"Music\"".into(),
+                lsinfo_files("Music", &["one.flac"]),
+            ),
+            (
+                "readpicture \"Music/one.flac\" 0".into(),
+                picture_response(jpeg.len(), None, jpeg),
+            ),
+        ]);
+        assert_eq!(
+            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            Some(format!("data:image/jpeg;base64,{}", BASE64.encode(jpeg)))
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn picture_uri_with_spaces_and_quotes_is_escaped() {
+        let dir = cover_test_dir();
+        let folder = "Music \"Mix\"";
+        let jpeg = b"\xff\xd8\xffyes";
+        let (socket, server) = fake_cover_mpd(vec![
+            (
+                "lsinfo \"Music \\\"Mix\\\"\"".into(),
+                lsinfo_files(folder, &["01 song.flac"]),
+            ),
+            (
+                "readpicture \"Music \\\"Mix\\\"/01 song.flac\" 0".into(),
+                picture_response(jpeg.len(), Some("image/jpeg"), jpeg),
+            ),
+        ]);
+        assert!(AudioEngine::get_local_cover_at(&socket, &dir, folder)
+            .unwrap()
+            .is_some());
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn folder_without_direct_tracks_has_no_embedded_cover() {
+        let dir = cover_test_dir();
+        let (socket, server) = fake_cover_mpd(vec![(
+            "lsinfo \"Music\"".into(),
+            b"directory: Music/Sub\nfile: Music/Sub/deep.flac\nOK\n".to_vec(),
+        )]);
+        assert_eq!(
+            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            None
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

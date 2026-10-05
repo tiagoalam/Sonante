@@ -906,22 +906,14 @@ async fn play_playlist(
 }
 
 #[tauri::command]
-fn get_local_cover(path: String) -> Option<String> {
+async fn get_local_cover(path: String) -> Result<Option<String>, String> {
     let lib_dir = supervisor::MpdSupervisor::library_dir();
-    let p = std::path::Path::new(&path);
-    let full_path = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        lib_dir.join(p)
-    };
-
-    if full_path.is_dir() {
-        audio::find_folder_cover_path(&full_path)
-    } else if let Some(parent) = full_path.parent() {
-        audio::find_folder_cover_path(parent)
-    } else {
-        None
-    }
+    let socket_path = MpdSupervisor::socket_path().to_string_lossy().into_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        AudioEngine::get_local_cover_at(&socket_path, &lib_dir, &path)
+    })
+    .await
+    .map_err(|e| format!("Falha na tarefa de capa local: {e}"))?
 }
 
 #[tauri::command]

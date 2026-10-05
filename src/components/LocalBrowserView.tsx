@@ -284,7 +284,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       setLoadingFolders(true);
       Promise.all([
         audioService.listLocalDirectory(currentPath),
-        audioService.getLocalCover(currentPath),
+        audioService.getLocalCover(currentPath).catch((error) => {
+          console.error("Falha ao carregar capa da pasta local:", error);
+          return null;
+        }),
       ])
         .then(([data, cov]) => {
           setItems(data);
