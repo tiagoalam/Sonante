@@ -703,7 +703,7 @@ impl AudioEngine {
             }
             let suffix = title[index..].trim_start();
             let lower = suffix.to_ascii_lowercase();
-            let Some(after_prefix) = ["disc", "disk", "cd"]
+            let Some(after_prefix) = ["disco", "disc", "disk", "cd"]
                 .iter()
                 .find_map(|prefix| lower.strip_prefix(prefix))
             else {
@@ -747,7 +747,13 @@ impl AudioEngine {
             if number != disc_number || number == 0 {
                 return None;
             }
-            let base = title[..index].trim();
+            let base = title[..index].trim_end();
+            let base = match base.char_indices().next_back() {
+                Some((separator_index, ',' | '-' | '–' | '—' | ':')) => {
+                    base[..separator_index].trim_end()
+                }
+                _ => base,
+            };
             return (!base.is_empty()).then(|| base.to_string());
         }
         Some(title.to_string())
@@ -2908,6 +2914,16 @@ mod tests {
             ("Album Disk 1", 1),
             ("Album Disc-2", 2),
             ("Album Disk_03", 3),
+            ("Album Disco 1", 1),
+            ("Album Disco2", 2),
+            ("Album Disco-1", 1),
+            ("Album Disco_1", 1),
+            ("Album Disco.1", 1),
+            ("Album, Disco 1", 1),
+            ("Album - Disco 1", 1),
+            ("Album – Disco 2", 2),
+            ("Album — Disco 2", 2),
+            ("Album: Disco 1", 1),
             ("Album CD.2 (Dub Wise)", 2),
             ("Album CD 2 - Bonus", 2),
             ("Album Disc 3 (Live)", 3),
@@ -2920,6 +2936,7 @@ mod tests {
             );
         }
         assert_eq!(AudioEngine::multidisc_base_title("Album CD1", 2), None);
+        assert_eq!(AudioEngine::multidisc_base_title("Album Disco 2", 1), None);
         assert_eq!(
             AudioEngine::multidisc_base_title("CD Collection", 1).as_deref(),
             Some("CD Collection")
@@ -2927,6 +2944,56 @@ mod tests {
         assert_eq!(
             AudioEngine::multidisc_base_title("Compact Disc", 1).as_deref(),
             Some("Compact Disc")
+        );
+        for title in ["Disco Music", "Disco Inferno", "Album Discography"] {
+            assert_eq!(
+                AudioEngine::multidisc_base_title(title, 1).as_deref(),
+                Some(title),
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn portuguese_disco_suffix_consolidates_the_real_cd_layout() {
+        let map = consolidated_album_tracks(&[
+            (
+                "Brasilidades/Legião Urbana/Música P_Acampamentos/CD1/a.flac",
+                Some("Música P/Acampamentos, Disco 1"),
+                Some("Legião Urbana"),
+                None,
+            ),
+            (
+                "Brasilidades/Legião Urbana/Música P_Acampamentos/CD2/b.flac",
+                Some("Música P/Acampamentos, Disco 2"),
+                Some("Legião Urbana"),
+                None,
+            ),
+        ]);
+        let root = "Brasilidades/Legião Urbana/Música P_Acampamentos";
+        assert_eq!(map.len(), 1);
+        let album = &map[&album_id(root, "Música P/Acampamentos")];
+        assert_eq!(album.title, "Música P/Acampamentos");
+        assert_eq!(album.track_count, 2);
+        assert_eq!(album.discs.len(), 2);
+        assert_eq!(
+            album
+                .discs
+                .iter()
+                .map(|disc| (disc.number, disc.label.as_str(), disc.folder_path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    1,
+                    "CD1",
+                    "Brasilidades/Legião Urbana/Música P_Acampamentos/CD1"
+                ),
+                (
+                    2,
+                    "CD2",
+                    "Brasilidades/Legião Urbana/Música P_Acampamentos/CD2"
+                ),
+            ]
         );
     }
 
