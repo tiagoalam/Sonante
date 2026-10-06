@@ -359,13 +359,41 @@ fn toggle_playback(state: State<AudioState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn next_track(state: State<AudioState>) -> Result<(), String> {
-    state.0.lock().unwrap().next()
+fn next_track(
+    config_state: State<ConfigState>,
+    audio_state: State<AudioState>,
+) -> Result<(), String> {
+    let is_shared = {
+        let config = config_state
+            .0
+            .lock()
+            .map_err(|e| format!("Falha ao acessar configuração durante Next: {}", e))?;
+        is_shared_output(&config)
+    };
+    audio_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar reprodução durante Next: {}", e))?
+        .next(is_shared)
 }
 
 #[tauri::command]
-fn previous_track(state: State<AudioState>) -> Result<(), String> {
-    state.0.lock().unwrap().previous()
+fn previous_track(
+    config_state: State<ConfigState>,
+    audio_state: State<AudioState>,
+) -> Result<(), String> {
+    let is_shared = {
+        let config = config_state
+            .0
+            .lock()
+            .map_err(|e| format!("Falha ao acessar configuração durante Previous: {}", e))?;
+        is_shared_output(&config)
+    };
+    audio_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar reprodução durante Previous: {}", e))?
+        .previous(is_shared)
 }
 
 #[tauri::command]

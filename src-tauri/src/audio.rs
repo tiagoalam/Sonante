@@ -292,10 +292,13 @@ fn explicit_playback_command(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct SeekPlaybackStatus {
+struct PlaybackProgressStatus {
     state: PlaybackState,
     elapsed: f64,
 }
+
+const SHARED_PROGRESS_SAMPLE_DELAY: Duration = Duration::from_millis(80);
+const SHARED_MIN_PROGRESS: f64 = 0.02;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeviceSwitchSnapshot {
@@ -2237,21 +2240,108 @@ impl AudioEngine {
         }
     }
 
-    pub fn next(&mut self) -> Result<(), String> {
+    fn change_track_with<F, S>(
+        &mut self,
+        command: &str,
+        is_shared: bool,
+        send_command: &mut F,
+        sleep: &mut S,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&str) -> Result<Vec<String>, String>,
+        S: FnMut(Duration),
+    {
         self.ensure_startup_queue_ready()?;
-        self.send_command("next")?;
+        let pre_state = if is_shared {
+            Some(Self::parse_progress_status(send_command("status")?)?.state)
+        } else {
+            None
+        };
+        send_command(command)?;
         self.restored_resume = None;
+        if pre_state != Some(PlaybackState::Playing) {
+            return Ok(());
+        }
+
+        sleep(SHARED_PROGRESS_SAMPLE_DELAY);
+        let first = Self::parse_progress_status(send_command("status")?)?;
+        sleep(SHARED_PROGRESS_SAMPLE_DELAY);
+        let second = Self::parse_progress_status(send_command("status")?)?;
+        Self::validate_shared_playing_samples(command, first, second)?;
+        if second.elapsed - first.elapsed >= SHARED_MIN_PROGRESS {
+            return Ok(());
+        }
+        Self::recover_shared_stall(command, send_command, sleep)
+    }
+
+    pub fn next(&mut self, is_shared: bool) -> Result<(), String> {
+        let socket_path = self.socket_path.clone();
+        let mut send_command = |command: &str| Self::send_command_to_socket(&socket_path, command);
+        self.change_track_with(
+            "next",
+            is_shared,
+            &mut send_command,
+            &mut std::thread::sleep,
+        )
+    }
+
+    pub fn previous(&mut self, is_shared: bool) -> Result<(), String> {
+        let socket_path = self.socket_path.clone();
+        let mut send_command = |command: &str| Self::send_command_to_socket(&socket_path, command);
+        self.change_track_with(
+            "previous",
+            is_shared,
+            &mut send_command,
+            &mut std::thread::sleep,
+        )
+    }
+
+    fn validate_shared_playing_samples(
+        operation: &str,
+        first: PlaybackProgressStatus,
+        second: PlaybackProgressStatus,
+    ) -> Result<(), String> {
+        if first.state == PlaybackState::Stopped || second.state == PlaybackState::Stopped {
+            return Err(format!(
+                "O MPD parou inesperadamente após {operation} em Shared."
+            ));
+        }
+        if first.state != PlaybackState::Playing || second.state != PlaybackState::Playing {
+            return Err(format!(
+                "O MPD deixou o estado de reprodução após {operation} em Shared."
+            ));
+        }
         Ok(())
     }
 
-    pub fn previous(&mut self) -> Result<(), String> {
-        self.ensure_startup_queue_ready()?;
-        self.send_command("previous")?;
-        self.restored_resume = None;
+    fn recover_shared_stall<F, S>(
+        operation: &str,
+        send_command: &mut F,
+        sleep: &mut S,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&str) -> Result<Vec<String>, String>,
+        S: FnMut(Duration),
+    {
+        send_command("pause 1").map_err(|error| {
+            format!("Falha ao pausar para recuperar {operation} em Shared: {error}")
+        })?;
+        send_command("pause 0").map_err(|error| {
+            format!("Falha ao retomar após recuperar {operation} em Shared: {error}")
+        })?;
+        let recovery_first = Self::parse_progress_status(send_command("status")?)?;
+        sleep(SHARED_PROGRESS_SAMPLE_DELAY);
+        let recovery_second = Self::parse_progress_status(send_command("status")?)?;
+        Self::validate_shared_playing_samples(operation, recovery_first, recovery_second)?;
+        if recovery_second.elapsed - recovery_first.elapsed < SHARED_MIN_PROGRESS {
+            return Err(format!(
+                "A saída Shared permaneceu congelada após uma tentativa de pause/resume para {operation}."
+            ));
+        }
         Ok(())
     }
 
-    fn parse_seek_status(lines: Vec<String>) -> Result<SeekPlaybackStatus, String> {
+    fn parse_progress_status(lines: Vec<String>) -> Result<PlaybackProgressStatus, String> {
         let mut state = None;
         let mut elapsed = None;
         for line in lines {
@@ -2263,9 +2353,17 @@ impl AudioEngine {
                 }
             }
         }
-        Ok(SeekPlaybackStatus {
-            state: state.ok_or_else(|| "Status MPD sem estado durante seek.".to_string())?,
-            elapsed: elapsed.unwrap_or(0.0),
+        let elapsed: f64 = elapsed.unwrap_or(0.0);
+        if !elapsed.is_finite() || elapsed < 0.0 {
+            return Err(
+                "Status MPD com elapsed inválido durante verificação de progresso.".to_string(),
+            );
+        }
+        Ok(PlaybackProgressStatus {
+            state: state.ok_or_else(|| {
+                "Status MPD sem estado durante verificação de progresso.".to_string()
+            })?,
+            elapsed,
         })
     }
 
@@ -2299,7 +2397,7 @@ impl AudioEngine {
         }
 
         let pre_state = if is_shared {
-            Some(Self::parse_seek_status(send_command("status")?)?.state)
+            Some(Self::parse_progress_status(send_command("status")?)?.state)
         } else {
             None
         };
@@ -2308,13 +2406,11 @@ impl AudioEngine {
             return Ok(());
         }
 
-        const SAMPLE_DELAY: Duration = Duration::from_millis(80);
-        const MIN_PROGRESS: f64 = 0.02;
         const TARGET_TOLERANCE: f64 = 2.0;
-        sleep(SAMPLE_DELAY);
-        let first = Self::parse_seek_status(send_command("status")?)?;
-        sleep(SAMPLE_DELAY);
-        let second = Self::parse_seek_status(send_command("status")?)?;
+        sleep(SHARED_PROGRESS_SAMPLE_DELAY);
+        let first = Self::parse_progress_status(send_command("status")?)?;
+        sleep(SHARED_PROGRESS_SAMPLE_DELAY);
+        let second = Self::parse_progress_status(send_command("status")?)?;
         if first.state == PlaybackState::Stopped || second.state == PlaybackState::Stopped {
             return Err("O MPD parou inesperadamente após o seek Shared.".to_string());
         }
@@ -2323,27 +2419,10 @@ impl AudioEngine {
         }
         let near_target = (first.elapsed - seconds).abs() <= TARGET_TOLERANCE
             && (second.elapsed - seconds).abs() <= TARGET_TOLERANCE;
-        if !near_target || second.elapsed - first.elapsed >= MIN_PROGRESS {
+        if !near_target || second.elapsed - first.elapsed >= SHARED_MIN_PROGRESS {
             return Ok(());
         }
-
-        send_command("pause 1")
-            .map_err(|error| format!("Falha ao pausar para recuperar o seek Shared: {}", error))?;
-        send_command("pause 0")
-            .map_err(|error| format!("Falha ao retomar após o seek Shared: {}", error))?;
-        let recovery_first = Self::parse_seek_status(send_command("status")?)?;
-        sleep(SAMPLE_DELAY);
-        let recovery_second = Self::parse_seek_status(send_command("status")?)?;
-        if recovery_first.state != PlaybackState::Playing
-            || recovery_second.state != PlaybackState::Playing
-            || recovery_second.elapsed - recovery_first.elapsed < MIN_PROGRESS
-        {
-            return Err(
-                "A saída Shared permaneceu congelada após uma tentativa de pause/resume."
-                    .to_string(),
-            );
-        }
-        Ok(())
+        Self::recover_shared_stall("o seek", send_command, sleep)
     }
 
     pub fn seek(&mut self, seconds: f64, is_shared: bool) -> Result<(), String> {
@@ -2746,6 +2825,28 @@ mod tests {
         let mut sleeps = Vec::new();
         let result = engine.seek_with(
             seconds,
+            is_shared,
+            &mut |command| {
+                commands.push(command.to_string());
+                responses.pop_front().expect("resposta MPD simulada ausente")
+            },
+            &mut |duration| sleeps.push(duration),
+        );
+        assert!(responses.is_empty(), "respostas MPD simuladas não consumidas");
+        (result, commands, sleeps)
+    }
+
+    fn scripted_track_change(
+        engine: &mut AudioEngine,
+        command: &str,
+        is_shared: bool,
+        responses: Vec<Result<Vec<String>, String>>,
+    ) -> (Result<(), String>, Vec<String>, Vec<Duration>) {
+        let mut responses = VecDeque::from(responses);
+        let mut commands = Vec::new();
+        let mut sleeps = Vec::new();
+        let result = engine.change_track_with(
+            command,
             is_shared,
             &mut |command| {
                 commands.push(command.to_string());
@@ -4882,6 +4983,196 @@ mod tests {
     }
 
     #[test]
+    fn direct_next_and_previous_send_only_the_transport_command() {
+        for command in ["next", "previous"] {
+            let mut engine = engine_with_track("local/faixa.flac");
+            let (result, commands, sleeps) =
+                scripted_track_change(&mut engine, command, false, vec![Ok(vec![])]);
+
+            result.unwrap();
+            assert_eq!(commands, vec![command]);
+            assert!(sleeps.is_empty());
+        }
+    }
+
+    #[test]
+    fn shared_playing_track_change_with_progress_needs_no_recovery() {
+        let mut engine = engine_with_track("local/faixa.flac");
+        let (result, commands, sleeps) = scripted_track_change(
+            &mut engine,
+            "next",
+            true,
+            vec![
+                seek_status("play", 41.0),
+                Ok(vec![]),
+                seek_status("play", 0.10),
+                seek_status("play", 0.19),
+            ],
+        );
+
+        result.unwrap();
+        assert_eq!(commands, vec!["status", "next", "status", "status"]);
+        assert_eq!(sleeps, vec![SHARED_PROGRESS_SAMPLE_DELAY; 2]);
+    }
+
+    #[test]
+    fn shared_stalled_next_and_previous_recover_once() {
+        for command in ["next", "previous"] {
+            let mut engine = engine_with_track("local/faixa.flac");
+            let (result, commands, sleeps) = scripted_track_change(
+                &mut engine,
+                command,
+                true,
+                vec![
+                    seek_status("play", 41.0),
+                    Ok(vec![]),
+                    seek_status("play", 0.10),
+                    seek_status("play", 0.10),
+                    Ok(vec![]),
+                    Ok(vec![]),
+                    seek_status("play", 0.10),
+                    seek_status("play", 0.19),
+                ],
+            );
+
+            result.unwrap();
+            assert_eq!(
+                commands,
+                vec![
+                    "status", command, "status", "status", "pause 1", "pause 0", "status",
+                    "status",
+                ]
+            );
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|candidate| candidate.as_str() == "pause 1")
+                    .count(),
+                1
+            );
+            assert_eq!(sleeps, vec![SHARED_PROGRESS_SAMPLE_DELAY; 3]);
+        }
+    }
+
+    #[test]
+    fn shared_track_change_still_frozen_after_recovery_is_an_error() {
+        let mut engine = engine_with_track("local/faixa.flac");
+        let (result, commands, _) = scripted_track_change(
+            &mut engine,
+            "next",
+            true,
+            vec![
+                seek_status("play", 41.0),
+                Ok(vec![]),
+                seek_status("play", 0.10),
+                seek_status("play", 0.10),
+                Ok(vec![]),
+                Ok(vec![]),
+                seek_status("play", 0.10),
+                seek_status("play", 0.10),
+            ],
+        );
+
+        assert!(result.unwrap_err().contains("permaneceu congelada"));
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|candidate| candidate.as_str() == "pause 1")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn shared_paused_or_stopped_track_change_does_not_force_playback() {
+        for (command, state) in [("next", "pause"), ("previous", "stop")] {
+            let mut engine = engine_with_track("local/faixa.flac");
+            let (result, commands, sleeps) = scripted_track_change(
+                &mut engine,
+                command,
+                true,
+                vec![seek_status(state, 12.0), Ok(vec![])],
+            );
+
+            result.unwrap();
+            assert_eq!(commands, vec!["status", command]);
+            assert!(sleeps.is_empty());
+            assert!(!commands.iter().any(|candidate| candidate.starts_with("pause")));
+        }
+    }
+
+    #[test]
+    fn shared_track_change_propagates_pause_and_resume_failures() {
+        for (responses, failed_command) in [
+            (
+                vec![
+                    seek_status("play", 41.0),
+                    Ok(vec![]),
+                    seek_status("play", 0.10),
+                    seek_status("play", 0.10),
+                    Err("ACK simulado no pause".into()),
+                ],
+                "pause 1",
+            ),
+            (
+                vec![
+                    seek_status("play", 41.0),
+                    Ok(vec![]),
+                    seek_status("play", 0.10),
+                    seek_status("play", 0.10),
+                    Ok(vec![]),
+                    Err("ACK simulado no resume".into()),
+                ],
+                "pause 0",
+            ),
+        ] {
+            let mut engine = engine_with_track("local/faixa.flac");
+            let (result, commands, _) =
+                scripted_track_change(&mut engine, "previous", true, responses);
+
+            assert!(result.is_err());
+            assert_eq!(commands.last().map(String::as_str), Some(failed_command));
+        }
+    }
+
+    #[test]
+    fn shared_track_change_that_stops_is_an_error_without_recovery() {
+        let mut engine = engine_with_track("local/faixa.flac");
+        let (result, commands, _) = scripted_track_change(
+            &mut engine,
+            "next",
+            true,
+            vec![
+                seek_status("play", 41.0),
+                Ok(vec![]),
+                seek_status("stop", 0.0),
+                seek_status("stop", 0.0),
+            ],
+        );
+
+        assert!(result.unwrap_err().contains("parou inesperadamente"));
+        assert!(!commands.iter().any(|candidate| candidate.starts_with("pause")));
+    }
+
+    #[test]
+    fn shared_track_change_rejects_invalid_elapsed() {
+        let mut engine = engine_with_track("local/faixa.flac");
+        let (result, commands, _) = scripted_track_change(
+            &mut engine,
+            "next",
+            true,
+            vec![
+                seek_status("play", 41.0),
+                Ok(vec![]),
+                seek_status("play", f64::NAN),
+            ],
+        );
+
+        assert!(result.unwrap_err().contains("elapsed inválido"));
+        assert_eq!(commands, vec!["status", "next", "status"]);
+    }
+
+    #[test]
     fn direct_seek_never_polls_or_recovers() {
         let mut engine = engine_with_track("local/faixa.flac");
         let (result, commands, sleeps) = scripted_seek(&mut engine, 114.0, false, vec![Ok(vec![])]);
@@ -5036,8 +5327,8 @@ mod tests {
             engine.socket_path = socket;
             engine.restored_resume = Some(PlaybackResumeSnapshot { queue_index: 0, elapsed: 9.0, state: PlaybackState::Paused });
             match command {
-                "next" => engine.next().unwrap(),
-                "previous" => engine.previous().unwrap(),
+                "next" => engine.next(false).unwrap(),
+                "previous" => engine.previous(false).unwrap(),
                 _ => engine.play_index(0).unwrap(),
             }
             assert!(engine.restored_resume.is_none());

@@ -1,4 +1,5 @@
 use crate::audio::{AudioEngine, AudioState, CurrentMedia, PlaybackStatus as AudioPlaybackStatus};
+use crate::{is_shared_output, ConfigState};
 use mpris_server::{
     zbus::{self, fdo},
     LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, Property, RootInterface,
@@ -174,8 +175,8 @@ trait BasicMediaControls {
     fn play(&mut self) -> Result<(), String>;
     fn pause(&mut self) -> Result<(), String>;
     fn play_pause(&mut self) -> Result<(), String>;
-    fn next(&mut self) -> Result<(), String>;
-    fn previous(&mut self) -> Result<(), String>;
+    fn next(&mut self, is_shared: bool) -> Result<(), String>;
+    fn previous(&mut self, is_shared: bool) -> Result<(), String>;
 }
 
 impl BasicMediaControls for AudioEngine {
@@ -191,25 +192,26 @@ impl BasicMediaControls for AudioEngine {
         self.toggle_play_pause()
     }
 
-    fn next(&mut self) -> Result<(), String> {
-        AudioEngine::next(self)
+    fn next(&mut self, is_shared: bool) -> Result<(), String> {
+        AudioEngine::next(self, is_shared)
     }
 
-    fn previous(&mut self) -> Result<(), String> {
-        AudioEngine::previous(self)
+    fn previous(&mut self, is_shared: bool) -> Result<(), String> {
+        AudioEngine::previous(self, is_shared)
     }
 }
 
 fn apply_basic_action(
     controls: &mut impl BasicMediaControls,
     action: BasicMediaAction,
+    is_shared: bool,
 ) -> Result<(), String> {
     match action {
         BasicMediaAction::Play => controls.play(),
         BasicMediaAction::Pause => controls.pause(),
         BasicMediaAction::PlayPause => controls.play_pause(),
-        BasicMediaAction::Next => controls.next(),
-        BasicMediaAction::Previous => controls.previous(),
+        BasicMediaAction::Next => controls.next(is_shared),
+        BasicMediaAction::Previous => controls.previous(is_shared),
     }
 }
 
@@ -284,13 +286,25 @@ impl SonanteMpris {
     async fn control(&self, action: BasicMediaAction) -> fdo::Result<()> {
         let app = self.app.clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let is_shared =
+                if matches!(action, BasicMediaAction::Next | BasicMediaAction::Previous) {
+                    let config_state = app.try_state::<ConfigState>().ok_or_else(|| {
+                        "Configuração indisponível para o controle MPRIS.".to_string()
+                    })?;
+                    let config = config_state.0.lock().map_err(|error| {
+                        format!("Falha ao acessar configuração via MPRIS: {error}")
+                    })?;
+                    is_shared_output(&config)
+                } else {
+                    false
+                };
             let state = app
                 .try_state::<AudioState>()
                 .ok_or_else(|| "Estado de áudio indisponível para o controle MPRIS.".to_string())?;
             let mut audio = state.0.lock().map_err(|error| {
                 format!("Falha ao acessar o estado de áudio via MPRIS: {error}")
             })?;
-            apply_basic_action(&mut *audio, action)
+            apply_basic_action(&mut *audio, action, is_shared)
         })
         .await
         .map_err(|error| fdo::Error::Failed(format!("Falha na tarefa MPRIS: {error}")))?
@@ -1043,6 +1057,7 @@ mod tests {
     #[derive(Default)]
     struct FakeControls {
         actions: Vec<BasicMediaAction>,
+        shared_transport: Vec<(BasicMediaAction, bool)>,
         failure: Option<String>,
     }
 
@@ -1069,11 +1084,15 @@ mod tests {
             self.record(BasicMediaAction::PlayPause)
         }
 
-        fn next(&mut self) -> Result<(), String> {
+        fn next(&mut self, is_shared: bool) -> Result<(), String> {
+            self.shared_transport
+                .push((BasicMediaAction::Next, is_shared));
             self.record(BasicMediaAction::Next)
         }
 
-        fn previous(&mut self) -> Result<(), String> {
+        fn previous(&mut self, is_shared: bool) -> Result<(), String> {
+            self.shared_transport
+                .push((BasicMediaAction::Previous, is_shared));
             self.record(BasicMediaAction::Previous)
         }
     }
@@ -1090,21 +1109,29 @@ mod tests {
         ];
 
         for action in actions {
-            apply_basic_action(&mut controls, action).expect("ação simulada deve funcionar");
+            apply_basic_action(&mut controls, action, true).expect("ação simulada deve funcionar");
         }
 
         assert_eq!(controls.actions, actions);
+        assert_eq!(
+            controls.shared_transport,
+            vec![
+                (BasicMediaAction::Next, true),
+                (BasicMediaAction::Previous, true),
+            ]
+        );
     }
 
     #[test]
     fn basic_action_errors_are_not_reported_as_success() {
         let mut controls = FakeControls {
             actions: Vec::new(),
+            shared_transport: Vec::new(),
             failure: Some("ACK simulado".into()),
         };
 
         assert_eq!(
-            apply_basic_action(&mut controls, BasicMediaAction::Next),
+            apply_basic_action(&mut controls, BasicMediaAction::Next, true),
             Err("ACK simulado".into())
         );
     }
