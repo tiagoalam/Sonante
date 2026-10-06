@@ -163,6 +163,8 @@
     "albumsCount_one": "{{count}} álbum disponível",
     "albumsCount_other": "{{count}} álbuns disponíveis",
     "root": "Raiz da Biblioteca",
+    "libraryScope": "Biblioteca",
+    "allLibraries": "Todas",
     "filterPlaceholder": "Filtrar por álbum ou artista...",
     "tabAlbums": "Álbuns",
     "tabFolders": "Pastas",

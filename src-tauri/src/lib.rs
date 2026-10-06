@@ -1520,11 +1520,24 @@ fn rollback_first_run_completion(
 }
 
 #[tauri::command]
-async fn get_local_albums(state: State<'_, AudioState>) -> Result<Vec<audio::LocalAlbum>, String> {
+async fn get_local_albums(
+    state: State<'_, AudioState>,
+    config_state: State<'_, ConfigState>,
+) -> Result<Vec<audio::LocalAlbum>, String> {
     let socket_path = state.0.lock()
         .map_err(|e| format!("Falha ao acessar conexão da biblioteca local: {e}"))?
         .local_album_socket_path();
-    tauri::async_runtime::spawn_blocking(move || AudioEngine::get_local_albums_at(&socket_path))
+    let local_folders = config_state.0.lock()
+        .map_err(|e| format!("Falha ao acessar pastas da biblioteca local: {e}"))?
+        .local_folders
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let source_ids = MpdSupervisor::local_library_sources(&local_folders)?
+            .into_iter()
+            .map(|source| source.id)
+            .collect();
+        AudioEngine::get_local_albums_at(&socket_path, &source_ids)
+    })
         .await
         .map_err(|e| format!("Falha na tarefa de consulta da biblioteca local: {e}"))?
 }

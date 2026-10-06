@@ -1,7 +1,7 @@
 use crate::plex::{contains_plex_token, legacy_plex_image_ref, PlexImageRef};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -206,6 +206,7 @@ pub struct LocalAlbum {
     pub artist: String,
     pub year: Option<String>,
     pub folder_path: String,
+    pub source_id: Option<String>,
     pub track_count: usize,
     pub discs: Vec<LocalAlbumDisc>,
 }
@@ -872,7 +873,10 @@ impl AudioEngine {
         songs.ok_or_else(|| "Resposta count do MPD não contém songs.".to_string())
     }
 
-    pub fn get_local_albums_at(socket_path: &str) -> Result<Vec<LocalAlbum>, String> {
+    pub fn get_local_albums_at(
+        socket_path: &str,
+        valid_source_ids: &HashSet<String>,
+    ) -> Result<Vec<LocalAlbum>, String> {
         let status = Self::send_command_to_socket(socket_path, "status")
             .map_err(|e| format!("Falha ao verificar atualização da biblioteca: {e}"))?;
         if status.iter().any(|line| line.starts_with("updating_db: ")) {
@@ -903,12 +907,14 @@ impl AudioEngine {
             .filter(|(_, col)| col.track_count > 0 && !col.folder_path.is_empty())
             .map(|(key, col)| {
                 let artist = col.display_artist();
+                let source_id = Self::local_album_source_id(&col.discs, valid_source_ids);
                 LocalAlbum {
                     id: key,
                     title: col.title,
                     artist,
                     year: col.year,
                     folder_path: col.folder_path,
+                    source_id,
                     track_count: col.track_count,
                     discs: col.discs,
                 }
@@ -917,6 +923,27 @@ impl AudioEngine {
 
         albums.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         Ok(albums)
+    }
+
+    fn local_album_source_id(
+        discs: &[LocalAlbumDisc],
+        valid_source_ids: &HashSet<String>,
+    ) -> Option<String> {
+        let mut resolved = discs.iter().map(|disc| {
+            let mut components = Path::new(&disc.folder_path).components();
+            let first = match components.next() {
+                Some(std::path::Component::Normal(name)) => name.to_str(),
+                _ => None,
+            }?;
+            if components.any(|component| !matches!(component, std::path::Component::Normal(_))) {
+                return None;
+            }
+            valid_source_ids.contains(first).then(|| first.to_string())
+        });
+        let first = resolved.next()??;
+        resolved
+            .all(|source| source.as_deref() == Some(first.as_str()))
+            .then_some(first)
     }
 
     fn collect_local_album_page(map: &mut std::collections::HashMap<String, AlbumCollector>, lines: Vec<String>) -> Result<usize, String> {
@@ -2872,6 +2899,67 @@ mod tests {
         assert_eq!(album.display_artist(), "Big Youth");
     }
 
+    fn source_test_disc(folder_path: &str) -> LocalAlbumDisc {
+        LocalAlbumDisc {
+            number: 0,
+            label: "Disc".to_string(),
+            folder_path: folder_path.to_string(),
+            track_count: 1,
+        }
+    }
+
+    #[test]
+    fn local_album_source_uses_only_a_valid_virtual_root_component() {
+        let valid = HashSet::from([
+            "Reggae".to_string(),
+            "Brasilidades".to_string(),
+            "Music (2)".to_string(),
+        ]);
+        for (path, expected) in [
+            ("Reggae/Artist/Album", Some("Reggae")),
+            ("Brasilidades/Album", Some("Brasilidades")),
+            ("Music (2)/Album", Some("Music (2)")),
+            ("Reggae", Some("Reggae")),
+            ("Unknown/Album", None),
+            ("", None),
+            ("../Reggae/Album", None),
+            ("Reggae/../Album", None),
+            ("/Reggae/Album", None),
+        ] {
+            assert_eq!(
+                AudioEngine::local_album_source_id(&[source_test_disc(path)], &valid).as_deref(),
+                expected,
+                "unexpected source for {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_album_source_requires_all_discs_to_share_the_same_source() {
+        let valid = HashSet::from(["Reggae".to_string(), "Jazz".to_string()]);
+        assert_eq!(
+            AudioEngine::local_album_source_id(
+                &[
+                    source_test_disc("Reggae/Album/CD1"),
+                    source_test_disc("Reggae/Album/CD2"),
+                ],
+                &valid,
+            )
+            .as_deref(),
+            Some("Reggae")
+        );
+        assert_eq!(
+            AudioEngine::local_album_source_id(
+                &[
+                    source_test_disc("Reggae/Album/CD1"),
+                    source_test_disc("Jazz/Album/CD2"),
+                ],
+                &valid,
+            ),
+            None
+        );
+    }
+
     #[test]
     fn paginated_album_query_returns_one_multi_disc_album() {
         let (path, server) = fake_album_mpd(vec![
@@ -2879,11 +2967,16 @@ mod tests {
             ("count \"(base '')\"", "songs: 2\nOK\n"),
             ("find \"(base '')\" window 0:2", "file: Artist/Album/CD2/two.flac\nAlbum: Album\nArtist: B\nfile: Artist/Album/CD1/one.flac\nAlbum: Album\nArtist: A\nOK\n"),
         ]);
-        let albums = AudioEngine::get_local_albums_at(&path).unwrap();
+        let albums = AudioEngine::get_local_albums_at(
+            &path,
+            &HashSet::from(["Artist".to_string()]),
+        )
+        .unwrap();
         server.join().unwrap();
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].id, album_id("Artist/Album", "Album"));
         assert_eq!(albums[0].folder_path, "Artist/Album/CD1");
+        assert_eq!(albums[0].source_id.as_deref(), Some("Artist"));
         assert_eq!(albums[0].track_count, 2);
         assert_eq!(
             albums[0]
@@ -3681,18 +3774,25 @@ mod tests {
             ("count \"(base '')\"", "songs: 1\nplaytime: 20\nOK\n"),
             ("find \"(base '')\" window 0:1", "file: Raiz/Disco/faixa.flac\nAlbum: Disco\nOK\n"),
         ]);
-        let albums = AudioEngine::get_local_albums_at(&path).unwrap();
+        let albums = AudioEngine::get_local_albums_at(
+            &path,
+            &HashSet::from(["Raiz".to_string()]),
+        )
+        .unwrap();
         server.join().unwrap();
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].id, album_id("Raiz/Disco", "Disco"));
         assert_eq!(albums[0].folder_path, "Raiz/Disco");
+        assert_eq!(albums[0].source_id.as_deref(), Some("Raiz"));
         assert_eq!(albums[0].track_count, 1);
 
         let (path, server) = fake_album_mpd(vec![
             ("status", "state: stop\nOK\n"),
             ("count \"(base '')\"", "songs: 0\nOK\n"),
         ]);
-        assert!(AudioEngine::get_local_albums_at(&path).unwrap().is_empty());
+        assert!(AudioEngine::get_local_albums_at(&path, &HashSet::new())
+            .unwrap()
+            .is_empty());
         server.join().unwrap();
     }
 
@@ -3701,7 +3801,9 @@ mod tests {
         let (path, server) = fake_album_mpd(vec![
             ("status", "updating_db: 12\nstate: stop\nOK\n"),
         ]);
-        assert!(AudioEngine::get_local_albums_at(&path).unwrap_err().contains("atualização"));
+        assert!(AudioEngine::get_local_albums_at(&path, &HashSet::new())
+            .unwrap_err()
+            .contains("atualização"));
         server.join().unwrap();
 
         for response in ["ACK [5@0] {find} failure\n", "file: Disco/faixa.flac\n", "OK\n"] {
@@ -3710,7 +3812,7 @@ mod tests {
                 ("count \"(base '')\"", "songs: 1\nOK\n"),
                 ("find \"(base '')\" window 0:1", response),
             ]);
-            assert!(AudioEngine::get_local_albums_at(&path).is_err());
+            assert!(AudioEngine::get_local_albums_at(&path, &HashSet::new()).is_err());
             server.join().unwrap();
         }
     }

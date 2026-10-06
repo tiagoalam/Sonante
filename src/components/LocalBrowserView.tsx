@@ -24,6 +24,12 @@ import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDisc
 import { LocalAlbumCatalog, emptyLocalAlbumCatalogState } from "../utils/localAlbumCatalog";
 import { albumLocationSources } from "../utils/localAlbumLocations";
 import { localArtworkEnrichment, localArtworkResolver } from "../utils/localArtworkSession";
+import {
+  filterLocalAlbumsByScope,
+  localLibraryScopeResetKey,
+  localLibrarySourceOptions,
+  validLocalLibrarySourceSelection,
+} from "../utils/localLibraryScope";
 import { VirtualAlbumGrid } from "./VirtualAlbumGrid";
 
 const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
@@ -166,6 +172,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const albums = catalog.albums;
   const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, isLibraryUpdating);
   const [albumSearch, setAlbumSearch] = useState("");
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(null);
   const [albumLocations, setAlbumLocations] = useState<{
     album: LocalAlbum;
@@ -367,14 +374,16 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     },
   });
 
-  const filteredAlbums = useMemo(() => {
-    const normalizedSearch = albumSearch.toLowerCase();
-    return albums.filter(
-      (album) =>
-        album.title.toLowerCase().includes(normalizedSearch) ||
-        album.artist.toLowerCase().includes(normalizedSearch),
-    );
-  }, [albums, albumSearch]);
+  const sourceOptions = useMemo(() => localLibrarySourceOptions(albums), [albums]);
+  const activeSourceId = validLocalLibrarySourceSelection(selectedSourceId, sourceOptions);
+  const filteredAlbums = useMemo(
+    () => filterLocalAlbumsByScope(albums, activeSourceId, albumSearch),
+    [albums, activeSourceId, albumSearch],
+  );
+
+  useEffect(() => {
+    if (selectedSourceId !== activeSourceId) setSelectedSourceId(activeSourceId);
+  }, [activeSourceId, selectedSourceId]);
 
   const artistAlbums = selectedArtist
     ? albums.filter(
@@ -438,16 +447,31 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         {!selectedAlbum && !selectedArtist && (
           <div className="flex items-center space-x-4">
             {viewMode === "albums" && (
-              <div className="relative flex items-center w-64">
-                <Search size={14} className="absolute left-3 text-[#666666]" />
-                <input
-                  type="text"
-                  value={albumSearch}
-                  onChange={(e) => setAlbumSearch(e.target.value)}
-                  placeholder={t("localBrowser.filterPlaceholder")}
-                  className="w-full bg-[#1A1A1A] border border-[#2B2B2B] rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D] transition-colors"
-                />
-              </div>
+              <>
+                <label className="flex items-center gap-2 text-xs text-[#888888]">
+                  <span>{t("localBrowser.libraryScope")}</span>
+                  <select
+                    value={activeSourceId ?? ""}
+                    onChange={(event) => setSelectedSourceId(event.target.value || null)}
+                    className="max-w-44 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
+                  >
+                    <option value="">{t("localBrowser.allLibraries")}</option>
+                    {sourceOptions.map((source) => (
+                      <option key={source.id} value={source.id}>{source.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <div className="relative flex items-center w-64">
+                  <Search size={14} className="absolute left-3 text-[#666666]" />
+                  <input
+                    type="text"
+                    value={albumSearch}
+                    onChange={(e) => setAlbumSearch(e.target.value)}
+                    placeholder={t("localBrowser.filterPlaceholder")}
+                    className="w-full bg-[#1A1A1A] border border-[#2B2B2B] rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D] transition-colors"
+                  />
+                </div>
+              </>
             )}
 
             <div className="flex bg-[#1E1E1E] p-1 rounded-lg border border-[#333333]">
@@ -697,7 +721,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               items={filteredAlbums}
               getItemKey={(album) => album.id}
               scrollContainer={scrollContainer}
-              resetKey={albumSearch}
+              resetKey={localLibraryScopeResetKey(activeSourceId, albumSearch)}
               renderItem={(album) => (
                 <LocalAlbumCard
                   album={album}

@@ -31,6 +31,12 @@ pub struct LibrarySyncResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LocalLibrarySource {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", content = "reason", rename_all = "snake_case")]
 pub enum MpdHealth {
     Starting,
@@ -199,6 +205,77 @@ impl MpdSupervisor {
         crate::persistence::ensure_sonante_config_dir()?;
         let lib_dir = Self::library_dir();
         Self::reconcile_library_symlinks(&lib_dir, folders)
+    }
+
+    pub fn local_library_sources(
+        folders: &[String],
+    ) -> Result<Vec<LocalLibrarySource>, String> {
+        Self::local_library_sources_in(&Self::library_dir(), folders)
+    }
+
+    fn local_library_sources_in(
+        lib_dir: &Path,
+        folders: &[String],
+    ) -> Result<Vec<LocalLibrarySource>, String> {
+        let configured_targets = folders
+            .iter()
+            .filter_map(|folder| {
+                let path = Path::new(folder);
+                path.is_dir().then_some(path)
+            })
+            .map(|path| {
+                fs::canonicalize(path).map_err(|error| {
+                    format!("Falha ao resolver uma pasta local configurada: {error}")
+                })
+            })
+            .collect::<Result<HashSet<_>, _>>()?;
+
+        let entries = match fs::read_dir(lib_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(format!("Falha ao listar fontes da biblioteca virtual: {error}"))
+            }
+        };
+        let mut entries = entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Falha ao ler fonte da biblioteca virtual: {error}"))?;
+        entries.sort_by_key(|entry| entry.file_name());
+
+        let mut sources = Vec::new();
+        for entry in entries {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                format!("Falha ao examinar fonte da biblioteca virtual: {error}")
+            })?;
+            if !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Ok(target) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if !configured_targets.contains(&target) {
+                continue;
+            }
+            let Some(id) = entry.file_name().to_str().and_then(Self::valid_source_id) else {
+                continue;
+            };
+            sources.push(LocalLibrarySource {
+                label: id.clone(),
+                id,
+            });
+        }
+        Ok(sources)
+    }
+
+    fn valid_source_id(value: &str) -> Option<String> {
+        let mut components = Path::new(value).components();
+        match (components.next(), components.next()) {
+            (Some(std::path::Component::Normal(name)), None) if !name.is_empty() => {
+                name.to_str().map(str::to_string)
+            }
+            _ => None,
+        }
     }
 
     fn reconcile_library_symlinks(
@@ -1200,6 +1277,63 @@ mod tests {
             second_inode
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_library_sources_include_only_configured_symlinks() {
+        let (root, library) = library_test_paths("library-sources");
+        let reggae = root.join("Reggae");
+        let other = root.join("Other");
+        fs::create_dir(&reggae).unwrap();
+        fs::create_dir(&other).unwrap();
+        fs::create_dir(library.join("UnexpectedDirectory")).unwrap();
+        symlink(&reggae, library.join("Reggae")).unwrap();
+        symlink(&other, library.join("Unconfigured")).unwrap();
+        symlink(root.join("Missing"), library.join("Broken")).unwrap();
+
+        let sources = MpdSupervisor::local_library_sources_in(
+            &library,
+            &[configured_folder(&reggae)],
+        )
+        .unwrap();
+        assert_eq!(
+            sources,
+            vec![LocalLibrarySource {
+                id: "Reggae".to_string(),
+                label: "Reggae".to_string(),
+            }]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_library_sources_preserve_duplicate_basename_names_without_targets() {
+        let (root, library) = library_test_paths("library-source-names");
+        let first = root.join("one/Music");
+        let second = root.join("two/Music");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let folders = [configured_folder(&first), configured_folder(&second)];
+        MpdSupervisor::reconcile_library_symlinks(&library, &folders).unwrap();
+
+        let sources = MpdSupervisor::local_library_sources_in(&library, &folders).unwrap();
+        assert_eq!(
+            sources.iter().map(|source| source.id.as_str()).collect::<Vec<_>>(),
+            vec!["Music", "Music (2)"]
+        );
+        let serialized = serde_json::to_string(&sources).unwrap();
+        assert!(!serialized.contains(&root.to_string_lossy().to_string()));
+        assert!(!serialized.contains("one/Music"));
+        assert!(!serialized.contains("two/Music"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_library_source_ids_are_single_safe_components() {
+        assert_eq!(MpdSupervisor::valid_source_id("Music (2)").as_deref(), Some("Music (2)"));
+        for invalid in ["", ".", "..", "Music/Other", "/Music"] {
+            assert_eq!(MpdSupervisor::valid_source_id(invalid), None, "{invalid:?}");
+        }
     }
 
     #[test]

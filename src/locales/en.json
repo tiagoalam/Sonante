@@ -163,6 +163,8 @@
     "albumsCount_one": "{{count}} album available",
     "albumsCount_other": "{{count}} albums available",
     "root": "Library Root",
+    "libraryScope": "Library",
+    "allLibraries": "All",
     "filterPlaceholder": "Filter by album or artist...",
     "tabAlbums": "Albums",
     "tabFolders": "Folders",

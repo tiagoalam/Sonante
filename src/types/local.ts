@@ -14,6 +14,7 @@ export interface LocalAlbum {
   artist: string;
   year?: string;
   folder_path: string;
+  source_id?: string | null;
   track_count: number;
   discs: LocalAlbumDisc[];
 }
