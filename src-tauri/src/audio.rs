@@ -272,6 +272,25 @@ enum StartupQueueRestore {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExplicitPlaybackRequest {
+    Play,
+    Pause,
+}
+
+fn explicit_playback_command(
+    state: PlaybackState,
+    request: ExplicitPlaybackRequest,
+) -> Option<&'static str> {
+    match (state, request) {
+        (PlaybackState::Playing, ExplicitPlaybackRequest::Play)
+        | (PlaybackState::Paused | PlaybackState::Stopped, ExplicitPlaybackRequest::Pause) => None,
+        (PlaybackState::Paused, ExplicitPlaybackRequest::Play) => Some("pause 0"),
+        (PlaybackState::Stopped, ExplicitPlaybackRequest::Play) => Some("play"),
+        (PlaybackState::Playing, ExplicitPlaybackRequest::Pause) => Some("pause 1"),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SeekPlaybackStatus {
     state: PlaybackState,
@@ -2143,12 +2162,51 @@ impl AudioEngine {
         }
     }
 
-    fn observed_mpd_playback_state(&self) -> Result<PlaybackState, String> {
+    fn playback_state_with_missing_error(
+        &self,
+        missing_error: &str,
+    ) -> Result<PlaybackState, String> {
         self.send_command("status")?
             .into_iter()
             .find_map(|line| line.strip_prefix("state: ").map(str::to_string))
-            .ok_or_else(|| "Status MPD sem estado de reprodução após retomar a faixa.".to_string())
+            .ok_or_else(|| missing_error.to_string())
             .and_then(|state| Self::parse_playback_state(&state))
+    }
+
+    pub fn playback_state(&self) -> Result<PlaybackState, String> {
+        self.playback_state_with_missing_error("Status MPD sem estado de reprodução.")
+    }
+
+    fn observed_mpd_playback_state(&self) -> Result<PlaybackState, String> {
+        self.playback_state_with_missing_error(
+            "Status MPD sem estado de reprodução após retomar a faixa.",
+        )
+    }
+
+    pub fn play(&mut self) -> Result<(), String> {
+        self.ensure_startup_queue_ready()?;
+        if self.restored_resume.is_some() {
+            return self.toggle_play_pause();
+        }
+        if let Some(command) =
+            explicit_playback_command(self.playback_state()?, ExplicitPlaybackRequest::Play)
+        {
+            self.send_command(command)?;
+        }
+        Ok(())
+    }
+
+    pub fn pause(&mut self) -> Result<(), String> {
+        self.ensure_startup_queue_ready()?;
+        if self.restored_resume.is_some() {
+            return Ok(());
+        }
+        if let Some(command) =
+            explicit_playback_command(self.playback_state()?, ExplicitPlaybackRequest::Pause)
+        {
+            self.send_command(command)?;
+        }
+        Ok(())
     }
 
     pub fn toggle_play_pause(&mut self) -> Result<(), String> {
@@ -2615,6 +2673,38 @@ mod tests {
     use std::thread;
 
     static ALBUM_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn explicit_play_is_idempotent_and_uses_mpd_resume_commands() {
+        assert_eq!(
+            explicit_playback_command(PlaybackState::Playing, ExplicitPlaybackRequest::Play),
+            None
+        );
+        assert_eq!(
+            explicit_playback_command(PlaybackState::Paused, ExplicitPlaybackRequest::Play),
+            Some("pause 0")
+        );
+        assert_eq!(
+            explicit_playback_command(PlaybackState::Stopped, ExplicitPlaybackRequest::Play),
+            Some("play")
+        );
+    }
+
+    #[test]
+    fn explicit_pause_is_idempotent_and_only_pauses_playing_audio() {
+        assert_eq!(
+            explicit_playback_command(PlaybackState::Playing, ExplicitPlaybackRequest::Pause),
+            Some("pause 1")
+        );
+        assert_eq!(
+            explicit_playback_command(PlaybackState::Paused, ExplicitPlaybackRequest::Pause),
+            None
+        );
+        assert_eq!(
+            explicit_playback_command(PlaybackState::Stopped, ExplicitPlaybackRequest::Pause),
+            None
+        );
+    }
 
     fn seek_status(state: &str, elapsed: f64) -> Result<Vec<String>, String> {
         Ok(vec![

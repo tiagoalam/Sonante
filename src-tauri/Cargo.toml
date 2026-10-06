@@ -30,6 +30,7 @@ rfd = "0.17.2"
 alsa = "0.11"
 libc = "0.2"
 rustfft = "6.4.1"
+mpris-server = "0.10"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

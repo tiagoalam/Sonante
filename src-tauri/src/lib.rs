@@ -4,6 +4,7 @@ mod artwork_progress;
 mod audio;
 mod config;
 mod favorites;
+mod mpris;
 mod online_artwork;
 mod persistence;
 mod playlists;
@@ -1697,6 +1698,7 @@ pub fn run() {
         .manage(ConfigState(Mutex::new(initial_config)))
         .manage(ConfigTransactionState(Mutex::new(())))
         .manage(PlaylistState(Mutex::new(PlaylistStore::default())))
+        .manage(mpris::MprisState::default())
         .invoke_handler(tauri::generate_handler![
             get_playback_status,
             get_mpd_status_snapshot,
@@ -1775,14 +1777,18 @@ pub fn run() {
     let shutdown_started = AtomicBool::new(false);
     app.run(move |app_handle, event| {
         match event {
-            RunEvent::Ready if mpd_started && !restore_started.swap(true, Ordering::SeqCst) => {
-                let app = app_handle.clone();
-                tauri::async_runtime::spawn(restore_cached_queue_after_ready(app));
+            RunEvent::Ready => {
+                mpris::start(app_handle.clone());
+                if mpd_started && !restore_started.swap(true, Ordering::SeqCst) {
+                    let app = app_handle.clone();
+                    tauri::async_runtime::spawn(restore_cached_queue_after_ready(app));
+                }
             }
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
                 if shutdown_started.swap(true, Ordering::SeqCst) {
                     return;
                 }
+                mpris::shutdown(app_handle);
                 if let Some(audio_state) = app_handle.try_state::<AudioState>() {
                     match audio_state.0.lock() {
                         Ok(mut audio) => {
