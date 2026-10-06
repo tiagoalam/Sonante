@@ -21,7 +21,7 @@ const textCollator = new Intl.Collator("und", {
   usage: "sort",
 });
 
-function compareText(left: string, right: string): number {
+export function compareLocalNavigationText(left: string, right: string): number {
   return textCollator.compare(left, right);
 }
 
@@ -38,7 +38,7 @@ function compareTextFields(
   direction: 1 | -1,
 ): number {
   for (const field of fields) {
-    const compared = compareText(left[field] ?? "", right[field] ?? "");
+    const compared = compareLocalNavigationText(left[field] ?? "", right[field] ?? "");
     if (compared !== 0) return compared * direction;
   }
   return compareRaw(left.id, right.id) * direction;
@@ -78,8 +78,8 @@ export function sortLocalAlbums(
         if (leftYear !== null && rightYear !== null && leftYear !== rightYear) {
           return mode === "year-newest" ? rightYear - leftYear : leftYear - rightYear;
         }
-        const byTitle = compareText(left.title, right.title);
-        return byTitle || compareText(left.id, right.id) || compareRaw(left.id, right.id);
+        const byTitle = compareLocalNavigationText(left.title, right.title);
+        return byTitle || compareLocalNavigationText(left.id, right.id) || compareRaw(left.id, right.id);
       }
     }
   });
@@ -93,19 +93,26 @@ export function isTextLocalAlbumSort(mode: LocalAlbumSortMode): boolean {
     || mode === "artist-desc";
 }
 
+export function normalizeLocalNavigationText(value: string): string {
+  return value
+    .trim()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLocaleLowerCase("und");
+}
+
+export function localNavigationBucket(value: string): LocalAlbumIndexBucket {
+  const first = normalizeLocalNavigationText(value).toUpperCase().charAt(0);
+  return /^[A-Z]$/.test(first) ? first as LocalAlbumIndexBucket : "#";
+}
+
 export function localAlbumIndexBucket(
   album: LocalAlbum,
   mode: LocalAlbumSortMode,
 ): LocalAlbumIndexBucket {
   if (!isTextLocalAlbumSort(mode)) return "#";
   const value = mode.startsWith("artist") ? album.artist : album.title;
-  const normalized = value
-    .trim()
-    .normalize("NFD")
-    .replace(/\p{M}/gu, "")
-    .toUpperCase();
-  const first = normalized.charAt(0);
-  return /^[A-Z]$/.test(first) ? first as LocalAlbumIndexBucket : "#";
+  return localNavigationBucket(value);
 }
 
 export function localAlbumBucketFirstIndices(

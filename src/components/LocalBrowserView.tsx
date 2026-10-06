@@ -8,6 +8,8 @@ import {
   Search,
   Grid,
   ListTree,
+  Users,
+  CalendarDays,
   Clock,
   Sparkles,
   Heart,
@@ -37,7 +39,21 @@ import {
   sortLocalAlbums,
   type LocalAlbumSortMode,
 } from "../utils/localAlbumNavigation";
+import {
+  albumsForLocalArtist,
+  deriveLocalArtists,
+  filterAndSortLocalArtists,
+  localArtistBucketFirstIndices,
+  type LocalArtistSortMode,
+} from "../utils/localArtistNavigation";
+import {
+  deriveLocalYearNavigation,
+  filterLocalAlbumsByYear,
+  filterLocalAlbumsWithoutYear,
+  validLocalYearSelection,
+} from "../utils/localYearNavigation";
 import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./VirtualAlbumGrid";
+import { VirtualList, type VirtualListHandle } from "./VirtualList";
 
 const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
 
@@ -173,14 +189,19 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   onlineArtworkEnabled,
 }) => {
   const { t } = useTranslation();
-  const [viewMode, setViewMode] = useState<"albums" | "folders">("albums");
+  const [viewMode, setViewMode] = useState<"albums" | "artists" | "years" | "folders">("albums");
   const catalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
   const artworkStatus = useSyncExternalStore(localArtworkEnrichment.subscribe, localArtworkEnrichment.getSnapshot);
   const albums = catalog.albums;
   const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, isLibraryUpdating);
   const [albumSearch, setAlbumSearch] = useState("");
+  const [artistSearch, setArtistSearch] = useState("");
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [albumSortMode, setAlbumSortMode] = useState<LocalAlbumSortMode>("album-asc");
+  const [artistSortMode, setArtistSortMode] = useState<LocalArtistSortMode>("artist-asc");
+  const [selectedDecade, setSelectedDecade] = useState<number | null>(null);
+  const [selectedYear, setSelectedYear] = useState<number | null>(null);
+  const [unknownYearSelected, setUnknownYearSelected] = useState(false);
   const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(null);
   const [albumLocations, setAlbumLocations] = useState<{
     album: LocalAlbum;
@@ -192,6 +213,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const [albumCover, setAlbumCover] = useState<string | null>(null);
   const albumRequest = useRef(0);
   const albumGridRef = useRef<VirtualAlbumGridHandle>(null);
+  const artistListRef = useRef<VirtualListHandle>(null);
   const onlineEnabledRef = useRef(onlineArtworkEnabled);
   const libraryUpdatingRef = useRef(isLibraryUpdating);
   onlineEnabledRef.current = onlineArtworkEnabled;
@@ -250,7 +272,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     if (initialArtist) {
       setSelectedArtist(initialArtist);
       setSelectedAlbum(null);
-      setViewMode("albums");
+      setViewMode("artists");
     }
   }, [initialArtist]);
 
@@ -385,9 +407,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
   const sourceOptions = useMemo(() => localLibrarySourceOptions(albums), [albums]);
   const activeSourceId = validLocalLibrarySourceSelection(selectedSourceId, sourceOptions);
+  const scopedAlbums = useMemo(
+    () => filterLocalAlbumsByScope(albums, activeSourceId, ""),
+    [albums, activeSourceId],
+  );
   const filteredAlbums = useMemo(
-    () => filterLocalAlbumsByScope(albums, activeSourceId, albumSearch),
-    [albums, activeSourceId, albumSearch],
+    () => filterLocalAlbumsByScope(scopedAlbums, null, albumSearch),
+    [scopedAlbums, albumSearch],
   );
   const sortedAlbums = useMemo(
     () => sortLocalAlbums(filteredAlbums, albumSortMode),
@@ -397,33 +423,128 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     () => localAlbumBucketFirstIndices(sortedAlbums, albumSortMode),
     [sortedAlbums, albumSortMode],
   );
+  const artists = useMemo(() => deriveLocalArtists(scopedAlbums), [scopedAlbums]);
+  const visibleArtists = useMemo(
+    () => filterAndSortLocalArtists(artists, artistSearch, artistSortMode),
+    [artists, artistSearch, artistSortMode],
+  );
+  const artistBucketIndices = useMemo(
+    () => localArtistBucketFirstIndices(visibleArtists),
+    [visibleArtists],
+  );
+  const yearNavigation = useMemo(
+    () => deriveLocalYearNavigation(scopedAlbums),
+    [scopedAlbums],
+  );
+  const artistAlbums = useMemo(
+    () => selectedArtist
+      ? sortLocalAlbums(albumsForLocalArtist(scopedAlbums, selectedArtist), "album-asc")
+      : [],
+    [scopedAlbums, selectedArtist],
+  );
+  const yearAlbums = useMemo(() => {
+    const selected = unknownYearSelected
+      ? filterLocalAlbumsWithoutYear(scopedAlbums)
+      : selectedYear !== null
+        ? filterLocalAlbumsByYear(scopedAlbums, selectedYear)
+        : [];
+    return sortLocalAlbums(selected, "album-asc");
+  }, [scopedAlbums, selectedYear, unknownYearSelected]);
+  const selectedDecadeSummary = selectedDecade === null
+    ? null
+    : yearNavigation.decades.find((item) => item.decade === selectedDecade) ?? null;
 
   useEffect(() => {
     if (selectedSourceId !== activeSourceId) setSelectedSourceId(activeSourceId);
   }, [activeSourceId, selectedSourceId]);
 
-  const artistAlbums = selectedArtist
-    ? albums.filter(
-        (a) =>
-          a.artist &&
-          a.artist.trim().toLowerCase() === selectedArtist.trim().toLowerCase()
-      )
-    : [];
+  useEffect(() => {
+    if (!selectedArtist || !catalog.loaded || catalog.loading) return;
+    if (artistAlbums.length === 0) {
+      setSelectedArtist(null);
+      onClearInitialArtist?.();
+    }
+  }, [artistAlbums.length, catalog.loaded, catalog.loading, onClearInitialArtist, selectedArtist]);
+
+  useEffect(() => {
+    const valid = validLocalYearSelection(
+      yearNavigation,
+      selectedDecade,
+      selectedYear,
+      unknownYearSelected,
+    );
+    if (valid.decade !== selectedDecade) setSelectedDecade(valid.decade);
+    if (valid.year !== selectedYear) setSelectedYear(valid.year);
+    if (valid.unknown !== unknownYearSelected) setUnknownYearSelected(valid.unknown);
+  }, [selectedDecade, selectedYear, unknownYearSelected, yearNavigation]);
+
+  const showContextBack = Boolean(
+    selectedAlbum
+    || selectedArtist
+    || selectedDecade !== null
+    || selectedYear !== null
+    || unknownYearSelected,
+  );
+  const headerTitle = selectedAlbum?.title
+    ?? selectedArtist
+    ?? (unknownYearSelected ? t("localBrowser.unknownYear") : null)
+    ?? (selectedYear !== null ? String(selectedYear) : null)
+    ?? (selectedDecade !== null ? `${selectedDecade}s` : null)
+    ?? (viewMode === "albums"
+      ? t("localBrowser.albumsTitle")
+      : viewMode === "artists"
+        ? t("localBrowser.artistsTitle")
+        : viewMode === "years"
+          ? t("localBrowser.yearsTitle")
+          : t("localBrowser.foldersTitle"));
+  const headerCount = selectedAlbum
+    ? selectedAlbum.artist
+    : selectedArtist
+      ? t("localBrowser.albumsCount", { count: artistAlbums.length })
+      : selectedYear !== null || unknownYearSelected
+        ? t("localBrowser.albumsCount", { count: yearAlbums.length })
+        : selectedDecadeSummary
+          ? t("localBrowser.albumsCount", { count: selectedDecadeSummary.albumCount })
+          : viewMode === "albums"
+            ? t("localBrowser.albumsCount", { count: filteredAlbums.length })
+            : viewMode === "artists"
+              ? t("localBrowser.artistsCount", { count: visibleArtists.length })
+              : viewMode === "years"
+                ? t("localBrowser.albumsCount", { count: scopedAlbums.length })
+                : currentPath || t("localBrowser.root");
+
+  const handleContextBack = () => {
+    if (selectedAlbum) {
+      setSelectedAlbum(null);
+    } else if (selectedArtist) {
+      setSelectedArtist(null);
+      onClearInitialArtist?.();
+    } else if (unknownYearSelected) {
+      setUnknownYearSelected(false);
+    } else if (selectedYear !== null) {
+      setSelectedYear(null);
+    } else if (selectedDecade !== null) {
+      setSelectedDecade(null);
+    }
+  };
+
+  const selectViewMode = (mode: typeof viewMode) => {
+    setViewMode(mode);
+    setSelectedAlbum(null);
+    setSelectedArtist(null);
+    setSelectedDecade(null);
+    setSelectedYear(null);
+    setUnknownYearSelected(false);
+    onClearInitialArtist?.();
+  };
 
   return (
     <main className="flex-1 flex flex-col overflow-hidden bg-[#121212] select-none">
-      <div className="flex flex-wrap items-center justify-between gap-4 p-8 pb-4 border-b border-[#222222]">
+      <div className="flex flex-wrap items-center justify-between gap-4 px-8 pt-8 pb-4">
         <div className="flex items-center space-x-3">
-          {(selectedAlbum || selectedArtist) && (
+          {showContextBack && (
             <button
-              onClick={() => {
-                if (selectedAlbum) {
-                  setSelectedAlbum(null);
-                } else if (selectedArtist) {
-                  setSelectedArtist(null);
-                  if (onClearInitialArtist) onClearInitialArtist();
-                }
-              }}
+              onClick={handleContextBack}
               className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
               title={t("localBrowser.back")}
             >
@@ -432,24 +553,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           )}
 
           <div>
-            <h2 className="text-2xl font-bold text-white tracking-tight">
-              {selectedAlbum
-                ? selectedAlbum.title
-                : selectedArtist
-                ? selectedArtist
-                : viewMode === "albums"
-                ? t("localBrowser.albumsTitle")
-                : t("localBrowser.foldersTitle")}
-            </h2>
-            <p className="text-xs text-[#888888] mt-0.5">
-              {selectedAlbum
-                ? selectedAlbum.artist
-                : selectedArtist
-                ? t("localBrowser.albumsCount", { count: artistAlbums.length })
-                : viewMode === "albums"
-                ? t("localBrowser.albumsCount", { count: filteredAlbums.length })
-                : currentPath || t("localBrowser.root")}
-            </p>
+            <h2 className="text-2xl font-bold text-white tracking-tight">{headerTitle}</h2>
+            <p className="text-xs text-[#888888] mt-0.5">{headerCount}</p>
             {viewMode === "albums" && artworkStatus.onlineActivity && (
               <div className="text-[11px] text-[#777777] mt-1 flex flex-wrap items-center gap-x-2">
                 <span className="text-[#E5A00D] flex items-center gap-1 max-w-72 truncate" title={artworkStatus.onlineActivity.title}>
@@ -460,88 +565,82 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
             )}
           </div>
         </div>
-
-        {!selectedAlbum && !selectedArtist && (
-          <div className="flex flex-wrap items-center justify-end gap-3">
-            {viewMode === "albums" && (
-              <>
-                <label className="flex items-center gap-2 text-xs text-[#888888]">
-                  <span>{t("localBrowser.libraryScope")}</span>
-                  <select
-                    value={activeSourceId ?? ""}
-                    onChange={(event) => setSelectedSourceId(event.target.value || null)}
-                    className="max-w-44 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
-                  >
-                    <option value="">{t("localBrowser.allLibraries")}</option>
-                    {sourceOptions.map((source) => (
-                      <option key={source.id} value={source.id}>{source.label}</option>
-                    ))}
-                  </select>
-                </label>
-                <div className="relative flex items-center w-64">
-                  <Search size={14} className="absolute left-3 text-[#666666]" />
-                  <input
-                    type="text"
-                    value={albumSearch}
-                    onChange={(e) => setAlbumSearch(e.target.value)}
-                    placeholder={t("localBrowser.filterPlaceholder")}
-                    className="w-full bg-[#1A1A1A] border border-[#2B2B2B] rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D] transition-colors"
-                  />
-                </div>
-                <label className="flex items-center gap-2 text-xs text-[#888888]">
-                  <span>{t("localBrowser.sortLabel")}</span>
-                  <select
-                    value={albumSortMode}
-                    onChange={(event) => setAlbumSortMode(event.target.value as LocalAlbumSortMode)}
-                    className="max-w-44 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
-                  >
-                    <option value="album-asc">{t("localBrowser.sortAlbumAsc")}</option>
-                    <option value="album-desc">{t("localBrowser.sortAlbumDesc")}</option>
-                    <option value="artist-asc">{t("localBrowser.sortArtistAsc")}</option>
-                    <option value="artist-desc">{t("localBrowser.sortArtistDesc")}</option>
-                    <option value="year-newest">{t("localBrowser.sortYearNewest")}</option>
-                    <option value="year-oldest">{t("localBrowser.sortYearOldest")}</option>
-                  </select>
-                </label>
-              </>
-            )}
-
-            <div className="flex bg-[#1E1E1E] p-1 rounded-lg border border-[#333333]">
-              <button
-                onClick={() => {
-                  setViewMode("albums");
-                  setSelectedAlbum(null);
-                  setSelectedArtist(null);
-                }}
-                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
-                  viewMode === "albums"
-                    ? "bg-[#E5A00D] text-black shadow"
-                    : "text-[#999999] hover:text-white"
-                }`}
-              >
-                <Grid size={14} />
-                <span>{t("localBrowser.tabAlbums")}</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setViewMode("folders");
-                  setSelectedAlbum(null);
-                  setSelectedArtist(null);
-                }}
-                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
-                  viewMode === "folders"
-                    ? "bg-[#E5A00D] text-black shadow"
-                    : "text-[#999999] hover:text-white"
-                }`}
-              >
-                <ListTree size={14} />
-                <span>{t("localBrowser.tabFolders")}</span>
-              </button>
-            </div>
-          </div>
-        )}
       </div>
+
+      {!selectedAlbum && !selectedArtist && (
+        <div className="flex flex-wrap gap-1 border-b border-[#222222] px-8 pb-3">
+          {([
+            ["albums", Grid, t("localBrowser.tabAlbums")],
+            ["artists", Users, t("localBrowser.tabArtists")],
+            ["years", CalendarDays, t("localBrowser.tabYears")],
+            ["folders", ListTree, t("localBrowser.tabFolders")],
+          ] as const).map(([mode, Icon, label]) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => selectViewMode(mode)}
+              className={`flex items-center space-x-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                viewMode === mode ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+              }`}
+            >
+              <Icon size={14} />
+              <span>{label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {!selectedAlbum && viewMode !== "folders" && (
+        <div className="flex flex-wrap items-center gap-3 border-b border-[#222222] px-8 py-3">
+          <label className="flex items-center gap-2 text-xs text-[#888888]">
+            <span>{t("localBrowser.libraryScope")}</span>
+            <select
+              value={activeSourceId ?? ""}
+              onChange={(event) => setSelectedSourceId(event.target.value || null)}
+              className="max-w-44 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
+            >
+              <option value="">{t("localBrowser.allLibraries")}</option>
+              {sourceOptions.map((source) => (
+                <option key={source.id} value={source.id}>{source.label}</option>
+              ))}
+            </select>
+          </label>
+          {viewMode === "albums" && (
+            <>
+              <div className="relative flex w-64 max-w-full items-center">
+                <Search size={14} className="absolute left-3 text-[#666666]" />
+                <input type="text" value={albumSearch} onChange={(event) => setAlbumSearch(event.target.value)} placeholder={t("localBrowser.filterPlaceholder")} className="w-full rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] py-1.5 pl-9 pr-3 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D]" />
+              </div>
+              <label className="flex items-center gap-2 text-xs text-[#888888]">
+                <span>{t("localBrowser.sortLabel")}</span>
+                <select value={albumSortMode} onChange={(event) => setAlbumSortMode(event.target.value as LocalAlbumSortMode)} className="max-w-44 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]">
+                  <option value="album-asc">{t("localBrowser.sortAlbumAsc")}</option>
+                  <option value="album-desc">{t("localBrowser.sortAlbumDesc")}</option>
+                  <option value="artist-asc">{t("localBrowser.sortArtistAsc")}</option>
+                  <option value="artist-desc">{t("localBrowser.sortArtistDesc")}</option>
+                  <option value="year-newest">{t("localBrowser.sortYearNewest")}</option>
+                  <option value="year-oldest">{t("localBrowser.sortYearOldest")}</option>
+                </select>
+              </label>
+            </>
+          )}
+          {viewMode === "artists" && !selectedArtist && (
+            <>
+              <div className="relative flex w-64 max-w-full items-center">
+                <Search size={14} className="absolute left-3 text-[#666666]" />
+                <input type="text" value={artistSearch} onChange={(event) => setArtistSearch(event.target.value)} placeholder={t("localBrowser.artistSearchPlaceholder")} className="w-full rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] py-1.5 pl-9 pr-3 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D]" />
+              </div>
+              <label className="flex items-center gap-2 text-xs text-[#888888]">
+                <span>{t("localBrowser.sortLabel")}</span>
+                <select value={artistSortMode} onChange={(event) => setArtistSortMode(event.target.value as LocalArtistSortMode)} className="max-w-44 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]">
+                  <option value="artist-asc">{t("localBrowser.sortArtistAsc")}</option>
+                  <option value="artist-desc">{t("localBrowser.sortArtistDesc")}</option>
+                </select>
+              </label>
+            </>
+          )}
+        </div>
+      )}
 
       {!selectedAlbum && !selectedArtist && viewMode === "albums" && isTextLocalAlbumSort(albumSortMode) && (
         <nav
@@ -564,6 +663,19 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 }}
                 className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[#999999] transition-colors hover:bg-[#282828] hover:text-[#E5A00D] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:cursor-default disabled:text-[#444444] disabled:hover:bg-transparent"
               >
+                {bucket}
+              </button>
+            );
+          })}
+        </nav>
+      )}
+      {!selectedAlbum && !selectedArtist && viewMode === "artists" && (
+        <nav aria-label={t("localBrowser.artistIndex")} className="flex flex-wrap items-center gap-1 border-b border-[#222222] px-8 py-2">
+          {LOCAL_ALBUM_INDEX_BUCKETS.map((bucket) => {
+            const index = artistBucketIndices.get(bucket);
+            const label = t("localBrowser.jumpToArtistBucket", { bucket });
+            return (
+              <button key={bucket} type="button" disabled={index === undefined} title={label} aria-label={label} onClick={() => index !== undefined && artistListRef.current?.scrollToIndex(index)} className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[#999999] transition-colors hover:bg-[#282828] hover:text-[#E5A00D] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:cursor-default disabled:text-[#444444] disabled:hover:bg-transparent">
                 {bucket}
               </button>
             );
@@ -605,6 +717,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   onClick={() => {
                     setSelectedArtist(selectedAlbum.artist);
                     setSelectedAlbum(null);
+                    setViewMode("artists");
+                    setSelectedDecade(null);
+                    setSelectedYear(null);
+                    setUnknownYearSelected(false);
                   }}
                   className="text-base text-[#CCCCCC] hover:text-[#E5A00D] font-medium transition-colors cursor-pointer text-left block"
                   title={t("localBrowser.viewDiscography", "Ver discografia")}
@@ -745,10 +861,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
               </div>
             ) : (
-              <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
-                {artistAlbums.map((album) => (
+              <VirtualAlbumGrid
+                items={artistAlbums}
+                getItemKey={(album) => album.id}
+                scrollContainer={scrollContainer}
+                resetKey={JSON.stringify([activeSourceId, selectedArtist])}
+                renderItem={(album) => (
                   <LocalAlbumCard
-                    key={album.id || album.folder_path}
                     album={album}
                     isFavorite={favoriteIds.has(album.folder_path)}
                     onToggleFavorite={handleToggleFavoriteLocal}
@@ -761,8 +880,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     onlineArtworkEnabled={onlineArtworkEnabled}
                     isLibraryUpdating={isLibraryUpdating}
                   />
-                ))}
-              </div>
+                )}
+              />
             )}
           </div>
         ) : viewMode === "albums" ? (
@@ -799,6 +918,116 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 />
               )}
             />
+          )
+        ) : viewMode === "artists" ? (
+          emptyCatalogState === "indexing" ? (
+            <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+              {t(isLibraryUpdating ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
+            </div>
+          ) : emptyCatalogState === "error" ? null
+          : visibleArtists.length === 0 ? (
+            <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
+              <Users size={40} className="opacity-40" />
+              <span className="text-xs">{t("localBrowser.emptyArtists")}</span>
+            </div>
+          ) : (
+            <VirtualList
+              ref={artistListRef}
+              items={visibleArtists}
+              rowHeight={56}
+              getItemKey={(artist) => artist.id}
+              scrollContainer={scrollContainer}
+              resetKey={JSON.stringify([activeSourceId, artistSearch, artistSortMode])}
+              renderItem={(artist) => (
+                <button
+                  type="button"
+                  onClick={() => setSelectedArtist(artist.name)}
+                  className="flex h-full w-full items-center justify-between border-b border-[#1D1D1D] px-4 text-left transition-colors hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#E5A00D]"
+                >
+                  <span className="truncate pr-4 text-sm font-semibold text-white">{artist.name}</span>
+                  <span className="shrink-0 text-xs text-[#777777]">{t("localBrowser.albumsCount", { count: artist.albumCount })}</span>
+                </button>
+              )}
+            />
+          )
+        ) : viewMode === "years" ? (
+          selectedYear !== null || unknownYearSelected ? (
+            yearAlbums.length === 0 ? (
+              <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
+                <Disc3 size={40} className="opacity-40" />
+                <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
+              </div>
+            ) : (
+              <VirtualAlbumGrid
+                items={yearAlbums}
+                getItemKey={(album) => album.id}
+                scrollContainer={scrollContainer}
+                resetKey={JSON.stringify([activeSourceId, selectedYear, unknownYearSelected])}
+                renderItem={(album) => (
+                  <LocalAlbumCard
+                    album={album}
+                    isFavorite={favoriteIds.has(album.folder_path)}
+                    onToggleFavorite={handleToggleFavoriteLocal}
+                    onClick={() => handleSelectAlbum(album)}
+                    onPlayQuick={(event) => {
+                      event.stopPropagation();
+                      handlePlayEntireAlbum(album);
+                    }}
+                    isPlaybackAvailable={isPlaybackAvailable}
+                    onlineArtworkEnabled={onlineArtworkEnabled}
+                    isLibraryUpdating={isLibraryUpdating}
+                  />
+                )}
+              />
+            )
+          ) : selectedDecadeSummary ? (
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-4">
+              {selectedDecadeSummary.years.map((year) => (
+                <button
+                  key={year.year}
+                  type="button"
+                  onClick={() => setSelectedYear(year.year)}
+                  className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                >
+                  <span className="block text-xl font-bold text-white">{year.year}</span>
+                  <span className="mt-1 block text-xs text-[#777777]">{t("localBrowser.albumsCount", { count: year.albumCount })}</span>
+                </button>
+              ))}
+            </div>
+          ) : emptyCatalogState === "indexing" ? (
+            <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+              {t(isLibraryUpdating ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
+            </div>
+          ) : emptyCatalogState === "error" ? null : scopedAlbums.length === 0 ? (
+            <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
+              <Disc3 size={40} className="opacity-40" />
+              <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
+            </div>
+          ) : (
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-4">
+              {yearNavigation.decades.map((decade) => (
+                <button
+                  key={decade.decade}
+                  type="button"
+                  onClick={() => setSelectedDecade(decade.decade)}
+                  aria-label={t("localBrowser.decadeLabel", { decade: decade.decade })}
+                  className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                >
+                  <span className="block text-xl font-bold text-white">{decade.decade}s</span>
+                  <span className="mt-1 block text-xs text-[#777777]">{t("localBrowser.albumsCount", { count: decade.albumCount })}</span>
+                </button>
+              ))}
+              {yearNavigation.unknownCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setUnknownYearSelected(true)}
+                  className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                >
+                  <span className="block text-lg font-bold text-white">{t("localBrowser.unknownYear")}</span>
+                  <span className="mt-1 block text-xs text-[#777777]">{t("localBrowser.albumsCount", { count: yearNavigation.unknownCount })}</span>
+                </button>
+              )}
+            </div>
           )
         ) : (
           <div className="space-y-4">
