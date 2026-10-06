@@ -84,7 +84,7 @@ enum CacheHit {
     Miss,
 }
 
-fn cache_dir() -> Result<PathBuf, String> {
+pub(crate) fn cache_dir() -> Result<PathBuf, String> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -190,6 +190,63 @@ fn read_cache(dir: &Path, id: &str, now: u64) -> Result<CacheHit, String> {
         }
         None => Ok(CacheHit::Miss),
     }
+}
+
+pub(crate) fn cache_entry_statuses(
+    dir: &Path,
+    now: u64,
+) -> Result<BTreeMap<String, &'static str>, String> {
+    let _guard = CACHE_LOCK
+        .lock()
+        .map_err(|_| "Cache de capas indisponível.".to_string())?;
+    let index = load_index(dir)?;
+    drop(_guard);
+    Ok(index
+        .entries
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            let status = match entry {
+                CacheEntry::Negative { checked_at }
+                    if now.saturating_sub(checked_at) < NEGATIVE_TTL_SECS =>
+                {
+                    "negative"
+                }
+                CacheEntry::Positive { file, .. }
+                    if Path::new(&file).file_name().and_then(|name| name.to_str())
+                        == Some(file.as_str())
+                        && file.ends_with(".img")
+                        && fs::symlink_metadata(dir.join(&file)).is_ok_and(|metadata| {
+                            metadata.file_type().is_file()
+                                && metadata.len() > 0
+                                && metadata.len() <= MAX_IMAGE_BYTES as u64
+                        }) =>
+                {
+                    "positive"
+                }
+                _ => return None,
+            };
+            Some((id, status))
+        })
+        .collect())
+}
+
+pub async fn cached_cover_status(request: OnlineAlbumCoverRequest) -> Result<String, String> {
+    let Some(request) = request.validated()? else {
+        return Ok("ineligible".into());
+    };
+    let album_id = request.album_id;
+    let dir = cache_dir()?;
+    let now = now_secs()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(match read_cache(&dir, &album_id, now)? {
+            CacheHit::Image(_) => "positive",
+            CacheHit::Negative => "negative",
+            CacheHit::Miss => "miss",
+        }
+        .to_string())
+    })
+    .await
+    .map_err(|error| format!("Falha na tarefa de cache: {error}"))?
 }
 
 fn save_negative(dir: &Path, id: &str, now: u64) -> Result<(), String> {

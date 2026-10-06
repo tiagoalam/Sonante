@@ -26,6 +26,8 @@ import { AlbumView } from "./components/AlbumView";
 import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
 import { LocalBrowserView } from "./components/LocalBrowserView";
+import { localArtworkEnrichment } from "./utils/localArtworkSession";
+import { initialMediaSource } from "./utils/appBootstrap";
 import { FavoritesView } from "./components/FavoritesView";
 import { PlaylistsView } from "./components/PlaylistsView";
 import { PlaylistPickerModal } from "./components/PlaylistPickerModal";
@@ -284,9 +286,8 @@ export function App() {
   const { t } = useTranslation();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const [mediaSource, setMediaSource] = useState<"plex" | "local" | "favorites" | "playlists">(
-    "local",
-  );
+  const [mediaSource, setMediaSource] = useState<"plex" | "local" | "favorites" | "playlists" | null>(null);
+  const [bootstrapError, setBootstrapError] = useState(false);
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
   const [localSelectedArtist, setLocalSelectedArtist] = useState<string | null>(null);
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
@@ -328,6 +329,12 @@ export function App() {
   const statusRequestGenerationRef = useRef(0);
 
   const statusRef = useRef(playbackStatus);
+  useEffect(() => {
+    localArtworkEnrichment.setUpdating(playbackStatus.is_updating);
+  }, [playbackStatus.is_updating]);
+  useEffect(() => {
+    localArtworkEnrichment.setOnlineEnabled(config?.online_artwork_enabled ?? false);
+  }, [config?.online_artwork_enabled]);
   useEffect(() => {
     statusRef.current = playbackStatus;
   }, [playbackStatus]);
@@ -385,17 +392,21 @@ export function App() {
 
   // Carga inicial de configurações e dispositivos
   useEffect(() => {
+    let disposed = false;
     Promise.all([configService.getConfig(), configService.getAudioDevices()])
       .then(([cfg, devs]) => {
+        if (disposed) return;
         setConfig(cfg);
         setDevices(devs);
-        if (cfg.plex_token && cfg.plex_token.trim().length > 0) {
-          setMediaSource("plex");
-        } else {
-          setMediaSource("local");
-        }
+        setMediaSource(initialMediaSource(cfg));
       })
-      .catch(console.error);
+      .catch((error) => {
+        if (!disposed) {
+          console.error("Falha no bootstrap inicial:", error);
+          setBootstrapError(true);
+        }
+      });
+    return () => { disposed = true; };
   }, []);
 
   useEffect(() => {
@@ -732,6 +743,17 @@ export function App() {
   };
 
   const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
+
+  if (!config || mediaSource === null) {
+    return (
+      <main className="h-screen w-screen flex items-center justify-center bg-[#121212] text-[#E0E0E0]">
+        <div className="text-center">
+          <h1 className="text-xl font-black tracking-wider text-[#E5A00D]">SONANTE</h1>
+          <p className="mt-3 text-sm text-[#888888]">{t(bootstrapError ? "app.bootstrapError" : "welcome.starting")}</p>
+        </div>
+      </main>
+    );
+  }
 
   if (config && config.first_run) {
     return (

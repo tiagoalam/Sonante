@@ -23,55 +23,12 @@ import type { NewPlaylistItem } from "../types/playlist";
 import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDiscs";
 import { LocalAlbumCatalog, emptyLocalAlbumCatalogState } from "../utils/localAlbumCatalog";
 import { albumLocationSources } from "../utils/localAlbumLocations";
-import { lookupAlbumArtwork } from "../utils/localArtwork";
+import { localArtworkEnrichment, localArtworkResolver } from "../utils/localArtworkSession";
 
 const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
 
-class LruMemoryCache {
-  private maxSize: number;
-  private map: Map<string, string>;
-
-  constructor(maxSize = 150) {
-    this.maxSize = maxSize;
-    this.map = new Map();
-  }
-
-  get(key: string): string | undefined {
-    const val = this.map.get(key);
-    if (val !== undefined) {
-      this.map.delete(key);
-      this.map.set(key, val);
-    }
-    return val;
-  }
-
-  set(key: string, val: string): void {
-    if (this.map.has(key)) {
-      this.map.delete(key);
-    } else if (this.map.size >= this.maxSize) {
-      const oldestKey = this.map.keys().next().value;
-      if (oldestKey !== undefined) {
-        this.map.delete(oldestKey);
-      }
-    }
-    this.map.set(key, val);
-  }
-
-  has(key: string): boolean {
-    return this.map.has(key);
-  }
-}
-
-const coverMemoryCache = new LruMemoryCache(150);
-
 async function getLocalAlbumCover(album: LocalAlbum, onlineEnabled: boolean | (() => boolean), libraryUpdating: boolean | (() => boolean)): Promise<string | null> {
-  const cached = coverMemoryCache.get(album.id);
-  if (cached) return cached;
-  const cover = await lookupAlbumArtwork(
-    album, audioService.getLocalCover, audioService.getOnlineAlbumCover, onlineEnabled, libraryUpdating,
-  );
-  if (cover) coverMemoryCache.set(album.id, cover);
-  return cover;
+  return localArtworkResolver.resolve(album, onlineEnabled, libraryUpdating);
 }
 
 async function loadAlbumDiscTracks(album: LocalAlbum): Promise<AlbumDiscTracks[]> {
@@ -91,13 +48,19 @@ const LocalAlbumCard: React.FC<{
   onlineArtworkEnabled: boolean;
   isLibraryUpdating: boolean;
 }> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable, onlineArtworkEnabled, isLibraryUpdating }) => {
-  const [cover, setCover] = useState<string | null>(() => coverMemoryCache.get(album.id) || null);
+  const [cover, setCover] = useState<string | null>(() => localArtworkResolver.get(album.id));
   const cardRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const onlineEnabledRef = useRef(onlineArtworkEnabled);
   const libraryUpdatingRef = useRef(isLibraryUpdating);
   onlineEnabledRef.current = onlineArtworkEnabled;
   libraryUpdatingRef.current = isLibraryUpdating;
+
+  useEffect(() => {
+    const cached = localArtworkResolver.get(album.id);
+    if (cached) setCover(cached);
+    return localArtworkResolver.subscribe(album.id, setCover);
+  }, [album.id]);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -198,6 +161,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const { t } = useTranslation();
   const [viewMode, setViewMode] = useState<"albums" | "folders">("albums");
   const catalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
+  const artworkStatus = useSyncExternalStore(localArtworkEnrichment.subscribe, localArtworkEnrichment.getSnapshot);
   const albums = catalog.albums;
   const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, isLibraryUpdating);
   const [albumSearch, setAlbumSearch] = useState("");
@@ -250,6 +214,19 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   useEffect(() => {
     localAlbumCatalog.setUpdating(isLibraryUpdating);
   }, [isLibraryUpdating]);
+
+  useEffect(() => {
+    if (catalog.loaded && !catalog.loading && !catalog.error && !isLibraryUpdating) {
+      localArtworkEnrichment.setCatalog(catalog.albums);
+    }
+  }, [catalog.albums, catalog.loaded, catalog.loading, catalog.error, isLibraryUpdating]);
+
+  useEffect(() => {
+    if (!selectedAlbum) return;
+    const cached = localArtworkResolver.get(selectedAlbum.id);
+    if (cached) setAlbumCover(cached);
+    return localArtworkResolver.subscribe(selectedAlbum.id, setAlbumCover);
+  }, [selectedAlbum]);
 
   useEffect(() => {
     if (initialArtist) {
@@ -351,7 +328,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     if (!isPlaybackAvailable) return;
     try {
       const files = trackItems ?? flattenAlbumDiscs(await loadAlbumDiscTracks(album)).tracks;
-      const cov = (selectedAlbum?.id === album.id ? albumCover : null) || await getLocalAlbumCover(album, false, () => libraryUpdatingRef.current);
+      const cov = (selectedAlbum?.id === album.id ? albumCover : null) || await localArtworkResolver.resolveLocalOnly(album);
       const meta = files.map((f) => ({
         title: f.title || f.name,
         artist: f.artist || album.artist,
@@ -442,6 +419,14 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 ? t("localBrowser.albumsCount", { count: filteredAlbums.length })
                 : currentPath || t("localBrowser.root")}
             </p>
+            {viewMode === "albums" && artworkStatus.onlineActivity && (
+              <div className="text-[11px] text-[#777777] mt-1 flex flex-wrap items-center gap-x-2">
+                <span className="text-[#E5A00D] flex items-center gap-1 max-w-72 truncate" title={artworkStatus.onlineActivity.title}>
+                  {artworkStatus.onlineActivity.kind === "searching" && <Disc3 size={11} className="animate-spin" />}
+                  {t(artworkStatus.onlineActivity.kind === "searching" ? "artwork.searchingOnline" : "artwork.foundOnline", { title: artworkStatus.onlineActivity.title })}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 

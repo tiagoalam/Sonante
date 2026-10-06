@@ -1,6 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { MpdStatusSnapshot, PlaybackStatus, TrackMetadata } from "../types/audio";
 import { LocalItem, LocalAlbum } from "../types/local";
+import type { OnlineCacheStatus } from "../utils/localArtwork";
+
+const onlineArtworkRequest = (album: LocalAlbum) => ({
+  album_id: album.id,
+  title: album.title,
+  artist: album.artist,
+  year: album.year ?? null,
+});
 
 export const audioService = {
   getStatus: (): Promise<PlaybackStatus> => invoke<PlaybackStatus>("get_playback_status"),
@@ -24,12 +32,9 @@ export const audioService = {
   getLocalCover: (path: string): Promise<string | null> =>
     invoke<string | null>("get_local_cover", { path }),
   getOnlineAlbumCover: (album: LocalAlbum): Promise<string | null> =>
-    invoke<string | null>("get_online_album_cover", { request: {
-      album_id: album.id,
-      title: album.title,
-      artist: album.artist,
-      year: album.year ?? null,
-    } }),
+    invoke<string | null>("get_online_album_cover", { request: onlineArtworkRequest(album) }),
+  getOnlineCoverCacheStatus: (album: LocalAlbum): Promise<OnlineCacheStatus> =>
+    invoke<OnlineCacheStatus>("get_online_cover_cache_status", { request: onlineArtworkRequest(album) }),
   getLocalAlbums: (): Promise<LocalAlbum[]> => invoke<LocalAlbum[]>("get_local_albums"),
   resolveLocalLibraryPath: (path: string): Promise<string> =>
     invoke<string>("resolve_local_library_path", { path }),

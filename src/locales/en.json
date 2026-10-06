@@ -1,4 +1,5 @@
 {
+  "app": { "bootstrapError": "Could not load initial settings." },
   "sidebar": {
     "mediaSources": "Media Sources",
     "local": "Local Storage",
@@ -14,6 +15,10 @@
     "about": "About Sonante",
     "indexingTooltip": "Indexing local folders...",
     "syncedTooltip": "Library Synchronized"
+  },
+  "artwork": {
+    "searchingOnline": "Searching for cover online: {{title}}",
+    "foundOnline": "Cover found: {{title}}"
   },
   "player": {
     "noTrack": "No track playing",

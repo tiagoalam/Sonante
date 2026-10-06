@@ -1,5 +1,6 @@
 mod alsa_mixer;
 mod analyzer;
+mod artwork_progress;
 mod audio;
 mod config;
 mod favorites;
@@ -931,6 +932,26 @@ async fn get_online_album_cover(
 }
 
 #[tauri::command]
+async fn get_online_cover_cache_status(
+    request: online_artwork::OnlineAlbumCoverRequest,
+) -> Result<String, String> {
+    online_artwork::cached_cover_status(request).await
+}
+
+#[tauri::command]
+async fn get_artwork_enrichment_progress(
+) -> Result<std::collections::BTreeMap<String, artwork_progress::Entry>, String> {
+    artwork_progress::read().await
+}
+
+#[tauri::command]
+async fn save_artwork_enrichment_progress(
+    changes: Vec<artwork_progress::Change>,
+) -> Result<(), String> {
+    artwork_progress::write(changes).await
+}
+
+#[tauri::command]
 fn pick_directory() -> Option<String> {
     rfd::FileDialog::new()
         .set_title("Selecionar Pasta de Músicas")
@@ -1624,6 +1645,9 @@ pub fn run() {
             resolve_local_library_path,
             get_local_cover,
             get_online_album_cover,
+            get_online_cover_cache_status,
+            get_artwork_enrichment_progress,
+            save_artwork_enrichment_progress,
             get_local_albums,
             get_favorites,
             toggle_favorite,

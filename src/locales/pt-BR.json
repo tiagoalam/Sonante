@@ -1,4 +1,5 @@
 {
+  "app": { "bootstrapError": "Não foi possível carregar as configurações iniciais." },
   "sidebar": {
     "mediaSources": "Fontes de Mídia",
     "local": "Armazenamento Local",
@@ -14,6 +15,10 @@
     "about": "Sobre o Sonante",
     "indexingTooltip": "Indexando pastas locais...",
     "syncedTooltip": "Biblioteca Sincronizada"
+  },
+  "artwork": {
+    "searchingOnline": "Buscando capa online: {{title}}",
+    "foundOnline": "Capa encontrada: {{title}}"
   },
   "player": {
     "noTrack": "Nenhuma faixa em reprodução",
