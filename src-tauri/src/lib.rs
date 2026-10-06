@@ -1520,11 +1520,24 @@ fn rollback_first_run_completion(
 }
 
 #[tauri::command]
-async fn get_local_albums(state: State<'_, AudioState>) -> Result<Vec<audio::LocalAlbum>, String> {
+async fn get_local_albums(
+    state: State<'_, AudioState>,
+    config_state: State<'_, ConfigState>,
+) -> Result<Vec<audio::LocalAlbum>, String> {
     let socket_path = state.0.lock()
         .map_err(|e| format!("Falha ao acessar conexão da biblioteca local: {e}"))?
         .local_album_socket_path();
-    tauri::async_runtime::spawn_blocking(move || AudioEngine::get_local_albums_at(&socket_path))
+    let local_folders = config_state.0.lock()
+        .map_err(|e| format!("Falha ao acessar pastas da biblioteca local: {e}"))?
+        .local_folders
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let source_ids = MpdSupervisor::local_library_sources(&local_folders)?
+            .into_iter()
+            .map(|source| source.id)
+            .collect();
+        AudioEngine::get_local_albums_at(&socket_path, &source_ids)
+    })
         .await
         .map_err(|e| format!("Falha na tarefa de consulta da biblioteca local: {e}"))?
 }
@@ -2158,11 +2171,31 @@ mod tests {
     }
 
     #[test]
-    fn database_path_matches_supervisor_configuration_directory() {
-        assert_eq!(
-            MpdSupervisor::database_path(),
-            MpdSupervisor::sonante_config_dir().join("mpd.db")
-        );
+    fn versioned_database_migration_requests_only_one_initial_rescan() {
+        let fixture = LocalPathFixture::new();
+        let legacy_database = fixture.root.join("mpd.db");
+        let versioned_database = MpdSupervisor::database_path_in(&fixture.root);
+        let mut config = AppConfig::default();
+        config.first_run = false;
+        config.local_folders = vec![fixture.root.join("Music").to_string_lossy().into_owned()];
+        fs::write(&legacy_database, "legacy database fixture").unwrap();
+
+        assert_eq!(versioned_database, fixture.root.join("mpd-v2.db"));
+        assert!(legacy_database.exists());
+        assert!(!versioned_database.exists());
+        assert!(should_rescan_library_on_startup(
+            true,
+            &config,
+            versioned_database.exists()
+        ));
+
+        fs::write(&versioned_database, "versioned database fixture").unwrap();
+        assert!(!should_rescan_library_on_startup(
+            true,
+            &config,
+            versioned_database.exists()
+        ));
+        assert!(legacy_database.exists());
     }
 
     #[test]

@@ -31,6 +31,12 @@ pub struct LibrarySyncResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LocalLibrarySource {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", content = "reason", rename_all = "snake_case")]
 pub enum MpdHealth {
     Starting,
@@ -121,7 +127,11 @@ impl MpdSupervisor {
     }
 
     pub fn database_path() -> PathBuf {
-        Self::sonante_config_dir().join("mpd.db")
+        Self::database_path_in(&Self::sonante_config_dir())
+    }
+
+    pub(crate) fn database_path_in(config_dir: &Path) -> PathBuf {
+        config_dir.join("mpd-v2.db")
     }
 
     pub fn library_dir() -> PathBuf {
@@ -199,6 +209,77 @@ impl MpdSupervisor {
         crate::persistence::ensure_sonante_config_dir()?;
         let lib_dir = Self::library_dir();
         Self::reconcile_library_symlinks(&lib_dir, folders)
+    }
+
+    pub fn local_library_sources(
+        folders: &[String],
+    ) -> Result<Vec<LocalLibrarySource>, String> {
+        Self::local_library_sources_in(&Self::library_dir(), folders)
+    }
+
+    fn local_library_sources_in(
+        lib_dir: &Path,
+        folders: &[String],
+    ) -> Result<Vec<LocalLibrarySource>, String> {
+        let configured_targets = folders
+            .iter()
+            .filter_map(|folder| {
+                let path = Path::new(folder);
+                path.is_dir().then_some(path)
+            })
+            .map(|path| {
+                fs::canonicalize(path).map_err(|error| {
+                    format!("Falha ao resolver uma pasta local configurada: {error}")
+                })
+            })
+            .collect::<Result<HashSet<_>, _>>()?;
+
+        let entries = match fs::read_dir(lib_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(format!("Falha ao listar fontes da biblioteca virtual: {error}"))
+            }
+        };
+        let mut entries = entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Falha ao ler fonte da biblioteca virtual: {error}"))?;
+        entries.sort_by_key(|entry| entry.file_name());
+
+        let mut sources = Vec::new();
+        for entry in entries {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                format!("Falha ao examinar fonte da biblioteca virtual: {error}")
+            })?;
+            if !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Ok(target) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if !configured_targets.contains(&target) {
+                continue;
+            }
+            let Some(id) = entry.file_name().to_str().and_then(Self::valid_source_id) else {
+                continue;
+            };
+            sources.push(LocalLibrarySource {
+                label: id.clone(),
+                id,
+            });
+        }
+        Ok(sources)
+    }
+
+    fn valid_source_id(value: &str) -> Option<String> {
+        let mut components = Path::new(value).components();
+        match (components.next(), components.next()) {
+            (Some(std::path::Component::Normal(name)), None) if !name.is_empty() => {
+                name.to_str().map(str::to_string)
+            }
+            _ => None,
+        }
     }
 
     fn reconcile_library_symlinks(
@@ -346,7 +427,7 @@ impl MpdSupervisor {
         let dop_flag = if cfg.dop_enabled { "yes" } else { "no" };
         let lib_dir_value = Self::escape_config_value(&library_sync.library_dir.to_string_lossy())?;
         let config_dir_value = Self::escape_config_value(&dir.to_string_lossy())?;
-        let db_path_value = Self::escape_config_value(&db_path.to_string_lossy())?;
+        let database_section = Self::database_section(&db_path)?;
         let pid_path_value = Self::escape_config_value(&self.pid_path.to_string_lossy())?;
         let socket_path_value = Self::escape_config_value(&self.socket_path)?;
         let alsa_device_value = Self::escape_config_value(&cfg.alsa_device)?;
@@ -383,10 +464,38 @@ impl MpdSupervisor {
         )?;
 
         // Sem state_file: o MPD inicia em modo neutro/stop sem tocar sozinho
-        let conf_content = format!(
+        let audio_buffer_size = cfg.audio_buffer_size_kb.to_string();
+        let conf_content = Self::render_config(
+            &lib_dir_value,
+            &config_dir_value,
+            &database_section,
+            &pid_path_value,
+            &socket_path_value,
+            &audio_buffer_size,
+            &replay_gain_value,
+            &audio_output_section,
+            &analyzer_output_section,
+        );
+
+        fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
+        Ok((conf_path, volume_backend, library_sync))
+    }
+
+    fn render_config(
+        library_dir: &str,
+        playlist_dir: &str,
+        database_section: &str,
+        pid_path: &str,
+        socket_path: &str,
+        audio_buffer_size: &str,
+        replay_gain: &str,
+        audio_output_section: &str,
+        analyzer_output_section: &str,
+    ) -> String {
+        format!(
             r#"music_directory "{}"
 playlist_directory "{}"
-db_file "{}"
+{}
 pid_file "{}"
 log_file "/dev/null"
 bind_to_address "{}"
@@ -407,19 +516,16 @@ decoder {{
 
 {}
 "#,
-            lib_dir_value,
-            config_dir_value,
-            db_path_value,
-            pid_path_value,
-            socket_path_value,
-            cfg.audio_buffer_size_kb,
-            replay_gain_value,
+            library_dir,
+            playlist_dir,
+            database_section,
+            pid_path,
+            socket_path,
+            audio_buffer_size,
+            replay_gain,
             audio_output_section,
             analyzer_output_section
-        );
-
-        fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
-        Ok((conf_path, volume_backend, library_sync))
+        )
     }
 
     fn public_volume_backend(
@@ -438,6 +544,18 @@ decoder {{
             MixerSelection::Hardware { .. } => VolumeBackend::AlsaHardware,
             MixerSelection::Software => VolumeBackend::MpdSoftware,
         }
+    }
+
+    fn database_section(database_path: &Path) -> Result<String, String> {
+        let database_path = Self::escape_config_value(&database_path.to_string_lossy())?;
+        Ok(format!(
+            r#"database {{
+    plugin "simple"
+    path "{}"
+    hide_playlist_targets "no"
+}}"#,
+            database_path
+        ))
     }
 
     fn audio_output_section(
@@ -1203,6 +1321,63 @@ mod tests {
     }
 
     #[test]
+    fn local_library_sources_include_only_configured_symlinks() {
+        let (root, library) = library_test_paths("library-sources");
+        let reggae = root.join("Reggae");
+        let other = root.join("Other");
+        fs::create_dir(&reggae).unwrap();
+        fs::create_dir(&other).unwrap();
+        fs::create_dir(library.join("UnexpectedDirectory")).unwrap();
+        symlink(&reggae, library.join("Reggae")).unwrap();
+        symlink(&other, library.join("Unconfigured")).unwrap();
+        symlink(root.join("Missing"), library.join("Broken")).unwrap();
+
+        let sources = MpdSupervisor::local_library_sources_in(
+            &library,
+            &[configured_folder(&reggae)],
+        )
+        .unwrap();
+        assert_eq!(
+            sources,
+            vec![LocalLibrarySource {
+                id: "Reggae".to_string(),
+                label: "Reggae".to_string(),
+            }]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_library_sources_preserve_duplicate_basename_names_without_targets() {
+        let (root, library) = library_test_paths("library-source-names");
+        let first = root.join("one/Music");
+        let second = root.join("two/Music");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let folders = [configured_folder(&first), configured_folder(&second)];
+        MpdSupervisor::reconcile_library_symlinks(&library, &folders).unwrap();
+
+        let sources = MpdSupervisor::local_library_sources_in(&library, &folders).unwrap();
+        assert_eq!(
+            sources.iter().map(|source| source.id.as_str()).collect::<Vec<_>>(),
+            vec!["Music", "Music (2)"]
+        );
+        let serialized = serde_json::to_string(&sources).unwrap();
+        assert!(!serialized.contains(&root.to_string_lossy().to_string()));
+        assert!(!serialized.contains("one/Music"));
+        assert!(!serialized.contains("two/Music"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_library_source_ids_are_single_safe_components() {
+        assert_eq!(MpdSupervisor::valid_source_id("Music (2)").as_deref(), Some("Music (2)"));
+        for invalid in ["", ".", "..", "Music/Other", "/Music"] {
+            assert_eq!(MpdSupervisor::valid_source_id(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
     fn duplicate_targets_and_broken_links_are_reconciled_without_removing_regular_entries() {
         let (root, library) = library_test_paths("library-broken");
         let folder = root.join("Music");
@@ -1489,6 +1664,35 @@ mod tests {
         assert!(MpdSupervisor::escape_config_value("default\nlog_file bad").is_err());
         assert!(MpdSupervisor::escape_config_value("default\rkill").is_err());
         assert!(MpdSupervisor::escape_config_value("default\0kill").is_err());
+    }
+
+    #[test]
+    fn simple_database_is_versioned_and_exposes_playlist_targets() {
+        let config_dir = Path::new("/tmp/sonante config\\with-quote\"");
+        let database_path = MpdSupervisor::database_path_in(config_dir);
+        assert_eq!(database_path, config_dir.join("mpd-v2.db"));
+
+        let section = MpdSupervisor::database_section(&database_path).unwrap();
+        assert!(section.contains("database {"));
+        assert!(section.contains("plugin \"simple\""));
+        assert!(section.contains("path \"/tmp/sonante config\\\\with-quote\\\"/mpd-v2.db\""));
+        assert!(section.contains("hide_playlist_targets \"no\""));
+        assert!(!section.contains("db_file"));
+
+        let config = MpdSupervisor::render_config(
+            "/tmp/library",
+            "/tmp/playlists",
+            &section,
+            "/tmp/mpd.pid",
+            "/tmp/mpd.socket",
+            "4096",
+            "off",
+            "audio_output {}",
+            "audio_output {}",
+        );
+        assert!(config.contains(&section));
+        assert!(!config.contains("db_file"));
+        assert!(!config.contains("state_file"));
     }
 
     #[test]

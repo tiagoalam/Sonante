@@ -1,7 +1,7 @@
 use crate::plex::{contains_plex_token, legacy_plex_image_ref, PlexImageRef};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -206,6 +206,7 @@ pub struct LocalAlbum {
     pub artist: String,
     pub year: Option<String>,
     pub folder_path: String,
+    pub source_id: Option<String>,
     pub track_count: usize,
     pub discs: Vec<LocalAlbumDisc>,
 }
@@ -494,10 +495,31 @@ struct AlbumCollector {
     discs: Vec<LocalAlbumDisc>,
 }
 
+#[derive(Default)]
+struct LocalAlbumCollection {
+    physical: HashMap<String, AlbumCollector>,
+    cue: HashMap<String, AlbumCollector>,
+}
+
+struct VirtualCueTrackPath {
+    cue_directory: String,
+    physical_folder: String,
+}
+
 impl AlbumCollector {
     fn merge_title_variant(&mut self, other: Self) {
         self.track_count += other.track_count;
-        self.discs[0].track_count += other.track_count;
+        for other_disc in other.discs {
+            if let Some(disc) = self
+                .discs
+                .iter_mut()
+                .find(|disc| disc.folder_path == other_disc.folder_path)
+            {
+                disc.track_count += other_disc.track_count;
+            } else {
+                self.discs.push(other_disc);
+            }
+        }
         if self.year.is_none() {
             self.year = other.year;
         }
@@ -613,6 +635,38 @@ impl AlbumCollector {
 }
 
 impl AudioEngine {
+    fn virtual_cue_track_path(file: &str) -> Option<VirtualCueTrackPath> {
+        let path = Path::new(file);
+        if path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+
+        let leaf = path.file_name()?.to_str()?;
+        let track_number = leaf.strip_prefix("track")?;
+        if track_number.is_empty() || !track_number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+
+        let cue_directory = path.parent()?;
+        let cue_name = cue_directory.file_name()?.to_str()?;
+        if !cue_name.to_ascii_lowercase().ends_with(".cue") {
+            return None;
+        }
+
+        let physical_folder = cue_directory.parent()?;
+        if physical_folder.as_os_str().is_empty() {
+            return None;
+        }
+
+        Some(VirtualCueTrackPath {
+            cue_directory: cue_directory.to_string_lossy().into_owned(),
+            physical_folder: physical_folder.to_string_lossy().into_owned(),
+        })
+    }
+
     fn disc_folder_number(name: &str) -> Option<u32> {
         let lower = name.to_ascii_lowercase();
         let suffix = ["disc", "disk", "cd"]
@@ -643,13 +697,28 @@ impl AudioEngine {
 
     fn multidisc_base_title(album_title: &str, disc_number: u32) -> Option<String> {
         let title = album_title.trim();
+        if let Some(without_close) = title.strip_suffix(')') {
+            if let Some(open_index) = without_close.rfind('(') {
+                let base = without_close[..open_index].trim_end();
+                let marker = without_close[open_index + 1..].trim();
+                if !base.is_empty() && !marker.is_empty() {
+                    let expanded = format!("{base} {marker}");
+                    match Self::multidisc_base_title(&expanded, disc_number) {
+                        None => return None,
+                        Some(parsed) if parsed == base => return Some(parsed),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         for (index, ch) in title.char_indices().rev() {
             if !ch.is_whitespace() {
                 continue;
             }
             let suffix = title[index..].trim_start();
             let lower = suffix.to_ascii_lowercase();
-            let Some(after_prefix) = ["disc", "disk", "cd"]
+            let Some(after_prefix) = ["disco", "disc", "disk", "cd"]
                 .iter()
                 .find_map(|prefix| lower.strip_prefix(prefix))
             else {
@@ -693,7 +762,13 @@ impl AudioEngine {
             if number != disc_number || number == 0 {
                 return None;
             }
-            let base = title[..index].trim();
+            let base = title[..index].trim_end();
+            let base = match base.char_indices().next_back() {
+                Some((separator_index, ',' | '-' | '–' | '—' | ':')) => {
+                    base[..separator_index].trim_end()
+                }
+                _ => base,
+            };
             return (!base.is_empty()).then(|| base.to_string());
         }
         Some(title.to_string())
@@ -872,7 +947,10 @@ impl AudioEngine {
         songs.ok_or_else(|| "Resposta count do MPD não contém songs.".to_string())
     }
 
-    pub fn get_local_albums_at(socket_path: &str) -> Result<Vec<LocalAlbum>, String> {
+    pub fn get_local_albums_at(
+        socket_path: &str,
+        valid_source_ids: &HashSet<String>,
+    ) -> Result<Vec<LocalAlbum>, String> {
         let status = Self::send_command_to_socket(socket_path, "status")
             .map_err(|e| format!("Falha ao verificar atualização da biblioteca: {e}"))?;
         if status.iter().any(|line| line.starts_with("updating_db: ")) {
@@ -881,12 +959,12 @@ impl AudioEngine {
         let count = Self::send_command_to_socket(socket_path, "count \"(base '')\"")
             .map_err(|e| format!("Falha ao contar músicas da biblioteca local: {e}"))?;
         let total = Self::parse_local_album_count(&count)?;
-        let mut map: HashMap<String, AlbumCollector> = HashMap::new();
+        let mut collection = LocalAlbumCollection::default();
         for (start, end) in Self::local_album_windows(total) {
             let command = format!("find \"(base '')\" window {start}:{end}");
             let lines = Self::send_command_to_socket(socket_path, &command)
                 .map_err(|e| format!("Falha ao ler página {start}:{end} da biblioteca local: {e}"))?;
-            let found = Self::collect_local_album_page(&mut map, lines)
+            let found = Self::collect_local_album_page(&mut collection, lines)
                 .map_err(|e| format!("Página {start}:{end} inválida: {e}"))?;
             if found != end - start {
                 return Err(format!(
@@ -895,6 +973,17 @@ impl AudioEngine {
                 ));
             }
         }
+        Ok(Self::finalize_local_album_collection(
+            collection,
+            valid_source_ids,
+        ))
+    }
+
+    fn finalize_local_album_collection(
+        collection: LocalAlbumCollection,
+        valid_source_ids: &HashSet<String>,
+    ) -> Vec<LocalAlbum> {
+        let mut map = Self::canonical_local_album_collectors(collection);
         Self::consolidate_dominant_album_titles(&mut map);
         Self::consolidate_local_album_discs(&mut map);
 
@@ -903,12 +992,14 @@ impl AudioEngine {
             .filter(|(_, col)| col.track_count > 0 && !col.folder_path.is_empty())
             .map(|(key, col)| {
                 let artist = col.display_artist();
+                let source_id = Self::local_album_source_id(&col.discs, valid_source_ids);
                 LocalAlbum {
                     id: key,
                     title: col.title,
                     artist,
                     year: col.year,
                     folder_path: col.folder_path,
+                    source_id,
                     track_count: col.track_count,
                     discs: col.discs,
                 }
@@ -916,58 +1007,135 @@ impl AudioEngine {
             .collect();
 
         albums.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-        Ok(albums)
+        albums
     }
 
-    fn collect_local_album_page(map: &mut std::collections::HashMap<String, AlbumCollector>, lines: Vec<String>) -> Result<usize, String> {
+    fn local_album_source_id(
+        discs: &[LocalAlbumDisc],
+        valid_source_ids: &HashSet<String>,
+    ) -> Option<String> {
+        let mut resolved = discs.iter().map(|disc| {
+            let mut components = Path::new(&disc.folder_path).components();
+            let first = match components.next() {
+                Some(std::path::Component::Normal(name)) => name.to_str(),
+                _ => None,
+            }?;
+            if components.any(|component| !matches!(component, std::path::Component::Normal(_))) {
+                return None;
+            }
+            valid_source_ids.contains(first).then(|| first.to_string())
+        });
+        let first = resolved.next()??;
+        resolved
+            .all(|source| source.as_deref() == Some(first.as_str()))
+            .then_some(first)
+    }
+
+    fn canonical_local_album_collectors(
+        collection: LocalAlbumCollection,
+    ) -> HashMap<String, AlbumCollector> {
+        let mut canonical = collection.physical;
+        for (key, cue) in collection.cue {
+            match canonical.entry(key) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if entry.get().track_count == 1
+                        && cue.track_count >= 2
+                        && cue.discs.len() == 1
+                    {
+                        entry.insert(cue);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(cue);
+                }
+            }
+        }
+        canonical
+    }
+
+    fn collect_local_album_page(
+        collection: &mut LocalAlbumCollection,
+        lines: Vec<String>,
+    ) -> Result<usize, String> {
         let mut cur_file = String::new();
         let mut cur_album = None;
         let mut cur_artist = None;
         let mut cur_album_artist = None;
         let mut cur_date = None;
 
-        let commit_track = |map: &mut HashMap<String, AlbumCollector>,
-                           file: &str,
-                           album: Option<String>,
-                           artist: Option<String>,
-                           album_artist: Option<String>,
-                           date: Option<String>| {
+        let commit_track = |collection: &mut LocalAlbumCollection,
+                            file: &str,
+                            album: Option<String>,
+                            artist: Option<String>,
+                            album_artist: Option<String>,
+                            date: Option<String>| {
             if file.is_empty() {
                 return;
             }
-            let p = Path::new(file);
-            let parent_dir = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
-            let folder_name = p.parent()
-                .and_then(|d| d.file_name())
+            let path = Path::new(file);
+            let cue_path = Self::virtual_cue_track_path(file);
+            let is_cue = cue_path.is_some();
+            let physical_folder = cue_path
+                .as_ref()
+                .map(|cue| cue.physical_folder.clone())
+                .unwrap_or_else(|| {
+                    path.parent()
+                        .map(|directory| directory.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                });
+            let folder_name = Path::new(&physical_folder)
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("Álbum Desconhecido")
                 .to_string();
 
-            let disc_label = folder_name.clone();
+            let (disc_path, disc_label) = cue_path
+                .map(|cue| {
+                    let label = Path::new(&cue.cue_directory)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("CUE")
+                        .to_string();
+                    (cue.cue_directory, label)
+                })
+                .unwrap_or_else(|| (physical_folder.clone(), folder_name.clone()));
             let title = album.unwrap_or(folder_name);
-            let key = Self::local_album_id(&parent_dir, &title);
+            let key = Self::local_album_id(&physical_folder, &title);
+            let map = if is_cue {
+                &mut collection.cue
+            } else {
+                &mut collection.physical
+            };
 
             let entry = map.entry(key).or_insert_with(|| AlbumCollector {
                 title: title.clone(),
                 year: date.clone(),
                 track_count: 0,
-                folder_path: parent_dir.clone(),
+                folder_path: physical_folder.clone(),
                 album_artist: None,
                 album_artist_consistent: true,
                 artists: HashMap::new(),
-                discs: vec![LocalAlbumDisc {
-                    number: Self::disc_folder_number(&disc_label).unwrap_or(0),
-                    label: disc_label,
-                    folder_path: parent_dir,
-                    track_count: 0,
-                }],
+                discs: Vec::new(),
             });
 
             if title > entry.title {
                 entry.title = title;
             }
             entry.track_count += 1;
-            entry.discs[0].track_count += 1;
+            if let Some(disc) = entry
+                .discs
+                .iter_mut()
+                .find(|disc| disc.folder_path == disc_path)
+            {
+                disc.track_count += 1;
+            } else {
+                entry.discs.push(LocalAlbumDisc {
+                    number: Self::disc_folder_number(&disc_label).unwrap_or(0),
+                    label: disc_label,
+                    folder_path: disc_path,
+                    track_count: 1,
+                });
+            }
             entry.add_artist_metadata(artist, album_artist);
             if entry.year.is_none() && date.is_some() {
                 entry.year = date;
@@ -982,7 +1150,14 @@ impl AudioEngine {
                         if v.is_empty() {
                             return Err("entrada file vazia".to_string());
                         }
-                        commit_track(map, &cur_file, cur_album.take(), cur_artist.take(), cur_album_artist.take(), cur_date.take());
+                        commit_track(
+                            collection,
+                            &cur_file,
+                            cur_album.take(),
+                            cur_artist.take(),
+                            cur_album_artist.take(),
+                            cur_date.take(),
+                        );
                         cur_file = v.to_string();
                         found += 1;
                     }
@@ -995,7 +1170,14 @@ impl AudioEngine {
             }
         }
 
-        commit_track(map, &cur_file, cur_album, cur_artist, cur_album_artist, cur_date);
+        commit_track(
+            collection,
+            &cur_file,
+            cur_album,
+            cur_artist,
+            cur_album_artist,
+            cur_date,
+        );
 
         Ok(found)
     }
@@ -2087,7 +2269,6 @@ impl AudioEngine {
             return Ok(());
         }
 
-        eprintln!("[Audio] Shared output stalled after seek; recovering with pause/resume.");
         send_command("pause 1")
             .map_err(|error| format!("Falha ao pausar para recuperar o seek Shared: {}", error))?;
         send_command("pause 0")
@@ -2484,12 +2665,12 @@ mod tests {
                 lines.push(format!("AlbumArtist: {value}"));
             }
         }
-        let mut map = HashMap::new();
+        let mut collection = LocalAlbumCollection::default();
         assert_eq!(
-            AudioEngine::collect_local_album_page(&mut map, lines).unwrap(),
+            AudioEngine::collect_local_album_page(&mut collection, lines).unwrap(),
             tracks.len()
         );
-        map
+        AudioEngine::canonical_local_album_collectors(collection)
     }
 
     fn album_id(folder: &str, title: &str) -> String {
@@ -2499,6 +2680,32 @@ mod tests {
             folder,
             title.trim().to_lowercase()
         )
+    }
+
+    fn collect_album_pages(pages: Vec<Vec<String>>) -> LocalAlbumCollection {
+        let mut collection = LocalAlbumCollection::default();
+        for page in pages {
+            AudioEngine::collect_local_album_page(&mut collection, page).unwrap();
+        }
+        collection
+    }
+
+    fn cue_fixture_lines(
+        folder: &str,
+        album: &str,
+        physical_tracks: usize,
+        cue_tracks: usize,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        for index in 1..=physical_tracks {
+            lines.push(format!("file: {folder}/{index:02}.flac"));
+            lines.push(format!("Album: {album}"));
+        }
+        for index in 1..=cue_tracks {
+            lines.push(format!("file: {folder}/image.cue/track{index:04}"));
+            lines.push(format!("Album: {album}"));
+        }
+        lines
     }
 
     fn resolved_album_tracks(
@@ -2560,6 +2767,154 @@ mod tests {
     }
 
     #[test]
+    fn virtual_cue_tracks_are_detected_strictly() {
+        for (path, expected) in [
+            ("Artist/Album/album.cue/track0001", true),
+            ("Artist/Album/ALBUM.CUE/track12", true),
+            ("Artist/Album/album.cue/track", false),
+            ("Artist/Album/album.cue/foo0001", false),
+            ("Artist/Album/album.cue-not/track0001", false),
+            ("Artist/Album/track0001.flac", false),
+            ("Artist.cue/Album/track0001.flac", false),
+        ] {
+            assert_eq!(
+                AudioEngine::virtual_cue_track_path(path).is_some(),
+                expected,
+                "{path}"
+            );
+        }
+
+        let cue = AudioEngine::virtual_cue_track_path(
+            "Brasilidades/Artist/Album/album.cue/track0004",
+        )
+        .unwrap();
+        assert_eq!(cue.cue_directory, "Brasilidades/Artist/Album/album.cue");
+        assert_eq!(cue.physical_folder, "Brasilidades/Artist/Album");
+    }
+
+    #[test]
+    fn physical_tracks_win_over_a_duplicate_cue_album() {
+        let collection = collect_album_pages(vec![cue_fixture_lines(
+            "FLAC/Donovan/Album", "Donovan Album", 20, 20,
+        )]);
+        let albums = AudioEngine::finalize_local_album_collection(
+            collection,
+            &HashSet::from(["FLAC".to_string()]),
+        );
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].track_count, 20);
+        assert_eq!(albums[0].folder_path, "FLAC/Donovan/Album");
+        assert_eq!(albums[0].discs.len(), 1);
+        assert_eq!(albums[0].discs[0].folder_path, "FLAC/Donovan/Album");
+        assert_eq!(albums[0].source_id.as_deref(), Some("FLAC"));
+    }
+
+    #[test]
+    fn single_image_cue_wins_without_becoming_a_one_track_album() {
+        let collection = collect_album_pages(vec![cue_fixture_lines(
+            "Music/Artist/Album", "Album", 1, 10,
+        )]);
+        let albums = AudioEngine::finalize_local_album_collection(
+            collection,
+            &HashSet::from(["Music".to_string()]),
+        );
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].track_count, 10);
+        assert_eq!(albums[0].folder_path, "Music/Artist/Album");
+        assert_eq!(albums[0].discs.len(), 1);
+        assert_eq!(
+            albums[0].discs[0].folder_path,
+            "Music/Artist/Album/image.cue"
+        );
+        assert_eq!(albums[0].discs[0].track_count, 10);
+        assert_eq!(albums[0].source_id.as_deref(), Some("Music"));
+    }
+
+    #[test]
+    fn one_physical_and_one_cue_track_choose_physical() {
+        let collection = collect_album_pages(vec![cue_fixture_lines(
+            "Music/Artist/Album", "Album", 1, 1,
+        )]);
+        let map = AudioEngine::canonical_local_album_collectors(collection);
+        let album = &map[&album_id("Music/Artist/Album", "Album")];
+        assert_eq!(album.track_count, 1);
+        assert_eq!(album.discs[0].folder_path, "Music/Artist/Album");
+    }
+
+    #[test]
+    fn ambiguous_multiple_cue_directories_prefer_physical() {
+        let lines = album_test_lines(&[
+            "file: Music/Artist/Album/image.flac",
+            "Album: Album",
+            "file: Music/Artist/Album/first.cue/track0001",
+            "Album: Album",
+            "file: Music/Artist/Album/second.cue/track0001",
+            "Album: Album",
+        ]);
+        let map = AudioEngine::canonical_local_album_collectors(collect_album_pages(vec![lines]));
+        let album = &map[&album_id("Music/Artist/Album", "Album")];
+        assert_eq!(album.track_count, 1);
+        assert_eq!(album.discs[0].folder_path, "Music/Artist/Album");
+    }
+
+    #[test]
+    fn cue_only_and_physical_only_albums_remain_available() {
+        let cue = AudioEngine::canonical_local_album_collectors(collect_album_pages(vec![
+            cue_fixture_lines("Music/Artist/Cue", "Cue", 0, 4),
+        ]));
+        assert_eq!(cue[&album_id("Music/Artist/Cue", "Cue")].track_count, 4);
+        assert_eq!(
+            cue[&album_id("Music/Artist/Cue", "Cue")].discs[0].folder_path,
+            "Music/Artist/Cue/image.cue"
+        );
+
+        let physical = AudioEngine::canonical_local_album_collectors(collect_album_pages(vec![
+            cue_fixture_lines("Music/Artist/Physical", "Physical", 3, 0),
+        ]));
+        assert_eq!(
+            physical[&album_id("Music/Artist/Physical", "Physical")].track_count,
+            3
+        );
+        assert_eq!(
+            physical[&album_id("Music/Artist/Physical", "Physical")].discs[0].folder_path,
+            "Music/Artist/Physical"
+        );
+    }
+
+    #[test]
+    fn cue_choice_is_global_across_collection_pages() {
+        let mut first_page = cue_fixture_lines("Music/Artist/Album", "Album", 1, 0);
+        for index in 0..499 {
+            first_page.push(format!("file: Music/Filler/{index:04}.flac"));
+            first_page.push("Album: Filler".to_string());
+        }
+        let cue_page = cue_fixture_lines("Music/Artist/Album", "Album", 0, 10);
+        let map = AudioEngine::canonical_local_album_collectors(collect_album_pages(vec![
+            first_page, cue_page,
+        ]));
+        let album = &map[&album_id("Music/Artist/Album", "Album")];
+        assert_eq!(album.track_count, 10);
+        assert_eq!(
+            album.discs[0].folder_path,
+            "Music/Artist/Album/image.cue"
+        );
+    }
+
+    #[test]
+    fn different_album_titles_in_one_folder_are_not_canonicalized_together() {
+        let mut lines = cue_fixture_lines("Music/Artist/Folder", "Physical Album", 2, 0);
+        lines.extend(cue_fixture_lines("Music/Artist/Folder", "Cue Album", 0, 2));
+        let albums = AudioEngine::finalize_local_album_collection(
+            collect_album_pages(vec![lines]),
+            &HashSet::new(),
+        );
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums.iter().map(|album| album.track_count).sum::<usize>(), 4);
+    }
+
+    #[test]
     fn multidisc_title_suffix_matches_its_folder_number() {
         for (title, number) in [
             ("Album CD1", 1),
@@ -2574,6 +2929,25 @@ mod tests {
             ("Album Disk 1", 1),
             ("Album Disc-2", 2),
             ("Album Disk_03", 3),
+            ("Album Disco 1", 1),
+            ("Album Disco2", 2),
+            ("Album Disco-1", 1),
+            ("Album Disco_1", 1),
+            ("Album Disco.1", 1),
+            ("Album, Disco 1", 1),
+            ("Album - Disco 1", 1),
+            ("Album – Disco 2", 2),
+            ("Album — Disco 2", 2),
+            ("Album: Disco 1", 1),
+            ("Album (CD1)", 1),
+            ("Album (CD 2)", 2),
+            ("Album (CD.1)", 1),
+            ("Album (CD-1)", 1),
+            ("Album (CD_1)", 1),
+            ("Album (Disc 1)", 1),
+            ("Album (Disk 2)", 2),
+            ("Album (Disco 1)", 1),
+            ("Album (cD1)", 1),
             ("Album CD.2 (Dub Wise)", 2),
             ("Album CD 2 - Bonus", 2),
             ("Album Disc 3 (Live)", 3),
@@ -2586,6 +2960,8 @@ mod tests {
             );
         }
         assert_eq!(AudioEngine::multidisc_base_title("Album CD1", 2), None);
+        assert_eq!(AudioEngine::multidisc_base_title("Album Disco 2", 1), None);
+        assert_eq!(AudioEngine::multidisc_base_title("Album (CD2)", 1), None);
         assert_eq!(
             AudioEngine::multidisc_base_title("CD Collection", 1).as_deref(),
             Some("CD Collection")
@@ -2593,6 +2969,135 @@ mod tests {
         assert_eq!(
             AudioEngine::multidisc_base_title("Compact Disc", 1).as_deref(),
             Some("Compact Disc")
+        );
+        for title in ["Disco Music", "Disco Inferno", "Album Discography"] {
+            assert_eq!(
+                AudioEngine::multidisc_base_title(title, 1).as_deref(),
+                Some(title),
+                "{title}"
+            );
+        }
+        for title in [
+            "Album (CD1) Remaster",
+            "History of Compact Disc (Documentary)",
+            "Disco Music (Live)",
+            "Discography (CD Collection)",
+        ] {
+            assert_eq!(
+                AudioEngine::multidisc_base_title(title, 1).as_deref(),
+                Some(title),
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn parenthesized_cd_suffix_consolidates_real_albums() {
+        for (root, title, first_path, second_path) in [
+            (
+                "Brasilidades/Egberto Gismonti/Saudações",
+                "Saudações",
+                "Brasilidades/Egberto Gismonti/Saudações/CD1/a.flac",
+                "Brasilidades/Egberto Gismonti/Saudações/CD2/b.flac",
+            ),
+            (
+                "Jazz/Paco de Lucia & John McLaughlin/Live At Montreux 1987",
+                "Paco And John Live At Montreux 1987",
+                "Jazz/Paco de Lucia & John McLaughlin/Live At Montreux 1987/CD1/a.flac",
+                "Jazz/Paco de Lucia & John McLaughlin/Live At Montreux 1987/CD2/b.flac",
+            ),
+        ] {
+            let first_title = format!("{title} (CD1)");
+            let second_title = format!("{title} (CD2)");
+            let map = consolidated_album_tracks(&[
+                (first_path, Some(first_title.as_str()), None, None),
+                (second_path, Some(second_title.as_str()), None, None),
+            ]);
+
+            assert_eq!(map.len(), 1, "{title}");
+            let album = &map[&album_id(root, title)];
+            assert_eq!(album.title, title);
+            assert_eq!(album.track_count, 2);
+            assert_eq!(album.discs.len(), 2);
+            assert_eq!(
+                album
+                    .discs
+                    .iter()
+                    .map(|disc| (disc.number, disc.label.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![(1, "CD1"), (2, "CD2")]
+            );
+        }
+    }
+
+    #[test]
+    fn parenthesized_disc_tags_in_the_same_folder_remain_separate() {
+        let map = consolidated_album_tracks(&[
+            (
+                "Artist/Black Is Our Colour/one.flac",
+                Some("Black Is Our Colour (Disc 1)"),
+                None,
+                None,
+            ),
+            (
+                "Artist/Black Is Our Colour/two.flac",
+                Some("Black Is Our Colour (Disc 2)"),
+                None,
+                None,
+            ),
+        ]);
+
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key(&album_id(
+            "Artist/Black Is Our Colour",
+            "Black Is Our Colour (Disc 1)"
+        )));
+        assert!(map.contains_key(&album_id(
+            "Artist/Black Is Our Colour",
+            "Black Is Our Colour (Disc 2)"
+        )));
+    }
+
+    #[test]
+    fn portuguese_disco_suffix_consolidates_the_real_cd_layout() {
+        let map = consolidated_album_tracks(&[
+            (
+                "Brasilidades/Legião Urbana/Música P_Acampamentos/CD1/a.flac",
+                Some("Música P/Acampamentos, Disco 1"),
+                Some("Legião Urbana"),
+                None,
+            ),
+            (
+                "Brasilidades/Legião Urbana/Música P_Acampamentos/CD2/b.flac",
+                Some("Música P/Acampamentos, Disco 2"),
+                Some("Legião Urbana"),
+                None,
+            ),
+        ]);
+        let root = "Brasilidades/Legião Urbana/Música P_Acampamentos";
+        assert_eq!(map.len(), 1);
+        let album = &map[&album_id(root, "Música P/Acampamentos")];
+        assert_eq!(album.title, "Música P/Acampamentos");
+        assert_eq!(album.track_count, 2);
+        assert_eq!(album.discs.len(), 2);
+        assert_eq!(
+            album
+                .discs
+                .iter()
+                .map(|disc| (disc.number, disc.label.as_str(), disc.folder_path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    1,
+                    "CD1",
+                    "Brasilidades/Legião Urbana/Música P_Acampamentos/CD1"
+                ),
+                (
+                    2,
+                    "CD2",
+                    "Brasilidades/Legião Urbana/Música P_Acampamentos/CD2"
+                ),
+            ]
         );
     }
 
@@ -2841,7 +3346,7 @@ mod tests {
 
     #[test]
     fn multi_disc_album_survives_page_boundary() {
-        let mut map = HashMap::new();
+        let mut collection = LocalAlbumCollection::default();
         let mut first_page = Vec::new();
         for index in 0..500 {
             first_page.push(format!("file: Artist/Album/CD1/{index}.flac"));
@@ -2849,12 +3354,12 @@ mod tests {
             first_page.push("Artist: Big Youth".to_string());
         }
         assert_eq!(
-            AudioEngine::collect_local_album_page(&mut map, first_page).unwrap(),
+            AudioEngine::collect_local_album_page(&mut collection, first_page).unwrap(),
             500
         );
         assert_eq!(
             AudioEngine::collect_local_album_page(
-                &mut map,
+                &mut collection,
                 album_test_lines(&[
                     "file: Artist/Album/CD2/one.flac",
                     "Album: Album",
@@ -2864,12 +3369,74 @@ mod tests {
             .unwrap(),
             1
         );
+        let mut map = AudioEngine::canonical_local_album_collectors(collection);
         AudioEngine::consolidate_local_album_discs(&mut map);
         assert_eq!(map.len(), 1);
         let album = &map[&album_id("Artist/Album", "Album")];
         assert_eq!(album.track_count, 501);
         assert_eq!(album.discs.len(), 2);
         assert_eq!(album.display_artist(), "Big Youth");
+    }
+
+    fn source_test_disc(folder_path: &str) -> LocalAlbumDisc {
+        LocalAlbumDisc {
+            number: 0,
+            label: "Disc".to_string(),
+            folder_path: folder_path.to_string(),
+            track_count: 1,
+        }
+    }
+
+    #[test]
+    fn local_album_source_uses_only_a_valid_virtual_root_component() {
+        let valid = HashSet::from([
+            "Reggae".to_string(),
+            "Brasilidades".to_string(),
+            "Music (2)".to_string(),
+        ]);
+        for (path, expected) in [
+            ("Reggae/Artist/Album", Some("Reggae")),
+            ("Brasilidades/Album", Some("Brasilidades")),
+            ("Music (2)/Album", Some("Music (2)")),
+            ("Reggae", Some("Reggae")),
+            ("Unknown/Album", None),
+            ("", None),
+            ("../Reggae/Album", None),
+            ("Reggae/../Album", None),
+            ("/Reggae/Album", None),
+        ] {
+            assert_eq!(
+                AudioEngine::local_album_source_id(&[source_test_disc(path)], &valid).as_deref(),
+                expected,
+                "unexpected source for {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_album_source_requires_all_discs_to_share_the_same_source() {
+        let valid = HashSet::from(["Reggae".to_string(), "Jazz".to_string()]);
+        assert_eq!(
+            AudioEngine::local_album_source_id(
+                &[
+                    source_test_disc("Reggae/Album/CD1"),
+                    source_test_disc("Reggae/Album/CD2"),
+                ],
+                &valid,
+            )
+            .as_deref(),
+            Some("Reggae")
+        );
+        assert_eq!(
+            AudioEngine::local_album_source_id(
+                &[
+                    source_test_disc("Reggae/Album/CD1"),
+                    source_test_disc("Jazz/Album/CD2"),
+                ],
+                &valid,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -2879,11 +3446,16 @@ mod tests {
             ("count \"(base '')\"", "songs: 2\nOK\n"),
             ("find \"(base '')\" window 0:2", "file: Artist/Album/CD2/two.flac\nAlbum: Album\nArtist: B\nfile: Artist/Album/CD1/one.flac\nAlbum: Album\nArtist: A\nOK\n"),
         ]);
-        let albums = AudioEngine::get_local_albums_at(&path).unwrap();
+        let albums = AudioEngine::get_local_albums_at(
+            &path,
+            &HashSet::from(["Artist".to_string()]),
+        )
+        .unwrap();
         server.join().unwrap();
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].id, album_id("Artist/Album", "Album"));
         assert_eq!(albums[0].folder_path, "Artist/Album/CD1");
+        assert_eq!(albums[0].source_id.as_deref(), Some("Artist"));
         assert_eq!(albums[0].track_count, 2);
         assert_eq!(
             albums[0]
@@ -3314,15 +3886,16 @@ mod tests {
 
     #[test]
     fn local_album_pages_preserve_aggregation_and_reset_tags() {
-        let mut map = HashMap::new();
-        assert_eq!(AudioEngine::collect_local_album_page(&mut map, album_test_lines(&[
+        let mut collection = LocalAlbumCollection::default();
+        assert_eq!(AudioEngine::collect_local_album_page(&mut collection, album_test_lines(&[
             "file: Música/Disco/primeira.flac", "Album: Mesmo", "Artist: Faixa", "AlbumArtist: Álbum", "Date: 2024-03-01",
             "file: Música/Sem Album/primeira.flac",
         ])).unwrap(), 2);
-        assert_eq!(AudioEngine::collect_local_album_page(&mut map, album_test_lines(&[
+        assert_eq!(AudioEngine::collect_local_album_page(&mut collection, album_test_lines(&[
             "file: Música/Disco/segunda.flac", "Album: Mesmo", "Artist: Faixa", "AlbumArtist: Álbum",
             "file: Música/Sem Album/segunda.flac",
         ])).unwrap(), 2);
+        let map = AudioEngine::canonical_local_album_collectors(collection);
         let shared = &map[&album_id("Música/Disco", "Mesmo")];
         assert_eq!(shared.track_count, 2);
         assert_eq!(shared.display_artist(), "Álbum");
@@ -3337,16 +3910,17 @@ mod tests {
 
     #[test]
     fn local_album_crossing_500_song_boundary_counts_both_tracks() {
-        let mut map = HashMap::new();
+        let mut collection = LocalAlbumCollection::default();
         let mut first_page = Vec::new();
         for index in 0..500 {
             first_page.push(format!("file: Disco/faixa-{index}.flac"));
             first_page.push("Album: Mesmo".to_string());
         }
-        assert_eq!(AudioEngine::collect_local_album_page(&mut map, first_page).unwrap(), 500);
-        assert_eq!(AudioEngine::collect_local_album_page(&mut map, album_test_lines(&[
+        assert_eq!(AudioEngine::collect_local_album_page(&mut collection, first_page).unwrap(), 500);
+        assert_eq!(AudioEngine::collect_local_album_page(&mut collection, album_test_lines(&[
             "file: Disco/faixa-500.flac", "Album: Mesmo",
         ])).unwrap(), 1);
+        let map = AudioEngine::canonical_local_album_collectors(collection);
         assert_eq!(map[&album_id("Disco", "Mesmo")].track_count, 501);
     }
 
@@ -3522,7 +4096,7 @@ mod tests {
 
     #[test]
     fn dominant_album_title_counts_across_page_boundary() {
-        let mut map = HashMap::new();
+        let mut collection = LocalAlbumCollection::default();
         let mut first_page = Vec::new();
         for index in 0..500 {
             first_page.push(format!("file: Artist/Folder/{index}.flac"));
@@ -3532,17 +4106,18 @@ mod tests {
             ));
         }
         assert_eq!(
-            AudioEngine::collect_local_album_page(&mut map, first_page).unwrap(),
+            AudioEngine::collect_local_album_page(&mut collection, first_page).unwrap(),
             500
         );
         assert_eq!(
             AudioEngine::collect_local_album_page(
-                &mut map,
+                &mut collection,
                 album_test_lines(&["file: Artist/Folder/500.flac", "Album: Album A",])
             )
             .unwrap(),
             1
         );
+        let mut map = AudioEngine::canonical_local_album_collectors(collection);
         AudioEngine::consolidate_dominant_album_titles(&mut map);
         assert_eq!(map.len(), 1);
         assert_eq!(map[&album_id("Artist/Folder", "Album A")].track_count, 501);
@@ -3636,7 +4211,7 @@ mod tests {
 
     #[test]
     fn local_album_artist_stats_cross_page_boundary() {
-        let mut map = HashMap::new();
+        let mut collection = LocalAlbumCollection::default();
         let mut first_page = Vec::new();
         for index in 0..500 {
             first_page.push(format!("file: Disco/faixa-{index}.flac"));
@@ -3647,16 +4222,16 @@ mod tests {
             ));
         }
         assert_eq!(
-            AudioEngine::collect_local_album_page(&mut map, first_page).unwrap(),
+            AudioEngine::collect_local_album_page(&mut collection, first_page).unwrap(),
             500
         );
         assert_eq!(
-            map[&album_id("Disco", "Progress")].display_artist(),
+            collection.physical[&album_id("Disco", "Progress")].display_artist(),
             "Big Youth"
         );
         assert_eq!(
             AudioEngine::collect_local_album_page(
-                &mut map,
+                &mut collection,
                 album_test_lines(&[
                     "file: Disco/faixa-500.flac",
                     "Album: Progress",
@@ -3666,6 +4241,7 @@ mod tests {
             .unwrap(),
             1
         );
+        let map = AudioEngine::canonical_local_album_collectors(collection);
         assert_eq!(map.len(), 1);
         assert_eq!(map[&album_id("Disco", "Progress")].track_count, 501);
         assert_eq!(
@@ -3681,18 +4257,25 @@ mod tests {
             ("count \"(base '')\"", "songs: 1\nplaytime: 20\nOK\n"),
             ("find \"(base '')\" window 0:1", "file: Raiz/Disco/faixa.flac\nAlbum: Disco\nOK\n"),
         ]);
-        let albums = AudioEngine::get_local_albums_at(&path).unwrap();
+        let albums = AudioEngine::get_local_albums_at(
+            &path,
+            &HashSet::from(["Raiz".to_string()]),
+        )
+        .unwrap();
         server.join().unwrap();
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].id, album_id("Raiz/Disco", "Disco"));
         assert_eq!(albums[0].folder_path, "Raiz/Disco");
+        assert_eq!(albums[0].source_id.as_deref(), Some("Raiz"));
         assert_eq!(albums[0].track_count, 1);
 
         let (path, server) = fake_album_mpd(vec![
             ("status", "state: stop\nOK\n"),
             ("count \"(base '')\"", "songs: 0\nOK\n"),
         ]);
-        assert!(AudioEngine::get_local_albums_at(&path).unwrap().is_empty());
+        assert!(AudioEngine::get_local_albums_at(&path, &HashSet::new())
+            .unwrap()
+            .is_empty());
         server.join().unwrap();
     }
 
@@ -3701,7 +4284,9 @@ mod tests {
         let (path, server) = fake_album_mpd(vec![
             ("status", "updating_db: 12\nstate: stop\nOK\n"),
         ]);
-        assert!(AudioEngine::get_local_albums_at(&path).unwrap_err().contains("atualização"));
+        assert!(AudioEngine::get_local_albums_at(&path, &HashSet::new())
+            .unwrap_err()
+            .contains("atualização"));
         server.join().unwrap();
 
         for response in ["ACK [5@0] {find} failure\n", "file: Disco/faixa.flac\n", "OK\n"] {
@@ -3710,7 +4295,7 @@ mod tests {
                 ("count \"(base '')\"", "songs: 1\nOK\n"),
                 ("find \"(base '')\" window 0:1", response),
             ]);
-            assert!(AudioEngine::get_local_albums_at(&path).is_err());
+            assert!(AudioEngine::get_local_albums_at(&path, &HashSet::new()).is_err());
             server.join().unwrap();
         }
     }

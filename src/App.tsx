@@ -1,11 +1,10 @@
-import React, { useEffect, useState, useRef, useCallback, memo } from "react";
+import React, { useEffect, useState, useRef, useCallback, useMemo, memo } from "react";
 import {
   Disc3,
   Folder,
   Server,
   Sparkles,
   Play,
-  ArrowUpDown,
   Settings,
   ArrowLeft,
   Search,
@@ -35,6 +34,10 @@ import { SettingsModal } from "./components/SettingsModal";
 import { AboutModal } from "./components/AboutModal";
 import { WelcomeWizard } from "./components/WelcomeWizard";
 import { PlexImage } from "./components/PlexImage";
+import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./components/VirtualAlbumGrid";
+import { VirtualList, type VirtualListHandle } from "./components/VirtualList";
+import { ToolbarSelect } from "./components/ToolbarSelect";
+import { SidebarNavItem } from "./components/SidebarNavItem";
 import { plexService } from "./services/plex";
 import { audioService } from "./services/audio";
 import { configService } from "./services/config";
@@ -58,6 +61,27 @@ import { PlaybackStatus, AudioDevice, MpdHealth } from "./types/audio";
 import { AppConfig } from "./types/config";
 import { FavoriteAlbum } from "./types/favorite";
 import type { NewPlaylistItem } from "./types/playlist";
+import {
+  isTextPlexAlbumSort,
+  plexAlbumBucketFirstIndices,
+  plexAlbumNavigationResetKey,
+  sortPlexAlbums,
+  type PlexAlbumSortMode,
+} from "./utils/plexAlbumNavigation";
+import { LOCAL_ALBUM_INDEX_BUCKETS } from "./utils/localAlbumNavigation";
+import {
+  albumsForPlexArtist,
+  derivePlexArtists,
+  plexArtistBucketFirstIndices,
+  sortPlexArtists,
+  type PlexArtistSortMode,
+  type PlexArtistSummary,
+} from "./utils/plexArtistNavigation";
+import {
+  derivePlexYearNavigation,
+  plexAlbumsForYear,
+  plexAlbumsWithoutYear,
+} from "./utils/plexYearNavigation";
 
 interface CollectionAlbumsCacheEntry {
   promise: Promise<PlexAlbum[]>;
@@ -263,8 +287,9 @@ const PlexAlbumCard = memo<{
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          if (album.artist_rating_key) {
-            onSelectArtist(album.artist_rating_key, album.artist);
+          const artistKey = album.artist_rating_key?.trim();
+          if (artistKey) {
+            onSelectArtist(artistKey, album.artist);
           }
         }}
         className="text-xs text-[#999999] hover:text-[#E5A00D] transition-colors truncate mt-0.5 text-left cursor-pointer"
@@ -293,9 +318,10 @@ export function App() {
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
   const [loadingLibraries, setLoadingLibraries] = useState(true);
   const [selectedLibrary, setSelectedLibrary] = useState<PlexLibrary | null>(null);
-  const [activeTab, setActiveTab] = useState<"library" | "collections">("library");
+  const [plexViewMode, setPlexViewMode] = useState<"albums" | "artists" | "years" | "collections">("albums");
   const [hasCollections, setHasCollections] = useState(false);
-  const [sortBy, setSortBy] = useState<string>("added");
+  const [plexSortMode, setPlexSortMode] = useState<PlexAlbumSortMode>("added_recent");
+  const [plexArtistSortMode, setPlexArtistSortMode] = useState<PlexArtistSortMode>("artist_asc");
   const [showSettings, setShowSettings] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
 
@@ -327,6 +353,11 @@ export function App() {
   const [mpdHealth, setMpdHealth] = useState<MpdHealth>({ state: "starting" });
   const isPlaybackAvailable = mpdHealth.state === "available";
   const statusRequestGenerationRef = useRef(0);
+  const plexLibraryRequestGenerationRef = useRef(0);
+  const plexSearchRequestGenerationRef = useRef(0);
+  const plexGridRef = useRef<VirtualAlbumGridHandle>(null);
+  const plexArtistListRef = useRef<VirtualListHandle>(null);
+  const [plexScrollContainer, setPlexScrollContainer] = useState<HTMLDivElement | null>(null);
 
   const statusRef = useRef(playbackStatus);
   useEffect(() => {
@@ -369,6 +400,10 @@ export function App() {
   const [collectionAlbums, setCollectionAlbums] = useState<PlexAlbum[]>([]);
   const [activeAlbum, setActiveAlbum] = useState<PlexAlbum | null>(null);
   const [activeArtist, setActiveArtist] = useState<SelectedArtist | null>(null);
+  const [fallbackPlexArtist, setFallbackPlexArtist] = useState<PlexArtistSummary | null>(null);
+  const [selectedPlexDecade, setSelectedPlexDecade] = useState<number | null>(null);
+  const [selectedPlexYear, setSelectedPlexYear] = useState<number | null>(null);
+  const [selectedPlexUnknownYear, setSelectedPlexUnknownYear] = useState(false);
 
   // Busca Global
   const [searchQuery, setSearchQuery] = useState("");
@@ -577,6 +612,10 @@ export function App() {
       setActiveAlbum(null);
       setActiveCollection(null);
       setActiveArtist(null);
+      setFallbackPlexArtist(null);
+      setSelectedPlexDecade(null);
+      setSelectedPlexYear(null);
+      setSelectedPlexUnknownYear(false);
       return;
     }
 
@@ -589,6 +628,8 @@ export function App() {
         setLibraries(libs);
         if (libs.length > 0) {
           setSelectedLibrary(libs[0]);
+        } else {
+          setSelectedLibrary(null);
         }
       })
       .catch((err) => {
@@ -603,50 +644,67 @@ export function App() {
     };
   }, [config?.plex_token]);
 
-  // Atualizar coleções da biblioteca ativa
+  // Carregar o catálogo base e as coleções da biblioteca ativa uma única vez.
   useEffect(() => {
-    if (!selectedLibrary) return;
+    if (!selectedLibrary) {
+      setAlbums([]);
+      setCollections([]);
+      setHasCollections(false);
+      setLoading(false);
+      return;
+    }
+    const generation = plexLibraryRequestGenerationRef.current + 1;
+    plexLibraryRequestGenerationRef.current = generation;
+    let disposed = false;
+
     setActiveAlbum(null);
     setActiveCollection(null);
     setActiveArtist(null);
+    setFallbackPlexArtist(null);
+    setSelectedPlexDecade(null);
+    setSelectedPlexYear(null);
+    setSelectedPlexUnknownYear(false);
     setSearchQuery("");
     setSearchResults(null);
-
-    plexService
-      .getCollections(selectedLibrary.key)
-      .then((cols) => {
-        const available = cols.length > 0;
-        setHasCollections(available);
-        if (!available && activeTab === "collections") {
-          setActiveTab("library");
-        }
-      })
-      .catch(() => setHasCollections(false));
-  }, [selectedLibrary, activeTab]);
-
-  // Carregar álbuns/coleções do Plex
-  useEffect(() => {
-    if (!selectedLibrary || searchQuery.trim().length > 0 || mediaSource !== "plex") return;
-
+    setAlbums([]);
+    setCollections([]);
+    setHasCollections(false);
     setLoading(true);
-    if (activeTab === "library") {
-      plexService
-        .getAlbums(selectedLibrary.key, sortBy)
-        .then(setAlbums)
-        .catch(console.error)
-        .finally(() => setLoading(false));
-    } else {
-      plexService
-        .getCollections(selectedLibrary.key)
-        .then(setCollections)
-        .catch(console.error)
-        .finally(() => setLoading(false));
-    }
-  }, [selectedLibrary, activeTab, sortBy, searchQuery, mediaSource]);
+    void Promise.allSettled([
+      plexService.getAlbums(selectedLibrary.key, "added"),
+      plexService.getCollections(selectedLibrary.key),
+    ]).then(([albumResult, collectionResult]) => {
+      if (disposed || generation !== plexLibraryRequestGenerationRef.current) return;
+      if (albumResult.status === "fulfilled") {
+        setAlbums(albumResult.value);
+      } else {
+        console.error("Falha ao carregar álbuns Plex:", albumResult.reason);
+      }
+      if (collectionResult.status === "fulfilled") {
+        const loadedCollections = collectionResult.value;
+        setCollections(loadedCollections);
+        setHasCollections(loadedCollections.length > 0);
+        if (loadedCollections.length === 0) {
+          setPlexViewMode((current) => current === "collections" ? "albums" : current);
+        }
+      } else {
+        setHasCollections(false);
+        setPlexViewMode((current) => current === "collections" ? "albums" : current);
+        console.error("Falha ao consultar coleções Plex:", collectionResult.reason);
+      }
+      setLoading(false);
+    });
+
+    return () => {
+      disposed = true;
+    };
+  }, [selectedLibrary]);
 
   // Busca Plex
   useEffect(() => {
     const q = searchQuery.trim();
+    const generation = plexSearchRequestGenerationRef.current + 1;
+    plexSearchRequestGenerationRef.current = generation;
     if (q.length === 0 || mediaSource !== "plex") {
       setSearchResults(null);
       setIsSearching(false);
@@ -657,12 +715,23 @@ export function App() {
     const timer = setTimeout(() => {
       plexService
         .search(q, selectedLibrary?.key)
-        .then((res) => setSearchResults(res))
-        .catch(console.error)
-        .finally(() => setIsSearching(false));
+        .then((res) => {
+          if (generation === plexSearchRequestGenerationRef.current) setSearchResults(res);
+        })
+        .catch((error) => {
+          if (generation === plexSearchRequestGenerationRef.current) console.error(error);
+        })
+        .finally(() => {
+          if (generation === plexSearchRequestGenerationRef.current) setIsSearching(false);
+        });
     }, 300);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      if (generation === plexSearchRequestGenerationRef.current) {
+        plexSearchRequestGenerationRef.current += 1;
+      }
+    };
   }, [searchQuery, selectedLibrary, mediaSource]);
 
   const handleSelectCollection = async (col: PlexCollection) => {
@@ -730,19 +799,139 @@ export function App() {
   }, []);
 
   const handleSelectArtist = useCallback((artistKey: string, artistName: string) => {
-    setActiveArtist({ rating_key: artistKey, name: artistName });
+    const normalizedArtistKey = artistKey.trim();
+    if (!normalizedArtistKey) return;
+    setFallbackPlexArtist(null);
+    setActiveArtist({ rating_key: normalizedArtistKey, name: artistName });
   }, []);
+
+  const handlePlexModeChange = (mode: "albums" | "artists" | "years" | "collections") => {
+    setPlexViewMode(mode);
+    setActiveAlbum(null);
+    setActiveArtist(null);
+    setActiveCollection(null);
+    setFallbackPlexArtist(null);
+    setSelectedPlexDecade(null);
+    setSelectedPlexYear(null);
+    setSelectedPlexUnknownYear(false);
+  };
 
   const resetAllNavigation = () => {
     setLocalSelectedArtist(null);
     setActiveAlbum(null);
     setActiveCollection(null);
     setActiveArtist(null);
+    setFallbackPlexArtist(null);
+    setSelectedPlexDecade(null);
+    setSelectedPlexYear(null);
+    setSelectedPlexUnknownYear(false);
     setSearchQuery("");
     setSearchResults(null);
   };
 
+  const handlePlexLibraryChange = (libraryKey: string) => {
+    const library = libraries.find((item) => item.key === libraryKey);
+    if (!library || library.key === selectedLibrary?.key) return;
+    plexLibraryRequestGenerationRef.current += 1;
+    plexSearchRequestGenerationRef.current += 1;
+    setAlbums([]);
+    setCollections([]);
+    setHasCollections(false);
+    setLoading(true);
+    setActiveAlbum(null);
+    setActiveCollection(null);
+    setActiveArtist(null);
+    setFallbackPlexArtist(null);
+    setSelectedPlexDecade(null);
+    setSelectedPlexYear(null);
+    setSelectedPlexUnknownYear(false);
+    setSearchQuery("");
+    setSearchResults(null);
+    setSelectedLibrary(library);
+  };
+
   const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
+  const plexLibraryOptions = useMemo(() => libraries.length > 0
+    ? libraries.map((library) => ({ value: library.key, label: library.title }))
+    : [{
+        value: "",
+        label: t(loadingLibraries ? "sidebar.loadingLibraries" : "sidebar.noLibraries"),
+      }], [libraries, loadingLibraries, t]);
+  const plexAlbumSortOptions = useMemo(() => [
+    { value: "added_recent", label: t("plex.sortAddedRecent") },
+    { value: "album_asc", label: t("plex.sortAlbumAsc") },
+    { value: "album_desc", label: t("plex.sortAlbumDesc") },
+    { value: "artist_asc", label: t("plex.sortArtistAsc") },
+    { value: "artist_desc", label: t("plex.sortArtistDesc") },
+    { value: "year_desc", label: t("plex.sortYearNewest") },
+    { value: "year_asc", label: t("plex.sortYearOldest") },
+  ], [t]);
+  const plexArtistSortOptions = useMemo(() => [
+    { value: "artist_asc", label: t("plex.sortArtistAsc") },
+    { value: "artist_desc", label: t("plex.sortArtistDesc") },
+  ], [t]);
+  const sortedPlexAlbums = useMemo(
+    () => sortPlexAlbums(albums, plexSortMode),
+    [albums, plexSortMode],
+  );
+  const plexAlbumBucketIndices = useMemo(
+    () => plexAlbumBucketFirstIndices(sortedPlexAlbums, plexSortMode),
+    [plexSortMode, sortedPlexAlbums],
+  );
+  const plexArtists = useMemo(() => derivePlexArtists(albums), [albums]);
+  const sortedPlexArtists = useMemo(
+    () => sortPlexArtists(plexArtists, plexArtistSortMode),
+    [plexArtistSortMode, plexArtists],
+  );
+  const plexArtistBucketIndices = useMemo(
+    () => plexArtistBucketFirstIndices(sortedPlexArtists),
+    [sortedPlexArtists],
+  );
+  const fallbackPlexArtistAlbums = useMemo(
+    () => fallbackPlexArtist
+      ? sortPlexAlbums(albumsForPlexArtist(albums, fallbackPlexArtist), "album_asc")
+      : [],
+    [albums, fallbackPlexArtist],
+  );
+  const plexYearNavigation = useMemo(() => derivePlexYearNavigation(albums), [albums]);
+  const selectedPlexYearAlbums = useMemo(
+    () => selectedPlexUnknownYear
+      ? plexAlbumsWithoutYear(albums)
+      : selectedPlexYear === null
+        ? []
+        : plexAlbumsForYear(albums, selectedPlexYear),
+    [albums, selectedPlexUnknownYear, selectedPlexYear],
+  );
+  const selectedPlexDecadeSummary = selectedPlexDecade === null
+    ? undefined
+    : plexYearNavigation.decades.find((item) => item.decade === selectedPlexDecade);
+  const hasPlexSubview = Boolean(
+    activeCollection
+    || fallbackPlexArtist
+    || selectedPlexDecade !== null
+    || selectedPlexYear !== null
+    || selectedPlexUnknownYear,
+  );
+  const showPlexAlbumIndex = searchQuery.trim().length === 0
+    && plexViewMode === "albums"
+    && isTextPlexAlbumSort(plexSortMode);
+  const showPlexArtistIndex = !hasPlexSubview
+    && searchQuery.trim().length === 0
+    && plexViewMode === "artists";
+
+  const handlePlexContextBack = () => {
+    if (activeCollection) {
+      setActiveCollection(null);
+    } else if (fallbackPlexArtist) {
+      setFallbackPlexArtist(null);
+    } else if (selectedPlexUnknownYear) {
+      setSelectedPlexUnknownYear(false);
+    } else if (selectedPlexYear !== null) {
+      setSelectedPlexYear(null);
+    } else if (selectedPlexDecade !== null) {
+      setSelectedPlexDecade(null);
+    }
+  };
 
   if (!config || mediaSource === null) {
     return (
@@ -776,177 +965,94 @@ export function App() {
     <div className="h-screen w-screen flex flex-col bg-[#121212] text-[#E0E0E0] overflow-hidden select-none">
       <div className="min-h-0 flex-1 flex overflow-hidden">
         {/* Barra Lateral */}
-        <aside className="w-64 bg-[#181818] border-r border-[#262626] flex flex-col p-4 shrink-0">
-          <div className="flex items-center space-x-2.5 px-2 py-3 mb-6">
-            <Sparkles className="text-[#E5A00D]" size={22} />
-            <h1 className="text-lg font-black tracking-wider text-[#E5A00D]">SONANTE</h1>
+        <aside className="flex min-h-0 w-56 shrink-0 flex-col overflow-hidden border-r border-[#262626] bg-[#181818] p-3">
+          <div className="mb-7 flex shrink-0 items-center gap-2.5 px-3 py-3">
+            <Sparkles className="shrink-0 text-[#E5A00D]" size={21} />
+            <h1 className="truncate text-base font-black tracking-[0.14em] text-[#E5A00D]">SONANTE</h1>
           </div>
 
-          <div className="text-[11px] font-bold text-[#666666] tracking-wider uppercase px-2 mb-2">
-            {t("sidebar.mediaSources")}
-          </div>
-
-          <nav className="space-y-1 mb-6">
-            <button
-              onClick={() => {
-                resetAllNavigation();
-                setMediaSource("local");
-              }}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-                mediaSource === "local"
-                  ? "bg-[#242424] text-white"
-                  : "text-[#888888] hover:bg-[#202020] hover:text-white"
-              }`}
-            >
-              <div className="flex items-center space-x-3">
-                <Folder size={16} className={mediaSource === "local" ? "text-[#E5A00D]" : ""} />
-                <span>{t("sidebar.local")}</span>
-              </div>
-
-              {!isPlaybackAvailable ? (
-                <div
-                  className="flex items-center text-[#C9A45D]"
-                  title={mpdHealth.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")}
-                >
-                  <CircleAlert size={13} />
-                </div>
-              ) : playbackStatus.is_updating ? (
-                <div
-                  className="flex items-center space-x-1 text-[#E5A00D]"
-                  title={t("sidebar.indexingTooltip")}
-                >
-                  <RefreshCw size={13} className="animate-spin" />
-                </div>
-              ) : (
-                <div
-                  className="flex items-center text-[#4BB543]/80"
-                  title={t("sidebar.syncedTooltip")}
-                >
-                  <CheckCircle2 size={13} />
-                </div>
-              )}
-            </button>
-
-            <button
-              onClick={() => {
-                resetAllNavigation();
-                setMediaSource("plex");
-              }}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-                mediaSource === "plex"
-                  ? "bg-[#242424] text-white"
-                  : "text-[#888888] hover:bg-[#202020] hover:text-white"
-              }`}
-            >
-              <Server size={16} className={mediaSource === "plex" ? "text-[#E5A00D]" : ""} />
-              <span>{t("sidebar.plex")}</span>
-            </button>
-
-            <button
-              onClick={() => {
-                resetAllNavigation();
-                setMediaSource("favorites");
-              }}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-                mediaSource === "favorites"
-                  ? "bg-[#242424] text-white"
-                  : "text-[#888888] hover:bg-[#202020] hover:text-white"
-              }`}
-            >
-              <Heart
-                size={16}
-                className={mediaSource === "favorites" ? "text-[#E5A00D]" : ""}
-                fill={mediaSource === "favorites" ? "#E5A00D" : "none"}
-              />
-              <span>{t("sidebar.favorites")}</span>
-            </button>
-
-            <button
-              onClick={() => {
-                resetAllNavigation();
-                setMediaSource("playlists");
-              }}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-                mediaSource === "playlists"
-                  ? "bg-[#242424] text-white"
-                  : "text-[#888888] hover:bg-[#202020] hover:text-white"
-              }`}
-            >
-              <ListMusic
-                size={16}
-                className={mediaSource === "playlists" ? "text-[#E5A00D]" : ""}
-              />
-              <span>{t("sidebar.playlists")}</span>
-            </button>
-          </nav>
-
-          {mediaSource === "plex" && (
-            <>
-              <div className="text-[11px] font-bold text-[#666666] tracking-wider uppercase px-2 mb-2">
-                {t("sidebar.plexAudioLibraries")}
-              </div>
-
-              {!isPlexConnected ? (
-                <div className="px-3 py-3.5 bg-[#141414] border border-[#242424] rounded-xl text-center space-y-2">
-                  <span className="text-[11px] text-[#777777] block">{t("sidebar.noAccountConnected")}</span>
-                  <button
-                    onClick={() => setShowSettings(true)}
-                    className="w-full py-1.5 px-3 bg-[#242424] hover:bg-[#2D2D2D] text-[#E5A00D] rounded-lg text-xs font-bold transition-colors cursor-pointer"
-                  >
-                    {t("sidebar.connectNow")}
-                  </button>
-                </div>
-              ) : (
-                <div className="flex-1 overflow-y-auto space-y-1 pr-1 text-sm">
-                  {loadingLibraries ? (
-                    <span className="text-xs text-[#666666] px-2 block">{t("sidebar.loadingLibraries")}</span>
-                  ) : libraries.length === 0 ? (
-                    <span className="text-xs text-[#666666] px-2 block">{t("sidebar.noLibraries")}</span>
+          <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pb-3">
+            <section aria-labelledby="sidebar-music-group">
+              <h2 id="sidebar-music-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#5F5F5F]">
+                {t("sidebar.musicGroup")}
+              </h2>
+              <nav aria-label={t("sidebar.musicGroup")} className="space-y-1">
+                <SidebarNavItem
+                  icon={Folder}
+                  label={t("sidebar.local")}
+                  active={mediaSource === "local"}
+                  onClick={() => {
+                    resetAllNavigation();
+                    setMediaSource("local");
+                  }}
+                  trailing={!isPlaybackAvailable ? (
+                    <span
+                      className="flex items-center text-[#C9A45D]"
+                      title={mpdHealth.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")}
+                    >
+                      <CircleAlert size={13} />
+                    </span>
+                  ) : playbackStatus.is_updating ? (
+                    <span className="flex items-center text-[#E5A00D]" title={t("sidebar.indexingTooltip")}>
+                      <RefreshCw size={13} className="animate-spin" />
+                    </span>
                   ) : (
-                    libraries.map((lib) => {
-                      const isSelected = selectedLibrary?.key === lib.key;
-                      return (
-                        <button
-                          key={lib.key}
-                          onClick={() => {
-                            setSelectedLibrary(lib);
-                            resetAllNavigation();
-                          }}
-                          className={`w-full text-left px-3 py-2 rounded-md truncate transition-colors cursor-pointer ${
-                            isSelected
-                              ? "bg-[#332B15] text-[#E5A00D] font-bold"
-                              : "text-[#CCCCCC] hover:bg-[#202020] hover:text-white"
-                          }`}
-                        >
-                          {lib.title}
-                        </button>
-                      );
-                    })
+                    <span className="flex items-center text-[#4BB543]/80" title={t("sidebar.syncedTooltip")}>
+                      <CheckCircle2 size={13} />
+                    </span>
                   )}
-                </div>
-              )}
-            </>
-          )}
+                />
+                <SidebarNavItem
+                  icon={Server}
+                  label={t("sidebar.plex")}
+                  active={mediaSource === "plex"}
+                  onClick={() => {
+                    resetAllNavigation();
+                    setMediaSource("plex");
+                  }}
+                />
+              </nav>
+            </section>
 
-          {mediaSource !== "plex" && <div className="flex-1" />}
-
-          <div className="pt-3 border-t border-[#262626] mt-auto space-y-1">
-            <button
-              onClick={() => setShowSettings(true)}
-              className="w-full flex items-center space-x-3 px-3 py-2 rounded-md text-xs font-semibold text-[#888888] hover:bg-[#202020] hover:text-white transition-colors cursor-pointer"
-            >
-              <Settings size={15} />
-              <span>{t("sidebar.preferences")}</span>
-            </button>
-
-            <button
-              onClick={() => setShowAbout(true)}
-              className="w-full flex items-center space-x-3 px-3 py-2 rounded-md text-xs font-semibold text-[#888888] hover:bg-[#202020] hover:text-[#E5A00D] transition-colors cursor-pointer"
-            >
-              <Info size={15} />
-              <span>{t("sidebar.about")}</span>
-            </button>
+            <section aria-labelledby="sidebar-collection-group">
+              <h2 id="sidebar-collection-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#5F5F5F]">
+                {t("sidebar.collectionGroup")}
+              </h2>
+              <nav aria-label={t("sidebar.collectionGroup")} className="space-y-1">
+                <SidebarNavItem
+                  icon={Heart}
+                  label={t("sidebar.favorites")}
+                  active={mediaSource === "favorites"}
+                  onClick={() => {
+                    resetAllNavigation();
+                    setMediaSource("favorites");
+                  }}
+                />
+                <SidebarNavItem
+                  icon={ListMusic}
+                  label={t("sidebar.playlists")}
+                  active={mediaSource === "playlists"}
+                  onClick={() => {
+                    resetAllNavigation();
+                    setMediaSource("playlists");
+                  }}
+                />
+              </nav>
+            </section>
           </div>
+
+          <nav aria-label={t("sidebar.utilitiesGroup")} className="mt-auto shrink-0 space-y-1 pt-4">
+            <SidebarNavItem
+              icon={Settings}
+              label={t("sidebar.preferences")}
+              onClick={() => setShowSettings(true)}
+            />
+            <SidebarNavItem
+              icon={Info}
+              label={t("sidebar.about")}
+              onClick={() => setShowAbout(true)}
+            />
+          </nav>
         </aside>
 
         {/* Painel Central */}
@@ -987,8 +1093,10 @@ export function App() {
             album={activeAlbum}
             onBack={() => setActiveAlbum(null)}
             onSelectArtist={(art) => {
+              const artistKey = art.rating_key.trim();
+              if (!artistKey) return;
               setActiveAlbum(null);
-              setActiveArtist(art);
+              setActiveArtist({ ...art, rating_key: artistKey });
             }}
             onToggleFavorite={refreshPlexFavorites}
             isPlaybackAvailable={isPlaybackAvailable}
@@ -1003,13 +1111,13 @@ export function App() {
           />
         ) : (
           <main className="flex-1 flex flex-col overflow-hidden bg-[#121212]">
-            <div className="flex items-center justify-between p-8 pb-4 border-b border-[#222222]">
+            <div className="flex flex-wrap items-center justify-between gap-4 px-8 pt-8 pb-4">
               <div className="flex items-center space-x-3">
-                {activeCollection && (
+                {hasPlexSubview && (
                   <button
-                    onClick={() => setActiveCollection(null)}
+                    onClick={handlePlexContextBack}
                     className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
-                    title={t("plex.backToCollections")}
+                    title={t("plex.back")}
                   >
                     <ArrowLeft size={16} />
                   </button>
@@ -1019,87 +1127,169 @@ export function App() {
                     {searchQuery.trim().length > 0
                       ? t("plex.resultsFor", { query: searchQuery })
                       : activeCollection
-                      ? activeCollection.title
-                      : selectedLibrary?.title || t("plex.loading")}
+                        ? activeCollection.title
+                        : fallbackPlexArtist
+                          ? fallbackPlexArtist.name
+                          : selectedPlexUnknownYear
+                            ? t("plex.unknownYear")
+                            : selectedPlexYear !== null
+                              ? String(selectedPlexYear)
+                              : selectedPlexDecade !== null
+                                ? `${selectedPlexDecade}s`
+                                : t("player.source.plex")}
                   </h2>
-                </div>
-              </div>
-
-              <div className="flex items-center space-x-4">
-                <div className="relative flex items-center w-72">
-                  <Search size={15} className="absolute left-3 text-[#666666]" />
-                  <input
-                    ref={searchInputRef}
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder={t("plex.searchPlaceholder")}
-                    className="w-full bg-[#1A1A1A] border border-[#2B2B2B] rounded-lg pl-9 pr-8 py-1.5 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D] transition-colors"
-                  />
-                  {searchQuery && (
-                    <button
-                      onClick={() => setSearchQuery("")}
-                      className="absolute right-2.5 text-[#666666] hover:text-white cursor-pointer"
-                    >
-                      <X size={14} />
-                    </button>
+                  {searchQuery.trim().length === 0 && (
+                    <p className="mt-0.5 text-xs text-[#888888]">
+                      {activeCollection
+                        ? t("plex.albumsCount", { count: collectionAlbums.length })
+                        : fallbackPlexArtist
+                          ? t("plex.albumsCount", { count: fallbackPlexArtistAlbums.length })
+                          : selectedPlexUnknownYear || selectedPlexYear !== null
+                            ? t("plex.albumsCount", { count: selectedPlexYearAlbums.length })
+                            : selectedPlexDecadeSummary
+                              ? t("plex.albumsCount", { count: selectedPlexDecadeSummary.albumCount })
+                        : plexViewMode === "collections"
+                          ? t("plex.collectionsCount", { count: collections.length })
+                          : plexViewMode === "artists"
+                            ? t("plex.artistsCount", { count: plexArtists.length })
+                          : t("plex.albumsCount", { count: albums.length })}
+                    </p>
                   )}
                 </div>
-
-                {!activeCollection && searchQuery.trim().length === 0 && (
-                  <>
-                    {activeTab === "library" && (
-                      <div className="flex items-center space-x-2 bg-[#1E1E1E] px-3 py-1.5 rounded-lg border border-[#333333] text-xs text-[#CCCCCC]">
-                        <ArrowUpDown size={14} className="text-[#888888]" />
-                        <select
-                          value={sortBy}
-                          onChange={(e) => setSortBy(e.target.value)}
-                          className="bg-transparent border-none outline-none text-white cursor-pointer"
-                        >
-                          <option value="added">{t("plex.sortAdded")}</option>
-                          <option value="title">{t("plex.sortTitle")}</option>
-                          <option value="year">{t("plex.sortYear")}</option>
-                        </select>
-                      </div>
-                    )}
-
-                    <div className="flex bg-[#1E1E1E] p-1 rounded-lg border border-[#333333]">
-                      <button
-                        onClick={() => {
-                          setActiveTab("library");
-                          setActiveCollection(null);
-                        }}
-                        className={`px-4 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
-                          activeTab === "library"
-                            ? "bg-[#E5A00D] text-black shadow"
-                            : "text-[#999999] hover:text-white"
-                        }`}
-                      >
-                        {t("plex.tabLibrary")}
-                      </button>
-
-                      {hasCollections && (
-                        <button
-                          onClick={() => {
-                            setActiveTab("collections");
-                            setActiveCollection(null);
-                          }}
-                          className={`px-4 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
-                            activeTab === "collections"
-                              ? "bg-[#E5A00D] text-black shadow"
-                              : "text-[#999999] hover:text-white"
-                          }`}
-                        >
-                          {t("plex.tabCollections")}
-                        </button>
-                      )}
-                    </div>
-                  </>
-                )}
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-8">
+            {!hasPlexSubview && searchQuery.trim().length === 0 && (
+              <div className="flex flex-wrap gap-1 border-b border-[#222222] px-8 pb-3">
+                <button
+                  type="button"
+                  onClick={() => handlePlexModeChange("albums")}
+                  className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                    plexViewMode === "albums" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                  }`}
+                >
+                  {t("plex.tabAlbums")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handlePlexModeChange("artists")}
+                  className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                    plexViewMode === "artists" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                  }`}
+                >
+                  {t("plex.tabArtists")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handlePlexModeChange("years")}
+                  className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                    plexViewMode === "years" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                  }`}
+                >
+                  {t("plex.tabYears")}
+                </button>
+                {hasCollections && (
+                  <button
+                    type="button"
+                    onClick={() => handlePlexModeChange("collections")}
+                    className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                      plexViewMode === "collections" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                    }`}
+                  >
+                    {t("plex.tabCollections")}
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-3 border-b border-[#222222] px-8 py-3">
+              <div className="flex items-center gap-2 text-xs text-[#888888]">
+                <span>{t("plex.libraryLabel")}</span>
+                <ToolbarSelect
+                  value={selectedLibrary?.key ?? ""}
+                  options={plexLibraryOptions}
+                  onChange={handlePlexLibraryChange}
+                  label={t("plex.libraryLabel")}
+                  disabled={loadingLibraries || libraries.length === 0}
+                  className="max-w-52"
+                />
+              </div>
+
+              <div className="relative flex w-72 max-w-full items-center">
+                <Search size={15} className="absolute left-3 text-[#666666]" />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder={t("plex.searchPlaceholder")}
+                  className="w-full rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] py-1.5 pl-9 pr-8 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D]"
+                />
+                {searchQuery && (
+                  <button type="button" onClick={() => setSearchQuery("")} className="absolute right-2.5 text-[#666666] hover:text-white cursor-pointer">
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+
+              {!hasPlexSubview && searchQuery.trim().length === 0 && plexViewMode === "albums" && (
+                <div className="flex items-center gap-2 text-xs text-[#888888]">
+                  <span>{t("plex.sortLabel")}</span>
+                  <ToolbarSelect
+                    value={plexSortMode}
+                    options={plexAlbumSortOptions}
+                    onChange={(nextValue) => setPlexSortMode(nextValue as PlexAlbumSortMode)}
+                    label={t("plex.sortLabel")}
+                    className="max-w-52"
+                  />
+                </div>
+              )}
+              {!hasPlexSubview && searchQuery.trim().length === 0 && plexViewMode === "artists" && (
+                <div className="flex items-center gap-2 text-xs text-[#888888]">
+                  <span>{t("plex.sortLabel")}</span>
+                  <ToolbarSelect
+                    value={plexArtistSortMode}
+                    options={plexArtistSortOptions}
+                    onChange={(nextValue) => setPlexArtistSortMode(nextValue as PlexArtistSortMode)}
+                    label={t("plex.sortLabel")}
+                    className="max-w-52"
+                  />
+                </div>
+              )}
+            </div>
+
+            {(showPlexAlbumIndex || showPlexArtistIndex) && (
+              <nav
+                aria-label={t(plexViewMode === "artists" ? "plex.artistIndex" : "plex.albumIndex")}
+                className="flex flex-wrap items-center gap-1 border-b border-[#222222] px-8 py-2"
+              >
+                {LOCAL_ALBUM_INDEX_BUCKETS.map((bucket) => {
+                  const index = plexViewMode === "artists"
+                    ? plexArtistBucketIndices.get(bucket)
+                    : plexAlbumBucketIndices.get(bucket);
+                  const label = t("plex.jumpToBucket", { bucket });
+                  return (
+                    <button
+                      key={bucket}
+                      type="button"
+                      disabled={index === undefined}
+                      title={label}
+                      aria-label={label}
+                      onClick={() => {
+                        if (index === undefined) return;
+                        if (plexViewMode === "artists") plexArtistListRef.current?.scrollToIndex(index);
+                        else plexGridRef.current?.scrollToIndex(index);
+                      }}
+                      className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[#999999] transition-colors hover:bg-[#282828] hover:text-[#E5A00D] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:cursor-default disabled:text-[#444444] disabled:hover:bg-transparent"
+                    >
+                      {bucket}
+                    </button>
+                  );
+                })}
+              </nav>
+            )}
+
+            <div ref={setPlexScrollContainer} className="flex-1 overflow-y-auto p-8">
               {searchQuery.trim().length > 0 ? (
                 isSearching ? (
                   <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
@@ -1279,13 +1469,65 @@ export function App() {
                     );
                   })}
                 </div>
-              ) : activeTab === "library" ? (
-                <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
-                  {albums.map((album) => {
+              ) : fallbackPlexArtist ? (
+                <VirtualAlbumGrid
+                  items={fallbackPlexArtistAlbums}
+                  getItemKey={(album) => album.rating_key}
+                  scrollContainer={plexScrollContainer}
+                  resetKey={JSON.stringify([selectedLibrary?.key, "fallback-artist", fallbackPlexArtist.id])}
+                  renderItem={(album) => {
                     const albumKey = String(album.rating_key || "");
                     return (
                       <PlexAlbumCard
-                        key={albumKey || album.title}
+                        album={album}
+                        isFav={albumKey ? plexFavIds.has(albumKey) : false}
+                        onSelect={setActiveAlbum}
+                        onPlayQuick={handlePlayQuick}
+                        onToggleFav={handleTogglePlexCardFav}
+                        onSelectArtist={handleSelectArtist}
+                        removeFavText={t("favorites.removeFavorite")}
+                        addFavText={t("favorites.title")}
+                        playAlbumText={t("plex.playAlbum")}
+                        isPlaybackAvailable={isPlaybackAvailable}
+                      />
+                    );
+                  }}
+                />
+              ) : selectedPlexYear !== null || selectedPlexUnknownYear ? (
+                <VirtualAlbumGrid
+                  items={selectedPlexYearAlbums}
+                  getItemKey={(album) => album.rating_key}
+                  scrollContainer={plexScrollContainer}
+                  resetKey={JSON.stringify([selectedLibrary?.key, selectedPlexYear, selectedPlexUnknownYear])}
+                  renderItem={(album) => {
+                    const albumKey = String(album.rating_key || "");
+                    return (
+                      <PlexAlbumCard
+                        album={album}
+                        isFav={albumKey ? plexFavIds.has(albumKey) : false}
+                        onSelect={setActiveAlbum}
+                        onPlayQuick={handlePlayQuick}
+                        onToggleFav={handleTogglePlexCardFav}
+                        onSelectArtist={handleSelectArtist}
+                        removeFavText={t("favorites.removeFavorite")}
+                        addFavText={t("favorites.title")}
+                        playAlbumText={t("plex.playAlbum")}
+                        isPlaybackAvailable={isPlaybackAvailable}
+                      />
+                    );
+                  }}
+                />
+              ) : plexViewMode === "albums" ? (
+                <VirtualAlbumGrid
+                  ref={plexGridRef}
+                  items={sortedPlexAlbums}
+                  getItemKey={(album) => album.rating_key}
+                  scrollContainer={plexScrollContainer}
+                  resetKey={plexAlbumNavigationResetKey(selectedLibrary?.key ?? null, plexSortMode)}
+                  renderItem={(album) => {
+                    const albumKey = String(album.rating_key || "");
+                    return (
+                      <PlexAlbumCard
                         album={album}
                         isFav={albumKey ? plexFavIds.has(albumKey) : false}
                         onSelect={(a) => setActiveAlbum(a)}
@@ -1298,8 +1540,82 @@ export function App() {
                         isPlaybackAvailable={isPlaybackAvailable}
                       />
                     );
-                  })}
-                </div>
+                  }}
+                />
+              ) : plexViewMode === "artists" ? (
+                <VirtualList
+                  ref={plexArtistListRef}
+                  items={sortedPlexArtists}
+                  rowHeight={56}
+                  getItemKey={(artist) => artist.id}
+                  scrollContainer={plexScrollContainer}
+                  resetKey={JSON.stringify([selectedLibrary?.key, plexArtistSortMode])}
+                  renderItem={(artist) => (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (artist.ratingKey) {
+                          setActiveArtist({ rating_key: artist.ratingKey, name: artist.name });
+                        } else {
+                          setFallbackPlexArtist(artist);
+                        }
+                      }}
+                      className="flex h-full w-full items-center justify-between border-b border-[#1D1D1D] px-4 text-left transition-colors hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#E5A00D]"
+                    >
+                      <span className="truncate pr-4 text-sm font-semibold text-white">{artist.name}</span>
+                      <span className="shrink-0 text-xs text-[#777777]">
+                        {t("plex.albumsCount", { count: artist.albumCount })}
+                      </span>
+                    </button>
+                  )}
+                />
+              ) : plexViewMode === "years" ? (
+                selectedPlexDecadeSummary ? (
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-4">
+                    {selectedPlexDecadeSummary.years.map((year) => (
+                      <button
+                        key={year.year}
+                        type="button"
+                        onClick={() => setSelectedPlexYear(year.year)}
+                        className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                      >
+                        <span className="block text-xl font-bold text-white">{year.year}</span>
+                        <span className="mt-1 block text-xs text-[#777777]">
+                          {t("plex.albumsCount", { count: year.albumCount })}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-4">
+                    {plexYearNavigation.decades.map((decade) => (
+                      <button
+                        key={decade.decade}
+                        type="button"
+                        onClick={() => setSelectedPlexDecade(decade.decade)}
+                        aria-label={t("plex.decadeLabel", { decade: decade.decade })}
+                        className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                      >
+                        <span className="block text-xl font-bold text-white">{decade.decade}s</span>
+                        <span className="mt-1 block text-xs text-[#777777]">
+                          {t("plex.albumsCount", { count: decade.albumCount })}
+                        </span>
+                      </button>
+                    ))}
+                    {plexYearNavigation.unknownCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPlexUnknownYear(true)}
+                        className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                      >
+                        <span className="block text-lg font-bold text-white">{t("plex.unknownYear")}</span>
+                        <span className="mt-1 block text-xs text-[#777777]">
+                          {t("plex.albumsCount", { count: plexYearNavigation.unknownCount })}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                )
               ) : (
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
                   {collections.map((col) => (
