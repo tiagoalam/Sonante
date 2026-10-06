@@ -16,6 +16,12 @@ export interface VirtualGridMetrics extends VisibleRowRange {
   startOffset: number;
 }
 
+export interface VirtualGridIndexPosition {
+  index: number;
+  rowIndex: number;
+  rowOffset: number;
+}
+
 export function isVirtualGridMeasurementReady(
   width: number,
   height: number,
@@ -48,6 +54,23 @@ export function gridRowCount(itemCount: number, columnCount: number): number {
   const items = nonNegativeInteger(itemCount);
   const columns = Math.max(1, nonNegativeInteger(columnCount));
   return Math.ceil(items / columns);
+}
+
+export function virtualGridIndexPosition(
+  requestedIndex: number,
+  itemCount: number,
+  columnCount: number,
+  rowStride: number,
+): VirtualGridIndexPosition | null {
+  const items = nonNegativeInteger(itemCount);
+  const columns = nonNegativeInteger(columnCount);
+  const stride = finiteOr(rowStride, 0);
+  if (!Number.isFinite(requestedIndex) || items === 0 || columns === 0 || stride <= 0) {
+    return null;
+  }
+  const index = Math.min(items - 1, Math.max(0, Math.floor(requestedIndex)));
+  const rowIndex = Math.floor(index / columns);
+  return { index, rowIndex, rowOffset: rowIndex * stride };
 }
 
 export function visibleRowRange(

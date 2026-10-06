@@ -26,11 +26,18 @@ import { albumLocationSources } from "../utils/localAlbumLocations";
 import { localArtworkEnrichment, localArtworkResolver } from "../utils/localArtworkSession";
 import {
   filterLocalAlbumsByScope,
-  localLibraryScopeResetKey,
   localLibrarySourceOptions,
   validLocalLibrarySourceSelection,
 } from "../utils/localLibraryScope";
-import { VirtualAlbumGrid } from "./VirtualAlbumGrid";
+import {
+  isTextLocalAlbumSort,
+  LOCAL_ALBUM_INDEX_BUCKETS,
+  localAlbumBucketFirstIndices,
+  localAlbumNavigationResetKey,
+  sortLocalAlbums,
+  type LocalAlbumSortMode,
+} from "../utils/localAlbumNavigation";
+import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./VirtualAlbumGrid";
 
 const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
 
@@ -173,6 +180,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, isLibraryUpdating);
   const [albumSearch, setAlbumSearch] = useState("");
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+  const [albumSortMode, setAlbumSortMode] = useState<LocalAlbumSortMode>("album-asc");
   const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(null);
   const [albumLocations, setAlbumLocations] = useState<{
     album: LocalAlbum;
@@ -183,6 +191,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const [albumSections, setAlbumSections] = useState<ReturnType<typeof flattenAlbumDiscs>["sections"]>([]);
   const [albumCover, setAlbumCover] = useState<string | null>(null);
   const albumRequest = useRef(0);
+  const albumGridRef = useRef<VirtualAlbumGridHandle>(null);
   const onlineEnabledRef = useRef(onlineArtworkEnabled);
   const libraryUpdatingRef = useRef(isLibraryUpdating);
   onlineEnabledRef.current = onlineArtworkEnabled;
@@ -380,6 +389,14 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     () => filterLocalAlbumsByScope(albums, activeSourceId, albumSearch),
     [albums, activeSourceId, albumSearch],
   );
+  const sortedAlbums = useMemo(
+    () => sortLocalAlbums(filteredAlbums, albumSortMode),
+    [filteredAlbums, albumSortMode],
+  );
+  const albumBucketIndices = useMemo(
+    () => localAlbumBucketFirstIndices(sortedAlbums, albumSortMode),
+    [sortedAlbums, albumSortMode],
+  );
 
   useEffect(() => {
     if (selectedSourceId !== activeSourceId) setSelectedSourceId(activeSourceId);
@@ -395,7 +412,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
   return (
     <main className="flex-1 flex flex-col overflow-hidden bg-[#121212] select-none">
-      <div className="flex items-center justify-between p-8 pb-4 border-b border-[#222222]">
+      <div className="flex flex-wrap items-center justify-between gap-4 p-8 pb-4 border-b border-[#222222]">
         <div className="flex items-center space-x-3">
           {(selectedAlbum || selectedArtist) && (
             <button
@@ -445,7 +462,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         </div>
 
         {!selectedAlbum && !selectedArtist && (
-          <div className="flex items-center space-x-4">
+          <div className="flex flex-wrap items-center justify-end gap-3">
             {viewMode === "albums" && (
               <>
                 <label className="flex items-center gap-2 text-xs text-[#888888]">
@@ -471,6 +488,21 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     className="w-full bg-[#1A1A1A] border border-[#2B2B2B] rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D] transition-colors"
                   />
                 </div>
+                <label className="flex items-center gap-2 text-xs text-[#888888]">
+                  <span>{t("localBrowser.sortLabel")}</span>
+                  <select
+                    value={albumSortMode}
+                    onChange={(event) => setAlbumSortMode(event.target.value as LocalAlbumSortMode)}
+                    className="max-w-44 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
+                  >
+                    <option value="album-asc">{t("localBrowser.sortAlbumAsc")}</option>
+                    <option value="album-desc">{t("localBrowser.sortAlbumDesc")}</option>
+                    <option value="artist-asc">{t("localBrowser.sortArtistAsc")}</option>
+                    <option value="artist-desc">{t("localBrowser.sortArtistDesc")}</option>
+                    <option value="year-newest">{t("localBrowser.sortYearNewest")}</option>
+                    <option value="year-oldest">{t("localBrowser.sortYearOldest")}</option>
+                  </select>
+                </label>
               </>
             )}
 
@@ -510,6 +542,34 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           </div>
         )}
       </div>
+
+      {!selectedAlbum && !selectedArtist && viewMode === "albums" && isTextLocalAlbumSort(albumSortMode) && (
+        <nav
+          aria-label={t("localBrowser.albumIndex")}
+          className="flex flex-wrap items-center gap-1 border-b border-[#222222] px-8 py-2"
+        >
+          {LOCAL_ALBUM_INDEX_BUCKETS.map((bucket) => {
+            const index = albumBucketIndices.get(bucket);
+            const available = index !== undefined;
+            const label = t("localBrowser.jumpToBucket", { bucket });
+            return (
+              <button
+                key={bucket}
+                type="button"
+                disabled={!available}
+                title={label}
+                aria-label={label}
+                onClick={() => {
+                  if (index !== undefined) albumGridRef.current?.scrollToIndex(index);
+                }}
+                className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[#999999] transition-colors hover:bg-[#282828] hover:text-[#E5A00D] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:cursor-default disabled:text-[#444444] disabled:hover:bg-transparent"
+              >
+                {bucket}
+              </button>
+            );
+          })}
+        </nav>
+      )}
 
       {isLibraryUpdating && (
         <div className="px-8 py-2 text-xs text-[#E5A00D] flex items-center gap-2 border-b border-[#222222]">
@@ -718,10 +778,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
             </div>
           ) : (
             <VirtualAlbumGrid
-              items={filteredAlbums}
+              ref={albumGridRef}
+              items={sortedAlbums}
               getItemKey={(album) => album.id}
               scrollContainer={scrollContainer}
-              resetKey={localLibraryScopeResetKey(activeSourceId, albumSearch)}
+              resetKey={localAlbumNavigationResetKey(activeSourceId, albumSearch, albumSortMode)}
               renderItem={(album) => (
                 <LocalAlbumCard
                   album={album}

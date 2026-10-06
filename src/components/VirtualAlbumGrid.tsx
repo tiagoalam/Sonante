@@ -1,6 +1,13 @@
-import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   isVirtualGridMeasurementReady,
+  virtualGridIndexPosition,
   virtualGridMetrics,
 } from "../utils/virtualGrid";
 
@@ -17,21 +24,26 @@ export interface VirtualAlbumGridProps<T> {
   resetKey?: string;
 }
 
+export interface VirtualAlbumGridHandle {
+  scrollToIndex: (index: number) => void;
+}
+
 interface ViewportMeasurement {
   width: number;
   height: number;
   scrollOffset: number;
 }
 
-export function VirtualAlbumGrid<T>({
+function VirtualAlbumGridComponent<T>({
   items,
   getItemKey,
   renderItem,
   scrollContainer,
   resetKey,
-}: VirtualAlbumGridProps<T>) {
+}: VirtualAlbumGridProps<T>, ref: React.ForwardedRef<VirtualAlbumGridHandle>) {
   const gridRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number | null>(null);
+  const pendingIndexRef = useRef<number | null>(null);
   const previousResetKey = useRef(resetKey);
   const [viewport, setViewport] = useState<ViewportMeasurement>({
     width: 0,
@@ -97,10 +109,7 @@ export function VirtualAlbumGrid<T>({
     measure(grid, scrollContainer);
   }, [measure, resetKey, scrollContainer]);
 
-  if (!isVirtualGridMeasurementReady(viewport.width, viewport.height)) {
-    return <div ref={gridRef} className="relative w-full" />;
-  }
-
+  const measurementReady = isVirtualGridMeasurementReady(viewport.width, viewport.height);
   const metrics = virtualGridMetrics({
     itemCount: items.length,
     containerWidth: viewport.width,
@@ -111,6 +120,41 @@ export function VirtualAlbumGrid<T>({
     viewportHeight: viewport.height,
     overscanRows: OVERSCAN_ROWS,
   });
+
+  const scrollToIndex = useCallback((index: number) => {
+    const grid = gridRef.current;
+    const position = virtualGridIndexPosition(
+      index,
+      items.length,
+      metrics.columnCount,
+      metrics.rowStride,
+    );
+    if (!measurementReady || !grid || !scrollContainer || !position) {
+      pendingIndexRef.current = Number.isFinite(index) && items.length > 0 ? index : null;
+      return;
+    }
+
+    pendingIndexRef.current = null;
+    const gridTop = grid.getBoundingClientRect().top;
+    const scrollTop = scrollContainer.getBoundingClientRect().top;
+    const gridOffset = scrollContainer.scrollTop + gridTop - scrollTop;
+    scrollContainer.scrollTop = Math.max(0, gridOffset + position.rowOffset);
+    measure(grid, scrollContainer);
+  }, [items.length, measure, measurementReady, metrics.columnCount, metrics.rowStride, scrollContainer]);
+
+  useImperativeHandle(ref, () => ({ scrollToIndex }), [scrollToIndex]);
+
+  useLayoutEffect(() => {
+    if (!measurementReady || pendingIndexRef.current === null) return;
+    const pendingIndex = pendingIndexRef.current;
+    pendingIndexRef.current = null;
+    scrollToIndex(pendingIndex);
+  }, [measurementReady, scrollToIndex]);
+
+  if (!measurementReady) {
+    return <div ref={gridRef} className="relative w-full" />;
+  }
+
   const rows = [];
   for (let rowIndex = metrics.startRow; rowIndex < metrics.endRow; rowIndex += 1) {
     const firstItem = rowIndex * metrics.columnCount;
@@ -142,3 +186,7 @@ export function VirtualAlbumGrid<T>({
     </div>
   );
 }
+
+export const VirtualAlbumGrid = React.forwardRef(VirtualAlbumGridComponent) as <T>(
+  props: VirtualAlbumGridProps<T> & React.RefAttributes<VirtualAlbumGridHandle>,
+) => React.ReactElement;

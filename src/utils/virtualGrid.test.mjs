@@ -5,6 +5,7 @@ import {
   gridRowCount,
   isVirtualGridMeasurementReady,
   visibleRowRange,
+  virtualGridIndexPosition,
   virtualGridMetrics,
 } from "./virtualGrid.ts";
 
@@ -129,4 +130,42 @@ test("invalid dimensions never produce NaN or an infinite range", () => {
 test("start offset corresponds to the first rendered row", () => {
   const metrics = layout({ scrollOffset: 5_000 });
   assert.equal(metrics.startOffset, metrics.startRow * metrics.rowStride);
+});
+
+test("maps item indices to rows and offsets using the current column count", () => {
+  assert.deepEqual(virtualGridIndexPosition(12, 100, 5, 258), {
+    index: 12,
+    rowIndex: 2,
+    rowOffset: 516,
+  });
+  assert.deepEqual(virtualGridIndexPosition(8, 100, 3, 258), {
+    index: 8,
+    rowIndex: 2,
+    rowOffset: 516,
+  });
+});
+
+test("clamps requested indices to the available item range", () => {
+  assert.deepEqual(virtualGridIndexPosition(-20, 10, 5, 200), {
+    index: 0,
+    rowIndex: 0,
+    rowOffset: 0,
+  });
+  assert.deepEqual(virtualGridIndexPosition(500, 10, 5, 200), {
+    index: 9,
+    rowIndex: 1,
+    rowOffset: 200,
+  });
+});
+
+test("index positioning uses new columns after resize", () => {
+  assert.equal(virtualGridIndexPosition(14, 100, 5, 200)?.rowIndex, 2);
+  assert.equal(virtualGridIndexPosition(14, 100, 3, 200)?.rowIndex, 4);
+});
+
+test("invalid or unmeasured geometry cannot produce a scroll position", () => {
+  assert.equal(virtualGridIndexPosition(4, 10, 0, 200), null);
+  assert.equal(virtualGridIndexPosition(4, 10, 5, 0), null);
+  assert.equal(virtualGridIndexPosition(4, 0, 5, 200), null);
+  assert.equal(virtualGridIndexPosition(Number.NaN, 10, 5, 200), null);
 });
