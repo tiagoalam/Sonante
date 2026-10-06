@@ -2473,6 +2473,18 @@ impl AudioEngine {
     }
 
     pub fn get_status(&self) -> Result<PlaybackStatus, String> {
+        self.get_status_with_options(true, true)
+    }
+
+    pub(crate) fn get_mpris_status(&self) -> Result<PlaybackStatus, String> {
+        self.get_status_with_options(false, false)
+    }
+
+    fn get_status_with_options(
+        &self,
+        include_artwork: bool,
+        include_logical_resume: bool,
+    ) -> Result<PlaybackStatus, String> {
         let lines = self.send_command("status")?;
 
         let mut state = None;
@@ -2506,7 +2518,7 @@ impl AudioEngine {
 
         // Se o MPD estiver parado e sem nenhuma faixa ativa, retorna estado neutro e limpo
         if state == "stop" && song_index.is_none() {
-            if self.startup_restore == StartupQueueRestore::Ready {
+            if include_logical_resume && self.startup_restore == StartupQueueRestore::Ready {
                 if let Some(resume) = self.restored_resume.as_ref().filter(|resume| resume.valid_for(self.queue.len())) {
                     let track = &self.queue[resume.queue_index];
                     let local_uri = match &track.media_locator {
@@ -2524,8 +2536,16 @@ impl AudioEngine {
                         title: track.title.clone(),
                         artist: track.artist.clone(),
                         album: track.album.clone(),
-                        thumb: track.thumb.clone().or_else(|| local_uri.and_then(|uri| self.resolve_cover(uri))),
-                        plex_image: track.plex_image.clone(),
+                        thumb: include_artwork
+                            .then(|| {
+                                track.thumb.clone().or_else(|| {
+                                    local_uri.and_then(|uri| self.resolve_cover(uri))
+                                })
+                            })
+                            .flatten(),
+                        plex_image: include_artwork
+                            .then(|| track.plex_image.clone())
+                            .flatten(),
                         volume: VolumeStatus::from_mpd(volume),
                         is_updating,
                     });
@@ -2586,8 +2606,10 @@ impl AudioEngine {
                 title = track.title.clone();
                 artist = track.artist.clone();
                 album = track.album.clone();
-                thumb = track.thumb.clone();
-                plex_image = track.plex_image.clone();
+                if include_artwork {
+                    thumb = track.thumb.clone();
+                    plex_image = track.plex_image.clone();
+                }
                 if duration <= 0.0 {
                     if let Some(d) = track.duration {
                         duration = d;
@@ -2607,10 +2629,10 @@ impl AudioEngine {
                 if album.is_empty() {
                     album = track.album.clone();
                 }
-                if thumb.is_none() {
+                if include_artwork && thumb.is_none() {
                     thumb = track.thumb.clone();
                 }
-                if plex_image.is_none() {
+                if include_artwork && plex_image.is_none() {
                     plex_image = track.plex_image.clone();
                 }
                 if duration <= 0.0 {
@@ -2639,7 +2661,7 @@ impl AudioEngine {
             album = tag_album;
         }
 
-        if thumb.is_none() && !current_file.is_empty() {
+        if include_artwork && thumb.is_none() && !current_file.is_empty() {
             thumb = self.resolve_cover(&current_file);
         }
 
@@ -4705,6 +4727,54 @@ mod tests {
         let status = engine.get_status().unwrap();
         assert_eq!(status.plex_image, engine.queue[0].plex_image);
         assert_eq!(status.current_media, engine.current_media_for_queue_index(Some(0)));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn mpris_status_preserves_media_fields_without_cover_lookup() {
+        let (socket, server) = fake_album_mpd(vec![
+            (
+                "status",
+                "state: play\nsong: 0\nelapsed: 1.0\nduration: 10.0\nOK\n",
+            ),
+            (
+                "currentsong",
+                "file: local/faixa.flac\nTitle: Faixa\nArtist: Artista\nAlbum: Álbum\nPos: 0\nOK\n",
+            ),
+        ]);
+        let mut engine = engine_with_track("local/faixa.flac");
+        engine.socket_path = socket;
+        engine.queue[0].thumb = Some("data:image/jpeg;base64,AAAA".into());
+
+        let status = engine.get_mpris_status().unwrap();
+
+        assert_eq!(status.title, "Faixa");
+        assert_eq!(status.artist, "Artista");
+        assert_eq!(status.album, "Álbum");
+        assert_eq!(status.duration, 10.0);
+        assert!(status.current_media.is_some());
+        assert!(status.thumb.is_none());
+        assert!(status.plex_image.is_none());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn mpris_status_reports_raw_mpd_stop_instead_of_logical_resume() {
+        let (socket, server) =
+            fake_album_mpd(vec![("status", "state: stop\nvolume: 70\nOK\n")]);
+        let mut engine = engine_with_track("local/faixa.flac");
+        engine.socket_path = socket;
+        engine.restored_resume = Some(PlaybackResumeSnapshot {
+            queue_index: 0,
+            elapsed: 201.4,
+            state: PlaybackState::Playing,
+        });
+
+        let status = engine.get_mpris_status().unwrap();
+
+        assert_eq!(status.state, "stop");
+        assert_eq!(status.elapsed, 0.0);
+        assert!(status.current_media.is_none());
         server.join().unwrap();
     }
 
