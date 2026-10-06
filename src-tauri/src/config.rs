@@ -12,6 +12,8 @@ pub struct AppConfig {
     // Múltiplas pastas locais
     #[serde(default)]
     pub local_folders: Vec<String>,
+    #[serde(default = "default_online_artwork_enabled")]
+    pub online_artwork_enabled: bool,
 
     // Plex
     #[serde(default)]
@@ -40,6 +42,10 @@ fn default_first_run() -> bool {
     true
 }
 
+fn default_online_artwork_enabled() -> bool {
+    true
+}
+
 fn default_audio_output_type() -> String {
     "alsa".to_string()
 }
@@ -63,6 +69,7 @@ impl Default for AppConfig {
             alsa_device: "default".to_string(),
             audio_output_type: "pipewire".to_string(),
             local_folders: Vec::new(),
+            online_artwork_enabled: true,
             plex_server_id: None,
             plex_server_name: None,
             plex_url: "".to_string(),
@@ -166,6 +173,7 @@ mod tests {
         assert_eq!(config.audio_output_type, "pipewire");
         assert_eq!(config.alsa_device, "default");
         assert!(config.plex_url.is_empty());
+        assert!(config.online_artwork_enabled);
     }
 
     #[test]
@@ -176,6 +184,7 @@ mod tests {
         assert_eq!(config.local_folders, vec!["/media/plex"]);
         assert_eq!(config.plex_url, "https://legacy-route.example.invalid:32400");
         assert_eq!(config.plex_token, "TEST_ACCOUNT_TOKEN");
+        assert!(config.online_artwork_enabled);
         remove_test_path(&path);
     }
 

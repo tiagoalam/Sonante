@@ -1,4 +1,5 @@
 {
+  "app": { "bootstrapError": "Could not load initial settings." },
   "sidebar": {
     "mediaSources": "Media Sources",
     "local": "Local Storage",
@@ -14,6 +15,10 @@
     "about": "About Sonante",
     "indexingTooltip": "Indexing local folders...",
     "syncedTooltip": "Library Synchronized"
+  },
+  "artwork": {
+    "searchingOnline": "Searching for cover online: {{title}}",
+    "foundOnline": "Cover found: {{title}}"
   },
   "player": {
     "noTrack": "No track playing",
@@ -166,6 +171,7 @@
     "upOneLevel": "Up one level",
     "emptyFolder": "Empty folder.",
     "loadingFolder": "Loading folder...",
+    "location": "Location",
     "playAlbum": "Play Album",
     "back": "Back to Albums"
   },
@@ -197,6 +203,8 @@
     "alsaDevice": "ALSA Hardware Device",
     "currentDevice": "Current Device ({{id}})",
     "localFolders": "Local Storage Folders",
+    "onlineArtwork": "Find missing covers online",
+    "onlineArtworkDescription": "When enabled, Sonante may send album and artist names to the public MusicBrainz and Cover Art Archive services.",
     "checkNew": "Check for Updates",
     "addFolder": "Add",
     "noFolders": "No local folders configured.",

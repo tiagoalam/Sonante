@@ -1,8 +1,10 @@
 mod alsa_mixer;
 mod analyzer;
+mod artwork_progress;
 mod audio;
 mod config;
 mod favorites;
+mod online_artwork;
 mod persistence;
 mod playlists;
 mod plex;
@@ -24,8 +26,9 @@ use plex::{
 use serde::Serialize;
 use shared_volume::{PipeWireVolume, SharedVolumeBackend};
 use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use supervisor::{MpdHealth, MpdProcessObservation, MpdSupervisor, MpdUnavailableReason};
-use std::sync::Mutex;
+use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
 use tauri::{AppHandle, Manager, RunEvent, State, Window, WindowEvent};
 
 pub struct PlexState(pub Mutex<PlexClient>);
@@ -37,6 +40,127 @@ const MAIN_WINDOW_LABEL: &str = "main";
 
 fn should_start_mpd_on_startup(config_valid: bool, config: &AppConfig) -> bool {
     config_valid && !config.first_run
+}
+
+fn is_shared_output(config: &AppConfig) -> bool {
+    config.audio_output_type == "pipewire"
+        || config.audio_output_type == "shared"
+        || config.alsa_device == "default"
+}
+
+fn should_rescan_library_on_startup(
+    config_valid: bool,
+    config: &AppConfig,
+    database_exists: bool,
+) -> bool {
+    should_start_mpd_on_startup(config_valid, config)
+        && !config.local_folders.is_empty()
+        && !database_exists
+}
+
+fn local_folders_changed(current: &AppConfig, next: &AppConfig) -> bool {
+    current.local_folders != next.local_folders
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibraryRefresh {
+    Update,
+    Rescan,
+}
+
+fn library_refresh(
+    changed: bool,
+    database_exists: bool,
+    has_folders: bool,
+) -> Option<LibraryRefresh> {
+    if !changed {
+        None
+    } else if database_exists {
+        Some(LibraryRefresh::Update)
+    } else if has_folders {
+        Some(LibraryRefresh::Rescan)
+    } else {
+        None
+    }
+}
+
+fn library_refresh_after_sync(
+    sync_changed: bool,
+    start_changed: bool,
+    finishing_first_run: bool,
+    database_exists: bool,
+    has_folders: bool,
+) -> Option<LibraryRefresh> {
+    library_refresh(
+        sync_changed || start_changed || (finishing_first_run && !database_exists && has_folders),
+        database_exists,
+        has_folders,
+    )
+}
+
+fn database_exists() -> Result<bool, String> {
+    MpdSupervisor::database_path()
+        .try_exists()
+        .map_err(|e| format!("Falha ao verificar database MPD: {e}"))
+}
+
+fn resolve_local_library_path_in(
+    library_dir: &Path,
+    relative_path: &str,
+    local_folders: &[String],
+) -> Result<PathBuf, String> {
+    let path = Path::new(relative_path);
+    let mut components = path.components();
+    let first = match components.next() {
+        Some(Component::Normal(name)) => name,
+        _ => return Err("Caminho local relativo inválido".into()),
+    };
+    if components.any(|component| !matches!(component, Component::Normal(_))) {
+        return Err("Caminho local relativo inválido".into());
+    }
+    if !std::fs::symlink_metadata(library_dir)
+        .map_err(|e| format!("Biblioteca local indisponível: {e}"))?
+        .file_type()
+        .is_dir()
+    {
+        return Err("Biblioteca local inválida".into());
+    }
+
+    let roots = local_folders
+        .iter()
+        .filter(|folder| Path::new(folder).is_dir())
+        .map(|folder| {
+            std::fs::canonicalize(folder)
+                .map_err(|e| format!("Falha ao resolver pasta local configurada: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let link = library_dir.join(first);
+    if !std::fs::symlink_metadata(&link)
+        .map_err(|e| format!("Entrada da biblioteca local indisponível: {e}"))?
+        .file_type()
+        .is_symlink()
+    {
+        return Err("Entrada da biblioteca local inválida".into());
+    }
+    let link_target = std::fs::canonicalize(&link)
+        .map_err(|e| format!("Symlink da biblioteca local indisponível: {e}"))?;
+    if !roots.contains(&link_target) {
+        return Err("Entrada fora das pastas locais configuradas".into());
+    }
+
+    let resolved = std::fs::canonicalize(library_dir.join(path))
+        .map_err(|e| format!("Caminho local indisponível: {e}"))?;
+    if !resolved.is_dir() || !roots.iter().any(|root| resolved.starts_with(root)) {
+        return Err("Caminho fora das pastas locais configuradas".into());
+    }
+    Ok(resolved)
+}
+
+fn request_library_refresh(socket_path: &str, refresh: LibraryRefresh) -> Result<(), String> {
+    match refresh {
+        LibraryRefresh::Update => AudioEngine::update_library(socket_path),
+        LibraryRefresh::Rescan => AudioEngine::rescan_library_at(socket_path),
+    }
 }
 
 fn is_finishing_first_run(current_config: &AppConfig, new_config: &AppConfig) -> bool {
@@ -244,8 +368,23 @@ fn previous_track(state: State<AudioState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn seek_playback(seconds: f64, state: State<AudioState>) -> Result<(), String> {
-    state.0.lock().unwrap().seek(seconds)
+fn seek_playback(
+    seconds: f64,
+    config_state: State<ConfigState>,
+    audio_state: State<AudioState>,
+) -> Result<(), String> {
+    let is_shared = {
+        let config = config_state
+            .0
+            .lock()
+            .map_err(|e| format!("Falha ao acessar configuração durante seek: {}", e))?;
+        is_shared_output(&config)
+    };
+    audio_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar reprodução durante seek: {}", e))?
+        .seek(seconds, is_shared)
 }
 
 #[tauri::command]
@@ -276,6 +415,44 @@ async fn resolve_playback_uris(
         uris.push(uri);
     }
     Ok(uris)
+}
+
+async fn restore_cached_queue_after_ready(app: AppHandle) {
+    let audio_state = app.state::<AudioState>();
+    let queue = match audio_state.0.lock() {
+        Ok(audio) if audio.startup_queue_pending() => audio.get_queue(),
+        Ok(_) => return,
+        Err(_) => {
+            eprintln!("[Audio] Falha ao acessar a fila para restauração no startup.");
+            return;
+        }
+    };
+    let plex_client = match app.state::<PlexState>().0.lock() {
+        Ok(plex) => plex.clone(),
+        Err(_) => {
+            eprintln!("[Audio] Falha ao acessar Plex para restauração no startup.");
+            if let Ok(mut audio) = audio_state.0.lock() {
+                audio.fail_startup_queue_restore();
+            }
+            return;
+        }
+    };
+    match resolve_playback_uris(&queue, &plex_client).await {
+        Ok(uris) => match audio_state.0.lock() {
+            Ok(mut audio) => {
+                if let Err(error) = audio.restore_startup_queue(&uris) {
+                    eprintln!("[Audio] Falha ao restaurar fila no MPD: {}", error);
+                }
+            }
+            Err(_) => eprintln!("[Audio] Falha ao acessar o MPD para restauração no startup."),
+        },
+        Err(_) => {
+            eprintln!("[Audio] Falha ao resolver mídia para restauração no startup.");
+            if let Ok(mut audio) = audio_state.0.lock() {
+                audio.fail_startup_queue_restore();
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -365,6 +542,30 @@ fn list_local_directory(
     state: State<AudioState>,
 ) -> Result<Vec<audio::LocalItem>, String> {
     state.0.lock().unwrap().list_directory(&path)
+}
+
+#[tauri::command]
+async fn resolve_local_library_path(
+    path: String,
+    config_state: State<'_, ConfigState>,
+) -> Result<String, String> {
+    let local_folders = config_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar pastas locais: {e}"))?
+        .local_folders
+        .clone();
+    let library_dir = MpdSupervisor::library_dir();
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_local_library_path_in(&library_dir, &path, &local_folders).and_then(|resolved| {
+            resolved
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "Caminho local não pode ser exibido em UTF-8".to_string())
+        })
+    })
+    .await
+    .map_err(|e| format!("Falha ao resolver localização local: {e}"))?
 }
 
 #[tauri::command]
@@ -766,22 +967,47 @@ async fn play_playlist(
 }
 
 #[tauri::command]
-fn get_local_cover(path: String) -> Option<String> {
+async fn get_local_cover(path: String) -> Result<Option<String>, String> {
     let lib_dir = supervisor::MpdSupervisor::library_dir();
-    let p = std::path::Path::new(&path);
-    let full_path = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        lib_dir.join(p)
-    };
+    let socket_path = MpdSupervisor::socket_path().to_string_lossy().into_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        AudioEngine::get_local_cover_at(&socket_path, &lib_dir, &path)
+    })
+    .await
+    .map_err(|e| format!("Falha na tarefa de capa local: {e}"))?
+}
 
-    if full_path.is_dir() {
-        audio::find_folder_cover_path(&full_path)
-    } else if let Some(parent) = full_path.parent() {
-        audio::find_folder_cover_path(parent)
-    } else {
-        None
-    }
+#[tauri::command]
+async fn get_online_album_cover(
+    request: online_artwork::OnlineAlbumCoverRequest,
+    config_state: State<'_, ConfigState>,
+) -> Result<Option<String>, String> {
+    let enabled = config_state
+        .0
+        .lock()
+        .map_err(|_| "Configuração indisponível.".to_string())?
+        .online_artwork_enabled;
+    online_artwork::get_online_album_cover(request, enabled).await
+}
+
+#[tauri::command]
+async fn get_online_cover_cache_status(
+    request: online_artwork::OnlineAlbumCoverRequest,
+) -> Result<String, String> {
+    online_artwork::cached_cover_status(request).await
+}
+
+#[tauri::command]
+async fn get_artwork_enrichment_progress(
+) -> Result<std::collections::BTreeMap<String, artwork_progress::Entry>, String> {
+    artwork_progress::read().await
+}
+
+#[tauri::command]
+async fn save_artwork_enrichment_progress(
+    changes: Vec<artwork_progress::Change>,
+) -> Result<(), String> {
+    artwork_progress::write(changes).await
 }
 
 #[tauri::command]
@@ -793,8 +1019,26 @@ fn pick_directory() -> Option<String> {
 }
 
 #[tauri::command]
-fn rescan_library(state: State<AudioState>) -> Result<(), String> {
-    state.0.lock().unwrap().rescan_library()
+fn rescan_library(
+    state: State<AudioState>,
+    config_state: State<ConfigState>,
+) -> Result<(), String> {
+    // O nome IPC permanece para compatibilidade; com database existente, o refresh é incremental.
+    let has_folders = !config_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar pastas locais: {e}"))?
+        .local_folders
+        .is_empty();
+    if let Some(refresh) = library_refresh(true, database_exists()?, has_folders) {
+        let socket_path = state
+            .0
+            .lock()
+            .map_err(|e| format!("Falha ao acessar a biblioteca local: {e}"))?
+            .local_album_socket_path();
+        request_library_refresh(&socket_path, refresh)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -893,17 +1137,36 @@ async fn save_config(
         || current_cfg.audio_buffer_size_kb != new_config.audio_buffer_size_kb
         || current_cfg.replay_gain != new_config.replay_gain;
 
-    let folders_changed = current_cfg.local_folders != new_config.local_folders;
+    let folders_changed = local_folders_changed(&current_cfg, &new_config);
+    let database_existed = if folders_changed || finishing_first_run || audio_hw_changed {
+        database_exists()?
+    } else {
+        true
+    };
+    let mut library_changed_during_start = false;
     let mut playback_snapshot = None;
     let mut resume_analyzer = false;
 
     if finishing_first_run {
-        sup_state
+        let start_result = sup_state
             .0
             .lock()
-            .map_err(|e| format!("Falha ao iniciar MPD ao concluir a configuração inicial: {}", e))?
-            .start(&new_config)
-            .map_err(|e| format!("Falha ao iniciar MPD ao concluir a configuração inicial: {}", e))?;
+            .map_err(|e| format!("Falha ao acessar MPD na configuração inicial: {}", e))?
+            .start(&new_config);
+        library_changed_during_start = match start_result {
+            Ok(sync) => sync.changed,
+            Err(error) => {
+                let rollback =
+                    rollback_first_run_completion(folders_changed, &current_cfg, &sup_state);
+                return Err(error_with_rollback(
+                    format!(
+                        "Falha ao iniciar MPD ao concluir a configuração inicial: {}",
+                        error
+                    ),
+                    rollback,
+                ));
+            }
+        };
     } else if should_prepare_device_switch(audio_hw_changed, finishing_first_run) {
         // 1. Captura o estado e segundo atual da música sem destruir a fila
         let preparation = audio_state
@@ -968,20 +1231,22 @@ async fn save_config(
                 return Err(error_with_rollback(original, rollback));
             }
         };
-        if let Err(switch_error) = switch_result {
-            let rollback =
-                rollback_audio_switch(
+        library_changed_during_start = match switch_result {
+            Ok(sync) => sync.changed,
+            Err(switch_error) => {
+                let rollback = rollback_audio_switch(
                     &current_cfg,
                     playback_snapshot,
                     &playback_uris,
                     &sup_state,
                     &audio_state,
                 );
-            return Err(error_with_rollback(
-                format!("Falha ao iniciar nova saída: {}", switch_error),
-                rollback,
-            ));
-        }
+                return Err(error_with_rollback(
+                    format!("Falha ao iniciar nova saída: {}", switch_error),
+                    rollback,
+                ));
+            }
+        };
 
         // 3. Restaura fila/faixa/posição quando possível; Playing/Paused terminam pausados e Stopped permanece parado
         let restore_result = match audio_state.0.lock() {
@@ -1007,15 +1272,30 @@ async fn save_config(
         }
     }
 
-    if folders_changed {
+    if folders_changed
+        || library_changed_during_start
+        || (finishing_first_run && !new_config.local_folders.is_empty())
+    {
         let update_library = || -> Result<(), String> {
-            MpdSupervisor::sync_library_symlinks(&new_config.local_folders)?;
-            let mut audio = audio_state
-                .0
-                .lock()
-                .map_err(|e| format!("Falha ao acessar a biblioteca local: {}", e))?;
-            audio.set_music_dir(&MpdSupervisor::library_dir().to_string_lossy());
-            audio.rescan_library()
+            let sync = MpdSupervisor::sync_library_symlinks(&new_config.local_folders)?;
+            let socket_path = {
+                let mut audio = audio_state
+                    .0
+                    .lock()
+                    .map_err(|e| format!("Falha ao acessar a biblioteca local: {}", e))?;
+                audio.set_music_dir(&sync.library_dir.to_string_lossy());
+                audio.local_album_socket_path()
+            };
+            if let Some(refresh) = library_refresh_after_sync(
+                sync.changed,
+                library_changed_during_start,
+                finishing_first_run,
+                database_existed,
+                !new_config.local_folders.is_empty(),
+            ) {
+                request_library_refresh(&socket_path, refresh)?;
+            }
+            Ok(())
         };
         if let Err(library_error) = update_library() {
             let rollback = rollback_applied_config_change(
@@ -1168,12 +1448,22 @@ fn rollback_applied_config_change(
     let mut failures = Vec::new();
     if folders_changed {
         let library_rollback = MpdSupervisor::sync_library_symlinks(&previous_config.local_folders)
-            .and_then(|_| {
-                audio_state
-                    .0
-                    .lock()
-                    .map_err(|e| format!("Falha ao acessar a biblioteca durante rollback: {}", e))?
-                    .rescan_library()
+            .and_then(|sync| {
+                if let Some(refresh) = library_refresh(
+                    sync.changed,
+                    database_exists()?,
+                    !previous_config.local_folders.is_empty(),
+                ) {
+                    let socket_path = audio_state
+                        .0
+                        .lock()
+                        .map_err(|e| {
+                            format!("Falha ao acessar a biblioteca durante rollback: {}", e)
+                        })?
+                        .local_album_socket_path();
+                    request_library_refresh(&socket_path, refresh)?;
+                }
+                Ok(())
             });
         if let Err(error) = library_rollback {
             failures.push(format!("biblioteca: {}", error));
@@ -1230,8 +1520,13 @@ fn rollback_first_run_completion(
 }
 
 #[tauri::command]
-fn get_local_albums(state: State<AudioState>) -> Result<Vec<audio::LocalAlbum>, String> {
-    state.0.lock().unwrap().get_local_albums()
+async fn get_local_albums(state: State<'_, AudioState>) -> Result<Vec<audio::LocalAlbum>, String> {
+    let socket_path = state.0.lock()
+        .map_err(|e| format!("Falha ao acessar conexão da biblioteca local: {e}"))?
+        .local_album_socket_path();
+    tauri::async_runtime::spawn_blocking(move || AudioEngine::get_local_albums_at(&socket_path))
+        .await
+        .map_err(|e| format!("Falha na tarefa de consulta da biblioteca local: {e}"))?
 }
 
 #[tauri::command]
@@ -1330,14 +1625,37 @@ pub fn run() {
         }
     };
 
+    let should_start_mpd = should_start_mpd_on_startup(config_valid, &initial_config);
+    let startup_rescan = if should_start_mpd {
+        match MpdSupervisor::database_path().try_exists() {
+            Ok(database_exists) => {
+                should_rescan_library_on_startup(config_valid, &initial_config, database_exists)
+            }
+            Err(error) => {
+                eprintln!(
+                    "[Audio] Falha ao verificar database MPD no startup: {}",
+                    error
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+
     let mut supervisor = MpdSupervisor::new(&socket_path);
-    if should_start_mpd_on_startup(config_valid, &initial_config) {
-        if let Err(e) = supervisor.start(&initial_config) {
-            eprintln!("[Aviso] Erro no supervisor de áudio: {}", e);
+    let mpd_started = if should_start_mpd {
+        match supervisor.start(&initial_config) {
+            Ok(_) => true,
+            Err(error) => {
+                eprintln!("[Aviso] Erro no supervisor de áudio: {}", error);
+                false
+            }
         }
     } else {
         supervisor.mark_unavailable(MpdUnavailableReason::StartupFailed);
-    }
+        false
+    };
 
     let audio_engine = AudioEngine::new(
         &socket_path,
@@ -1347,7 +1665,7 @@ pub fn run() {
         socket_path.clone(),
         MpdSupervisor::analyzer_fifo_path(),
     );
-    if should_start_mpd_on_startup(config_valid, &initial_config) {
+    if mpd_started && startup_rescan {
         if let Err(e) = audio_engine.rescan_library() {
             eprintln!(
                 "[Audio] Falha ao solicitar rescan inicial da biblioteca: {}",
@@ -1383,7 +1701,12 @@ pub fn run() {
             clear_queue,
             set_window_title,
             list_local_directory,
+            resolve_local_library_path,
             get_local_cover,
+            get_online_album_cover,
+            get_online_cover_cache_status,
+            get_artwork_enrichment_progress,
+            save_artwork_enrichment_progress,
             get_local_albums,
             get_favorites,
             toggle_favorite,
@@ -1435,9 +1758,28 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Erro ao compilar o contexto do Tauri");
 
-    app.run(|app_handle, event| {
+    let restore_started = AtomicBool::new(false);
+    let shutdown_started = AtomicBool::new(false);
+    app.run(move |app_handle, event| {
         match event {
+            RunEvent::Ready if mpd_started && !restore_started.swap(true, Ordering::SeqCst) => {
+                let app = app_handle.clone();
+                tauri::async_runtime::spawn(restore_cached_queue_after_ready(app));
+            }
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                if shutdown_started.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                if let Some(audio_state) = app_handle.try_state::<AudioState>() {
+                    match audio_state.0.lock() {
+                        Ok(mut audio) => {
+                            if let Err(error) = audio.persist_shutdown_resume() {
+                                eprintln!("[Audio] Falha ao salvar posição no shutdown: {}", error);
+                            }
+                        }
+                        Err(_) => eprintln!("[Audio] Falha ao acessar posição no shutdown."),
+                    }
+                }
                 if let Some(state) = app_handle.try_state::<AnalyzerState>() {
                     if let Ok(mut analyzer) = state.0.lock() {
                         if let Err(error) = analyzer.stop(Some(app_handle)) {
@@ -1465,6 +1807,7 @@ mod tests {
     use std::cell::Cell;
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
@@ -1472,6 +1815,105 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
+
+    static NEXT_LOCAL_PATH_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct LocalPathFixture {
+        root: PathBuf,
+        library: PathBuf,
+    }
+
+    impl LocalPathFixture {
+        fn new() -> Self {
+            let id = NEXT_LOCAL_PATH_TEST_ID.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir()
+                .join(format!("sonante-local-path-{}-{id}", std::process::id()));
+            let library = root.join("library");
+            fs::create_dir_all(&library).unwrap();
+            Self { root, library }
+        }
+    }
+
+    impl Drop for LocalPathFixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn local_library_path_resolves_configured_root_and_specific_duplicate_name() {
+        let fixture = LocalPathFixture::new();
+        let first = fixture.root.join("first/Music");
+        let second = fixture.root.join("second/Music");
+        fs::create_dir_all(first.join("Album")).unwrap();
+        fs::create_dir_all(second.join("Album")).unwrap();
+        symlink(&first, fixture.library.join("Music")).unwrap();
+        symlink(&second, fixture.library.join("Music (2)")).unwrap();
+        let folders = vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ];
+
+        assert_eq!(
+            resolve_local_library_path_in(&fixture.library, "Music/Album", &folders).unwrap(),
+            first.join("Album")
+        );
+        assert_eq!(
+            resolve_local_library_path_in(&fixture.library, "Music (2)/Album", &folders).unwrap(),
+            second.join("Album")
+        );
+        assert_eq!(
+            resolve_local_library_path_in(&fixture.library, "Music", &folders).unwrap(),
+            first
+        );
+    }
+
+    #[test]
+    fn local_library_path_rejects_absolute_parent_and_empty_paths() {
+        let fixture = LocalPathFixture::new();
+        let root = fixture.root.join("Music");
+        fs::create_dir(&root).unwrap();
+        symlink(&root, fixture.library.join("Music")).unwrap();
+        let folders = vec![root.to_string_lossy().into_owned()];
+
+        for invalid in ["", "/Music", "../Music", "Music/../Music"] {
+            assert!(
+                resolve_local_library_path_in(&fixture.library, invalid, &folders).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_library_path_rejects_missing_path_and_unconfigured_link() {
+        let fixture = LocalPathFixture::new();
+        let configured = fixture.root.join("configured");
+        let other = fixture.root.join("other");
+        fs::create_dir(&configured).unwrap();
+        fs::create_dir(&other).unwrap();
+        symlink(&configured, fixture.library.join("Music")).unwrap();
+        symlink(&other, fixture.library.join("Other")).unwrap();
+        let folders = vec![configured.to_string_lossy().into_owned()];
+
+        assert!(
+            resolve_local_library_path_in(&fixture.library, "Music/Missing", &folders).is_err()
+        );
+        assert!(resolve_local_library_path_in(&fixture.library, "Other", &folders).is_err());
+    }
+
+    #[test]
+    fn local_library_path_rejects_symlink_escape_from_configured_root() {
+        let fixture = LocalPathFixture::new();
+        let configured = fixture.root.join("configured");
+        let outside = fixture.root.join("outside");
+        fs::create_dir(&configured).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&configured, fixture.library.join("Music")).unwrap();
+        symlink(&outside, configured.join("Escape")).unwrap();
+        let folders = vec![configured.to_string_lossy().into_owned()];
+
+        assert!(resolve_local_library_path_in(&fixture.library, "Music/Escape", &folders).is_err());
+    }
 
     fn playback_playlist(locators: Vec<MediaLocator>) -> Playlist {
         Playlist {
@@ -1638,11 +2080,100 @@ mod tests {
         config.first_run = false;
 
         assert!(should_start_mpd_on_startup(true, &config));
+        assert!(!should_start_mpd_on_startup(false, &config));
     }
 
     #[test]
     fn first_run_is_not_eligible_for_automatic_startup() {
         assert!(!should_start_mpd_on_startup(true, &AppConfig::default()));
+    }
+
+    #[test]
+    fn shared_seek_mode_matches_supervisor_output_definition() {
+        let mut config = AppConfig::default();
+        config.alsa_device = "hw:CARD=DAC,DEV=0".to_string();
+        config.audio_output_type = "alsa".to_string();
+        assert!(!is_shared_output(&config));
+
+        config.audio_output_type = "pipewire".to_string();
+        assert!(is_shared_output(&config));
+        config.audio_output_type = "shared".to_string();
+        assert!(is_shared_output(&config));
+        config.audio_output_type = "alsa".to_string();
+        config.alsa_device = "default".to_string();
+        assert!(is_shared_output(&config));
+    }
+
+    #[test]
+    fn startup_rescan_only_recovers_a_missing_database_with_local_folders() {
+        let mut config = AppConfig::default();
+        config.first_run = false;
+        config.local_folders = vec!["/music".to_string()];
+
+        assert!(!should_rescan_library_on_startup(true, &config, true));
+        assert!(should_rescan_library_on_startup(true, &config, false));
+        assert!(!should_rescan_library_on_startup(false, &config, false));
+
+        config.local_folders.clear();
+        assert!(!should_rescan_library_on_startup(true, &config, false));
+
+        config.local_folders.push("/music".to_string());
+        config.first_run = true;
+        assert!(!should_rescan_library_on_startup(true, &config, false));
+    }
+
+    #[test]
+    fn library_refresh_uses_update_for_existing_database_and_rescan_for_first_database() {
+        assert_eq!(
+            library_refresh(true, true, true),
+            Some(LibraryRefresh::Update)
+        );
+        assert_eq!(
+            library_refresh(true, true, false),
+            Some(LibraryRefresh::Update)
+        );
+        assert_eq!(
+            library_refresh(true, false, true),
+            Some(LibraryRefresh::Rescan)
+        );
+        assert_eq!(library_refresh(true, false, false), None);
+        assert_eq!(library_refresh(false, true, true), None);
+        assert_eq!(library_refresh(false, false, true), None);
+        assert_eq!(
+            library_refresh_after_sync(false, false, false, true, true),
+            None
+        );
+        assert_eq!(
+            library_refresh_after_sync(false, true, false, true, true),
+            Some(LibraryRefresh::Update)
+        );
+        assert_eq!(
+            library_refresh_after_sync(false, false, true, false, true),
+            Some(LibraryRefresh::Rescan)
+        );
+        assert_eq!(
+            library_refresh_after_sync(true, true, true, false, true),
+            Some(LibraryRefresh::Rescan)
+        );
+    }
+
+    #[test]
+    fn database_path_matches_supervisor_configuration_directory() {
+        assert_eq!(
+            MpdSupervisor::database_path(),
+            MpdSupervisor::sonante_config_dir().join("mpd.db")
+        );
+    }
+
+    #[test]
+    fn changing_local_folders_is_detected_for_library_reconciliation() {
+        let mut current = AppConfig::default();
+        current.first_run = false;
+        let mut next = current.clone();
+        assert!(!local_folders_changed(&current, &next));
+
+        next.local_folders.push("/music".to_string());
+        assert!(local_folders_changed(&current, &next));
     }
 
     #[test]

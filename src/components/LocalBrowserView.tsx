@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useSyncExternalStore } from "react";
 import {
   Folder,
   Music,
@@ -20,43 +20,23 @@ import { audioService } from "../services/audio";
 import { favoritesService } from "../services/favorites";
 import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
+import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDiscs";
+import { LocalAlbumCatalog, emptyLocalAlbumCatalogState } from "../utils/localAlbumCatalog";
+import { albumLocationSources } from "../utils/localAlbumLocations";
+import { localArtworkEnrichment, localArtworkResolver } from "../utils/localArtworkSession";
 
-class LruMemoryCache {
-  private maxSize: number;
-  private map: Map<string, string>;
+const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
 
-  constructor(maxSize = 150) {
-    this.maxSize = maxSize;
-    this.map = new Map();
-  }
-
-  get(key: string): string | undefined {
-    const val = this.map.get(key);
-    if (val !== undefined) {
-      this.map.delete(key);
-      this.map.set(key, val);
-    }
-    return val;
-  }
-
-  set(key: string, val: string): void {
-    if (this.map.has(key)) {
-      this.map.delete(key);
-    } else if (this.map.size >= this.maxSize) {
-      const oldestKey = this.map.keys().next().value;
-      if (oldestKey !== undefined) {
-        this.map.delete(oldestKey);
-      }
-    }
-    this.map.set(key, val);
-  }
-
-  has(key: string): boolean {
-    return this.map.has(key);
-  }
+async function getLocalAlbumCover(album: LocalAlbum, onlineEnabled: boolean | (() => boolean), libraryUpdating: boolean | (() => boolean)): Promise<string | null> {
+  return localArtworkResolver.resolve(album, onlineEnabled, libraryUpdating);
 }
 
-const coverMemoryCache = new LruMemoryCache(150);
+async function loadAlbumDiscTracks(album: LocalAlbum): Promise<AlbumDiscTracks[]> {
+  return Promise.all(album.discs.map(async (disc) => ({
+    disc,
+    tracks: (await audioService.listLocalDirectory(disc.folder_path)).filter((item) => item.item_type === "file"),
+  })));
+}
 
 const LocalAlbumCard: React.FC<{
   album: LocalAlbum;
@@ -65,26 +45,28 @@ const LocalAlbumCard: React.FC<{
   onClick: () => void;
   onPlayQuick: (e: React.MouseEvent) => void;
   isPlaybackAvailable: boolean;
-}> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable }) => {
-  const [cover, setCover] = useState<string | null>(() => coverMemoryCache.get(album.folder_path) || null);
+  onlineArtworkEnabled: boolean;
+  isLibraryUpdating: boolean;
+}> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable, onlineArtworkEnabled, isLibraryUpdating }) => {
+  const [cover, setCover] = useState<string | null>(() => localArtworkResolver.get(album.id));
   const cardRef = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  const onlineEnabledRef = useRef(onlineArtworkEnabled);
+  const libraryUpdatingRef = useRef(isLibraryUpdating);
+  onlineEnabledRef.current = onlineArtworkEnabled;
+  libraryUpdatingRef.current = isLibraryUpdating;
 
   useEffect(() => {
-    if (coverMemoryCache.has(album.folder_path)) {
-      setCover(coverMemoryCache.get(album.folder_path)!);
-      return;
-    }
+    const cached = localArtworkResolver.get(album.id);
+    if (cached) setCover(cached);
+    return localArtworkResolver.subscribe(album.id, setCover);
+  }, [album.id]);
 
-    let isMounted = true;
+  useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0].isIntersecting) {
-          audioService.getLocalCover(album.folder_path).then((c) => {
-            if (isMounted && c) {
-              coverMemoryCache.set(album.folder_path, c);
-              setCover(c);
-            }
-          });
+          setVisible(true);
           observer.disconnect();
         }
       },
@@ -96,10 +78,18 @@ const LocalAlbumCard: React.FC<{
     }
 
     return () => {
-      isMounted = false;
       observer.disconnect();
     };
   }, [album.folder_path]);
+
+  useEffect(() => {
+    if (!visible || cover) return;
+    let active = true;
+    getLocalAlbumCover(album, () => onlineEnabledRef.current, () => libraryUpdatingRef.current)
+      .then((found) => { if (active && found) setCover(found); })
+      .catch((error) => console.error("Falha ao carregar capa do álbum:", error));
+    return () => { active = false; };
+  }, [album, visible, cover, onlineArtworkEnabled, isLibraryUpdating]);
 
   return (
     <div ref={cardRef} onClick={onClick} className="group flex flex-col cursor-pointer relative">
@@ -157,22 +147,39 @@ export interface LocalBrowserViewProps {
   initialArtist?: string | null;
   onClearInitialArtist?: () => void;
   isPlaybackAvailable: boolean;
+  isLibraryUpdating: boolean;
+  onlineArtworkEnabled: boolean;
 }
 
 export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   initialArtist,
   onClearInitialArtist,
   isPlaybackAvailable,
+  isLibraryUpdating,
+  onlineArtworkEnabled,
 }) => {
   const { t } = useTranslation();
   const [viewMode, setViewMode] = useState<"albums" | "folders">("albums");
-  const [albums, setAlbums] = useState<LocalAlbum[]>([]);
-  const [loadingAlbums, setLoadingAlbums] = useState(false);
+  const catalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
+  const artworkStatus = useSyncExternalStore(localArtworkEnrichment.subscribe, localArtworkEnrichment.getSnapshot);
+  const albums = catalog.albums;
+  const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, isLibraryUpdating);
   const [albumSearch, setAlbumSearch] = useState("");
   const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(null);
+  const [albumLocations, setAlbumLocations] = useState<{
+    album: LocalAlbum;
+    paths: { label: string | null; absolutePath: string }[];
+  } | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(initialArtist || null);
   const [albumTracks, setAlbumTracks] = useState<LocalItem[]>([]);
+  const [albumSections, setAlbumSections] = useState<ReturnType<typeof flattenAlbumDiscs>["sections"]>([]);
   const [albumCover, setAlbumCover] = useState<string | null>(null);
+  const albumRequest = useRef(0);
+  const onlineEnabledRef = useRef(onlineArtworkEnabled);
+  const libraryUpdatingRef = useRef(isLibraryUpdating);
+  onlineEnabledRef.current = onlineArtworkEnabled;
+  libraryUpdatingRef.current = isLibraryUpdating;
+  const initialCatalogMountHandled = useRef(false);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
 
@@ -183,18 +190,6 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
   useEffect(() => {
     let isMounted = true;
-    setLoadingAlbums(true);
-
-    audioService
-      .getLocalAlbums()
-      .then((data) => {
-        if (isMounted) setAlbums(data);
-      })
-      .catch(console.error)
-      .finally(() => {
-        if (isMounted) setLoadingAlbums(false);
-      });
-
     favoritesService
       .getFavorites()
       .then((favs) => {
@@ -210,6 +205,30 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   }, []);
 
   useEffect(() => {
+    if (!initialCatalogMountHandled.current) {
+      initialCatalogMountHandled.current = true;
+      localAlbumCatalog.setUpdating(isLibraryUpdating, true);
+    }
+  }, []);
+
+  useEffect(() => {
+    localAlbumCatalog.setUpdating(isLibraryUpdating);
+  }, [isLibraryUpdating]);
+
+  useEffect(() => {
+    if (catalog.loaded && !catalog.loading && !catalog.error && !isLibraryUpdating) {
+      localArtworkEnrichment.setCatalog(catalog.albums);
+    }
+  }, [catalog.albums, catalog.loaded, catalog.loading, catalog.error, isLibraryUpdating]);
+
+  useEffect(() => {
+    if (!selectedAlbum) return;
+    const cached = localArtworkResolver.get(selectedAlbum.id);
+    if (cached) setAlbumCover(cached);
+    return localArtworkResolver.subscribe(selectedAlbum.id, setAlbumCover);
+  }, [selectedAlbum]);
+
+  useEffect(() => {
     if (initialArtist) {
       setSelectedArtist(initialArtist);
       setSelectedAlbum(null);
@@ -218,11 +237,37 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   }, [initialArtist]);
 
   useEffect(() => {
+    if (!selectedAlbum) return;
+    let active = true;
+    const album = selectedAlbum;
+    const sources = albumLocationSources(album);
+    void Promise.allSettled(
+      sources.map((source) => audioService.resolveLocalLibraryPath(source.path)),
+    ).then((results) => {
+      if (!active) return;
+      const paths = results.flatMap((result, index) => {
+        if (result.status === "rejected") {
+          console.error("Falha ao resolver localização do álbum local:", result.reason);
+          return [];
+        }
+        return [{ label: sources[index].label, absolutePath: result.value }];
+      });
+      setAlbumLocations({ album, paths });
+    });
+    return () => {
+      active = false;
+    };
+  }, [selectedAlbum]);
+
+  useEffect(() => {
     if (viewMode === "folders") {
       setLoadingFolders(true);
       Promise.all([
         audioService.listLocalDirectory(currentPath),
-        audioService.getLocalCover(currentPath),
+        audioService.getLocalCover(currentPath).catch((error) => {
+          console.error("Falha ao carregar capa da pasta local:", error);
+          return null;
+        }),
       ])
         .then(([data, cov]) => {
           setItems(data);
@@ -259,14 +304,21 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   };
 
   const handleSelectAlbum = async (album: LocalAlbum) => {
+    const request = ++albumRequest.current;
     setSelectedAlbum(album);
+    setAlbumLocations(null);
+    setAlbumTracks([]);
+    setAlbumSections([]);
+    setAlbumCover(null);
+    void getLocalAlbumCover(album, () => onlineEnabledRef.current, () => libraryUpdatingRef.current)
+      .then((cov) => { if (request === albumRequest.current) setAlbumCover(cov); })
+      .catch((error) => console.error("Falha ao carregar capa do álbum:", error));
     try {
-      const cov = coverMemoryCache.get(album.folder_path) || (await audioService.getLocalCover(album.folder_path));
-      if (cov) coverMemoryCache.set(album.folder_path, cov);
-      setAlbumCover(cov);
-
-      const trackList = await audioService.listLocalDirectory(album.folder_path);
-      setAlbumTracks(trackList.filter((i) => i.item_type === "file"));
+      const groups = await loadAlbumDiscTracks(album);
+      if (request !== albumRequest.current) return;
+      const flattened = flattenAlbumDiscs(groups);
+      setAlbumTracks(flattened.tracks);
+      setAlbumSections(flattened.sections);
     } catch (err) {
       console.error("Falha ao carregar faixas do álbum:", err);
     }
@@ -275,8 +327,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const handlePlayEntireAlbum = async (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => {
     if (!isPlaybackAvailable) return;
     try {
-      const files = trackItems || (await audioService.listLocalDirectory(album.folder_path)).filter((i) => i.item_type === "file");
-      const cov = albumCover || coverMemoryCache.get(album.folder_path) || (await audioService.getLocalCover(album.folder_path));
+      const files = trackItems ?? flattenAlbumDiscs(await loadAlbumDiscTracks(album)).tracks;
+      const cov = (selectedAlbum?.id === album.id ? albumCover : null) || await localArtworkResolver.resolveLocalOnly(album);
       const meta = files.map((f) => ({
         title: f.title || f.name,
         artist: f.artist || album.artist,
@@ -286,7 +338,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 	duration: f.duration,
       }));
       if (meta.length > 0) {
-        audioService.playTracks(meta, startIdx);
+        await audioService.playTracks(meta, startIdx);
       }
     } catch (err) {
       console.error("Erro ao tocar álbum:", err);
@@ -367,6 +419,14 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 ? t("localBrowser.albumsCount", { count: filteredAlbums.length })
                 : currentPath || t("localBrowser.root")}
             </p>
+            {viewMode === "albums" && artworkStatus.onlineActivity && (
+              <div className="text-[11px] text-[#777777] mt-1 flex flex-wrap items-center gap-x-2">
+                <span className="text-[#E5A00D] flex items-center gap-1 max-w-72 truncate" title={artworkStatus.onlineActivity.title}>
+                  {artworkStatus.onlineActivity.kind === "searching" && <Disc3 size={11} className="animate-spin" />}
+                  {t(artworkStatus.onlineActivity.kind === "searching" ? "artwork.searchingOnline" : "artwork.foundOnline", { title: artworkStatus.onlineActivity.title })}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -422,6 +482,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         )}
       </div>
 
+      {isLibraryUpdating && (
+        <div className="px-8 py-2 text-xs text-[#E5A00D] flex items-center gap-2 border-b border-[#222222]">
+          <Disc3 size={14} className="animate-spin" />
+          <span>{t("sidebar.indexingTooltip")}</span>
+        </div>
+      )}
+      {catalog.error && (
+        <div role="alert" className="px-8 py-2 text-xs text-red-400 border-b border-[#222222]">
+          {catalog.error}
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto p-8">
         {selectedAlbum ? (
           <div className="space-y-8 animate-in fade-in duration-100">
@@ -455,10 +526,26 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
                   {albumTracks.length} {t("favorites.tracks")}
                 </p>
+                {albumLocations?.album === selectedAlbum && albumLocations.paths.length > 0 && (
+                  <div className="space-y-1 text-[11px] text-[#777777] min-w-0">
+                    <p className="font-semibold">{t("localBrowser.location")}</p>
+                    {albumLocations.paths.map((location, index) => (
+                      <div key={`${location.absolutePath}-${index}`} className="min-w-0">
+                        {location.label && <span className="block text-[#999999]">{location.label}</span>}
+                        <span
+                          className="block w-full max-w-xl truncate select-text cursor-text"
+                          title={location.absolutePath}
+                        >
+                          {location.absolutePath}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 <div className="pt-2 flex items-center space-x-3">
                   <button
-                    onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, 0)}
+                    onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks.length ? albumTracks : undefined, 0)}
                     disabled={!isPlaybackAvailable}
                     className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
@@ -506,10 +593,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 </span>
               </div>
 
-              {albumTracks.map((track, idx) => (
-                <div
-                  key={track.path}
-                  onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, idx)}
+              {albumSections.map((section) => (
+                <React.Fragment key={section.disc.folder_path}>
+                  {selectedAlbum.discs.length > 1 && (
+                    <div className="px-4 py-2.5 text-xs font-bold text-[#E5A00D] bg-[#181818]">
+                      {section.disc.label}
+                    </div>
+                  )}
+                  {section.tracks.map((track, idx) => (
+                    <div
+                      key={track.path}
+                      onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, section.startIndex + idx)}
                   aria-disabled={!isPlaybackAvailable}
                   className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
                     isPlaybackAvailable
@@ -544,13 +638,19 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       <ListPlus size={15} />
                     </button>
                   </div>
-                </div>
+                    </div>
+                  ))}
+                </React.Fragment>
               ))}
             </div>
           </div>
         ) : selectedArtist ? (
           <div className="space-y-6 animate-in fade-in duration-100">
-            {artistAlbums.length === 0 ? (
+            {artistAlbums.length === 0 && emptyCatalogState === "indexing" ? (
+              <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+                {t(isLibraryUpdating ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
+              </div>
+            ) : emptyCatalogState === "error" ? null : artistAlbums.length === 0 ? (
               <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
                 <Disc3 size={40} className="opacity-40" />
                 <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
@@ -569,17 +669,20 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       handlePlayEntireAlbum(album);
                     }}
                     isPlaybackAvailable={isPlaybackAvailable}
+                    onlineArtworkEnabled={onlineArtworkEnabled}
+                    isLibraryUpdating={isLibraryUpdating}
                   />
                 ))}
               </div>
             )}
           </div>
         ) : viewMode === "albums" ? (
-          loadingAlbums ? (
+          emptyCatalogState === "indexing" ? (
             <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
-              {t("localBrowser.organizing")}
+              {t(isLibraryUpdating ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
             </div>
-          ) : filteredAlbums.length === 0 ? (
+          ) : emptyCatalogState === "error" ? null
+          : filteredAlbums.length === 0 ? (
             <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
               <Disc3 size={40} className="opacity-40" />
               <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
@@ -598,6 +701,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     handlePlayEntireAlbum(album);
                   }}
                   isPlaybackAvailable={isPlaybackAvailable}
+                  onlineArtworkEnabled={onlineArtworkEnabled}
+                  isLibraryUpdating={isLibraryUpdating}
                 />
               ))}
             </div>

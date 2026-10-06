@@ -136,7 +136,7 @@ O backend Rust não envia amostras diretamente ao ALSA. O MPD externo é o motor
 
 ### Estado conhecido que merece cautela
 
-- A fila em `queue_cache.json` é metadata espelhada; ela não é automaticamente restaurada no MPD no startup.
+- A fila em `queue_cache.json` é metadata espelhada; após a janela estar disponível, o startup resolve as referências de mídia e reconstrói a fila no MPD com `clear`/`add`, sem `play`, `seek` ou abertura intencional do DAC. O cursor opcional do cache é apresentado como estado lógico pausado e só inicia reprodução após comando explícito do usuário.
 - O transporte MPD valida e escapa argumentos textuais, rejeita NUL/CR/LF e diferencia `OK`, `ACK`, EOF e erros de I/O/timeout; novos comandos devem reutilizar essas mesmas fronteiras.
 - A troca de saída é serializada e transacional: captura um snapshot explícito, aplica a nova configuração e tenta rollback em falha. Snapshots Playing e Paused terminam pausados após a troca; Stopped permanece parado.
 - Há polling de status duplicado no frontend.
