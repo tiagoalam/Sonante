@@ -697,6 +697,21 @@ impl AudioEngine {
 
     fn multidisc_base_title(album_title: &str, disc_number: u32) -> Option<String> {
         let title = album_title.trim();
+        if let Some(without_close) = title.strip_suffix(')') {
+            if let Some(open_index) = without_close.rfind('(') {
+                let base = without_close[..open_index].trim_end();
+                let marker = without_close[open_index + 1..].trim();
+                if !base.is_empty() && !marker.is_empty() {
+                    let expanded = format!("{base} {marker}");
+                    match Self::multidisc_base_title(&expanded, disc_number) {
+                        None => return None,
+                        Some(parsed) if parsed == base => return Some(parsed),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         for (index, ch) in title.char_indices().rev() {
             if !ch.is_whitespace() {
                 continue;
@@ -2924,6 +2939,15 @@ mod tests {
             ("Album – Disco 2", 2),
             ("Album — Disco 2", 2),
             ("Album: Disco 1", 1),
+            ("Album (CD1)", 1),
+            ("Album (CD 2)", 2),
+            ("Album (CD.1)", 1),
+            ("Album (CD-1)", 1),
+            ("Album (CD_1)", 1),
+            ("Album (Disc 1)", 1),
+            ("Album (Disk 2)", 2),
+            ("Album (Disco 1)", 1),
+            ("Album (cD1)", 1),
             ("Album CD.2 (Dub Wise)", 2),
             ("Album CD 2 - Bonus", 2),
             ("Album Disc 3 (Live)", 3),
@@ -2937,6 +2961,7 @@ mod tests {
         }
         assert_eq!(AudioEngine::multidisc_base_title("Album CD1", 2), None);
         assert_eq!(AudioEngine::multidisc_base_title("Album Disco 2", 1), None);
+        assert_eq!(AudioEngine::multidisc_base_title("Album (CD2)", 1), None);
         assert_eq!(
             AudioEngine::multidisc_base_title("CD Collection", 1).as_deref(),
             Some("CD Collection")
@@ -2952,6 +2977,85 @@ mod tests {
                 "{title}"
             );
         }
+        for title in [
+            "Album (CD1) Remaster",
+            "History of Compact Disc (Documentary)",
+            "Disco Music (Live)",
+            "Discography (CD Collection)",
+        ] {
+            assert_eq!(
+                AudioEngine::multidisc_base_title(title, 1).as_deref(),
+                Some(title),
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn parenthesized_cd_suffix_consolidates_real_albums() {
+        for (root, title, first_path, second_path) in [
+            (
+                "Brasilidades/Egberto Gismonti/Saudações",
+                "Saudações",
+                "Brasilidades/Egberto Gismonti/Saudações/CD1/a.flac",
+                "Brasilidades/Egberto Gismonti/Saudações/CD2/b.flac",
+            ),
+            (
+                "Jazz/Paco de Lucia & John McLaughlin/Live At Montreux 1987",
+                "Paco And John Live At Montreux 1987",
+                "Jazz/Paco de Lucia & John McLaughlin/Live At Montreux 1987/CD1/a.flac",
+                "Jazz/Paco de Lucia & John McLaughlin/Live At Montreux 1987/CD2/b.flac",
+            ),
+        ] {
+            let first_title = format!("{title} (CD1)");
+            let second_title = format!("{title} (CD2)");
+            let map = consolidated_album_tracks(&[
+                (first_path, Some(first_title.as_str()), None, None),
+                (second_path, Some(second_title.as_str()), None, None),
+            ]);
+
+            assert_eq!(map.len(), 1, "{title}");
+            let album = &map[&album_id(root, title)];
+            assert_eq!(album.title, title);
+            assert_eq!(album.track_count, 2);
+            assert_eq!(album.discs.len(), 2);
+            assert_eq!(
+                album
+                    .discs
+                    .iter()
+                    .map(|disc| (disc.number, disc.label.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![(1, "CD1"), (2, "CD2")]
+            );
+        }
+    }
+
+    #[test]
+    fn parenthesized_disc_tags_in_the_same_folder_remain_separate() {
+        let map = consolidated_album_tracks(&[
+            (
+                "Artist/Black Is Our Colour/one.flac",
+                Some("Black Is Our Colour (Disc 1)"),
+                None,
+                None,
+            ),
+            (
+                "Artist/Black Is Our Colour/two.flac",
+                Some("Black Is Our Colour (Disc 2)"),
+                None,
+                None,
+            ),
+        ]);
+
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key(&album_id(
+            "Artist/Black Is Our Colour",
+            "Black Is Our Colour (Disc 1)"
+        )));
+        assert!(map.contains_key(&album_id(
+            "Artist/Black Is Our Colour",
+            "Black Is Our Colour (Disc 2)"
+        )));
     }
 
     #[test]
