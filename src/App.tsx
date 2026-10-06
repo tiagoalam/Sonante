@@ -37,6 +37,7 @@ import { PlexImage } from "./components/PlexImage";
 import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./components/VirtualAlbumGrid";
 import { VirtualList, type VirtualListHandle } from "./components/VirtualList";
 import { ToolbarSelect } from "./components/ToolbarSelect";
+import { SidebarNavItem } from "./components/SidebarNavItem";
 import { plexService } from "./services/plex";
 import { audioService } from "./services/audio";
 import { configService } from "./services/config";
@@ -964,129 +965,94 @@ export function App() {
     <div className="h-screen w-screen flex flex-col bg-[#121212] text-[#E0E0E0] overflow-hidden select-none">
       <div className="min-h-0 flex-1 flex overflow-hidden">
         {/* Barra Lateral */}
-        <aside className="w-64 bg-[#181818] border-r border-[#262626] flex flex-col p-4 shrink-0">
-          <div className="flex items-center space-x-2.5 px-2 py-3 mb-6">
-            <Sparkles className="text-[#E5A00D]" size={22} />
-            <h1 className="text-lg font-black tracking-wider text-[#E5A00D]">SONANTE</h1>
+        <aside className="flex min-h-0 w-56 shrink-0 flex-col overflow-hidden border-r border-[#262626] bg-[#181818] p-3">
+          <div className="mb-7 flex shrink-0 items-center gap-2.5 px-3 py-3">
+            <Sparkles className="shrink-0 text-[#E5A00D]" size={21} />
+            <h1 className="truncate text-base font-black tracking-[0.14em] text-[#E5A00D]">SONANTE</h1>
           </div>
 
-          <div className="text-[11px] font-bold text-[#666666] tracking-wider uppercase px-2 mb-2">
-            {t("sidebar.mediaSources")}
+          <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pb-3">
+            <section aria-labelledby="sidebar-music-group">
+              <h2 id="sidebar-music-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#5F5F5F]">
+                {t("sidebar.musicGroup")}
+              </h2>
+              <nav aria-label={t("sidebar.musicGroup")} className="space-y-1">
+                <SidebarNavItem
+                  icon={Folder}
+                  label={t("sidebar.local")}
+                  active={mediaSource === "local"}
+                  onClick={() => {
+                    resetAllNavigation();
+                    setMediaSource("local");
+                  }}
+                  trailing={!isPlaybackAvailable ? (
+                    <span
+                      className="flex items-center text-[#C9A45D]"
+                      title={mpdHealth.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")}
+                    >
+                      <CircleAlert size={13} />
+                    </span>
+                  ) : playbackStatus.is_updating ? (
+                    <span className="flex items-center text-[#E5A00D]" title={t("sidebar.indexingTooltip")}>
+                      <RefreshCw size={13} className="animate-spin" />
+                    </span>
+                  ) : (
+                    <span className="flex items-center text-[#4BB543]/80" title={t("sidebar.syncedTooltip")}>
+                      <CheckCircle2 size={13} />
+                    </span>
+                  )}
+                />
+                <SidebarNavItem
+                  icon={Server}
+                  label={t("sidebar.plex")}
+                  active={mediaSource === "plex"}
+                  onClick={() => {
+                    resetAllNavigation();
+                    setMediaSource("plex");
+                  }}
+                />
+              </nav>
+            </section>
+
+            <section aria-labelledby="sidebar-collection-group">
+              <h2 id="sidebar-collection-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#5F5F5F]">
+                {t("sidebar.collectionGroup")}
+              </h2>
+              <nav aria-label={t("sidebar.collectionGroup")} className="space-y-1">
+                <SidebarNavItem
+                  icon={Heart}
+                  label={t("sidebar.favorites")}
+                  active={mediaSource === "favorites"}
+                  onClick={() => {
+                    resetAllNavigation();
+                    setMediaSource("favorites");
+                  }}
+                />
+                <SidebarNavItem
+                  icon={ListMusic}
+                  label={t("sidebar.playlists")}
+                  active={mediaSource === "playlists"}
+                  onClick={() => {
+                    resetAllNavigation();
+                    setMediaSource("playlists");
+                  }}
+                />
+              </nav>
+            </section>
           </div>
 
-          <nav className="space-y-1 mb-6">
-            <button
-              onClick={() => {
-                resetAllNavigation();
-                setMediaSource("local");
-              }}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-                mediaSource === "local"
-                  ? "bg-[#242424] text-white"
-                  : "text-[#888888] hover:bg-[#202020] hover:text-white"
-              }`}
-            >
-              <div className="flex items-center space-x-3">
-                <Folder size={16} className={mediaSource === "local" ? "text-[#E5A00D]" : ""} />
-                <span>{t("sidebar.local")}</span>
-              </div>
-
-              {!isPlaybackAvailable ? (
-                <div
-                  className="flex items-center text-[#C9A45D]"
-                  title={mpdHealth.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")}
-                >
-                  <CircleAlert size={13} />
-                </div>
-              ) : playbackStatus.is_updating ? (
-                <div
-                  className="flex items-center space-x-1 text-[#E5A00D]"
-                  title={t("sidebar.indexingTooltip")}
-                >
-                  <RefreshCw size={13} className="animate-spin" />
-                </div>
-              ) : (
-                <div
-                  className="flex items-center text-[#4BB543]/80"
-                  title={t("sidebar.syncedTooltip")}
-                >
-                  <CheckCircle2 size={13} />
-                </div>
-              )}
-            </button>
-
-            <button
-              onClick={() => {
-                resetAllNavigation();
-                setMediaSource("plex");
-              }}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-                mediaSource === "plex"
-                  ? "bg-[#242424] text-white"
-                  : "text-[#888888] hover:bg-[#202020] hover:text-white"
-              }`}
-            >
-              <Server size={16} className={mediaSource === "plex" ? "text-[#E5A00D]" : ""} />
-              <span>{t("sidebar.plex")}</span>
-            </button>
-
-            <button
-              onClick={() => {
-                resetAllNavigation();
-                setMediaSource("favorites");
-              }}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-                mediaSource === "favorites"
-                  ? "bg-[#242424] text-white"
-                  : "text-[#888888] hover:bg-[#202020] hover:text-white"
-              }`}
-            >
-              <Heart
-                size={16}
-                className={mediaSource === "favorites" ? "text-[#E5A00D]" : ""}
-                fill={mediaSource === "favorites" ? "#E5A00D" : "none"}
-              />
-              <span>{t("sidebar.favorites")}</span>
-            </button>
-
-            <button
-              onClick={() => {
-                resetAllNavigation();
-                setMediaSource("playlists");
-              }}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-                mediaSource === "playlists"
-                  ? "bg-[#242424] text-white"
-                  : "text-[#888888] hover:bg-[#202020] hover:text-white"
-              }`}
-            >
-              <ListMusic
-                size={16}
-                className={mediaSource === "playlists" ? "text-[#E5A00D]" : ""}
-              />
-              <span>{t("sidebar.playlists")}</span>
-            </button>
-          </nav>
-
-          <div className="flex-1" />
-
-          <div className="pt-3 border-t border-[#262626] mt-auto space-y-1">
-            <button
+          <nav aria-label={t("sidebar.utilitiesGroup")} className="mt-auto shrink-0 space-y-1 pt-4">
+            <SidebarNavItem
+              icon={Settings}
+              label={t("sidebar.preferences")}
               onClick={() => setShowSettings(true)}
-              className="w-full flex items-center space-x-3 px-3 py-2 rounded-md text-xs font-semibold text-[#888888] hover:bg-[#202020] hover:text-white transition-colors cursor-pointer"
-            >
-              <Settings size={15} />
-              <span>{t("sidebar.preferences")}</span>
-            </button>
-
-            <button
+            />
+            <SidebarNavItem
+              icon={Info}
+              label={t("sidebar.about")}
               onClick={() => setShowAbout(true)}
-              className="w-full flex items-center space-x-3 px-3 py-2 rounded-md text-xs font-semibold text-[#888888] hover:bg-[#202020] hover:text-[#E5A00D] transition-colors cursor-pointer"
-            >
-              <Info size={15} />
-              <span>{t("sidebar.about")}</span>
-            </button>
-          </div>
+            />
+          </nav>
         </aside>
 
         {/* Painel Central */}

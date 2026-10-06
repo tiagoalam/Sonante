@@ -2,6 +2,9 @@
   "app": { "bootstrapError": "Could not load initial settings." },
   "sidebar": {
     "mediaSources": "Media Sources",
+    "musicGroup": "Music",
+    "collectionGroup": "Your collection",
+    "utilitiesGroup": "Utilities",
     "local": "Local Storage",
     "plex": "Plex Server",
     "favorites": "Favorites",

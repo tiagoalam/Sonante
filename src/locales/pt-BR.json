@@ -2,6 +2,9 @@
   "app": { "bootstrapError": "Não foi possível carregar as configurações iniciais." },
   "sidebar": {
     "mediaSources": "Fontes de Mídia",
+    "musicGroup": "Música",
+    "collectionGroup": "Sua coleção",
+    "utilitiesGroup": "Utilidades",
     "local": "Armazenamento Local",
     "plex": "Servidor Plex",
     "favorites": "Favoritos",
