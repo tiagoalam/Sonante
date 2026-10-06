@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const USER_AGENT: &str = "Sonante/0.4.5 (https://github.com/tiagoalam/Sonante)";
+const USER_AGENT: &str = "Sonante/0.4.8 (https://github.com/tiagoalam/Sonante)";
 const MUSICBRAINZ_URL: &str = "https://musicbrainz.org/ws/2/release-group/";
 const COVER_ART_URL: &str = "https://coverartarchive.org/release-group";
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
