@@ -28,7 +28,7 @@ use shared_volume::{PipeWireVolume, SharedVolumeBackend};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use supervisor::{MpdHealth, MpdProcessObservation, MpdSupervisor, MpdUnavailableReason};
-use std::sync::Mutex;
+use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
 use tauri::{AppHandle, Manager, RunEvent, State, Window, WindowEvent};
 
 pub struct PlexState(pub Mutex<PlexClient>);
@@ -40,6 +40,12 @@ const MAIN_WINDOW_LABEL: &str = "main";
 
 fn should_start_mpd_on_startup(config_valid: bool, config: &AppConfig) -> bool {
     config_valid && !config.first_run
+}
+
+fn is_shared_output(config: &AppConfig) -> bool {
+    config.audio_output_type == "pipewire"
+        || config.audio_output_type == "shared"
+        || config.alsa_device == "default"
 }
 
 fn should_rescan_library_on_startup(
@@ -362,8 +368,23 @@ fn previous_track(state: State<AudioState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn seek_playback(seconds: f64, state: State<AudioState>) -> Result<(), String> {
-    state.0.lock().unwrap().seek(seconds)
+fn seek_playback(
+    seconds: f64,
+    config_state: State<ConfigState>,
+    audio_state: State<AudioState>,
+) -> Result<(), String> {
+    let is_shared = {
+        let config = config_state
+            .0
+            .lock()
+            .map_err(|e| format!("Falha ao acessar configuração durante seek: {}", e))?;
+        is_shared_output(&config)
+    };
+    audio_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar reprodução durante seek: {}", e))?
+        .seek(seconds, is_shared)
 }
 
 #[tauri::command]
@@ -394,6 +415,44 @@ async fn resolve_playback_uris(
         uris.push(uri);
     }
     Ok(uris)
+}
+
+async fn restore_cached_queue_after_ready(app: AppHandle) {
+    let audio_state = app.state::<AudioState>();
+    let queue = match audio_state.0.lock() {
+        Ok(audio) if audio.startup_queue_pending() => audio.get_queue(),
+        Ok(_) => return,
+        Err(_) => {
+            eprintln!("[Audio] Falha ao acessar a fila para restauração no startup.");
+            return;
+        }
+    };
+    let plex_client = match app.state::<PlexState>().0.lock() {
+        Ok(plex) => plex.clone(),
+        Err(_) => {
+            eprintln!("[Audio] Falha ao acessar Plex para restauração no startup.");
+            if let Ok(mut audio) = audio_state.0.lock() {
+                audio.fail_startup_queue_restore();
+            }
+            return;
+        }
+    };
+    match resolve_playback_uris(&queue, &plex_client).await {
+        Ok(uris) => match audio_state.0.lock() {
+            Ok(mut audio) => {
+                if let Err(error) = audio.restore_startup_queue(&uris) {
+                    eprintln!("[Audio] Falha ao restaurar fila no MPD: {}", error);
+                }
+            }
+            Err(_) => eprintln!("[Audio] Falha ao acessar o MPD para restauração no startup."),
+        },
+        Err(_) => {
+            eprintln!("[Audio] Falha ao resolver mídia para restauração no startup.");
+            if let Ok(mut audio) = audio_state.0.lock() {
+                audio.fail_startup_queue_restore();
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -1699,9 +1758,28 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Erro ao compilar o contexto do Tauri");
 
-    app.run(|app_handle, event| {
+    let restore_started = AtomicBool::new(false);
+    let shutdown_started = AtomicBool::new(false);
+    app.run(move |app_handle, event| {
         match event {
+            RunEvent::Ready if mpd_started && !restore_started.swap(true, Ordering::SeqCst) => {
+                let app = app_handle.clone();
+                tauri::async_runtime::spawn(restore_cached_queue_after_ready(app));
+            }
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                if shutdown_started.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                if let Some(audio_state) = app_handle.try_state::<AudioState>() {
+                    match audio_state.0.lock() {
+                        Ok(mut audio) => {
+                            if let Err(error) = audio.persist_shutdown_resume() {
+                                eprintln!("[Audio] Falha ao salvar posição no shutdown: {}", error);
+                            }
+                        }
+                        Err(_) => eprintln!("[Audio] Falha ao acessar posição no shutdown."),
+                    }
+                }
                 if let Some(state) = app_handle.try_state::<AnalyzerState>() {
                     if let Ok(mut analyzer) = state.0.lock() {
                         if let Err(error) = analyzer.stop(Some(app_handle)) {
@@ -2008,6 +2086,22 @@ mod tests {
     #[test]
     fn first_run_is_not_eligible_for_automatic_startup() {
         assert!(!should_start_mpd_on_startup(true, &AppConfig::default()));
+    }
+
+    #[test]
+    fn shared_seek_mode_matches_supervisor_output_definition() {
+        let mut config = AppConfig::default();
+        config.alsa_device = "hw:CARD=DAC,DEV=0".to_string();
+        config.audio_output_type = "alsa".to_string();
+        assert!(!is_shared_output(&config));
+
+        config.audio_output_type = "pipewire".to_string();
+        assert!(is_shared_output(&config));
+        config.audio_output_type = "shared".to_string();
+        assert!(is_shared_output(&config));
+        config.audio_output_type = "alsa".to_string();
+        config.alsa_device = "default".to_string();
+        assert!(is_shared_output(&config));
     }
 
     #[test]
