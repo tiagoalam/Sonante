@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useSyncExternalStore } from "react";
+import React, { useEffect, useMemo, useState, useRef, useSyncExternalStore } from "react";
 import {
   Folder,
   Music,
@@ -24,6 +24,7 @@ import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDisc
 import { LocalAlbumCatalog, emptyLocalAlbumCatalogState } from "../utils/localAlbumCatalog";
 import { albumLocationSources } from "../utils/localAlbumLocations";
 import { localArtworkEnrichment, localArtworkResolver } from "../utils/localArtworkSession";
+import { VirtualAlbumGrid } from "./VirtualAlbumGrid";
 
 const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
 
@@ -182,6 +183,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const initialCatalogMountHandled = useRef(false);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
+  const [scrollContainer, setScrollContainer] = useState<HTMLDivElement | null>(null);
 
   const [currentPath, setCurrentPath] = useState<string>("");
   const [items, setItems] = useState<LocalItem[]>([]);
@@ -365,11 +367,14 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     },
   });
 
-  const filteredAlbums = albums.filter(
-    (a) =>
-      a.title.toLowerCase().includes(albumSearch.toLowerCase()) ||
-      a.artist.toLowerCase().includes(albumSearch.toLowerCase())
-  );
+  const filteredAlbums = useMemo(() => {
+    const normalizedSearch = albumSearch.toLowerCase();
+    return albums.filter(
+      (album) =>
+        album.title.toLowerCase().includes(normalizedSearch) ||
+        album.artist.toLowerCase().includes(normalizedSearch),
+    );
+  }, [albums, albumSearch]);
 
   const artistAlbums = selectedArtist
     ? albums.filter(
@@ -493,7 +498,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           {catalog.error}
         </div>
       )}
-      <div className="flex-1 overflow-y-auto p-8">
+      <div ref={setScrollContainer} className="flex-1 overflow-y-auto p-8">
         {selectedAlbum ? (
           <div className="space-y-8 animate-in fade-in duration-100">
             <div className="flex items-end space-x-6">
@@ -688,10 +693,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
             </div>
           ) : (
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
-              {filteredAlbums.map((album) => (
+            <VirtualAlbumGrid
+              items={filteredAlbums}
+              getItemKey={(album) => album.id}
+              scrollContainer={scrollContainer}
+              resetKey={albumSearch}
+              renderItem={(album) => (
                 <LocalAlbumCard
-                  key={album.id}
                   album={album}
                   isFavorite={favoriteIds.has(album.folder_path)}
                   onToggleFavorite={handleToggleFavoriteLocal}
@@ -704,8 +712,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   onlineArtworkEnabled={onlineArtworkEnabled}
                   isLibraryUpdating={isLibraryUpdating}
                 />
-              ))}
-            </div>
+              )}
+            />
           )
         ) : (
           <div className="space-y-4">
