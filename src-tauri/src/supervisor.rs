@@ -127,7 +127,11 @@ impl MpdSupervisor {
     }
 
     pub fn database_path() -> PathBuf {
-        Self::sonante_config_dir().join("mpd.db")
+        Self::database_path_in(&Self::sonante_config_dir())
+    }
+
+    pub(crate) fn database_path_in(config_dir: &Path) -> PathBuf {
+        config_dir.join("mpd-v2.db")
     }
 
     pub fn library_dir() -> PathBuf {
@@ -423,7 +427,7 @@ impl MpdSupervisor {
         let dop_flag = if cfg.dop_enabled { "yes" } else { "no" };
         let lib_dir_value = Self::escape_config_value(&library_sync.library_dir.to_string_lossy())?;
         let config_dir_value = Self::escape_config_value(&dir.to_string_lossy())?;
-        let db_path_value = Self::escape_config_value(&db_path.to_string_lossy())?;
+        let database_section = Self::database_section(&db_path)?;
         let pid_path_value = Self::escape_config_value(&self.pid_path.to_string_lossy())?;
         let socket_path_value = Self::escape_config_value(&self.socket_path)?;
         let alsa_device_value = Self::escape_config_value(&cfg.alsa_device)?;
@@ -460,10 +464,38 @@ impl MpdSupervisor {
         )?;
 
         // Sem state_file: o MPD inicia em modo neutro/stop sem tocar sozinho
-        let conf_content = format!(
+        let audio_buffer_size = cfg.audio_buffer_size_kb.to_string();
+        let conf_content = Self::render_config(
+            &lib_dir_value,
+            &config_dir_value,
+            &database_section,
+            &pid_path_value,
+            &socket_path_value,
+            &audio_buffer_size,
+            &replay_gain_value,
+            &audio_output_section,
+            &analyzer_output_section,
+        );
+
+        fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
+        Ok((conf_path, volume_backend, library_sync))
+    }
+
+    fn render_config(
+        library_dir: &str,
+        playlist_dir: &str,
+        database_section: &str,
+        pid_path: &str,
+        socket_path: &str,
+        audio_buffer_size: &str,
+        replay_gain: &str,
+        audio_output_section: &str,
+        analyzer_output_section: &str,
+    ) -> String {
+        format!(
             r#"music_directory "{}"
 playlist_directory "{}"
-db_file "{}"
+{}
 pid_file "{}"
 log_file "/dev/null"
 bind_to_address "{}"
@@ -484,19 +516,16 @@ decoder {{
 
 {}
 "#,
-            lib_dir_value,
-            config_dir_value,
-            db_path_value,
-            pid_path_value,
-            socket_path_value,
-            cfg.audio_buffer_size_kb,
-            replay_gain_value,
+            library_dir,
+            playlist_dir,
+            database_section,
+            pid_path,
+            socket_path,
+            audio_buffer_size,
+            replay_gain,
             audio_output_section,
             analyzer_output_section
-        );
-
-        fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
-        Ok((conf_path, volume_backend, library_sync))
+        )
     }
 
     fn public_volume_backend(
@@ -515,6 +544,18 @@ decoder {{
             MixerSelection::Hardware { .. } => VolumeBackend::AlsaHardware,
             MixerSelection::Software => VolumeBackend::MpdSoftware,
         }
+    }
+
+    fn database_section(database_path: &Path) -> Result<String, String> {
+        let database_path = Self::escape_config_value(&database_path.to_string_lossy())?;
+        Ok(format!(
+            r#"database {{
+    plugin "simple"
+    path "{}"
+    hide_playlist_targets "no"
+}}"#,
+            database_path
+        ))
     }
 
     fn audio_output_section(
@@ -1623,6 +1664,35 @@ mod tests {
         assert!(MpdSupervisor::escape_config_value("default\nlog_file bad").is_err());
         assert!(MpdSupervisor::escape_config_value("default\rkill").is_err());
         assert!(MpdSupervisor::escape_config_value("default\0kill").is_err());
+    }
+
+    #[test]
+    fn simple_database_is_versioned_and_exposes_playlist_targets() {
+        let config_dir = Path::new("/tmp/sonante config\\with-quote\"");
+        let database_path = MpdSupervisor::database_path_in(config_dir);
+        assert_eq!(database_path, config_dir.join("mpd-v2.db"));
+
+        let section = MpdSupervisor::database_section(&database_path).unwrap();
+        assert!(section.contains("database {"));
+        assert!(section.contains("plugin \"simple\""));
+        assert!(section.contains("path \"/tmp/sonante config\\\\with-quote\\\"/mpd-v2.db\""));
+        assert!(section.contains("hide_playlist_targets \"no\""));
+        assert!(!section.contains("db_file"));
+
+        let config = MpdSupervisor::render_config(
+            "/tmp/library",
+            "/tmp/playlists",
+            &section,
+            "/tmp/mpd.pid",
+            "/tmp/mpd.socket",
+            "4096",
+            "off",
+            "audio_output {}",
+            "audio_output {}",
+        );
+        assert!(config.contains(&section));
+        assert!(!config.contains("db_file"));
+        assert!(!config.contains("state_file"));
     }
 
     #[test]
