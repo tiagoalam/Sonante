@@ -55,6 +55,7 @@ import {
 import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./VirtualAlbumGrid";
 import { VirtualList, type VirtualListHandle } from "./VirtualList";
 import { AlbumArtworkPlaceholder } from "./AlbumArtworkPlaceholder";
+import { ToolbarSelect } from "./ToolbarSelect";
 
 const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
 
@@ -405,6 +406,22 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   });
 
   const sourceOptions = useMemo(() => localLibrarySourceOptions(albums), [albums]);
+  const librarySelectOptions = useMemo(() => [
+    { value: "", label: t("localBrowser.allLibraries") },
+    ...sourceOptions.map((source) => ({ value: source.id, label: source.label })),
+  ], [sourceOptions, t]);
+  const localAlbumSortOptions = useMemo(() => [
+    { value: "album-asc", label: t("localBrowser.sortAlbumAsc") },
+    { value: "album-desc", label: t("localBrowser.sortAlbumDesc") },
+    { value: "artist-asc", label: t("localBrowser.sortArtistAsc") },
+    { value: "artist-desc", label: t("localBrowser.sortArtistDesc") },
+    { value: "year-newest", label: t("localBrowser.sortYearNewest") },
+    { value: "year-oldest", label: t("localBrowser.sortYearOldest") },
+  ], [t]);
+  const localArtistSortOptions = useMemo(() => [
+    { value: "artist-asc", label: t("localBrowser.sortArtistAsc") },
+    { value: "artist-desc", label: t("localBrowser.sortArtistDesc") },
+  ], [t]);
   const activeSourceId = validLocalLibrarySourceSelection(selectedSourceId, sourceOptions);
   const scopedAlbums = useMemo(
     () => filterLocalAlbumsByScope(albums, activeSourceId, ""),
@@ -591,36 +608,32 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
       {!selectedAlbum && viewMode !== "folders" && (
         <div className="flex flex-wrap items-center gap-3 border-b border-[#222222] px-8 py-3">
-          <label className="flex items-center gap-2 text-xs text-[#888888]">
+          <div className="flex items-center gap-2 text-xs text-[#888888]">
             <span>{t("localBrowser.libraryScope")}</span>
-            <select
+            <ToolbarSelect
               value={activeSourceId ?? ""}
-              onChange={(event) => setSelectedSourceId(event.target.value || null)}
-              className="max-w-44 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
-            >
-              <option value="">{t("localBrowser.allLibraries")}</option>
-              {sourceOptions.map((source) => (
-                <option key={source.id} value={source.id}>{source.label}</option>
-              ))}
-            </select>
-          </label>
+              options={librarySelectOptions}
+              onChange={(nextValue) => setSelectedSourceId(nextValue || null)}
+              label={t("localBrowser.libraryScope")}
+              className="max-w-44"
+            />
+          </div>
           {viewMode === "albums" && (
             <>
               <div className="relative flex w-64 max-w-full items-center">
                 <Search size={14} className="absolute left-3 text-[#666666]" />
                 <input type="text" value={albumSearch} onChange={(event) => setAlbumSearch(event.target.value)} placeholder={t("localBrowser.filterPlaceholder")} className="w-full rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] py-1.5 pl-9 pr-3 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D]" />
               </div>
-              <label className="flex items-center gap-2 text-xs text-[#888888]">
+              <div className="flex items-center gap-2 text-xs text-[#888888]">
                 <span>{t("localBrowser.sortLabel")}</span>
-                <select value={albumSortMode} onChange={(event) => setAlbumSortMode(event.target.value as LocalAlbumSortMode)} className="max-w-44 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]">
-                  <option value="album-asc">{t("localBrowser.sortAlbumAsc")}</option>
-                  <option value="album-desc">{t("localBrowser.sortAlbumDesc")}</option>
-                  <option value="artist-asc">{t("localBrowser.sortArtistAsc")}</option>
-                  <option value="artist-desc">{t("localBrowser.sortArtistDesc")}</option>
-                  <option value="year-newest">{t("localBrowser.sortYearNewest")}</option>
-                  <option value="year-oldest">{t("localBrowser.sortYearOldest")}</option>
-                </select>
-              </label>
+                <ToolbarSelect
+                  value={albumSortMode}
+                  options={localAlbumSortOptions}
+                  onChange={(nextValue) => setAlbumSortMode(nextValue as LocalAlbumSortMode)}
+                  label={t("localBrowser.sortLabel")}
+                  className="max-w-44"
+                />
+              </div>
             </>
           )}
           {viewMode === "artists" && !selectedArtist && (
@@ -629,13 +642,16 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 <Search size={14} className="absolute left-3 text-[#666666]" />
                 <input type="text" value={artistSearch} onChange={(event) => setArtistSearch(event.target.value)} placeholder={t("localBrowser.artistSearchPlaceholder")} className="w-full rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] py-1.5 pl-9 pr-3 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D]" />
               </div>
-              <label className="flex items-center gap-2 text-xs text-[#888888]">
+              <div className="flex items-center gap-2 text-xs text-[#888888]">
                 <span>{t("localBrowser.sortLabel")}</span>
-                <select value={artistSortMode} onChange={(event) => setArtistSortMode(event.target.value as LocalArtistSortMode)} className="max-w-44 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]">
-                  <option value="artist-asc">{t("localBrowser.sortArtistAsc")}</option>
-                  <option value="artist-desc">{t("localBrowser.sortArtistDesc")}</option>
-                </select>
-              </label>
+                <ToolbarSelect
+                  value={artistSortMode}
+                  options={localArtistSortOptions}
+                  onChange={(nextValue) => setArtistSortMode(nextValue as LocalArtistSortMode)}
+                  label={t("localBrowser.sortLabel")}
+                  className="max-w-44"
+                />
+              </div>
             </>
           )}
         </div>

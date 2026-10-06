@@ -36,6 +36,7 @@ import { WelcomeWizard } from "./components/WelcomeWizard";
 import { PlexImage } from "./components/PlexImage";
 import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./components/VirtualAlbumGrid";
 import { VirtualList, type VirtualListHandle } from "./components/VirtualList";
+import { ToolbarSelect } from "./components/ToolbarSelect";
 import { plexService } from "./services/plex";
 import { audioService } from "./services/audio";
 import { configService } from "./services/config";
@@ -849,6 +850,25 @@ export function App() {
   };
 
   const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
+  const plexLibraryOptions = useMemo(() => libraries.length > 0
+    ? libraries.map((library) => ({ value: library.key, label: library.title }))
+    : [{
+        value: "",
+        label: t(loadingLibraries ? "sidebar.loadingLibraries" : "sidebar.noLibraries"),
+      }], [libraries, loadingLibraries, t]);
+  const plexAlbumSortOptions = useMemo(() => [
+    { value: "added_recent", label: t("plex.sortAddedRecent") },
+    { value: "album_asc", label: t("plex.sortAlbumAsc") },
+    { value: "album_desc", label: t("plex.sortAlbumDesc") },
+    { value: "artist_asc", label: t("plex.sortArtistAsc") },
+    { value: "artist_desc", label: t("plex.sortArtistDesc") },
+    { value: "year_desc", label: t("plex.sortYearNewest") },
+    { value: "year_asc", label: t("plex.sortYearOldest") },
+  ], [t]);
+  const plexArtistSortOptions = useMemo(() => [
+    { value: "artist_asc", label: t("plex.sortArtistAsc") },
+    { value: "artist_desc", label: t("plex.sortArtistDesc") },
+  ], [t]);
   const sortedPlexAlbums = useMemo(
     () => sortPlexAlbums(albums, plexSortMode),
     [albums, plexSortMode],
@@ -1217,22 +1237,17 @@ export function App() {
             )}
 
             <div className="flex flex-wrap items-center gap-3 border-b border-[#222222] px-8 py-3">
-              <label className="flex items-center gap-2 text-xs text-[#888888]">
+              <div className="flex items-center gap-2 text-xs text-[#888888]">
                 <span>{t("plex.libraryLabel")}</span>
-                <select
+                <ToolbarSelect
                   value={selectedLibrary?.key ?? ""}
-                  onChange={(event) => handlePlexLibraryChange(event.target.value)}
+                  options={plexLibraryOptions}
+                  onChange={handlePlexLibraryChange}
+                  label={t("plex.libraryLabel")}
                   disabled={loadingLibraries || libraries.length === 0}
-                  className="max-w-52 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D] disabled:text-[#666666]"
-                >
-                  {libraries.length === 0 && (
-                    <option value="">{t(loadingLibraries ? "sidebar.loadingLibraries" : "sidebar.noLibraries")}</option>
-                  )}
-                  {libraries.map((library) => (
-                    <option key={library.key} value={library.key}>{library.title}</option>
-                  ))}
-                </select>
-              </label>
+                  className="max-w-52"
+                />
+              </div>
 
               <div className="relative flex w-72 max-w-full items-center">
                 <Search size={15} className="absolute left-3 text-[#666666]" />
@@ -1252,35 +1267,28 @@ export function App() {
               </div>
 
               {!hasPlexSubview && searchQuery.trim().length === 0 && plexViewMode === "albums" && (
-                <label className="flex items-center gap-2 text-xs text-[#888888]">
+                <div className="flex items-center gap-2 text-xs text-[#888888]">
                   <span>{t("plex.sortLabel")}</span>
-                  <select
+                  <ToolbarSelect
                     value={plexSortMode}
-                    onChange={(event) => setPlexSortMode(event.target.value as PlexAlbumSortMode)}
-                    className="max-w-52 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
-                  >
-                    <option value="added_recent">{t("plex.sortAddedRecent")}</option>
-                    <option value="album_asc">{t("plex.sortAlbumAsc")}</option>
-                    <option value="album_desc">{t("plex.sortAlbumDesc")}</option>
-                    <option value="artist_asc">{t("plex.sortArtistAsc")}</option>
-                    <option value="artist_desc">{t("plex.sortArtistDesc")}</option>
-                    <option value="year_desc">{t("plex.sortYearNewest")}</option>
-                    <option value="year_asc">{t("plex.sortYearOldest")}</option>
-                  </select>
-                </label>
+                    options={plexAlbumSortOptions}
+                    onChange={(nextValue) => setPlexSortMode(nextValue as PlexAlbumSortMode)}
+                    label={t("plex.sortLabel")}
+                    className="max-w-52"
+                  />
+                </div>
               )}
               {!hasPlexSubview && searchQuery.trim().length === 0 && plexViewMode === "artists" && (
-                <label className="flex items-center gap-2 text-xs text-[#888888]">
+                <div className="flex items-center gap-2 text-xs text-[#888888]">
                   <span>{t("plex.sortLabel")}</span>
-                  <select
+                  <ToolbarSelect
                     value={plexArtistSortMode}
-                    onChange={(event) => setPlexArtistSortMode(event.target.value as PlexArtistSortMode)}
-                    className="max-w-52 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
-                  >
-                    <option value="artist_asc">{t("plex.sortArtistAsc")}</option>
-                    <option value="artist_desc">{t("plex.sortArtistDesc")}</option>
-                  </select>
-                </label>
+                    options={plexArtistSortOptions}
+                    onChange={(nextValue) => setPlexArtistSortMode(nextValue as PlexArtistSortMode)}
+                    label={t("plex.sortLabel")}
+                    className="max-w-52"
+                  />
+                </div>
               )}
             </div>
 
