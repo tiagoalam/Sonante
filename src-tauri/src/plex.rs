@@ -9,7 +9,7 @@ use std::time::Duration;
 
 const PLEX_CLIENT_ID: &str = "sonante-audio-player";
 const PLEX_PRODUCT_NAME: &str = "Sonante";
-const PLEX_VERSION: &str = "0.4.5";
+const PLEX_VERSION: &str = "0.4.8";
 const PLEX_RESOURCES_URL: &str =
     "https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1";
 const PLEX_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
