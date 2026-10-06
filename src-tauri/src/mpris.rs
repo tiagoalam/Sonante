@@ -9,7 +9,7 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
 };
 use std::thread;
 use std::time::Duration;
@@ -492,48 +492,139 @@ impl PlayerInterface for SonanteMpris {
 
 #[derive(Debug)]
 struct ObserverHandle {
-    cancelled: Arc<AtomicBool>,
-    socket: Arc<Mutex<Option<UnixStream>>>,
+    control: Arc<ObserverControl>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl ObserverHandle {
     fn start(app: AppHandle, socket_path: String) -> Result<Self, String> {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let socket = Arc::new(Mutex::new(None));
-        let thread_cancelled = Arc::clone(&cancelled);
-        let thread_socket = Arc::clone(&socket);
+        let control = Arc::new(ObserverControl::new());
+        let thread_control = Arc::clone(&control);
         let thread = thread::Builder::new()
             .name("sonante-mpris-mpd".into())
             .spawn(move || {
-                if let Err(error) =
-                    run_mpd_observer(&app, &socket_path, &thread_cancelled, &thread_socket)
-                {
-                    if !thread_cancelled.load(Ordering::SeqCst) {
+                if let Err(error) = run_mpd_observer(&app, &socket_path, &thread_control) {
+                    if !thread_control.is_cancelled() {
                         eprintln!("[MPRIS] Observer MPD encerrado: {error}");
                     }
                 }
             })
             .map_err(|error| format!("Falha ao iniciar thread do observer MPD: {error}"))?;
         Ok(Self {
-            cancelled,
-            socket,
+            control,
             thread: Some(thread),
         })
     }
 
     fn stop(mut self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-        if let Ok(mut socket) = self.socket.lock() {
-            if let Some(stream) = socket.take() {
-                let _ = stream.shutdown(Shutdown::Both);
-            }
-        }
+        self.control.cancel();
         if let Some(thread) = self.thread.take() {
             if thread.join().is_err() {
                 eprintln!("[MPRIS] Observer MPD terminou com panic.");
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct ObserverControl {
+    cancelled: AtomicBool,
+    socket: Mutex<Option<UnixStream>>,
+    wait_lock: Mutex<()>,
+    wait_wakeup: Condvar,
+}
+
+impl ObserverControl {
+    fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            socket: Mutex::new(None),
+            wait_lock: Mutex::new(()),
+            wait_wakeup: Condvar::new(),
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    fn install_socket(&self, stream: &UnixStream) -> Result<bool, String> {
+        let mut socket = self
+            .socket
+            .lock()
+            .map_err(|error| format!("Falha ao guardar socket do observer: {error}"))?;
+        if self.is_cancelled() {
+            return Ok(false);
+        }
+        *socket = Some(
+            stream
+                .try_clone()
+                .map_err(|error| format!("Falha ao guardar cleanup do observer: {error}"))?,
+        );
+        Ok(true)
+    }
+
+    fn clear_socket(&self) -> Result<(), String> {
+        self.socket
+            .lock()
+            .map_err(|error| format!("Falha ao liberar socket do observer: {error}"))?
+            .take();
+        Ok(())
+    }
+
+    fn wait_for_retry(&self, duration: Duration) -> Result<bool, String> {
+        let guard = self
+            .wait_lock
+            .lock()
+            .map_err(|error| format!("Falha ao preparar backoff do observer: {error}"))?;
+        if self.is_cancelled() {
+            return Ok(false);
+        }
+        let _guard = self
+            .wait_wakeup
+            .wait_timeout_while(guard, duration, |_| !self.is_cancelled())
+            .map_err(|error| format!("Falha durante backoff do observer: {error}"))?;
+        Ok(!self.is_cancelled())
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        match self.socket.lock() {
+            Ok(mut socket) => {
+                if let Some(stream) = socket.take() {
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+            }
+            Err(error) => eprintln!("[MPRIS] Falha ao cancelar socket do observer: {error}"),
+        }
+        self.wait_wakeup.notify_all();
+    }
+}
+
+#[derive(Debug)]
+struct ReconnectBackoff {
+    initial: Duration,
+    maximum: Duration,
+    next: Duration,
+}
+
+impl ReconnectBackoff {
+    fn new(initial: Duration, maximum: Duration) -> Self {
+        Self {
+            initial,
+            maximum,
+            next: initial,
+        }
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(self.maximum);
+        delay
+    }
+
+    fn reset(&mut self) {
+        self.next = self.initial;
     }
 }
 
@@ -579,63 +670,145 @@ fn arm_idle_player(stream: &mut UnixStream) -> Result<(), String> {
         .map_err(|error| format!("Falha ao enviar idle player: {error}"))
 }
 
+trait PlayerObserverConnection {
+    fn wait_for_player_change(&mut self) -> Result<(), String>;
+}
+
+trait PlayerObserverRuntime {
+    type Connection: PlayerObserverConnection;
+
+    fn connect(&mut self, control: &ObserverControl) -> Result<Self::Connection, String>;
+    fn refresh_snapshot(&mut self) -> Result<(), String>;
+}
+
+struct MpdObserverConnection {
+    stream: UnixStream,
+    reader: BufReader<UnixStream>,
+}
+
+impl PlayerObserverConnection for MpdObserverConnection {
+    fn wait_for_player_change(&mut self) -> Result<(), String> {
+        read_idle_player_response(&mut self.reader)?;
+        arm_idle_player(&mut self.stream)
+    }
+}
+
+struct AppObserverRuntime<'a> {
+    app: &'a AppHandle,
+    socket_path: &'a str,
+}
+
+impl PlayerObserverRuntime for AppObserverRuntime<'_> {
+    type Connection = MpdObserverConnection;
+
+    fn connect(&mut self, control: &ObserverControl) -> Result<Self::Connection, String> {
+        let mut stream = UnixStream::connect(self.socket_path)
+            .map_err(|error| format!("Falha ao conectar observer ao MPD: {error}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .map_err(|error| format!("Falha ao configurar handshake do observer: {error}"))?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(500)))
+            .map_err(|error| format!("Falha ao configurar escrita do observer: {error}"))?;
+        let mut reader = BufReader::new(
+            stream
+                .try_clone()
+                .map_err(|error| format!("Falha ao preparar observer MPD: {error}"))?,
+        );
+        if !control.install_socket(&stream)? {
+            return Err("Observer MPD cancelado durante conexão.".to_string());
+        }
+
+        let greeting = read_mpd_line(&mut reader, "ler handshake do observer MPD")?;
+        if !greeting.starts_with("OK MPD ") {
+            return Err("Handshake inválido no observer MPD.".to_string());
+        }
+        reader
+            .get_ref()
+            .set_read_timeout(None)
+            .map_err(|error| format!("Falha ao preparar espera idle do MPD: {error}"))?;
+        arm_idle_player(&mut stream)?;
+        Ok(MpdObserverConnection { stream, reader })
+    }
+
+    fn refresh_snapshot(&mut self) -> Result<(), String> {
+        refresh_properties_blocking(self.app.clone())
+    }
+}
+
+fn run_observer_state_machine<R, W>(
+    runtime: &mut R,
+    control: &ObserverControl,
+    mut wait_for_retry: W,
+) -> Result<(), String>
+where
+    R: PlayerObserverRuntime,
+    W: FnMut(&ObserverControl, Duration) -> Result<bool, String>,
+{
+    let mut backoff = ReconnectBackoff::new(Duration::from_millis(250), Duration::from_secs(5));
+    let mut connection_lost_logged = false;
+
+    loop {
+        if control.is_cancelled() {
+            return Ok(());
+        }
+
+        let session_result = match runtime.connect(control) {
+            Ok(mut connection) => {
+                if connection_lost_logged {
+                    eprintln!("[MPRIS] Conexão do observer MPD recuperada.");
+                    connection_lost_logged = false;
+                }
+                backoff.reset();
+                if control.is_cancelled() {
+                    Ok(())
+                } else {
+                    if let Err(error) = runtime.refresh_snapshot() {
+                        eprintln!("[MPRIS] Snapshot do observer indisponível: {error}");
+                    }
+                    loop {
+                        match connection.wait_for_player_change() {
+                            Ok(()) if control.is_cancelled() => break Ok(()),
+                            Ok(()) => {
+                                if let Err(error) = runtime.refresh_snapshot() {
+                                    eprintln!("[MPRIS] Falha ao atualizar evento player: {error}");
+                                }
+                            }
+                            Err(error) => break Err(error),
+                        }
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        };
+
+        control.clear_socket()?;
+        if control.is_cancelled() {
+            return Ok(());
+        }
+
+        if let Err(error) = session_result {
+            if !connection_lost_logged {
+                eprintln!("[MPRIS] Conexão do observer MPD indisponível: {error}");
+                connection_lost_logged = true;
+            }
+        }
+
+        if !wait_for_retry(control, backoff.next_delay())? {
+            return Ok(());
+        }
+    }
+}
+
 fn run_mpd_observer(
     app: &AppHandle,
     socket_path: &str,
-    cancelled: &AtomicBool,
-    cancel_socket: &Mutex<Option<UnixStream>>,
+    control: &ObserverControl,
 ) -> Result<(), String> {
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|error| format!("Falha ao conectar observer ao MPD: {error}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .map_err(|error| format!("Falha ao configurar handshake do observer: {error}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_millis(500)))
-        .map_err(|error| format!("Falha ao configurar escrita do observer: {error}"))?;
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .map_err(|error| format!("Falha ao preparar observer MPD: {error}"))?,
-    );
-    {
-        let mut owned_socket = cancel_socket
-            .lock()
-            .map_err(|error| format!("Falha ao guardar socket do observer: {error}"))?;
-        if cancelled.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        *owned_socket = Some(
-            stream
-                .try_clone()
-                .map_err(|error| format!("Falha ao guardar cleanup do observer: {error}"))?,
-        );
-    }
-
-    let greeting = read_mpd_line(&mut reader, "ler handshake do observer MPD")?;
-    if !greeting.starts_with("OK MPD ") {
-        return Err("Handshake inválido no observer MPD.".to_string());
-    }
-    reader
-        .get_ref()
-        .set_read_timeout(None)
-        .map_err(|error| format!("Falha ao preparar espera idle do MPD: {error}"))?;
-    arm_idle_player(&mut stream)?;
-
-    if let Err(error) = refresh_properties_blocking(app.clone()) {
-        eprintln!("[MPRIS] Snapshot inicial do observer indisponível: {error}");
-    }
-
-    loop {
-        read_idle_player_response(&mut reader)?;
-        if cancelled.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        arm_idle_player(&mut stream)?;
-        if let Err(error) = refresh_properties_blocking(app.clone()) {
-            eprintln!("[MPRIS] Falha ao atualizar evento player: {error}");
-        }
-    }
+    let mut runtime = AppObserverRuntime { app, socket_path };
+    run_observer_state_machine(&mut runtime, control, |control, delay| {
+        control.wait_for_retry(delay)
+    })
 }
 
 type SonanteMprisServer = Server<SonanteMpris>;
@@ -862,7 +1035,10 @@ pub fn shutdown(app: &AppHandle) {
 mod tests {
     use super::*;
     use crate::audio::{VolumeBackend, VolumeStatus};
-    use std::io::Cursor;
+    use std::collections::VecDeque;
+    use std::io::{Cursor, Read};
+    use std::sync::{mpsc, Barrier};
+    use std::time::Instant;
 
     #[derive(Default)]
     struct FakeControls {
@@ -1123,6 +1299,285 @@ mod tests {
                 .is_err()
         );
         assert!(read_idle_player_response(&mut Cursor::new(b"changed: player")).is_err());
+    }
+
+    enum FakeConnectionAttempt {
+        Fail(&'static str),
+        Connect {
+            id: usize,
+            events: VecDeque<Result<(), String>>,
+        },
+    }
+
+    struct FakeObserverConnection {
+        id: usize,
+        events: VecDeque<Result<(), String>>,
+        waited: Arc<Mutex<Vec<usize>>>,
+        dropped: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl PlayerObserverConnection for FakeObserverConnection {
+        fn wait_for_player_change(&mut self) -> Result<(), String> {
+            self.waited.lock().unwrap().push(self.id);
+            self.events
+                .pop_front()
+                .unwrap_or_else(|| Err("conexão simulada encerrada".into()))
+        }
+    }
+
+    impl Drop for FakeObserverConnection {
+        fn drop(&mut self) {
+            self.dropped.lock().unwrap().push(self.id);
+        }
+    }
+
+    struct FakeObserverRuntime {
+        attempts: VecDeque<FakeConnectionAttempt>,
+        connect_count: usize,
+        refresh_count: usize,
+        snapshots: VecDeque<MprisSnapshot>,
+        previous_snapshot: Option<MprisSnapshot>,
+        published_changes: Vec<Vec<ChangedProperty>>,
+        waited: Arc<Mutex<Vec<usize>>>,
+        dropped: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl FakeObserverRuntime {
+        fn new(attempts: Vec<FakeConnectionAttempt>) -> Self {
+            Self {
+                attempts: attempts.into(),
+                connect_count: 0,
+                refresh_count: 0,
+                snapshots: VecDeque::new(),
+                previous_snapshot: None,
+                published_changes: Vec::new(),
+                waited: Arc::new(Mutex::new(Vec::new())),
+                dropped: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl PlayerObserverRuntime for FakeObserverRuntime {
+        type Connection = FakeObserverConnection;
+
+        fn connect(&mut self, _control: &ObserverControl) -> Result<Self::Connection, String> {
+            self.connect_count += 1;
+            match self
+                .attempts
+                .pop_front()
+                .unwrap_or(FakeConnectionAttempt::Fail("script esgotado"))
+            {
+                FakeConnectionAttempt::Fail(error) => Err(error.into()),
+                FakeConnectionAttempt::Connect { id, events } => Ok(FakeObserverConnection {
+                    id,
+                    events,
+                    waited: Arc::clone(&self.waited),
+                    dropped: Arc::clone(&self.dropped),
+                }),
+            }
+        }
+
+        fn refresh_snapshot(&mut self) -> Result<(), String> {
+            self.refresh_count += 1;
+            if let Some(snapshot) = self.snapshots.pop_front() {
+                let changed = changed_properties(self.previous_snapshot.as_ref(), &snapshot);
+                self.previous_snapshot = Some(snapshot);
+                self.published_changes.push(changed);
+            }
+            Ok(())
+        }
+    }
+
+    fn disconnected_connection(id: usize) -> FakeConnectionAttempt {
+        FakeConnectionAttempt::Connect {
+            id,
+            events: VecDeque::from([Err("EOF simulado".into())]),
+        }
+    }
+
+    fn run_fake_until_wait_stops(
+        runtime: &mut FakeObserverRuntime,
+        delays: &mut Vec<Duration>,
+        waits_before_stop: usize,
+    ) {
+        let control = ObserverControl::new();
+        let mut waits = 0;
+        run_observer_state_machine(runtime, &control, |_, delay| {
+            delays.push(delay);
+            waits += 1;
+            Ok(waits < waits_before_stop)
+        })
+        .expect("state machine simulada deve encerrar");
+    }
+
+    #[test]
+    fn initial_connection_failure_keeps_observer_alive_until_reconnect() {
+        let mut runtime = FakeObserverRuntime::new(vec![
+            FakeConnectionAttempt::Fail("socket ausente"),
+            disconnected_connection(1),
+        ]);
+        let mut delays = Vec::new();
+
+        run_fake_until_wait_stops(&mut runtime, &mut delays, 2);
+
+        assert_eq!(runtime.connect_count, 2);
+        assert_eq!(runtime.refresh_count, 1);
+        assert_eq!(delays, [Duration::from_millis(250); 2]);
+    }
+
+    #[test]
+    fn disconnected_session_is_dropped_and_replaced_by_a_new_connection() {
+        let mut runtime =
+            FakeObserverRuntime::new(vec![disconnected_connection(1), disconnected_connection(2)]);
+        let waited = Arc::clone(&runtime.waited);
+        let dropped = Arc::clone(&runtime.dropped);
+        let mut delays = Vec::new();
+
+        run_fake_until_wait_stops(&mut runtime, &mut delays, 2);
+
+        assert_eq!(*waited.lock().unwrap(), vec![1, 2]);
+        assert_eq!(*dropped.lock().unwrap(), vec![1, 2]);
+        assert_eq!(runtime.refresh_count, 2);
+    }
+
+    #[test]
+    fn reconnect_backoff_grows_to_limit_and_resets_after_success() {
+        let mut backoff = ReconnectBackoff::new(Duration::from_millis(250), Duration::from_secs(5));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(250));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(500));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(5));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(5));
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_millis(250));
+
+        let mut runtime = FakeObserverRuntime::new(vec![
+            FakeConnectionAttempt::Fail("primeira falha"),
+            FakeConnectionAttempt::Fail("segunda falha"),
+            disconnected_connection(1),
+        ]);
+        let mut delays = Vec::new();
+        run_fake_until_wait_stops(&mut runtime, &mut delays, 3);
+        assert_eq!(
+            delays,
+            [
+                Duration::from_millis(250),
+                Duration::from_millis(500),
+                Duration::from_millis(250),
+            ]
+        );
+    }
+
+    #[test]
+    fn reconnect_refreshes_once_and_publishes_only_snapshot_changes() {
+        let playing = MprisSnapshot::from_audio(audio_status(
+            "play",
+            Some(CurrentMedia::Local {
+                uri: "a.flac".into(),
+                queue_index: 0,
+            }),
+        ))
+        .unwrap();
+        let mut paused = playing.clone();
+        paused.playback_status = PlaybackStatus::Paused;
+        let mut runtime = FakeObserverRuntime::new(vec![
+            disconnected_connection(1),
+            disconnected_connection(2),
+            disconnected_connection(3),
+        ]);
+        runtime.previous_snapshot = Some(playing.clone());
+        runtime.snapshots = VecDeque::from([playing, paused]);
+        let mut delays = Vec::new();
+
+        run_fake_until_wait_stops(&mut runtime, &mut delays, 3);
+
+        assert_eq!(runtime.refresh_count, 3);
+        assert_eq!(runtime.published_changes[0], Vec::<ChangedProperty>::new());
+        assert_eq!(
+            runtime.published_changes[1],
+            vec![ChangedProperty::PlaybackStatus]
+        );
+        assert_eq!(runtime.published_changes.len(), 2);
+    }
+
+    #[test]
+    fn cancellation_interrupts_backoff_immediately() {
+        let control = Arc::new(ObserverControl::new());
+        let thread_control = Arc::clone(&control);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let waiter = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            thread_control.wait_for_retry(Duration::from_secs(30))
+        });
+        ready_rx.recv().unwrap();
+        let started = Instant::now();
+
+        control.cancel();
+
+        assert!(!waiter.join().unwrap().unwrap());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn cancellation_unblocks_idle_socket() {
+        let control = Arc::new(ObserverControl::new());
+        let (mut observed, _peer) = UnixStream::pair().unwrap();
+        control.install_socket(&observed).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let reader_barrier = Arc::clone(&barrier);
+        let reader = thread::spawn(move || {
+            reader_barrier.wait();
+            let mut byte = [0_u8; 1];
+            observed.read(&mut byte)
+        });
+        barrier.wait();
+        let started = Instant::now();
+
+        control.cancel();
+
+        assert!(reader.join().unwrap().is_ok());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn shutdown_during_reconnect_does_not_leave_thread_pending() {
+        struct AlwaysUnavailable {
+            attempted: mpsc::Sender<()>,
+        }
+
+        impl PlayerObserverRuntime for AlwaysUnavailable {
+            type Connection = FakeObserverConnection;
+
+            fn connect(&mut self, _control: &ObserverControl) -> Result<Self::Connection, String> {
+                self.attempted.send(()).unwrap();
+                Err("MPD indisponível".into())
+            }
+
+            fn refresh_snapshot(&mut self) -> Result<(), String> {
+                unreachable!()
+            }
+        }
+
+        let control = Arc::new(ObserverControl::new());
+        let thread_control = Arc::clone(&control);
+        let (attempted_tx, attempted_rx) = mpsc::channel();
+        let observer = thread::spawn(move || {
+            let mut runtime = AlwaysUnavailable {
+                attempted: attempted_tx,
+            };
+            run_observer_state_machine(&mut runtime, &thread_control, |control, delay| {
+                control.wait_for_retry(delay)
+            })
+        });
+        attempted_rx.recv().unwrap();
+        let started = Instant::now();
+
+        control.cancel();
+
+        observer.join().unwrap().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
