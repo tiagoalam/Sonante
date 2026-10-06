@@ -54,6 +54,7 @@ import {
 } from "../utils/localYearNavigation";
 import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./VirtualAlbumGrid";
 import { VirtualList, type VirtualListHandle } from "./VirtualList";
+import { AlbumArtworkPlaceholder } from "./AlbumArtworkPlaceholder";
 
 const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
 
@@ -132,9 +133,7 @@ const LocalAlbumCard: React.FC<{
             loading="lazy"
           />
         ) : (
-          <div className="w-full h-full flex items-center justify-center text-[#444444]">
-            <Disc3 size={40} />
-          </div>
+          <AlbumArtworkPlaceholder />
         )}
 
         <button
@@ -702,7 +701,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 {albumCover ? (
                   <img src={albumCover} alt={selectedAlbum.title} className="w-full h-full object-cover" />
                 ) : (
-                  <Disc3 size={64} className="text-[#444444]" />
+                  <AlbumArtworkPlaceholder size="detail" />
                 )}
               </div>
 
