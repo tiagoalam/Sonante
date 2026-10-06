@@ -69,7 +69,12 @@ test("reports available buckets and their first indices", () => {
   assert.equal(indices.get("A"), sorted.findIndex((item) => item.rating_key === "a1"));
   assert.equal(indices.get("C"), sorted.findIndex((item) => item.rating_key === "c"));
   assert.equal(indices.has("B"), false);
-  assert.equal(isTextPlexAlbumSort("added_recent"), false);
+  for (const mode of ["album_asc", "album_desc", "artist_asc", "artist_desc"]) {
+    assert.equal(isTextPlexAlbumSort(mode), true);
+  }
+  for (const mode of ["added_recent", "year_desc", "year_asc"]) {
+    assert.equal(isTextPlexAlbumSort(mode), false);
+  }
 });
 
 test("ten thousand albums remain data-only navigation input", () => {

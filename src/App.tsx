@@ -35,6 +35,7 @@ import { AboutModal } from "./components/AboutModal";
 import { WelcomeWizard } from "./components/WelcomeWizard";
 import { PlexImage } from "./components/PlexImage";
 import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./components/VirtualAlbumGrid";
+import { VirtualList, type VirtualListHandle } from "./components/VirtualList";
 import { plexService } from "./services/plex";
 import { audioService } from "./services/audio";
 import { configService } from "./services/config";
@@ -66,6 +67,19 @@ import {
   type PlexAlbumSortMode,
 } from "./utils/plexAlbumNavigation";
 import { LOCAL_ALBUM_INDEX_BUCKETS } from "./utils/localAlbumNavigation";
+import {
+  albumsForPlexArtist,
+  derivePlexArtists,
+  plexArtistBucketFirstIndices,
+  sortPlexArtists,
+  type PlexArtistSortMode,
+  type PlexArtistSummary,
+} from "./utils/plexArtistNavigation";
+import {
+  derivePlexYearNavigation,
+  plexAlbumsForYear,
+  plexAlbumsWithoutYear,
+} from "./utils/plexYearNavigation";
 
 interface CollectionAlbumsCacheEntry {
   promise: Promise<PlexAlbum[]>;
@@ -271,8 +285,9 @@ const PlexAlbumCard = memo<{
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          if (album.artist_rating_key) {
-            onSelectArtist(album.artist_rating_key, album.artist);
+          const artistKey = album.artist_rating_key?.trim();
+          if (artistKey) {
+            onSelectArtist(artistKey, album.artist);
           }
         }}
         className="text-xs text-[#999999] hover:text-[#E5A00D] transition-colors truncate mt-0.5 text-left cursor-pointer"
@@ -301,9 +316,10 @@ export function App() {
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
   const [loadingLibraries, setLoadingLibraries] = useState(true);
   const [selectedLibrary, setSelectedLibrary] = useState<PlexLibrary | null>(null);
-  const [plexViewMode, setPlexViewMode] = useState<"albums" | "collections">("albums");
+  const [plexViewMode, setPlexViewMode] = useState<"albums" | "artists" | "years" | "collections">("albums");
   const [hasCollections, setHasCollections] = useState(false);
   const [plexSortMode, setPlexSortMode] = useState<PlexAlbumSortMode>("added_recent");
+  const [plexArtistSortMode, setPlexArtistSortMode] = useState<PlexArtistSortMode>("artist_asc");
   const [showSettings, setShowSettings] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
 
@@ -338,6 +354,7 @@ export function App() {
   const plexLibraryRequestGenerationRef = useRef(0);
   const plexSearchRequestGenerationRef = useRef(0);
   const plexGridRef = useRef<VirtualAlbumGridHandle>(null);
+  const plexArtistListRef = useRef<VirtualListHandle>(null);
   const [plexScrollContainer, setPlexScrollContainer] = useState<HTMLDivElement | null>(null);
 
   const statusRef = useRef(playbackStatus);
@@ -381,6 +398,10 @@ export function App() {
   const [collectionAlbums, setCollectionAlbums] = useState<PlexAlbum[]>([]);
   const [activeAlbum, setActiveAlbum] = useState<PlexAlbum | null>(null);
   const [activeArtist, setActiveArtist] = useState<SelectedArtist | null>(null);
+  const [fallbackPlexArtist, setFallbackPlexArtist] = useState<PlexArtistSummary | null>(null);
+  const [selectedPlexDecade, setSelectedPlexDecade] = useState<number | null>(null);
+  const [selectedPlexYear, setSelectedPlexYear] = useState<number | null>(null);
+  const [selectedPlexUnknownYear, setSelectedPlexUnknownYear] = useState(false);
 
   // Busca Global
   const [searchQuery, setSearchQuery] = useState("");
@@ -589,6 +610,10 @@ export function App() {
       setActiveAlbum(null);
       setActiveCollection(null);
       setActiveArtist(null);
+      setFallbackPlexArtist(null);
+      setSelectedPlexDecade(null);
+      setSelectedPlexYear(null);
+      setSelectedPlexUnknownYear(false);
       return;
     }
 
@@ -633,6 +658,10 @@ export function App() {
     setActiveAlbum(null);
     setActiveCollection(null);
     setActiveArtist(null);
+    setFallbackPlexArtist(null);
+    setSelectedPlexDecade(null);
+    setSelectedPlexYear(null);
+    setSelectedPlexUnknownYear(false);
     setSearchQuery("");
     setSearchResults(null);
     setAlbums([]);
@@ -768,14 +797,32 @@ export function App() {
   }, []);
 
   const handleSelectArtist = useCallback((artistKey: string, artistName: string) => {
-    setActiveArtist({ rating_key: artistKey, name: artistName });
+    const normalizedArtistKey = artistKey.trim();
+    if (!normalizedArtistKey) return;
+    setFallbackPlexArtist(null);
+    setActiveArtist({ rating_key: normalizedArtistKey, name: artistName });
   }, []);
+
+  const handlePlexModeChange = (mode: "albums" | "artists" | "years" | "collections") => {
+    setPlexViewMode(mode);
+    setActiveAlbum(null);
+    setActiveArtist(null);
+    setActiveCollection(null);
+    setFallbackPlexArtist(null);
+    setSelectedPlexDecade(null);
+    setSelectedPlexYear(null);
+    setSelectedPlexUnknownYear(false);
+  };
 
   const resetAllNavigation = () => {
     setLocalSelectedArtist(null);
     setActiveAlbum(null);
     setActiveCollection(null);
     setActiveArtist(null);
+    setFallbackPlexArtist(null);
+    setSelectedPlexDecade(null);
+    setSelectedPlexYear(null);
+    setSelectedPlexUnknownYear(false);
     setSearchQuery("");
     setSearchResults(null);
   };
@@ -792,6 +839,10 @@ export function App() {
     setActiveAlbum(null);
     setActiveCollection(null);
     setActiveArtist(null);
+    setFallbackPlexArtist(null);
+    setSelectedPlexDecade(null);
+    setSelectedPlexYear(null);
+    setSelectedPlexUnknownYear(false);
     setSearchQuery("");
     setSearchResults(null);
     setSelectedLibrary(library);
@@ -806,6 +857,60 @@ export function App() {
     () => plexAlbumBucketFirstIndices(sortedPlexAlbums, plexSortMode),
     [plexSortMode, sortedPlexAlbums],
   );
+  const plexArtists = useMemo(() => derivePlexArtists(albums), [albums]);
+  const sortedPlexArtists = useMemo(
+    () => sortPlexArtists(plexArtists, plexArtistSortMode),
+    [plexArtistSortMode, plexArtists],
+  );
+  const plexArtistBucketIndices = useMemo(
+    () => plexArtistBucketFirstIndices(sortedPlexArtists),
+    [sortedPlexArtists],
+  );
+  const fallbackPlexArtistAlbums = useMemo(
+    () => fallbackPlexArtist
+      ? sortPlexAlbums(albumsForPlexArtist(albums, fallbackPlexArtist), "album_asc")
+      : [],
+    [albums, fallbackPlexArtist],
+  );
+  const plexYearNavigation = useMemo(() => derivePlexYearNavigation(albums), [albums]);
+  const selectedPlexYearAlbums = useMemo(
+    () => selectedPlexUnknownYear
+      ? plexAlbumsWithoutYear(albums)
+      : selectedPlexYear === null
+        ? []
+        : plexAlbumsForYear(albums, selectedPlexYear),
+    [albums, selectedPlexUnknownYear, selectedPlexYear],
+  );
+  const selectedPlexDecadeSummary = selectedPlexDecade === null
+    ? undefined
+    : plexYearNavigation.decades.find((item) => item.decade === selectedPlexDecade);
+  const hasPlexSubview = Boolean(
+    activeCollection
+    || fallbackPlexArtist
+    || selectedPlexDecade !== null
+    || selectedPlexYear !== null
+    || selectedPlexUnknownYear,
+  );
+  const showPlexAlbumIndex = searchQuery.trim().length === 0
+    && plexViewMode === "albums"
+    && isTextPlexAlbumSort(plexSortMode);
+  const showPlexArtistIndex = !hasPlexSubview
+    && searchQuery.trim().length === 0
+    && plexViewMode === "artists";
+
+  const handlePlexContextBack = () => {
+    if (activeCollection) {
+      setActiveCollection(null);
+    } else if (fallbackPlexArtist) {
+      setFallbackPlexArtist(null);
+    } else if (selectedPlexUnknownYear) {
+      setSelectedPlexUnknownYear(false);
+    } else if (selectedPlexYear !== null) {
+      setSelectedPlexYear(null);
+    } else if (selectedPlexDecade !== null) {
+      setSelectedPlexDecade(null);
+    }
+  };
 
   if (!config || mediaSource === null) {
     return (
@@ -1002,8 +1107,10 @@ export function App() {
             album={activeAlbum}
             onBack={() => setActiveAlbum(null)}
             onSelectArtist={(art) => {
+              const artistKey = art.rating_key.trim();
+              if (!artistKey) return;
               setActiveAlbum(null);
-              setActiveArtist(art);
+              setActiveArtist({ ...art, rating_key: artistKey });
             }}
             onToggleFavorite={refreshPlexFavorites}
             isPlaybackAvailable={isPlaybackAvailable}
@@ -1020,11 +1127,11 @@ export function App() {
           <main className="flex-1 flex flex-col overflow-hidden bg-[#121212]">
             <div className="flex flex-wrap items-center justify-between gap-4 px-8 pt-8 pb-4">
               <div className="flex items-center space-x-3">
-                {activeCollection && (
+                {hasPlexSubview && (
                   <button
-                    onClick={() => setActiveCollection(null)}
+                    onClick={handlePlexContextBack}
                     className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
-                    title={t("plex.backToCollections")}
+                    title={t("plex.back")}
                   >
                     <ArrowLeft size={16} />
                   </button>
@@ -1034,15 +1141,31 @@ export function App() {
                     {searchQuery.trim().length > 0
                       ? t("plex.resultsFor", { query: searchQuery })
                       : activeCollection
-                      ? activeCollection.title
-                      : t("player.source.plex")}
+                        ? activeCollection.title
+                        : fallbackPlexArtist
+                          ? fallbackPlexArtist.name
+                          : selectedPlexUnknownYear
+                            ? t("plex.unknownYear")
+                            : selectedPlexYear !== null
+                              ? String(selectedPlexYear)
+                              : selectedPlexDecade !== null
+                                ? `${selectedPlexDecade}s`
+                                : t("player.source.plex")}
                   </h2>
                   {searchQuery.trim().length === 0 && (
                     <p className="mt-0.5 text-xs text-[#888888]">
                       {activeCollection
                         ? t("plex.albumsCount", { count: collectionAlbums.length })
+                        : fallbackPlexArtist
+                          ? t("plex.albumsCount", { count: fallbackPlexArtistAlbums.length })
+                          : selectedPlexUnknownYear || selectedPlexYear !== null
+                            ? t("plex.albumsCount", { count: selectedPlexYearAlbums.length })
+                            : selectedPlexDecadeSummary
+                              ? t("plex.albumsCount", { count: selectedPlexDecadeSummary.albumCount })
                         : plexViewMode === "collections"
                           ? t("plex.collectionsCount", { count: collections.length })
+                          : plexViewMode === "artists"
+                            ? t("plex.artistsCount", { count: plexArtists.length })
                           : t("plex.albumsCount", { count: albums.length })}
                     </p>
                   )}
@@ -1050,21 +1173,39 @@ export function App() {
               </div>
             </div>
 
-            {!activeCollection && searchQuery.trim().length === 0 && (
+            {!hasPlexSubview && searchQuery.trim().length === 0 && (
               <div className="flex flex-wrap gap-1 border-b border-[#222222] px-8 pb-3">
                 <button
                   type="button"
-                  onClick={() => setPlexViewMode("albums")}
+                  onClick={() => handlePlexModeChange("albums")}
                   className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
                     plexViewMode === "albums" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
                   }`}
                 >
                   {t("plex.tabAlbums")}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => handlePlexModeChange("artists")}
+                  className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                    plexViewMode === "artists" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                  }`}
+                >
+                  {t("plex.tabArtists")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handlePlexModeChange("years")}
+                  className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                    plexViewMode === "years" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                  }`}
+                >
+                  {t("plex.tabYears")}
+                </button>
                 {hasCollections && (
                   <button
                     type="button"
-                    onClick={() => setPlexViewMode("collections")}
+                    onClick={() => handlePlexModeChange("collections")}
                     className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
                       plexViewMode === "collections" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
                     }`}
@@ -1110,7 +1251,7 @@ export function App() {
                 )}
               </div>
 
-              {!activeCollection && searchQuery.trim().length === 0 && plexViewMode === "albums" && (
+              {!hasPlexSubview && searchQuery.trim().length === 0 && plexViewMode === "albums" && (
                 <label className="flex items-center gap-2 text-xs text-[#888888]">
                   <span>{t("plex.sortLabel")}</span>
                   <select
@@ -1128,15 +1269,30 @@ export function App() {
                   </select>
                 </label>
               )}
+              {!hasPlexSubview && searchQuery.trim().length === 0 && plexViewMode === "artists" && (
+                <label className="flex items-center gap-2 text-xs text-[#888888]">
+                  <span>{t("plex.sortLabel")}</span>
+                  <select
+                    value={plexArtistSortMode}
+                    onChange={(event) => setPlexArtistSortMode(event.target.value as PlexArtistSortMode)}
+                    className="max-w-52 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-xs text-white outline-none focus:border-[#E5A00D]"
+                  >
+                    <option value="artist_asc">{t("plex.sortArtistAsc")}</option>
+                    <option value="artist_desc">{t("plex.sortArtistDesc")}</option>
+                  </select>
+                </label>
+              )}
             </div>
 
-            {!activeCollection
-              && searchQuery.trim().length === 0
-              && plexViewMode === "albums"
-              && isTextPlexAlbumSort(plexSortMode) && (
-              <nav aria-label={t("plex.albumIndex")} className="flex flex-wrap items-center gap-1 border-b border-[#222222] px-8 py-2">
+            {(showPlexAlbumIndex || showPlexArtistIndex) && (
+              <nav
+                aria-label={t(plexViewMode === "artists" ? "plex.artistIndex" : "plex.albumIndex")}
+                className="flex flex-wrap items-center gap-1 border-b border-[#222222] px-8 py-2"
+              >
                 {LOCAL_ALBUM_INDEX_BUCKETS.map((bucket) => {
-                  const index = plexAlbumBucketIndices.get(bucket);
+                  const index = plexViewMode === "artists"
+                    ? plexArtistBucketIndices.get(bucket)
+                    : plexAlbumBucketIndices.get(bucket);
                   const label = t("plex.jumpToBucket", { bucket });
                   return (
                     <button
@@ -1145,7 +1301,11 @@ export function App() {
                       disabled={index === undefined}
                       title={label}
                       aria-label={label}
-                      onClick={() => index !== undefined && plexGridRef.current?.scrollToIndex(index)}
+                      onClick={() => {
+                        if (index === undefined) return;
+                        if (plexViewMode === "artists") plexArtistListRef.current?.scrollToIndex(index);
+                        else plexGridRef.current?.scrollToIndex(index);
+                      }}
                       className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[#999999] transition-colors hover:bg-[#282828] hover:text-[#E5A00D] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:cursor-default disabled:text-[#444444] disabled:hover:bg-transparent"
                     >
                       {bucket}
@@ -1335,6 +1495,54 @@ export function App() {
                     );
                   })}
                 </div>
+              ) : fallbackPlexArtist ? (
+                <VirtualAlbumGrid
+                  items={fallbackPlexArtistAlbums}
+                  getItemKey={(album) => album.rating_key}
+                  scrollContainer={plexScrollContainer}
+                  resetKey={JSON.stringify([selectedLibrary?.key, "fallback-artist", fallbackPlexArtist.id])}
+                  renderItem={(album) => {
+                    const albumKey = String(album.rating_key || "");
+                    return (
+                      <PlexAlbumCard
+                        album={album}
+                        isFav={albumKey ? plexFavIds.has(albumKey) : false}
+                        onSelect={setActiveAlbum}
+                        onPlayQuick={handlePlayQuick}
+                        onToggleFav={handleTogglePlexCardFav}
+                        onSelectArtist={handleSelectArtist}
+                        removeFavText={t("favorites.removeFavorite")}
+                        addFavText={t("favorites.title")}
+                        playAlbumText={t("plex.playAlbum")}
+                        isPlaybackAvailable={isPlaybackAvailable}
+                      />
+                    );
+                  }}
+                />
+              ) : selectedPlexYear !== null || selectedPlexUnknownYear ? (
+                <VirtualAlbumGrid
+                  items={selectedPlexYearAlbums}
+                  getItemKey={(album) => album.rating_key}
+                  scrollContainer={plexScrollContainer}
+                  resetKey={JSON.stringify([selectedLibrary?.key, selectedPlexYear, selectedPlexUnknownYear])}
+                  renderItem={(album) => {
+                    const albumKey = String(album.rating_key || "");
+                    return (
+                      <PlexAlbumCard
+                        album={album}
+                        isFav={albumKey ? plexFavIds.has(albumKey) : false}
+                        onSelect={setActiveAlbum}
+                        onPlayQuick={handlePlayQuick}
+                        onToggleFav={handleTogglePlexCardFav}
+                        onSelectArtist={handleSelectArtist}
+                        removeFavText={t("favorites.removeFavorite")}
+                        addFavText={t("favorites.title")}
+                        playAlbumText={t("plex.playAlbum")}
+                        isPlaybackAvailable={isPlaybackAvailable}
+                      />
+                    );
+                  }}
+                />
               ) : plexViewMode === "albums" ? (
                 <VirtualAlbumGrid
                   ref={plexGridRef}
@@ -1360,6 +1568,80 @@ export function App() {
                     );
                   }}
                 />
+              ) : plexViewMode === "artists" ? (
+                <VirtualList
+                  ref={plexArtistListRef}
+                  items={sortedPlexArtists}
+                  rowHeight={56}
+                  getItemKey={(artist) => artist.id}
+                  scrollContainer={plexScrollContainer}
+                  resetKey={JSON.stringify([selectedLibrary?.key, plexArtistSortMode])}
+                  renderItem={(artist) => (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (artist.ratingKey) {
+                          setActiveArtist({ rating_key: artist.ratingKey, name: artist.name });
+                        } else {
+                          setFallbackPlexArtist(artist);
+                        }
+                      }}
+                      className="flex h-full w-full items-center justify-between border-b border-[#1D1D1D] px-4 text-left transition-colors hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#E5A00D]"
+                    >
+                      <span className="truncate pr-4 text-sm font-semibold text-white">{artist.name}</span>
+                      <span className="shrink-0 text-xs text-[#777777]">
+                        {t("plex.albumsCount", { count: artist.albumCount })}
+                      </span>
+                    </button>
+                  )}
+                />
+              ) : plexViewMode === "years" ? (
+                selectedPlexDecadeSummary ? (
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(130px,1fr))] gap-4">
+                    {selectedPlexDecadeSummary.years.map((year) => (
+                      <button
+                        key={year.year}
+                        type="button"
+                        onClick={() => setSelectedPlexYear(year.year)}
+                        className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                      >
+                        <span className="block text-xl font-bold text-white">{year.year}</span>
+                        <span className="mt-1 block text-xs text-[#777777]">
+                          {t("plex.albumsCount", { count: year.albumCount })}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-4">
+                    {plexYearNavigation.decades.map((decade) => (
+                      <button
+                        key={decade.decade}
+                        type="button"
+                        onClick={() => setSelectedPlexDecade(decade.decade)}
+                        aria-label={t("plex.decadeLabel", { decade: decade.decade })}
+                        className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                      >
+                        <span className="block text-xl font-bold text-white">{decade.decade}s</span>
+                        <span className="mt-1 block text-xs text-[#777777]">
+                          {t("plex.albumsCount", { count: decade.albumCount })}
+                        </span>
+                      </button>
+                    ))}
+                    {plexYearNavigation.unknownCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPlexUnknownYear(true)}
+                        className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                      >
+                        <span className="block text-lg font-bold text-white">{t("plex.unknownYear")}</span>
+                        <span className="mt-1 block text-xs text-[#777777]">
+                          {t("plex.albumsCount", { count: plexYearNavigation.unknownCount })}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                )
               ) : (
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
                   {collections.map((col) => (
