@@ -2114,7 +2114,6 @@ impl AudioEngine {
             return Ok(());
         }
 
-        eprintln!("[Audio] Shared output stalled after seek; recovering with pause/resume.");
         send_command("pause 1")
             .map_err(|error| format!("Falha ao pausar para recuperar o seek Shared: {}", error))?;
         send_command("pause 0")
