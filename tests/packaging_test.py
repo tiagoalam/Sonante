@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import io
 import json
@@ -55,6 +56,41 @@ class PackagingTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('refusing mislabeled Arch package', result.stderr)
             self.assertFalse((root / 'stage' / 'PKGBUILD').exists())
+
+    def test_arch_archive_trust_is_scoped_to_exact_checkout(self):
+        with tempfile.TemporaryDirectory(prefix='sn-arch-owner-') as directory:
+            root = Path(directory)
+            config = root / 'gitconfig'
+            config.write_text('')
+            env = {**os.environ, 'GIT_TEST_ASSUME_DIFFERENT_OWNER': '1',
+                   'GIT_CONFIG_GLOBAL': str(config), 'GIT_CONFIG_SYSTEM': os.devnull,
+                   'GIT_CONFIG_COUNT': '0'}
+            env.pop('GIT_CONFIG_PARAMETERS', None)
+            archive_command = ['archive', '--format=tar', '--prefix=sonante/', 'HEAD']
+            refused = subprocess.run(['git', *archive_command], env=env, capture_output=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn(b'dubious ownership', refused.stderr)
+
+            stage = root / 'stage'
+            subprocess.run(['bash', 'scripts/prepare-arch-ci.sh', str(stage)],
+                           env=env, check=True, capture_output=True)
+            expected = subprocess.check_output(
+                ['git', '-c', f'safe.directory={Path.cwd().resolve()}', *archive_command], env=env)
+            source = stage / 'sonante-source.tar'
+            self.assertEqual(source.read_bytes(), expected)
+            self.assertEqual(stage.stat().st_mode & 0o777, 0o700)
+            desktop = stage / 'sonante.desktop'
+            self.assertEqual(desktop.read_bytes(), Path('sonante-arch/sonante.desktop').read_bytes())
+            recipe = (stage / 'PKGBUILD').read_text()
+            self.assertTrue(recipe.startswith(Path('sonante-arch/PKGBUILD').read_text()))
+            self.assertIn("source=('sonante-source.tar' 'sonante.desktop')", recipe)
+            hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in [source, desktop]]
+            self.assertTrue(recipe.endswith(f'sha256sums=("{hashes[0]}" "{hashes[1]}")\n'))
+
+            still_refused = subprocess.run(['git', *archive_command], env=env, capture_output=True)
+            self.assertNotEqual(still_refused.returncode, 0)
+            self.assertIn(b'dubious ownership', still_refused.stderr)
+            self.assertEqual(config.read_text(), '')
 
     def test_glibc_ceiling_rejects_newer_or_unclassified_symbols(self):
         with tempfile.TemporaryDirectory(prefix='sn-abi-') as directory:

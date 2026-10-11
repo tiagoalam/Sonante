@@ -3,7 +3,7 @@
 set -euo pipefail
 stage="$1"
 mkdir -m 700 "$stage"
-git archive --format=tar --prefix=sonante/ HEAD > "$stage/sonante-source.tar"
+git -c safe.directory="$(pwd -P)" archive --format=tar --prefix=sonante/ HEAD > "$stage/sonante-source.tar"
 archive_version="$(tar -xOf "$stage/sonante-source.tar" sonante/package.json | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')"
 checkout_version="$(node -p 'require("./package.json").version')"
 if [[ "$archive_version" != "$checkout_version" ]]; then
