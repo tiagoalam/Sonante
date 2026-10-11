@@ -185,13 +185,20 @@ impl ArtworkScope {
         for name in LOCAL_FOLDER_COVER_NAMES {
             let name = Path::new(name);
             let link_path = entry(&mirrored, name);
-            let Ok(link) = fs::symlink_metadata(&link_path) else {
+            // Pin the symlink inode without following it. Metadata alone can
+            // match a replacement if the inode and coarse timestamps are reused.
+            let Ok(link_file) = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
+                .open(&link_path)
+            else {
                 continue;
             };
+            let link = link_file.metadata().ok()?;
             if !link.file_type().is_symlink() {
                 return None;
             }
-            // Never open the mirror symlink: inspect its exact target and open
+            // Inspect the pinned symlink's expected target, then open only
             // the expected physical entry relative to the authorized root FD.
             let target = root.path.join(relative).join(name);
             if fs::read_link(&link_path).ok()? != target {
@@ -229,6 +236,7 @@ impl ArtworkScope {
             file.read_exact(&mut bytes).ok()?;
             if !unchanged(&before, &file.metadata().ok()?)
                 || !unchanged(&before, &fs::symlink_metadata(&physical_path).ok()?)
+                || !unchanged(&link, &link_file.metadata().ok()?)
                 || !unchanged(&link, &fs::symlink_metadata(&link_path).ok()?)
                 || fs::read_link(&link_path).ok()? != target
                 || !same(
@@ -502,6 +510,12 @@ pub(crate) mod tests {
             assert!(uri.starts_with("data:image/png;base64,"));
             assert!(!uri.contains("physical"));
         }
+        assert!(
+            gdk_pixbuf::Pixbuf::formats()
+                .iter()
+                .any(|format| format.name().as_deref() == Some("webp") && !format.is_disabled()),
+            "WebP GdkPixbuf loader is required (Ubuntu: webp-pixbuf-loader)"
+        );
         let webp = STANDARD.decode("UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoBAAEAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=").unwrap();
         assert!(thumbnail(&webp, "webp").is_some());
         assert!(thumbnail(&png(), "jpg").is_none());
@@ -568,6 +582,18 @@ pub(crate) mod tests {
                 } else {
                     f.physical.join("Album/cover.png")
                 };
+                if replace_link {
+                    let original = fs::symlink_metadata(&path).unwrap();
+                    let pinned = fs::read_dir("/proc/self/fd").unwrap().any(|entry| {
+                        entry
+                            .ok()
+                            .and_then(|entry| fs::metadata(entry.path()).ok())
+                            .is_some_and(|metadata| {
+                                metadata.file_type().is_symlink() && same(&original, &metadata)
+                            })
+                    });
+                    assert!(pinned, "mirror symlink must remain pinned during the read");
+                }
                 fs::remove_file(&path).unwrap();
                 if replace_link {
                     symlink(f.physical.join("Album/cover.png"), path).unwrap();
@@ -575,7 +601,15 @@ pub(crate) mod tests {
                     fs::write(path, png()).unwrap();
                 }
             });
-            assert!(result.is_none());
+            assert!(
+                result.is_none(),
+                "replacement accepted: {}",
+                if replace_link {
+                    "mirror symlink"
+                } else {
+                    "physical file"
+                }
+            );
         }
     }
     #[test]
