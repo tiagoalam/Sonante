@@ -180,8 +180,8 @@ impl MpdSupervisor {
                     self.cleanup_owned_runtime_files(Some(child_pid), pid_was_confirmed)
                 {
                     eprintln!(
-                        "[Supervisor] Falha ao limpar runtime após término inesperado do MPD: {}",
-                        error
+                        "[Supervisor] Failed to clean up runtime after unexpected MPD termination: {}",
+                        crate::diagnostics::error_summary(&error)
                     );
                 }
                 Ok(MpdProcessObservation::NotRunning(self.health.clone()))
@@ -221,57 +221,19 @@ impl MpdSupervisor {
         lib_dir: &Path,
         folders: &[String],
     ) -> Result<Vec<LocalLibrarySource>, String> {
-        let configured_targets = folders
-            .iter()
-            .filter_map(|folder| {
-                let path = Path::new(folder);
-                path.is_dir().then_some(path)
-            })
-            .map(|path| {
-                fs::canonicalize(path).map_err(|error| {
-                    format!("Falha ao resolver uma pasta local configurada: {error}")
-                })
-            })
-            .collect::<Result<HashSet<_>, _>>()?;
-
-        let entries = match fs::read_dir(lib_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => {
-                return Err(format!("Falha ao listar fontes da biblioteca virtual: {error}"))
-            }
-        };
-        let mut entries = entries
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("Falha ao ler fonte da biblioteca virtual: {error}"))?;
-        entries.sort_by_key(|entry| entry.file_name());
-
-        let mut sources = Vec::new();
-        for entry in entries {
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).map_err(|error| {
-                format!("Falha ao examinar fonte da biblioteca virtual: {error}")
-            })?;
-            if !metadata.file_type().is_symlink() {
-                continue;
-            }
-            let Ok(target) = fs::canonicalize(&path) else {
-                continue;
-            };
-            if !configured_targets.contains(&target) {
-                continue;
-            }
-            let Some(id) = entry.file_name().to_str().and_then(Self::valid_source_id) else {
-                continue;
-            };
-            sources.push(LocalLibrarySource {
+        let resolved = crate::local_media::resolve_local_sources(lib_dir, folders)
+            .map_err(|error| error.to_string())?;
+        Ok(resolved
+            .sources()
+            .keys()
+            .map(|id| LocalLibrarySource {
+                id: id.clone(),
                 label: id.clone(),
-                id,
-            });
-        }
-        Ok(sources)
+            })
+            .collect())
     }
 
+    #[cfg(test)]
     fn valid_source_id(value: &str) -> Option<String> {
         let mut components = Path::new(value).components();
         match (components.next(), components.next()) {
@@ -307,6 +269,32 @@ impl MpdSupervisor {
                 return Err(format!(
                     "Falha ao examinar biblioteca virtual ({}): {}",
                     lib_dir.display(),
+                    error
+                ))
+            }
+        }
+        let managed_marker = lib_dir.join(crate::local_media::mirror::MANIFEST_NAME);
+        match fs::symlink_metadata(&managed_marker) {
+            Ok(_) => {
+                let resolved = crate::local_media::resolve_local_sources(lib_dir, folders)
+                    .map_err(|error| error.to_string())?;
+                let manifest = crate::local_media::mirror::read_manifest(lib_dir)?;
+                if &manifest.sources != resolved.sources() {
+                    return Err(
+                        "A geração managed diverge das pastas locais configuradas."
+                            .to_string(),
+                    );
+                }
+                return Ok(LibrarySyncResult {
+                    library_dir: lib_dir.to_path_buf(),
+                    changed: false,
+                });
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Falha ao examinar marker da biblioteca virtual ({}): {}",
+                    managed_marker.display(),
                     error
                 ))
             }
@@ -683,8 +671,13 @@ decoder {{
         self.prepare_runtime_files()?;
 
         println!(
-            "[Supervisor] Iniciando MPD: dispositivo={}, saída={}, buffer={} KB",
-            cfg.alsa_device, cfg.audio_output_type, cfg.audio_buffer_size_kb
+            "[Supervisor] Starting MPD: route={}, buffer={} KB",
+            if crate::is_shared_output(cfg) {
+                "shared"
+            } else {
+                "direct"
+            },
+            cfg.audio_buffer_size_kb
         );
 
         let child = match Command::new("mpd")
@@ -711,8 +704,8 @@ decoder {{
             false,
         ) {
             eprintln!(
-                "[Analyzer] Falha ao confirmar o output desabilitado após iniciar o MPD: {}",
-                error
+                "[Analyzer] Failed to confirm disabled output after MPD startup: {}",
+                crate::diagnostics::error_summary(&error)
             );
         }
         self.shared_volume_backend = shared_volume_backend;
@@ -761,8 +754,7 @@ decoder {{
             .map_err(|e| format!("Falha ao consultar FIFO preparado: {}", e))?
             .ino();
         println!(
-            "[Supervisor] Analyzer FIFO prepared before MPD spawn: path={}, inode={}, mode=0600.",
-            fifo_path.display(),
+            "[Supervisor] Analyzer FIFO prepared before MPD spawn: inode={}, mode=0600.",
             inode
         );
         Ok(())
@@ -847,7 +839,7 @@ decoder {{
                 match self.validate_started_process(child_pid) {
                     Ok(true) => {
                         self.owns_runtime_files = true;
-                        println!("[Supervisor] Instância do MPD iniciada com sucesso.");
+                        println!("[Supervisor] MPD instance started successfully.");
                         return Ok(());
                     }
                     Ok(false) => {}
@@ -941,7 +933,7 @@ decoder {{
         let pid_identity = self.read_pid_identity(expected_pid)?;
         if !Self::can_request_socket_shutdown(true, self.owns_runtime_files, &pid_identity) {
             eprintln!(
-                "[Supervisor] PID file inconsistente; o encerramento será feito pelo Child controlado."
+                "[Supervisor] Inconsistent PID file; shutdown will use the owned Child handle."
             );
             return Ok(false);
         }
@@ -1093,10 +1085,7 @@ decoder {{
         match fifo_result {
             Ok(()) => {
                 if self.owns_analyzer_fifo {
-                    println!(
-                        "[Supervisor] Analyzer FIFO removed after MPD process termination: {}.",
-                        fifo_path.display()
-                    );
+                    println!("[Supervisor] Analyzer FIFO removed after MPD process termination.");
                 }
                 self.owns_analyzer_fifo = false;
             }
@@ -1124,8 +1113,8 @@ decoder {{
                 Ok(None) => false,
                 Err(e) => {
                     eprintln!(
-                        "[Supervisor] Falha ao consultar o Child do MPD antes do shutdown: {}",
-                        e
+                        "[Supervisor] Failed to query MPD Child before shutdown: {}",
+                        crate::diagnostics::error_summary(&e)
                     );
                     false
                 }
@@ -1134,8 +1123,8 @@ decoder {{
             if !already_exited {
                 if let Err(e) = self.request_graceful_shutdown(child_pid) {
                     eprintln!(
-                        "[Supervisor] {}. Usando o Child controlado como fallback.",
-                        e
+                        "[Supervisor] Graceful shutdown failed: {}. Using the owned Child handle as fallback.",
+                        crate::diagnostics::error_summary(&e)
                     );
                 }
 
@@ -1143,7 +1132,7 @@ decoder {{
                     match Self::wait_for_child_exit(&mut child, 8, Duration::from_millis(50)) {
                         Ok(exited) => exited,
                         Err(e) => {
-                            eprintln!("[Supervisor] {}. Forçando encerramento pelo Child.", e);
+                            eprintln!("[Supervisor] Child exit wait failed: {}. Forcing termination through the owned Child handle.", crate::diagnostics::error_summary(&e));
                             false
                         }
                     };
@@ -1166,7 +1155,10 @@ decoder {{
 impl Drop for MpdSupervisor {
     fn drop(&mut self) {
         if let Err(e) = self.stop() {
-            eprintln!("[Supervisor] Falha no cleanup final do MPD: {}", e);
+            eprintln!(
+                "[Supervisor] Final MPD cleanup failed: {}",
+                crate::diagnostics::error_summary(&e)
+            );
         }
     }
 }
@@ -1199,6 +1191,194 @@ mod tests {
 
     fn configured_folder(path: &Path) -> String {
         path.to_string_lossy().into_owned()
+    }
+
+    fn tree_snapshot(root: &Path) -> Vec<(PathBuf, String, u64, Vec<u8>)> {
+        fn visit(
+            root: &Path,
+            current: &Path,
+            snapshot: &mut Vec<(PathBuf, String, u64, Vec<u8>)>,
+        ) {
+            let mut entries = fs::read_dir(current)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                if metadata.file_type().is_symlink() {
+                    snapshot.push((
+                        relative,
+                        "symlink".to_string(),
+                        metadata.ino(),
+                        fs::read_link(&path)
+                            .unwrap()
+                            .to_string_lossy()
+                            .as_bytes()
+                            .to_vec(),
+                    ));
+                } else if metadata.is_dir() {
+                    snapshot.push((
+                        relative,
+                        "directory".to_string(),
+                        metadata.ino(),
+                        Vec::new(),
+                    ));
+                    visit(root, &path, snapshot);
+                } else {
+                    snapshot.push((
+                        relative,
+                        "file".to_string(),
+                        metadata.ino(),
+                        fs::read(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+
+        let root_metadata = fs::symlink_metadata(root).unwrap();
+        let mut snapshot = vec![(
+            PathBuf::new(),
+            "directory".to_string(),
+            root_metadata.ino(),
+            Vec::new(),
+        )];
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    fn publish_managed_library(root: &Path, library: &Path, physical_root: &Path) {
+        let staging = root.join("library.next");
+        crate::local_media::mirror::build_filtered_staging(
+            &staging,
+            library,
+            &[physical_root.to_path_buf()],
+            "supervisor-managed-sync",
+        )
+        .unwrap();
+        fs::remove_dir(library).unwrap();
+        fs::rename(staging, library).unwrap();
+    }
+
+    #[test]
+    fn legacy_reconcile_behavior_remains_unchanged_without_manifest() {
+        let (root, library) = library_test_paths("legacy-managed-aware-sync");
+        let music = root.join("Music");
+        fs::create_dir(&music).unwrap();
+
+        let first = MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&music)],
+        )
+        .unwrap();
+        assert!(first.changed);
+        assert_eq!(fs::canonicalize(library.join("Music")).unwrap(), music);
+
+        let second = MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&music)],
+        )
+        .unwrap();
+        assert!(!second.changed);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_reconcile_preserves_a_valid_compatible_generation() {
+        let (root, library) = library_test_paths("managed-sync-valid");
+        let music = root.join("Music");
+        fs::create_dir_all(music.join("Album")).unwrap();
+        fs::write(music.join("Album/track.flac"), b"audio").unwrap();
+        publish_managed_library(&root, &library, &music);
+        let before = tree_snapshot(&library);
+
+        let result = MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&music)],
+        )
+        .unwrap();
+
+        assert!(!result.changed);
+        assert_eq!(result.library_dir, library);
+        assert_eq!(tree_snapshot(&library), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_reconcile_rejects_corruption_without_mutation() {
+        let (root, library) = library_test_paths("managed-sync-invalid");
+        let music = root.join("Music");
+        fs::create_dir_all(music.join("Album")).unwrap();
+        fs::write(music.join("Album/track.flac"), b"audio").unwrap();
+        publish_managed_library(&root, &library, &music);
+        fs::write(
+            library.join(crate::local_media::mirror::MANIFEST_NAME),
+            b"invalid json",
+        )
+        .unwrap();
+        let before = tree_snapshot(&library);
+
+        assert!(MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&music)],
+        )
+        .is_err());
+        assert_eq!(tree_snapshot(&library), before);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_reconcile_rejects_incompatible_topology_without_mutation() {
+        let (root, library) = library_test_paths("managed-sync-topology-invalid");
+        let music = root.join("Music");
+        fs::create_dir_all(music.join("Album")).unwrap();
+        fs::write(music.join("Album/track.flac"), b"audio").unwrap();
+        publish_managed_library(&root, &library, &music);
+        fs::write(library.join("unexpected-file"), b"unexpected").unwrap();
+        let before = tree_snapshot(&library);
+
+        assert!(MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&music)],
+        )
+        .is_err());
+        assert_eq!(tree_snapshot(&library), before);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_reconcile_rejects_incompatible_config_without_mutation() {
+        let (root, library) = library_test_paths("managed-sync-config-mismatch");
+        let music = root.join("Music");
+        let other = root.join("Other");
+        fs::create_dir_all(music.join("Album")).unwrap();
+        fs::create_dir_all(other.join("Album")).unwrap();
+        fs::write(music.join("Album/track.flac"), b"audio").unwrap();
+        fs::write(other.join("Album/other.flac"), b"audio").unwrap();
+        let staging = root.join("library.next");
+        crate::local_media::mirror::build_filtered_staging(
+            &staging,
+            &library,
+            &[music.clone(), other],
+            "supervisor-managed-sync-mismatch",
+        )
+        .unwrap();
+        fs::remove_dir(&library).unwrap();
+        fs::rename(staging, &library).unwrap();
+        let before = tree_snapshot(&library);
+
+        assert!(MpdSupervisor::reconcile_library_symlinks(
+            &library,
+            &[configured_folder(&music)],
+        )
+        .is_err());
+        assert_eq!(tree_snapshot(&library), before);
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1327,7 +1507,6 @@ mod tests {
         let other = root.join("Other");
         fs::create_dir(&reggae).unwrap();
         fs::create_dir(&other).unwrap();
-        fs::create_dir(library.join("UnexpectedDirectory")).unwrap();
         symlink(&reggae, library.join("Reggae")).unwrap();
         symlink(&other, library.join("Unconfigured")).unwrap();
         symlink(root.join("Missing"), library.join("Broken")).unwrap();
@@ -1344,6 +1523,49 @@ mod tests {
                 label: "Reggae".to_string(),
             }]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_library_sources_support_managed_generations() {
+        let (root, library) = library_test_paths("library-sources-managed");
+        let first = root.join("one/Music");
+        let second = root.join("two/Music");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let staging = root.join("library.next");
+        crate::local_media::mirror::build_filtered_staging(
+            &staging,
+            &library,
+            &[first.clone(), second.clone()],
+            "source-discovery-managed",
+        )
+        .unwrap();
+        fs::remove_dir(&library).unwrap();
+        fs::rename(staging, &library).unwrap();
+        let folders = [configured_folder(&second), configured_folder(&first)];
+
+        let sources = MpdSupervisor::local_library_sources_in(&library, &folders).unwrap();
+        assert_eq!(
+            sources.iter().map(|source| source.id.as_str()).collect::<Vec<_>>(),
+            vec!["Music", "Music (2)"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_library_sources_fail_closed_on_unexpected_legacy_entry() {
+        let (root, library) = library_test_paths("library-sources-unexpected");
+        let music = root.join("Music");
+        fs::create_dir(&music).unwrap();
+        fs::create_dir(library.join("UnexpectedDirectory")).unwrap();
+        symlink(&music, library.join("Music")).unwrap();
+
+        assert!(MpdSupervisor::local_library_sources_in(
+            &library,
+            &[configured_folder(&music)],
+        )
+        .is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

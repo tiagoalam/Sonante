@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { plexService } from "../services/plex";
 import {
@@ -40,10 +40,21 @@ export const PlexImage: React.FC<PlexImageProps> = ({
   onLoadErrorRef.current = onLoadError;
   const imageKey = plexImageCacheKey(image);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     visibilityGateRef.current.reset(image);
     setObjectUrl(null);
     setFailed(false);
+
+    // Pin an already loaded image and present it before paint, without waiting for intersection.
+    const cached = artworkCache.acquireCached(image);
+    if (cached) {
+      leaseRef.current = cached;
+      setObjectUrl(cached.objectUrl);
+      return () => {
+        cached.release();
+        if (leaseRef.current === cached) leaseRef.current = null;
+      };
+    }
 
     const node = containerRef.current;
     if (!node || !("IntersectionObserver" in window)) {
@@ -82,10 +93,10 @@ export const PlexImage: React.FC<PlexImageProps> = ({
     leaseRef.current = lease;
     void lease.promise.then(
       (url) => {
-        if (active) setObjectUrl(url);
+        if (active && visibilityGateRef.current.canAcquire(image)) setObjectUrl(url);
       },
       () => {
-        if (active) {
+        if (active && visibilityGateRef.current.canAcquire(image)) {
           setFailed(true);
           onLoadErrorRef.current?.();
         }

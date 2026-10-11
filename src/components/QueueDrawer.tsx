@@ -1,3 +1,4 @@
+import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useState } from "react";
 import { X, Trash2, Disc3, Play, Volume2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -26,7 +27,7 @@ export const QueueDrawer: React.FC<Props> = ({
       const q = await audioService.getQueue();
       setQueue(q);
     } catch (err) {
-      console.error("Falha ao carregar fila:", err);
+      logError("queue.load", err);
     }
   };
 
@@ -41,7 +42,7 @@ export const QueueDrawer: React.FC<Props> = ({
     try {
       await audioService.playQueueIndex(index);
     } catch (err) {
-      console.error("Erro ao tocar índice da fila:", err);
+      logError("queue.play-index", err);
     }
   };
 
@@ -52,7 +53,7 @@ export const QueueDrawer: React.FC<Props> = ({
       await audioService.clearQueue();
       setQueue([]);
     } catch (err) {
-      console.error("Erro ao limpar fila:", err);
+      logError("queue.clear", err);
     } finally {
       setLoading(false);
     }
@@ -68,13 +69,13 @@ export const QueueDrawer: React.FC<Props> = ({
   if (!isOpen) return null;
 
   return (
-    <aside className="fixed top-0 right-0 bottom-24 w-80 bg-[#161616] border-l border-[#262626] shadow-2xl z-40 flex flex-col select-none animate-in slide-in-from-right duration-200">
+    <aside className="fixed top-0 right-0 bottom-28 w-80 bg-[#161616] border-l border-[#262626] shadow-2xl z-40 flex flex-col select-none animate-in slide-in-from-right duration-200">
       {/* Topo da Gaveta */}
       <div className="p-4 border-b border-[#242424] flex items-center justify-between bg-[#191919]">
         <div>
           <h2 className="text-sm font-bold text-white tracking-wide">{t("queue.title")}</h2>
           <span className="text-[11px] text-[#777777]">
-            {queue.length} {t("favorites.tracks")}
+            {t("common.trackCount", { count: queue.length })}
           </span>
         </div>
 

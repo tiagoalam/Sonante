@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { audioRestartExpected } from "./audioConfigChange.ts";
+import { audioRestartExpected, localFoldersChanged, localFoldersOnlyChanged } from "./audioConfigChange.ts";
 
 const original = {
   first_run: false,
@@ -32,4 +32,20 @@ test("each backend audio field implies an audio restart", () => {
   ]) {
     assert.equal(audioRestartExpected(original, { ...original, ...change }), true);
   }
+});
+
+test("local folder changes are detected without treating an unchanged list as changed", () => {
+  assert.equal(localFoldersChanged(original, { ...original, local_folders: ["/music"] }), false);
+  assert.equal(localFoldersChanged(original, { ...original, local_folders: ["/music", "/archive"] }), true);
+  assert.equal(localFoldersChanged(original, { ...original, local_folders: ["/archive"] }), true);
+  assert.equal(localFoldersChanged(original, { ...original, local_folders: [] }), true);
+});
+
+test("background Save is limited to local-folder-only changes", () => {
+  assert.equal(localFoldersOnlyChanged(original, { ...original, local_folders: ["/new"] }), true);
+  assert.equal(localFoldersOnlyChanged(original, original), false);
+  assert.equal(localFoldersOnlyChanged(original, { ...original, local_folders: ["/new"], alsa_device: "hw:1" }), false);
+  assert.equal(localFoldersOnlyChanged(original, { ...original, local_folders: ["/new"], plex_url: "http://plex" }), false);
+  assert.equal(localFoldersOnlyChanged(original, { ...original, local_folders: ["/new"], online_artwork_enabled: false }), false);
+  assert.equal(localFoldersOnlyChanged({ ...original, first_run: true }, { ...original, first_run: true, local_folders: ["/new"] }), false);
 });

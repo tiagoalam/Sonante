@@ -3,11 +3,17 @@ import type { LocalAlbum } from "../types/local";
 type CoverLookup = (album: LocalAlbum) => Promise<string | null>;
 type FolderLookup = (path: string) => Promise<string | null>;
 export type OnlineCacheStatus = "positive" | "negative" | "miss" | "ineligible";
-export type ArtworkPhase = "online_request" | "online_cache_positive" | "online_cache_negative" | "online_ineligible";
+export type ArtworkPhase = "online_request" | "online_cache_positive" | "online_cache_negative" | "online_ineligible" | "deferred";
 export type CurrentFlag = boolean | (() => boolean);
 const current = (flag: CurrentFlag): boolean => typeof flag === "function" ? flag() : flag;
 
 const onlineInFlight = new Map<string, Promise<string | null>>();
+
+export function artworkReadBlocked(updating: boolean, catalog: {
+  loaded: boolean; loading: boolean; saveBlocked: boolean; mpdBusy: boolean; error: string | null;
+}): boolean {
+  return updating || !catalog.loaded || catalog.loading || catalog.saveBlocked || catalog.mpdBusy || !!catalog.error;
+}
 
 export class LocalArtworkResolver {
   private readonly getLocalCover: FolderLookup;
@@ -16,7 +22,12 @@ export class LocalArtworkResolver {
   private readonly maxCached: number;
   private readonly covers = new Map<string, string>();
   private readonly coverSources = new Map<string, "local" | "online">();
-  private readonly inFlight = new Map<string, Promise<string | null>>();
+  private readonly inFlight = new Map<string, { generation: number; promise: Promise<string | null>; getPhase: () => ArtworkPhase | undefined; consumers: Set<() => boolean> }>();
+  private generation = 0;
+  private blocked = false;
+  private catalog: readonly LocalAlbum[] | null = null;
+  private active = 0;
+  private readonly queued: Array<() => void> = [];
   private readonly listeners = new Map<string, Set<(cover: string) => void>>();
 
   constructor(
@@ -43,6 +54,27 @@ export class LocalArtworkResolver {
     return this.coverSources.get(albumId) ?? null;
   }
 
+  setContext(blocked: boolean, catalog: readonly LocalAlbum[]): void {
+    if (this.blocked === blocked && this.catalog === catalog) return;
+    this.blocked = blocked;
+    this.catalog = catalog;
+    this.generation += 1;
+  }
+
+  private schedule(task: () => Promise<string | null>): Promise<string | null> {
+    return new Promise((resolve, reject) => {
+      const start = () => {
+        this.active += 1;
+        void task().then(resolve, reject).finally(() => {
+          this.active -= 1;
+          this.queued.shift()?.();
+        });
+      };
+      if (this.active < 2) start();
+      else this.queued.push(start);
+    });
+  }
+
   subscribe(albumId: string, listener: (cover: string) => void): () => void {
     const listeners = this.listeners.get(albumId) ?? new Set();
     listeners.add(listener);
@@ -67,23 +99,54 @@ export class LocalArtworkResolver {
     this.listeners.get(albumId)?.forEach((listener) => listener(cover));
   }
 
-  resolve(album: LocalAlbum, onlineEnabled: CurrentFlag, libraryUpdating: CurrentFlag, onPhase?: (phase: ArtworkPhase) => void): Promise<string | null> {
+  resolve(album: LocalAlbum, onlineEnabled: CurrentFlag, libraryUpdating: CurrentFlag, onPhase?: (phase: ArtworkPhase) => void, consumerActive: CurrentFlag = true): Promise<string | null> {
     const cached = this.get(album.id);
     if (cached) return Promise.resolve(cached);
+    const generation = this.generation;
+    const contextBlocked = () => this.blocked || generation !== this.generation || current(libraryUpdating)
+      || (this.catalog !== null && !this.catalog.includes(album));
+    if (contextBlocked() || !current(consumerActive)) {
+      onPhase?.("deferred");
+      return Promise.resolve(null);
+    }
+    const interested = () => current(consumerActive);
+    const observe = (entry: NonNullable<ReturnType<typeof this.inFlight.get>>) => {
+      entry.consumers.add(interested);
+      return entry.promise.then(cover => {
+        if (!interested()) { onPhase?.("deferred"); return null; }
+        if (contextBlocked() || entry.getPhase() === "deferred") { onPhase?.("deferred"); return this.get(album.id); }
+        return cover;
+      }).finally(() => entry.consumers.delete(interested));
+    };
     const inFlight = this.inFlight.get(album.id);
-    if (inFlight) return inFlight;
+    if (inFlight?.generation === generation && inFlight.getPhase() !== "deferred") return observe(inFlight);
+    const consumers = new Set([interested]);
+    const blocked = () => contextBlocked() || !Array.from(consumers).some(consumer => consumer());
     let phase: ArtworkPhase | undefined;
-    const pending = lookupAlbumArtwork(album, this.getLocalCover, this.getOnlineCover, onlineEnabled, libraryUpdating, this.getOnlineCacheStatus, (nextPhase) => {
-      phase = nextPhase;
-      onPhase?.(nextPhase);
+    const pending = this.schedule(() => {
+      // A queued card may have disappeared, or its cover may have arrived through another path.
+      if (!blocked()) {
+        const cached = this.get(album.id);
+        if (cached) return Promise.resolve(cached);
+      }
+      return lookupAlbumArtwork(album, this.getLocalCover, this.getOnlineCover, onlineEnabled, blocked, this.getOnlineCacheStatus, (nextPhase) => {
+        phase = nextPhase;
+        onPhase?.(nextPhase);
+      });
     })
       .then((cover) => {
+        if (blocked()) { phase = "deferred"; onPhase?.(phase); return this.get(album.id); }
         if (cover) this.publish(album.id, cover, phase === "online_request" || phase === "online_cache_positive" ? "online" : "local");
         return this.get(album.id) ?? cover;
       })
-      .finally(() => this.inFlight.delete(album.id));
-    this.inFlight.set(album.id, pending);
-    return pending;
+      .catch(error => {
+        if (!blocked()) throw error;
+        phase = "deferred"; onPhase?.(phase); return this.get(album.id);
+      })
+      .finally(() => { if (this.inFlight.get(album.id)?.promise === pending) this.inFlight.delete(album.id); });
+    const entry = { generation, promise: pending, getPhase: () => phase, consumers };
+    this.inFlight.set(album.id, entry);
+    return observe(entry);
   }
 
   // Playback must never wait for an online request already in flight.
@@ -105,16 +168,22 @@ export async function lookupAlbumArtwork(
   getOnlineCacheStatus?: (album: LocalAlbum) => Promise<OnlineCacheStatus>,
   onPhase?: (phase: ArtworkPhase) => void,
 ): Promise<string | null> {
+  const deferred = () => { onPhase?.("deferred"); return null; };
+  if (current(libraryUpdating)) return deferred();
   const paths = new Set([album.folder_path, ...album.discs.map((disc) => disc.folder_path)]);
   for (const path of paths) {
+    if (current(libraryUpdating)) return deferred();
     const cover = await getLocalCover(path);
+    if (current(libraryUpdating)) return deferred();
     if (cover) return cover;
   }
-  if (!current(onlineEnabled) || current(libraryUpdating)) return null;
+  if (current(libraryUpdating)) return deferred();
+  if (!current(onlineEnabled)) return null;
 
   if (getOnlineCacheStatus) {
     const status = await getOnlineCacheStatus(album);
-    if (!current(onlineEnabled) || current(libraryUpdating)) return null;
+    if (current(libraryUpdating)) return deferred();
+    if (!current(onlineEnabled)) return null;
     if (status === "negative" || status === "ineligible") {
       onPhase?.(status === "negative" ? "online_cache_negative" : "online_ineligible");
       return null;
@@ -129,5 +198,6 @@ export async function lookupAlbumArtwork(
     pending = getOnlineCover(album).finally(() => onlineInFlight.delete(album.id));
     onlineInFlight.set(album.id, pending);
   }
-  return pending;
+  const cover = await pending;
+  return current(libraryUpdating) ? deferred() : cover;
 }

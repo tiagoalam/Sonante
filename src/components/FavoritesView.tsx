@@ -1,3 +1,4 @@
+import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useState } from "react";
 import {
   Heart,
@@ -48,7 +49,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
       const data = await favoritesService.getFavorites();
       setFavorites(data || []);
     } catch (err) {
-      console.error("Falha ao carregar favoritos:", err);
+      logError("favorites.load", err);
     } finally {
       setLoading(false);
     }
@@ -70,7 +71,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
         onFavoritesChanged();
       }
     } catch (err) {
-      console.error("Erro ao alterar favorito:", err);
+      logError("favorites.toggle", err);
     }
   };
 
@@ -106,7 +107,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
         );
       }
     } catch (err) {
-      console.error("Falha ao carregar faixas do favorito:", err);
+      logError("favorites.load-tracks", err);
     } finally {
       setLoadingTracks(false);
     }
@@ -159,7 +160,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
         if (meta.length > 0) audioService.playTracks(meta, 0);
       }
     } catch (err) {
-      console.error("Erro na reprodução rápida de favoritos:", err);
+      logError("favorites.quick-play", err);
     }
   };
 
@@ -305,7 +306,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                 <p className="text-base text-[#CCCCCC] font-medium">{selectedAlbum.artist}</p>
                 <p className="text-xs text-[#777777]">
                   {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
-                  {tracks.length} {t("favorites.tracks")}
+                  {t("common.trackCount", { count: tracks.length })}
                 </p>
 
                 <div className="pt-2 flex items-center space-x-3">

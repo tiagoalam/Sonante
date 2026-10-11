@@ -172,24 +172,24 @@ fn changed_properties(
 }
 
 trait BasicMediaControls {
-    fn play(&mut self) -> Result<(), String>;
+    fn play(&mut self, is_shared: bool) -> Result<(), String>;
     fn pause(&mut self) -> Result<(), String>;
-    fn play_pause(&mut self) -> Result<(), String>;
+    fn play_pause(&mut self, is_shared: bool) -> Result<(), String>;
     fn next(&mut self, is_shared: bool) -> Result<(), String>;
     fn previous(&mut self, is_shared: bool) -> Result<(), String>;
 }
 
 impl BasicMediaControls for AudioEngine {
-    fn play(&mut self) -> Result<(), String> {
-        AudioEngine::play(self)
+    fn play(&mut self, is_shared: bool) -> Result<(), String> {
+        AudioEngine::play(self, is_shared)
     }
 
     fn pause(&mut self) -> Result<(), String> {
         AudioEngine::pause(self)
     }
 
-    fn play_pause(&mut self) -> Result<(), String> {
-        self.toggle_play_pause()
+    fn play_pause(&mut self, is_shared: bool) -> Result<(), String> {
+        self.toggle_play_pause(is_shared)
     }
 
     fn next(&mut self, is_shared: bool) -> Result<(), String> {
@@ -207,9 +207,9 @@ fn apply_basic_action(
     is_shared: bool,
 ) -> Result<(), String> {
     match action {
-        BasicMediaAction::Play => controls.play(),
+        BasicMediaAction::Play => controls.play(is_shared),
         BasicMediaAction::Pause => controls.pause(),
-        BasicMediaAction::PlayPause => controls.play_pause(),
+        BasicMediaAction::PlayPause => controls.play_pause(is_shared),
         BasicMediaAction::Next => controls.next(is_shared),
         BasicMediaAction::Previous => controls.previous(is_shared),
     }
@@ -286,18 +286,24 @@ impl SonanteMpris {
     async fn control(&self, action: BasicMediaAction) -> fdo::Result<()> {
         let app = self.app.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            let is_shared =
-                if matches!(action, BasicMediaAction::Next | BasicMediaAction::Previous) {
-                    let config_state = app.try_state::<ConfigState>().ok_or_else(|| {
-                        "Configuração indisponível para o controle MPRIS.".to_string()
-                    })?;
-                    let config = config_state.0.lock().map_err(|error| {
-                        format!("Falha ao acessar configuração via MPRIS: {error}")
-                    })?;
-                    is_shared_output(&config)
-                } else {
-                    false
-                };
+            let is_shared = if matches!(
+                action,
+                BasicMediaAction::Play
+                    | BasicMediaAction::PlayPause
+                    | BasicMediaAction::Next
+                    | BasicMediaAction::Previous
+            ) {
+                let config_state = app.try_state::<ConfigState>().ok_or_else(|| {
+                    "Configuração indisponível para o controle MPRIS.".to_string()
+                })?;
+                let config = config_state
+                    .0
+                    .lock()
+                    .map_err(|error| format!("Falha ao acessar configuração via MPRIS: {error}"))?;
+                is_shared_output(&config)
+            } else {
+                false
+            };
             let state = app
                 .try_state::<AudioState>()
                 .ok_or_else(|| "Estado de áudio indisponível para o controle MPRIS.".to_string())?;
@@ -316,7 +322,10 @@ impl SonanteMpris {
                 .await
                 .map_err(|error| fdo::Error::Failed(format!("Falha na tarefa MPRIS: {error}")))?;
         if let Err(error) = refresh {
-            eprintln!("[MPRIS] Controle aceito, mas atualização de propriedades falhou: {error}");
+            eprintln!(
+                "[MPRIS] Control accepted, but property refresh failed: {}",
+                crate::diagnostics::error_summary(&error)
+            );
         }
         Ok(())
     }
@@ -325,7 +334,10 @@ impl SonanteMpris {
         match query_audio_snapshot_async(self.app.clone()).await {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                eprintln!("[MPRIS] Estado MPD temporariamente indisponível: {error}");
+                eprintln!(
+                    "[MPRIS] MPD state temporarily unavailable: {}",
+                    crate::diagnostics::error_summary(&error)
+                );
                 MprisSnapshot::stopped()
             }
         }
@@ -519,7 +531,10 @@ impl ObserverHandle {
             .spawn(move || {
                 if let Err(error) = run_mpd_observer(&app, &socket_path, &thread_control) {
                     if !thread_control.is_cancelled() {
-                        eprintln!("[MPRIS] Observer MPD encerrado: {error}");
+                        eprintln!(
+                            "[MPRIS] MPD observer stopped: {}",
+                            crate::diagnostics::error_summary(&error)
+                        );
                     }
                 }
             })
@@ -534,7 +549,7 @@ impl ObserverHandle {
         self.control.cancel();
         if let Some(thread) = self.thread.take() {
             if thread.join().is_err() {
-                eprintln!("[MPRIS] Observer MPD terminou com panic.");
+                eprintln!("[MPRIS] MPD observer panicked.");
             }
         }
     }
@@ -609,7 +624,10 @@ impl ObserverControl {
                     let _ = stream.shutdown(Shutdown::Both);
                 }
             }
-            Err(error) => eprintln!("[MPRIS] Falha ao cancelar socket do observer: {error}"),
+            Err(error) => eprintln!(
+                "[MPRIS] Failed to cancel observer socket: {}",
+                crate::diagnostics::error_summary(&error)
+            ),
         }
         self.wait_wakeup.notify_all();
     }
@@ -770,7 +788,7 @@ where
         let session_result = match runtime.connect(control) {
             Ok(mut connection) => {
                 if connection_lost_logged {
-                    eprintln!("[MPRIS] Conexão do observer MPD recuperada.");
+                    eprintln!("[MPRIS] MPD observer connection recovered.");
                     connection_lost_logged = false;
                 }
                 backoff.reset();
@@ -778,14 +796,20 @@ where
                     Ok(())
                 } else {
                     if let Err(error) = runtime.refresh_snapshot() {
-                        eprintln!("[MPRIS] Snapshot do observer indisponível: {error}");
+                        eprintln!(
+                            "[MPRIS] Observer snapshot unavailable: {}",
+                            crate::diagnostics::error_summary(&error)
+                        );
                     }
                     loop {
                         match connection.wait_for_player_change() {
                             Ok(()) if control.is_cancelled() => break Ok(()),
                             Ok(()) => {
                                 if let Err(error) = runtime.refresh_snapshot() {
-                                    eprintln!("[MPRIS] Falha ao atualizar evento player: {error}");
+                                    eprintln!(
+                                        "[MPRIS] Failed to refresh player event: {}",
+                                        crate::diagnostics::error_summary(&error)
+                                    );
                                 }
                             }
                             Err(error) => break Err(error),
@@ -803,7 +827,10 @@ where
 
         if let Err(error) = session_result {
             if !connection_lost_logged {
-                eprintln!("[MPRIS] Conexão do observer MPD indisponível: {error}");
+                eprintln!(
+                    "[MPRIS] MPD observer connection unavailable: {}",
+                    crate::diagnostics::error_summary(&error)
+                );
                 connection_lost_logged = true;
             }
         }
@@ -927,13 +954,13 @@ impl Default for MprisState {
 
 pub fn start(app: AppHandle) {
     let Some(state) = app.try_state::<MprisState>() else {
-        eprintln!("[MPRIS] Estado do serviço indisponível.");
+        eprintln!("[MPRIS] Service state unavailable.");
         return;
     };
     let should_start = match state.0.lock() {
         Ok(mut lifecycle) => lifecycle.begin_start(),
         Err(_) => {
-            eprintln!("[MPRIS] Falha ao acessar o lifecycle do serviço.");
+            eprintln!("[MPRIS] Failed to access service lifecycle.");
             false
         }
     };
@@ -953,7 +980,10 @@ pub fn start(app: AppHandle) {
         {
             Ok(server) => server,
             Err(error) => {
-                eprintln!("[MPRIS] Session D-Bus indisponível: {error}");
+                eprintln!(
+                    "[MPRIS] Session D-Bus unavailable: {}",
+                    crate::diagnostics::error_summary(&error)
+                );
                 if let Some(state) = task_app.try_state::<MprisState>() {
                     if let Ok(mut lifecycle) = state.0.lock() {
                         lifecycle.start_failed();
@@ -969,7 +999,10 @@ pub fn start(app: AppHandle) {
             .and_then(|state| state.0.lock().ok()?.finish_start(server));
         if let Some(server) = unused_server {
             if let Err(error) = server.release_bus_name().await {
-                eprintln!("[MPRIS] Falha ao liberar o nome D-Bus: {error}");
+                eprintln!(
+                    "[MPRIS] Failed to release D-Bus name: {}",
+                    crate::diagnostics::error_summary(&error)
+                );
             }
             return;
         }
@@ -982,13 +1015,16 @@ pub fn start(app: AppHandle) {
                 .map(|audio| audio.local_album_socket_path())
         });
         let Some(socket_path) = socket_path else {
-            eprintln!("[MPRIS] Observer MPD não pôde obter o socket de áudio.");
+            eprintln!("[MPRIS] MPD observer could not obtain the audio socket.");
             return;
         };
         let observer = match ObserverHandle::start(task_app.clone(), socket_path) {
             Ok(observer) => observer,
             Err(error) => {
-                eprintln!("[MPRIS] Observer MPD indisponível: {error}");
+                eprintln!(
+                    "[MPRIS] MPD observer unavailable: {}",
+                    crate::diagnostics::error_summary(&error)
+                );
                 return;
             }
         };
@@ -996,7 +1032,7 @@ pub fn start(app: AppHandle) {
             Some(state) => match state.0.lock() {
                 Ok(mut lifecycle) => lifecycle.set_observer(observer),
                 Err(_) => {
-                    eprintln!("[MPRIS] Falha ao guardar o observer MPD.");
+                    eprintln!("[MPRIS] Failed to store MPD observer.");
                     Some(observer)
                 }
             },
@@ -1011,7 +1047,7 @@ pub fn start(app: AppHandle) {
             Ok(mut lifecycle) => lifecycle.set_startup_task(task),
             Err(_) => {
                 task.abort();
-                eprintln!("[MPRIS] Falha ao guardar a tarefa de inicialização.");
+                eprintln!("[MPRIS] Failed to store startup task.");
             }
         }
     } else {
@@ -1024,7 +1060,7 @@ pub fn shutdown(app: &AppHandle) {
         Some(state) => match state.0.lock() {
             Ok(mut lifecycle) => lifecycle.begin_shutdown(),
             Err(_) => {
-                eprintln!("[MPRIS] Falha ao acessar o lifecycle no shutdown.");
+                eprintln!("[MPRIS] Failed to access lifecycle during shutdown.");
                 (None, None, None)
             }
         },
@@ -1040,7 +1076,10 @@ pub fn shutdown(app: &AppHandle) {
 
     if let Some(server) = server {
         if let Err(error) = tauri::async_runtime::block_on(server.release_bus_name()) {
-            eprintln!("[MPRIS] Falha ao encerrar o serviço: {error}");
+            eprintln!(
+                "[MPRIS] Failed to stop service: {}",
+                crate::diagnostics::error_summary(&error)
+            );
         }
     }
 }
@@ -1072,7 +1111,9 @@ mod tests {
     }
 
     impl BasicMediaControls for FakeControls {
-        fn play(&mut self) -> Result<(), String> {
+        fn play(&mut self, is_shared: bool) -> Result<(), String> {
+            self.shared_transport
+                .push((BasicMediaAction::Play, is_shared));
             self.record(BasicMediaAction::Play)
         }
 
@@ -1080,7 +1121,9 @@ mod tests {
             self.record(BasicMediaAction::Pause)
         }
 
-        fn play_pause(&mut self) -> Result<(), String> {
+        fn play_pause(&mut self, is_shared: bool) -> Result<(), String> {
+            self.shared_transport
+                .push((BasicMediaAction::PlayPause, is_shared));
             self.record(BasicMediaAction::PlayPause)
         }
 
@@ -1116,6 +1159,8 @@ mod tests {
         assert_eq!(
             controls.shared_transport,
             vec![
+                (BasicMediaAction::Play, true),
+                (BasicMediaAction::PlayPause, true),
                 (BasicMediaAction::Next, true),
                 (BasicMediaAction::Previous, true),
             ]
@@ -1123,17 +1168,32 @@ mod tests {
     }
 
     #[test]
-    fn basic_action_errors_are_not_reported_as_success() {
-        let mut controls = FakeControls {
-            actions: Vec::new(),
-            shared_transport: Vec::new(),
-            failure: Some("ACK simulado".into()),
-        };
+    fn basic_direct_play_actions_forward_disabled_shared_recovery() {
+        for action in [BasicMediaAction::Play, BasicMediaAction::PlayPause] {
+            let mut controls = FakeControls::default();
+            apply_basic_action(&mut controls, action, false).unwrap();
+            assert_eq!(controls.actions, vec![action]);
+            assert_eq!(controls.shared_transport, vec![(action, false)]);
+        }
+    }
 
-        assert_eq!(
-            apply_basic_action(&mut controls, BasicMediaAction::Next, true),
-            Err("ACK simulado".into())
-        );
+    #[test]
+    fn basic_action_errors_are_not_reported_as_success() {
+        for action in [
+            BasicMediaAction::Play,
+            BasicMediaAction::PlayPause,
+            BasicMediaAction::Next,
+        ] {
+            let mut controls = FakeControls {
+                actions: Vec::new(),
+                shared_transport: Vec::new(),
+                failure: Some("ACK simulado".into()),
+            };
+            assert_eq!(
+                apply_basic_action(&mut controls, action, true),
+                Err("ACK simulado".into())
+            );
+        }
     }
 
     fn audio_status(state: &str, current_media: Option<CurrentMedia>) -> AudioPlaybackStatus {
@@ -1156,6 +1216,7 @@ mod tests {
                 backend: VolumeBackend::Unavailable,
             },
             is_updating: false,
+            playback_error: None,
         }
     }
 
@@ -1174,6 +1235,23 @@ mod tests {
             Ok(PlaybackStatus::Stopped)
         );
         assert!(playback_status_from_mpd("unknown").is_err());
+    }
+
+    #[test]
+    fn playback_error_does_not_change_mpris_state_or_metadata() {
+        for state in ["play", "pause", "stop"] {
+            let mut status = audio_status(
+                state,
+                Some(CurrentMedia::Local {
+                    uri: "Música/Faixa.flac".into(),
+                    queue_index: 0,
+                }),
+            );
+            let expected = MprisSnapshot::from_audio(status.clone()).unwrap();
+            status.playback_error = Some(crate::audio::PlaybackDiagnostic::OutputBusy);
+            let actual = MprisSnapshot::from_audio(status).unwrap();
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

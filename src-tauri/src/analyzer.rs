@@ -286,7 +286,10 @@ impl AudioAnalyzer {
 impl Drop for AudioAnalyzer {
     fn drop(&mut self) {
         if let Err(error) = self.stop(None) {
-            eprintln!("[Analyzer] Falha no cleanup final: {}", error);
+            eprintln!(
+                "[Analyzer] Final cleanup failed: {}",
+                crate::diagnostics::error_summary(&error)
+            );
         }
     }
 }
@@ -322,8 +325,7 @@ fn open_fifo_reader(path: &Path) -> Result<File, String> {
         ));
     }
     println!(
-        "[Analyzer] Opened existing FIFO: path={}, inode={}; no unlink/recreate performed.",
-        path.display(),
+        "[Analyzer] Opened existing FIFO: inode={}; no unlink/recreate performed.",
         opened_inode
     );
     Ok(file)
@@ -377,7 +379,8 @@ fn read_pcm(
                             Ok(()) => {}
                             Err(error) => eprintln!(
                                 "[Analyzer] Failed to emit level frame to window '{}': {}",
-                                WINDOW_LABEL, error
+                                WINDOW_LABEL,
+                                crate::diagnostics::error_summary(&error)
                             ),
                         }
                     } else if !logged_first_frame {
@@ -392,7 +395,10 @@ fn read_pcm(
                 thread::sleep(Duration::from_millis(5));
             }
             Err(error) => {
-                eprintln!("[Analyzer] Falha ao ler PCM do FIFO: {}", error);
+                eprintln!(
+                    "[Analyzer] Failed to read PCM from FIFO: {}",
+                    crate::diagnostics::error_summary(&error)
+                );
                 reader_stop.store(true, Ordering::Release);
                 controller_stop.store(true, Ordering::Release);
                 if let Err(disable_error) = set_output_enabled(
@@ -401,8 +407,8 @@ fn read_pcm(
                     false,
                 ) {
                     eprintln!(
-                        "[Analyzer] Falha ao desabilitar output após erro de leitura: {}",
-                        disable_error
+                        "[Analyzer] Failed to disable output after read error: {}",
+                        crate::diagnostics::error_summary(&disable_error)
                     );
                 }
                 emit_status(&app, false, Some("reader_error"));
@@ -463,15 +469,18 @@ fn monitor_player(socket_path: String, stop: Arc<AtomicBool>, app: AppHandle) {
                     false,
                 ) {
                     eprintln!(
-                        "[Analyzer] Falha ao desabilitar output durante troca de faixa: {}",
-                        error
+                        "[Analyzer] Failed to disable output during track change: {}",
+                        crate::diagnostics::error_summary(&error)
                     );
                     emit_status(&app, false, Some("output_disable_failed"));
                     continue;
                 }
                 if !stop.load(Ordering::Acquire) {
                     if let Err(error) = reconcile_output(&socket_path, &app, &stop) {
-                        eprintln!("[Analyzer] Falha ao reavaliar a faixa atual: {}", error);
+                        eprintln!(
+                            "[Analyzer] Failed to reevaluate current track: {}",
+                            crate::diagnostics::error_summary(&error)
+                        );
                         emit_status(&app, false, Some("reconcile_failed"));
                     }
                 }
@@ -522,7 +531,8 @@ fn emit_status(app: &AppHandle, available: bool, reason: Option<&str>) {
         if let Err(error) = window.emit(STATUS_EVENT, status) {
             eprintln!(
                 "[Analyzer] Failed to emit status to window '{}': {}",
-                WINDOW_LABEL, error
+                WINDOW_LABEL,
+                crate::diagnostics::error_summary(&error)
             );
         }
     } else {
@@ -534,7 +544,11 @@ fn emit_status(app: &AppHandle, available: bool, reason: Option<&str>) {
 }
 
 fn analyzer_failed(app: &AppHandle, reason: &str, error: &str) {
-    eprintln!("[Analyzer] Analyzer inactive: reason={}: {}", reason, error);
+    eprintln!(
+        "[Analyzer] Analyzer inactive: reason={}: {}",
+        reason,
+        crate::diagnostics::error_summary(&error)
+    );
     emit_status(app, false, Some(reason));
 }
 

@@ -20,6 +20,21 @@ async function until(predicate) {
   assert.fail("enrichment did not reach the expected state");
 }
 
+test("deferred artwork is never processed or persisted as missing", async () => {
+  const writes = [];
+  const queue = new LocalArtworkEnrichment({
+    get: () => null,
+    resolve: async (_album, _online, _updating, onPhase) => { onPhase("deferred"); return null; },
+  }, immediate, assert.fail, {
+    load: async () => ({}),
+    save: async changes => writes.push(...changes),
+  });
+  queue.setCatalog([album("A")]);
+  await until(() => queue.getSnapshot().total === 1 && !queue.getSnapshot().active);
+  assert.equal(queue.getSnapshot().processed, 0);
+  assert.deepEqual(writes, []);
+});
+
 test("three albums run in order with at most one active operation", async () => {
   const gates = [deferred(), deferred(), deferred()];
   const calls = [];

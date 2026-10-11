@@ -3,6 +3,42 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConfigSaveError {
+    BeforeRename(String),
+    AfterRenameUnconfirmed(String),
+}
+
+impl ConfigSaveError {
+    pub(crate) fn into_cause(self) -> String {
+        match self {
+            Self::BeforeRename(cause) | Self::AfterRenameUnconfirmed(cause) => cause,
+        }
+    }
+}
+
+impl From<String> for ConfigSaveError {
+    fn from(cause: String) -> Self {
+        Self::BeforeRename(cause)
+    }
+}
+
+impl std::fmt::Display for ConfigSaveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BeforeRename(cause) => {
+                write!(formatter, "config.json não foi substituído: {cause}")
+            }
+            Self::AfterRenameUnconfirmed(cause) => write!(
+                formatter,
+                "CONFIG_PERSISTENCE_UNCERTAIN: Estado incerto de config.json: a substituição pode ter ocorrido, mas a validação ou sincronização pós-rename falhou; commit e durabilidade não confirmados. {cause}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigSaveError {}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     #[serde(default = "default_first_run")]
@@ -106,18 +142,18 @@ impl AppConfig {
         Ok(cfg)
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    pub fn save(&self) -> Result<(), ConfigSaveError> {
         self.save_to_path(&Self::config_path())
     }
 
-    fn save_to_path(&self, path: &Path) -> Result<(), String> {
+    fn save_to_path(&self, path: &Path) -> Result<(), ConfigSaveError> {
         // Nunca substitua um arquivo existente que não pôde ser carregado.
         Self::load_from_path(path)?;
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        crate::persistence::atomic_write_private(path, json.as_bytes(), "config.json")
+        crate::persistence::atomic_write_private_synced(path, json.as_bytes(), "config.json")
     }
 
-    fn apply_legacy_migrations(&mut self) {
+    pub(crate) fn apply_legacy_migrations(&mut self) {
         // Migra configurações antigas com local_mount_path único para local_folders.
         if self.local_folders.is_empty() && !self.local_mount_path.is_empty() {
             self.local_folders.push(self.local_mount_path.clone());
@@ -166,6 +202,21 @@ mod tests {
     }
 
     #[test]
+    fn save_to_path_creates_and_replaces_config() {
+        let path = test_path();
+        let mut config = AppConfig::default();
+        config.save_to_path(&path).unwrap();
+        assert_eq!(AppConfig::load_from_path(&path).unwrap(), config);
+
+        config.first_run = false;
+        config.local_folders = vec!["/media/music".to_string()];
+        config.save_to_path(&path).unwrap();
+        assert_eq!(AppConfig::load_from_path(&path).unwrap(), config);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        remove_test_path(&path);
+    }
+
+    #[test]
     fn defaults_are_portable_for_first_run() {
         let config = AppConfig::default();
 
@@ -194,7 +245,10 @@ mod tests {
         let original = b"{invalid config bytes";
         fs::write(&path, original).unwrap();
         assert!(AppConfig::load_from_path(&path).is_err());
-        assert!(AppConfig::default().save_to_path(&path).is_err());
+        assert!(matches!(
+            AppConfig::default().save_to_path(&path),
+            Err(ConfigSaveError::BeforeRename(_))
+        ));
         assert_eq!(fs::read(&path).unwrap(), original);
         remove_test_path(&path);
     }
@@ -204,7 +258,10 @@ mod tests {
         let path = test_path();
         fs::create_dir(&path).unwrap();
         assert!(AppConfig::load_from_path(&path).is_err());
-        assert!(AppConfig::default().save_to_path(&path).is_err());
+        assert!(matches!(
+            AppConfig::default().save_to_path(&path),
+            Err(ConfigSaveError::BeforeRename(_))
+        ));
         remove_test_path(&path);
     }
 

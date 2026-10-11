@@ -1,3 +1,4 @@
+import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useState } from "react";
 import { ListMusic, LoaderCircle, Plus, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -31,7 +32,7 @@ export const PlaylistPickerModal: React.FC<Props> = ({ items, title, onClose }) 
         if (!disposed) setPlaylists(result);
       })
       .catch((cause) => {
-        console.error("Falha ao listar playlists:", cause);
+        logError("playlists.list", cause);
         if (!disposed) setError(t("playlists.loadError"));
       })
       .finally(() => {
@@ -49,7 +50,7 @@ export const PlaylistPickerModal: React.FC<Props> = ({ items, title, onClose }) 
       await playlistsService.addItems(playlistId, items);
       onClose();
     } catch (cause) {
-      console.error("Falha ao adicionar à playlist:", cause);
+      logError("playlists.add-tracks", cause);
       setError(t("playlists.addError"));
     } finally {
       setBusy(false);
@@ -69,7 +70,7 @@ export const PlaylistPickerModal: React.FC<Props> = ({ items, title, onClose }) 
       await playlistsService.createWithItems(name, items);
       onClose();
     } catch (cause) {
-      console.error("Falha ao criar playlist e adicionar faixas:", cause);
+      logError("playlists.create-with-tracks", cause);
       setError(
         isDuplicatePlaylistNameError(cause)
           ? t("playlists.duplicateName")

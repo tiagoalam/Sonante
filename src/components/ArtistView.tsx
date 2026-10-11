@@ -1,3 +1,4 @@
+import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useState } from "react";
 import { ArrowLeft, Play, Pause, Disc3, ChevronDown, ChevronUp, User, ListPlus } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -41,7 +42,7 @@ export const ArtistView: React.FC<Props> = ({
         setAlbums(fetchedAlbums);
         setTopTracks(fetchedTracks);
       })
-      .catch(console.error)
+      .catch(error => logError("artist.load", error))
       .finally(() => setLoading(false));
   }, [artist.rating_key]);
 
@@ -69,7 +70,7 @@ export const ArtistView: React.FC<Props> = ({
     if (!track) return;
 
     if (isTrackActive(track)) {
-      audioService.togglePlay().catch(console.error);
+      audioService.togglePlay().catch(error => logError("player.toggle", error));
       return;
     }
 
@@ -84,7 +85,7 @@ export const ArtistView: React.FC<Props> = ({
     try {
       await audioService.playTracks(metaTracks, index);
     } catch (err) {
-      console.error("Falha ao tocar faixas do artista:", err);
+      logError("artist.play", err);
     }
   };
 
@@ -129,7 +130,7 @@ export const ArtistView: React.FC<Props> = ({
             {artist.name}
           </h2>
           <div className="flex items-center space-x-3 text-xs text-[#777777] pt-1">
-            <span>{t(albums.length === 1 ? "artistView.albumsCount_one" : "artistView.albumsCount_other", { count: albums.length })}</span>
+            <span>{t("artistView.albumsCount", { count: albums.length })}</span>
             <span>•</span>
             <span>{t("artistView.catalogedTracks", { count: topTracks.length })}</span>
           </div>

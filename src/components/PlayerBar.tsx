@@ -1,3 +1,5 @@
+import { SignalPath } from "./SignalPath";
+import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useState, useRef } from "react";
 import {
   Play,
@@ -12,17 +14,18 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlexImage } from "./PlexImage";
-import { MpdHealth, PlaybackStatus } from "../types/audio";
+import { ConfiguredSignalRoute, MpdHealth, PlaybackStatus } from "../types/audio";
 import { audioService } from "../services/audio";
 
 interface Props {
   onToggleQueue: () => void;
   isQueueOpen: boolean;
-  onNavigateToArtist?: (artistName: string) => void;
+  onNavigateToArtist?: () => void;
   onNavigateToAlbum?: () => void;
   onOpenNowPlaying?: () => void;
   status: PlaybackStatus;
   health: MpdHealth;
+  route: ConfiguredSignalRoute | null;
 }
 
 export const PlayerBar: React.FC<Props> = ({
@@ -33,6 +36,7 @@ export const PlayerBar: React.FC<Props> = ({
   onOpenNowPlaying,
   status,
   health,
+  route,
 }) => {
   const { t } = useTranslation();
   const [isSeeking, setIsSeeking] = useState(false);
@@ -57,7 +61,7 @@ export const PlayerBar: React.FC<Props> = ({
     try {
       await audioService.togglePlay();
     } catch (err) {
-      console.error("Erro no play/pause:", err);
+      logError("player.toggle", err);
     }
   };
 
@@ -66,7 +70,7 @@ export const PlayerBar: React.FC<Props> = ({
     try {
       await audioService.next();
     } catch (err) {
-      console.error("Erro na faixa seguinte:", err);
+      logError("player.next", err);
     }
   };
 
@@ -75,7 +79,7 @@ export const PlayerBar: React.FC<Props> = ({
     try {
       await audioService.previous();
     } catch (err) {
-      console.error("Erro na faixa anterior:", err);
+      logError("player.previous", err);
     }
   };
 
@@ -86,7 +90,7 @@ export const PlayerBar: React.FC<Props> = ({
       await audioService.seek(val);
       setSeekValue(val);
     } catch (err) {
-      console.error("Erro ao buscar posição:", err);
+      logError("player.seek", err);
     }
   };
 
@@ -95,7 +99,7 @@ export const PlayerBar: React.FC<Props> = ({
     try {
       await audioService.setVolume(val);
     } catch (err) {
-      console.error("Erro ao alterar volume:", err);
+      logError("player.volume", err);
     }
   };
 
@@ -136,117 +140,105 @@ export const PlayerBar: React.FC<Props> = ({
     isAvailable && status.volume.available && status.volume.backend !== "unavailable"
       ? `${status.volume.value}% · ${volumeBackendLabel}`
       : volumeBackendLabel;
-  const sourceLabel = status.current_media
-    ? t(`player.source.${status.current_media.kind}`)
-    : null;
 
   return (
-    <footer className="h-24 bg-[#161616] border-t border-[#2A2A2A] flex items-center justify-between px-6 z-40 select-none shadow-[0_-8px_24px_rgba(0,0,0,0.16)]">
-      {/* 1. Metadados e Capa com Links Interativos */}
-      <div className="flex items-center gap-4 w-[30%] min-w-[240px]">
-        <div
-          onClick={() => {
-            if (!isNoTrack && onNavigateToAlbum) onNavigateToAlbum();
-          }}
-          className={`w-[60px] h-[60px] rounded-xl bg-[#202020] border border-[#303030] overflow-hidden shrink-0 flex items-center justify-center shadow-lg group/cover transition-all ${
-            !isNoTrack && onNavigateToAlbum
-              ? "cursor-pointer hover:border-[#E5A00D] hover:shadow-[0_0_12px_rgba(229,160,13,0.2)]"
-              : ""
-          }`}
-          title={!isNoTrack && onNavigateToAlbum ? (status.album || displayTitle) : undefined}
-        >
-          {status.plex_image && !isNoTrack ? (
-            <PlexImage
-              image={status.plex_image}
-              alt=""
-              className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
-            />
-          ) : status.thumb && !isNoTrack ? (
-            <img
-              src={status.thumb}
-              alt=""
-              className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
-            />
-          ) : (
-            <Disc3 size={28} className="text-[#444444]" />
-          )}
-        </div>
-
-        <div className="flex flex-col min-w-0 pr-2 gap-0.5">
-          {!isNoTrack && onNavigateToAlbum ? (
-            <button
-              type="button"
-              onClick={onNavigateToAlbum}
-              className="text-sm leading-tight font-bold text-white hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
-              title={displayTitle}
-            >
-              {displayTitle}
-            </button>
-          ) : (
-            <span className="text-sm leading-tight font-bold text-white truncate" title={displayTitle}>
-              {displayTitle}
-            </span>
-          )}
-
-          {!isNoTrack && status.artist && onNavigateToArtist ? (
-            <button
-              type="button"
-              onClick={() => onNavigateToArtist(status.artist)}
-              className="text-xs leading-tight text-[#B0B0B0] hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
-              title={displayArtist}
-            >
-              {displayArtist}
-            </button>
-          ) : (
-            <span className="text-xs leading-tight text-[#B0B0B0] truncate" title={displayArtist}>
-              {displayArtist}
-            </span>
-          )}
-
-          {!isNoTrack && status.album && onNavigateToAlbum ? (
-            <button
-              type="button"
-              onClick={onNavigateToAlbum}
-              className="text-[10px] leading-tight text-[#777777] hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
-              title={status.album}
-            >
-              {status.album}
-            </button>
-          ) : !isNoTrack && status.album ? (
-            <span className="text-[10px] leading-tight text-[#777777] truncate" title={status.album}>
-              {status.album}
-            </span>
-          ) : null}
-
-          <div className="flex items-center gap-1.5 mt-1 min-h-4 overflow-hidden">
-            {!isNoTrack && sourceLabel && (
-              <span className="text-[8px] leading-none px-1.5 py-1 rounded border border-[#3A321F] bg-[#211D14] text-[#D7AD52] font-bold tracking-[0.12em]">
-                {sourceLabel}
-              </span>
+    <footer className="h-28 shrink-0 bg-[#161616] border-t border-[#2A2A2A] grid grid-cols-[minmax(0,1fr)_clamp(240px,26vw,400px)_minmax(0,1fr)] items-center gap-3 px-4 z-40 select-none shadow-[0_-8px_24px_rgba(0,0,0,0.16)]">
+      {/* Equal side tracks keep playback at the geometric window center. */}
+      <div data-player-area="left" className="flex min-w-0 items-center gap-2">
+        {/* 1. Metadados e Capa com Links Interativos */}
+        <div data-player-area="metadata" className="flex min-w-0 flex-1 items-center gap-2">
+          <div
+            onClick={() => {
+              if (!isNoTrack && onNavigateToAlbum) onNavigateToAlbum();
+            }}
+            className={`w-[76px] h-[76px] rounded-xl bg-[#202020] border border-[#303030] overflow-hidden shrink-0 flex items-center justify-center shadow-lg group/cover transition-all ${
+              !isNoTrack && onNavigateToAlbum
+                ? "cursor-pointer hover:border-[#E5A00D] hover:shadow-[0_0_12px_rgba(229,160,13,0.2)]"
+                : ""
+            }`}
+            title={!isNoTrack && onNavigateToAlbum ? (status.album || displayTitle) : undefined}
+          >
+            {status.plex_image && !isNoTrack ? (
+              <PlexImage
+                image={status.plex_image}
+                alt=""
+                className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
+              />
+            ) : status.thumb && !isNoTrack ? (
+              <img
+                src={status.thumb}
+                alt=""
+                className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
+              />
+            ) : (
+              <Disc3 size={28} className="text-[#444444]" />
             )}
+          </div>
 
-            {!isNoTrack && status.audio_format && (
-              <span
-                className="text-[9px] leading-none font-mono px-1.5 py-1 rounded bg-[#252525] text-[#AAAAAA] whitespace-nowrap"
-                title={t("player.formatReportedByMpd")}
+          <div className="flex flex-col min-w-0 pr-2 gap-0.5">
+            {!isNoTrack && onNavigateToAlbum ? (
+              <button
+                type="button"
+                onClick={onNavigateToAlbum}
+                className="text-sm leading-tight font-bold text-white hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
+                title={displayTitle}
               >
-                {status.audio_format}
+                {displayTitle}
+              </button>
+            ) : (
+              <span className="text-sm leading-tight font-bold text-white truncate" title={displayTitle}>
+                {displayTitle}
               </span>
             )}
 
-            {!isAvailable && !isNoTrack && (
-              <span className="text-[9px] font-semibold text-[#C9A45D] truncate">
-                {t("player.lastKnown")}
+            {!isNoTrack && status.artist && onNavigateToArtist ? (
+              <button
+                type="button"
+                onClick={onNavigateToArtist}
+                className="text-xs leading-tight text-[#B0B0B0] hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
+                title={displayArtist}
+              >
+                {displayArtist}
+              </button>
+            ) : (
+              <span className="text-xs leading-tight text-[#B0B0B0] truncate" title={displayArtist}>
+                {displayArtist}
               </span>
             )}
+
+            {!isNoTrack && status.album && onNavigateToAlbum ? (
+              <button
+                type="button"
+                onClick={onNavigateToAlbum}
+                className="text-[10px] leading-tight text-[#777777] hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
+                title={status.album}
+              >
+                {status.album}
+              </button>
+            ) : !isNoTrack && status.album ? (
+              <span className="text-[10px] leading-tight text-[#777777] truncate" title={status.album}>
+                {status.album}
+              </span>
+            ) : null}
           </div>
         </div>
       </div>
 
-      {/* 2. Controlos de Reprodução & Barra de Progresso */}
-      <div className="flex flex-col items-center justify-center flex-1 max-w-2xl px-6 gap-2">
+      {/* 3. Controlos de Reprodução & Barra de Progresso */}
+      <div data-player-area="playback" className="flex min-w-0 flex-col items-center justify-center gap-1">
+        <span
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          title={status.playback_error ? t(`player.playbackError.${status.playback_error.code}`) : undefined}
+          className={status.playback_error ? "w-full truncate text-[10px] leading-tight text-[#C9A45D] text-center" : "sr-only"}
+        >
+          {status.playback_error
+            ? t(`player.playbackError.${status.playback_error.code}`)
+            : ""}
+        </span>
         {!isAvailable && (
-          <span className="text-[10px] font-semibold text-[#C9A45D]">
+          <span title={health.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")} className="w-full truncate text-center text-[10px] leading-tight font-semibold text-[#C9A45D]">
             {health.state === "unavailable"
               ? t("player.engineUnavailable")
               : t("player.engineTransitioning")}
@@ -301,7 +293,7 @@ export const PlayerBar: React.FC<Props> = ({
             onMouseDown={() => setIsSeeking(true)}
             onChange={(e) => setSeekValue(parseFloat(e.target.value))}
             onMouseUp={(e) => handleSeekCommit(parseFloat((e.target as HTMLInputElement).value))}
-            className="flex-1 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-30 disabled:cursor-default"
+            className="min-w-0 flex-1 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-30 disabled:cursor-default"
           />
 
           <span className="w-8 text-left">
@@ -310,9 +302,12 @@ export const PlayerBar: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* 3. Volume e Botão de Gaveta de Fila */}
-      <div className="flex items-center justify-end gap-3 w-[30%] min-w-[230px]">
-        <div className="flex flex-col items-end gap-1.5 mr-1">
+      {/* 4. Volume e ações */}
+      <div data-player-area="actions" className="flex min-w-0 items-center justify-end gap-2">
+        <div data-player-area="signal" className="min-w-0 max-w-[190px] flex-1">
+          <SignalPath compact route={route} status={status} health={health} />
+        </div>
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
           <div className="flex items-center gap-2.5">
             <button
               onClick={handleToggleMute}
@@ -334,7 +329,7 @@ export const PlayerBar: React.FC<Props> = ({
             />
           </div>
 
-          <span className="text-[9px] leading-none text-[#777777] whitespace-nowrap pr-0.5">
+          <span title={volumeStatusLabel} className="max-w-full truncate text-[9px] leading-none text-[#777777] pr-0.5">
             {volumeStatusLabel}
           </span>
         </div>
@@ -343,7 +338,7 @@ export const PlayerBar: React.FC<Props> = ({
           <button
             type="button"
             onClick={onOpenNowPlaying}
-            className="p-2.5 rounded-lg border border-[#2D2D2D] text-[#888888] hover:text-white hover:bg-[#202020] transition-colors cursor-pointer"
+            className="shrink-0 p-2.5 rounded-lg border border-[#2D2D2D] text-[#888888] hover:text-white hover:bg-[#202020] transition-colors cursor-pointer"
             title={t("player.openNowPlaying")}
           >
             <Maximize2 size={17} />
@@ -353,7 +348,7 @@ export const PlayerBar: React.FC<Props> = ({
         <button
           type="button"
           onClick={onToggleQueue}
-          className={`p-2.5 rounded-lg border transition-colors cursor-pointer ${
+          className={`shrink-0 p-2.5 rounded-lg border transition-colors cursor-pointer ${
             isQueueOpen
               ? "bg-[#252014] border-[#E5A00D] text-[#E5A00D]"
               : "border-[#262626] text-[#888888] hover:text-white hover:bg-[#202020]"

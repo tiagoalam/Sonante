@@ -32,3 +32,34 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+
+# Private development instructions and state
+AGENTS.md
+AGENTS.override.md
+PROJECT_STATE.md
+.codex/
+.agents/
+.aws/
+
+# Generated packaging output and inspection reports
+sonante-arch/pkg/
+sonante-arch/src/
+*.deb
+*.rpm
+*.pkg.tar.*
+/arch-build/
+/artifacts/
+/native-abi*.txt
+/package-inspection.txt
+__pycache__/
+*.pyc
+
+# Local application runtime files (never release inputs)
+/config.json
+/queue_cache.json
+/favorites.json
+/playlists.json
+/mpd.conf
+/mpd.db
+/runtime/

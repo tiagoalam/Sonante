@@ -1,3 +1,4 @@
+import { logError } from "./frontendDiagnostics.ts";
 import type { LocalAlbum } from "../types/local";
 import type { ArtworkPhase } from "./localArtwork";
 import type { ArtworkProgressChange, ArtworkProgressEntry, ArtworkProgressResult } from "../services/artworkProgress";
@@ -54,7 +55,7 @@ export class LocalArtworkEnrichment {
   constructor(
     resolver: ArtworkResolver,
     yieldBetweenItems: () => Promise<void> = yieldToBrowser,
-    reportError: (error: unknown) => void = (error) => console.error("Falha ao enriquecer capa local:", error),
+    reportError: (error: unknown) => void = (error) => logError("artwork.local-enrich", error),
     progressStore?: ArtworkProgressStore,
   ) {
     this.resolver = resolver;
@@ -243,6 +244,7 @@ export class LocalArtworkEnrichment {
       if (generation === this.generation && phase === "online_request" && this.status.onlineActivity?.kind === "searching"
           && this.status.onlineActivity.title === album.title) this.clearActivity();
       if (generation === this.generation && !this.updating && !this.awaitingCatalog && this.ids.has(album.id)) {
+        if (phase === "deferred") return;
         if (!cover && !onlineEnabledAtStart && this.onlineEnabled) {
           // The preference changed while this item was resolving; retry its online phase.
           this.index = 0;

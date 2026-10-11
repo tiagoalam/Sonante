@@ -1,4 +1,13 @@
-import type { MediaLocator } from "./audio";
+import type { CurrentMedia, MediaLocator } from "./audio";
+
+export interface PlayerPlexNavigation {
+  media: Extract<CurrentMedia, { kind: "plex" }>;
+  navigation: {
+    album: PlexAlbum;
+    artist_rating_key: string;
+    artist_name: string;
+  };
+}
 
 export interface PlexImageRef {
   server_id: string;
@@ -16,6 +25,7 @@ export interface PlexAlbum {
   artist: string;
   artist_rating_key?: string;
   year?: number;
+  genres?: string[];
   thumb?: PlexImageRef;
 }
 

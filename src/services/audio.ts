@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { MpdStatusSnapshot, PlaybackStatus, TrackMetadata } from "../types/audio";
-import { LocalItem, LocalAlbum } from "../types/local";
+import { LocalItem, LocalAlbum, LocalAlbumDiscTracks } from "../types/local";
 import type { OnlineCacheStatus } from "../utils/localArtwork";
 
 const onlineArtworkRequest = (album: LocalAlbum) => ({
@@ -36,8 +36,13 @@ export const audioService = {
   getOnlineCoverCacheStatus: (album: LocalAlbum): Promise<OnlineCacheStatus> =>
     invoke<OnlineCacheStatus>("get_online_cover_cache_status", { request: onlineArtworkRequest(album) }),
   getLocalAlbums: (): Promise<LocalAlbum[]> => invoke<LocalAlbum[]>("get_local_albums"),
+  getLocalAlbumTracks: (albumId: string): Promise<LocalAlbumDiscTracks[]> =>
+    invoke<LocalAlbumDiscTracks[]>("get_local_album_tracks", { albumId }),
   resolveLocalLibraryPath: (path: string): Promise<string> =>
     invoke<string>("resolve_local_library_path", { path }),
   pickDirectory: (): Promise<string | null> => invoke<string | null>("pick_directory"),
+  checkLocalLibrary: (): Promise<boolean> => invoke<boolean>("check_local_library"),
   rescanLibrary: (): Promise<void> => invoke<void>("rescan_library"),
 };
+
+export const LOCAL_LIBRARY_RECONCILED_EVENT = "local-library-reconciled";

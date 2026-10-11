@@ -45,14 +45,35 @@ where
     }
 }
 
-fn check_local_path_exists(path_str: &str) -> bool {
-    let p = Path::new(path_str);
-    let full_path = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        crate::supervisor::MpdSupervisor::library_dir().join(p)
-    };
-    full_path.is_dir()
+fn check_local_path_exists(path_str: &str, config: &AppConfig) -> Result<bool, String> {
+    check_local_path_exists_in(
+        &crate::supervisor::MpdSupervisor::library_dir(),
+        path_str,
+        config,
+    )
+}
+
+fn check_local_path_exists_in(
+    library_dir: &Path,
+    path_str: &str,
+    config: &AppConfig,
+) -> Result<bool, String> {
+    match crate::local_media::resolve_local_path(
+        library_dir,
+        path_str,
+        &config.local_folders,
+    ) {
+        Ok(resolved) => Ok(resolved.physical_path.is_dir()),
+        Err(
+            crate::local_media::LocalPathResolveError::InvalidPath
+            | crate::local_media::LocalPathResolveError::SourceNotFound
+            | crate::local_media::LocalPathResolveError::NotFound
+            | crate::local_media::LocalPathResolveError::OutsideRoot,
+        ) => Ok(false),
+        Err(error @ crate::local_media::LocalPathResolveError::Unavailable(_)) => {
+            Err(error.to_string())
+        }
+    }
 }
 
 impl FavoriteAlbum {
@@ -106,7 +127,9 @@ impl FavoriteAlbum {
 
         for fav in &mut list {
             if fav.source == "local" {
-                fav.exists = check_local_path_exists(&fav.path_or_key);
+                if let Some(config) = config {
+                    fav.exists = check_local_path_exists(&fav.path_or_key, config)?;
+                }
             } else {
                 fav.exists = true;
             }
@@ -157,7 +180,7 @@ impl FavoriteAlbum {
             let mut new_fav = album;
             new_fav.id = clean_id;
             if new_fav.source == "local" {
-                new_fav.exists = check_local_path_exists(&new_fav.path_or_key);
+                new_fav.exists = check_local_path_exists(&new_fav.path_or_key, config)?;
             }
             list.push(new_fav);
             Self::save_all_to_path(path, &list)?;
@@ -169,6 +192,7 @@ impl FavoriteAlbum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -236,6 +260,64 @@ mod tests {
     }
 
     #[test]
+    fn local_existence_uses_legacy_and_managed_source_mapping() {
+        let path = test_path();
+        let base = path.parent().unwrap();
+        let library = base.join("library");
+        let root = base.join("Music");
+        fs::create_dir(&library).unwrap();
+        fs::create_dir_all(root.join("Album")).unwrap();
+        symlink(&root, library.join("Music")).unwrap();
+        let config = AppConfig {
+            local_folders: vec![root.to_string_lossy().into_owned()],
+            ..AppConfig::default()
+        };
+
+        assert!(check_local_path_exists_in(&library, "Music/Album", &config).unwrap());
+        assert!(!check_local_path_exists_in(&library, "Unknown/Album", &config).unwrap());
+
+        let staging = base.join("library.next");
+        crate::local_media::mirror::build_filtered_staging(
+            &staging,
+            &library,
+            std::slice::from_ref(&root),
+            "favorites-managed",
+        )
+        .unwrap();
+        fs::remove_file(library.join("Music")).unwrap();
+        fs::remove_dir(&library).unwrap();
+        fs::rename(staging, &library).unwrap();
+        assert!(check_local_path_exists_in(&library, "Music/Album", &config).unwrap());
+
+        let removed_config = AppConfig::default();
+        assert!(!check_local_path_exists_in(
+            &library,
+            "Music/Album",
+            &removed_config,
+        )
+        .unwrap());
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn local_operational_failure_is_not_reported_as_absence() {
+        let path = test_path();
+        let base = path.parent().unwrap();
+        let library = base.join("library");
+        let root = base.join("Music");
+        fs::create_dir(&library).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(library.join(".sonante-mirror.json"), b"invalid").unwrap();
+        let config = AppConfig {
+            local_folders: vec![root.to_string_lossy().into_owned()],
+            ..AppConfig::default()
+        };
+
+        assert!(check_local_path_exists_in(&library, "Music", &config).is_err());
+        remove_test_path(&path);
+    }
+
+    #[test]
     fn valid_config_keeps_matching_plex_artwork_without_rewriting_file() {
         let path = test_path();
         let original = serde_json::to_vec(&vec![favorite_with_artwork()]).unwrap();
@@ -299,6 +381,30 @@ mod tests {
         let list = FavoriteAlbum::load_all_from_path(&path, None).unwrap();
         assert_eq!(list.len(), 1);
         assert!(list[0].thumb.is_none());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn unavailable_config_does_not_remove_or_mark_a_local_favorite_missing() {
+        let path = test_path();
+        let favorite = FavoriteAlbum {
+            id: "local-album".to_string(),
+            source: "local".to_string(),
+            title: "Album".to_string(),
+            artist: "Artist".to_string(),
+            year: None,
+            thumb: None,
+            plex_image: None,
+            path_or_key: "Music/Album".to_string(),
+            exists: true,
+        };
+        let original = serde_json::to_vec(&vec![favorite]).unwrap();
+        fs::write(&path, &original).unwrap();
+
+        let list = FavoriteAlbum::load_all_from_path(&path, None).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].exists);
         assert_eq!(fs::read(&path).unwrap(), original);
         remove_test_path(&path);
     }
