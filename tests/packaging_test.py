@@ -23,6 +23,28 @@ class PackagingTests(unittest.TestCase):
             self.assertIn('xdg-desktop-portal', cfg['bundle']['linux'][fmt]['depends'])
             self.assertIn('xdg-desktop-portal-gtk', cfg['bundle']['linux'][fmt]['recommends'])
 
+    def test_webp_loader_is_optional_in_all_packages(self):
+        loader = 'webp-pixbuf-loader'
+        cfg = json.loads(Path('src-tauri/tauri.conf.json').read_text())
+        for fmt in ['deb', 'rpm']:
+            with self.subTest(format=fmt):
+                package = cfg['bundle']['linux'][fmt]
+                self.assertEqual(package['recommends'].count(loader), 1)
+                self.assertNotIn(loader, package['depends'])
+
+        metadata = subprocess.check_output([
+            'bash', '-c',
+            'source sonante-arch/PKGBUILD\n'
+            'printf "required:%s\\n" "${depends[@]}" "${makedepends[@]}"\n'
+            'printf "optional:%s\\n" "${optdepends[@]}"',
+        ], text=True)
+        entries = [line.partition(':') for line in metadata.splitlines()]
+        required = [value for kind, _, value in entries if kind == 'required']
+        optional = [value.split(':', 1)[0] for kind, _, value in entries if kind == 'optional']
+        self.assertTrue(required)
+        self.assertNotIn(loader, required)
+        self.assertEqual(optional.count(loader), 1)
+
     def test_release_tag_mismatch_is_refused(self):
         result = subprocess.run(['node', 'scripts/verify-packaging.mjs'], env={**os.environ, 'RELEASE_TAG': 'v9.9.9'}, capture_output=True)
         self.assertNotEqual(result.returncode, 0)

@@ -42,7 +42,7 @@
   ],
   "linux": {
     "deb": {
-      "recommends": ["xdg-desktop-portal-gtk"],
+      "recommends": ["xdg-desktop-portal-gtk", "webp-pixbuf-loader"],
       "depends": [
         "mpd",
         "libasound2",
@@ -53,7 +53,7 @@
       ]
     },
     "rpm": {
-      "recommends": ["xdg-desktop-portal-gtk"],
+      "recommends": ["xdg-desktop-portal-gtk", "webp-pixbuf-loader"],
       "release": "1",
       "depends": [
         "mpd",

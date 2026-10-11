@@ -18,6 +18,7 @@ depends=(
 )
 makedepends=('git' 'npm' 'rust')
 optdepends=(
+    'webp-pixbuf-loader: display WebP sidecar album covers'
     'wireplumber: control Shared volume through PipeWire using wpctl'
     'xdg-desktop-portal-gtk: GTK file chooser when no desktop portal backend is installed'
 )
