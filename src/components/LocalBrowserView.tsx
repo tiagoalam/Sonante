@@ -346,12 +346,16 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   useEffect(() => {
     if (!playerTarget) return;
     const album = playerAlbum;
-    if (!album) { onPlayerNavigationBack?.(); return; }
+    if (!album) {
+      // Keep an in-flight batch and its results mounted until the user closes the editor.
+      if (!tagEditorAlbum) onPlayerNavigationBack?.();
+      return;
+    }
     setSelectedSourceId(album.source_id ?? null);
     setSelectedAlbum(playerTarget.view === "album" ? album : null);
     setSelectedArtist(playerTarget.view === "artist" ? album.artist : null);
     setViewMode(playerTarget.view === "artist" ? "artists" : "albums");
-  }, [playerTarget, playerAlbum]);
+  }, [playerTarget, playerAlbum, tagEditorAlbum]);
 
   useEffect(() => {
     if (!selectedAlbum) return;
@@ -1384,6 +1388,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           available={catalogConfirmed && albums.some((album) => album.id === tagEditorAlbum.id)}
           catalogVersion={catalog}
           isAvailable={() => localAlbumCatalog.getSnapshot() === catalog && albumTagEditingAvailable(tagEditorAlbum.id)}
+          onBatchFinished={(result) => {
+            if (result?.tracks.some((track) => track.mpd_refresh.state === "accepted")) {
+              localAlbumCatalog.waitForMpd();
+            } else {
+              localAlbumCatalog.requestRefresh();
+            }
+          }}
           onClose={() => setTagEditorAlbum(null)}
         />
       )}

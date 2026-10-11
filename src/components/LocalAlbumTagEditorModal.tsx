@@ -5,6 +5,8 @@ import { useTranslation } from "react-i18next";
 import { localTagsService } from "../services/localTags";
 import type {
   LocalAlbumTagBatchPreflightErrorCode,
+  LocalAlbumTagBatchPreflightRequest,
+  LocalAlbumTagBatchResult,
   LocalAlbumTagInspection,
 } from "../types/localTags";
 import {
@@ -13,6 +15,9 @@ import {
   clearMixedLocalAlbumTagField,
   createLocalAlbumTagEditorDraft,
   createLocalAlbumTagRequestGuard,
+  freezeLocalAlbumTagBatchRequest,
+  validateLocalAlbumTagBatchResult,
+  localAlbumTagApplyErrorKind,
   type LocalAlbumTagPreviewView,
   editLocalAlbumTagField,
   localAlbumTagFields,
@@ -28,6 +33,7 @@ interface Props {
   catalogVersion: unknown;
   isAvailable: () => boolean;
   onClose: () => void;
+  onBatchFinished?: (result: LocalAlbumTagBatchResult | null) => void;
 }
 
 function backendErrorCode(cause: unknown): LocalAlbumTagBatchPreflightErrorCode | null {
@@ -37,13 +43,20 @@ function backendErrorCode(cause: unknown): LocalAlbumTagBatchPreflightErrorCode 
     : null;
 }
 
-export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName, available, catalogVersion, isAvailable, onClose }) => {
+export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName, available, catalogVersion, isAvailable, onClose, onBatchFinished }) => {
   const { t } = useTranslation();
   const [draft, setDraft] = useState<LocalAlbumTagEditorDraft | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloading, setReloading] = useState(false);
   const [previewing, setPreviewing] = useState(false);
-  const [preview, setPreview] = useState<{ view: LocalAlbumTagPreviewView; token: { context: number; generation: number } } | null>(null);
+  const [preview, setPreview] = useState<{ view: LocalAlbumTagPreviewView; request: LocalAlbumTagBatchPreflightRequest; token: { context: number; generation: number } } | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [result, setResult] = useState<LocalAlbumTagBatchResult | null>(null);
+  const [applyIssue, setApplyIssue] = useState<"conflict" | "unknown" | null>(null);
+  const applyInFlight = useRef(false);
+  const consumed = useRef(false);
+  const previewRef = useRef(preview);
+  previewRef.current = preview;
   const [inspectionContext, setInspectionContext] = useState<number | null>(null);
   const [stale, setStale] = useState(false);
   const [message, setMessage] = useState<{ kind: "error" | "warning"; text: string } | null>(null);
@@ -65,6 +78,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
   }, [context]);
 
   const loadInspection = async (isReload: boolean) => {
+    if (applyInFlight.current) return;
     if (!available || !isAvailable()) {
       setMessage({ kind: "warning", text: t("albumTagEditor.unavailable") });
       setLoading(false);
@@ -84,6 +98,9 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
       setInspectionContext(request.context);
       setPreview(null);
       setStale(false);
+      consumed.current = false;
+      setResult(null);
+      setApplyIssue(null);
     } catch {
       if (!guard.isCurrent(request) || !isAvailable()) return;
       setMessage({ kind: "error", text: t("albumTagEditor.loadError") });
@@ -112,8 +129,9 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
   }, []);
 
   const requestClose = () => {
-    if (previewing) return;
-    if (analysis?.dirty && !window.confirm(t("albumTagEditor.discardConfirm"))) return;
+    if (applyInFlight.current || previewing) return;
+    if ((consumed.current || analysis?.dirty) && !window.confirm(t(consumed.current
+      ? "albumTagEditor.resultCloseConfirm" : "albumTagEditor.discardConfirm"))) return;
     guard.invalidate();
     onClose();
   };
@@ -142,9 +160,10 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [analysis?.dirty, previewing, t]);
+  }, [analysis?.dirty, previewing, applying, result, applyIssue, t]);
 
   const changeField = (field: typeof localAlbumTagFields[number], value: string) => {
+    if (applyInFlight.current || consumed.current) return;
     guard.invalidate();
     setPreviewing(false);
     setDraft((current) => current ? editLocalAlbumTagField(current, field, value) : current);
@@ -153,6 +172,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
   };
 
   const clearAll = (field: typeof localAlbumTagFields[number]) => {
+    if (applyInFlight.current || consumed.current) return;
     guard.invalidate();
     setPreviewing(false);
     setDraft((current) => current ? clearMixedLocalAlbumTagField(current, field) : current);
@@ -161,6 +181,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
   };
 
   const undoField = (field: typeof localAlbumTagFields[number]) => {
+    if (applyInFlight.current || consumed.current) return;
     guard.invalidate();
     setPreviewing(false);
     setDraft((current) => current ? resetLocalAlbumTagField(current, field) : current);
@@ -169,12 +190,15 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
   };
 
   const reload = () => {
-    if (analysis?.dirty && !window.confirm(t("albumTagEditor.reloadConfirm"))) return;
+    if (applyInFlight.current) return;
+    if ((consumed.current || analysis?.dirty) && !window.confirm(t(consumed.current
+      ? "albumTagEditor.resultReloadConfirm" : "albumTagEditor.reloadConfirm"))) return;
     void loadInspection(true);
   };
 
   const requestPreview = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (applyInFlight.current || consumed.current) return;
     if (!draft || !analysis?.dirty || analysis.blocked || mustReload || previewing || reloading) return;
     if (!available || !isAvailable()) {
       guard.invalidate();
@@ -188,9 +212,8 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
     setPreview(null);
     setMessage(null);
     try {
-      const plan = await localTagsService.preflightAlbumBatch(
-        buildLocalAlbumTagBatchPreflightRequest(draft),
-      );
+      const exactRequest = freezeLocalAlbumTagBatchRequest(buildLocalAlbumTagBatchPreflightRequest(draft));
+      const plan = await localTagsService.preflightAlbumBatch(exactRequest);
       if (!guard.isCurrent(request) || !isAvailable()) return;
       let view: LocalAlbumTagPreviewView;
       try {
@@ -200,7 +223,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
         setMessage({ kind: "warning", text: t("albumTagEditor.invalidPlan") });
         return;
       }
-      setPreview({ view, token: request });
+      setPreview({ view, request: exactRequest, token: request });
       if (!plan.applicable) {
         const key = plan.blocked_reason === "cue_virtual"
           ? "albumTagEditor.cueBlocked"
@@ -220,6 +243,50 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
       }
     } finally {
       if (guard.isCurrent(request)) setPreviewing(false);
+    }
+  };
+
+  const requestApply = async () => {
+    const approved = previewRef.current;
+    if (applyInFlight.current || consumed.current || !approved || !approved.view.canApply
+      || mustReload || !guard.isCurrent(approved.token) || !available || !isAvailable()) return;
+    // Set synchronously before confirmation: repeated clicks cannot confirm/send twice.
+    applyInFlight.current = true;
+    if (!window.confirm(t("albumTagEditor.applyConfirm", { count: approved.view.changeCount }))) {
+      applyInFlight.current = false;
+      return;
+    }
+    if (previewRef.current !== approved || !guard.isCurrent(approved.token) || !isAvailable()) {
+      applyInFlight.current = false;
+      setPreview(null);
+      setStale(true);
+      return;
+    }
+    consumed.current = true;
+    setApplying(true);
+    setApplyIssue(null);
+    setMessage(null);
+    previewRef.current = null;
+    setPreview(null);
+    guard.invalidate();
+    setInspectionContext(null);
+    setStale(true);
+    let outcome: LocalAlbumTagBatchResult | null = null;
+    try {
+      // Never send the plan. Backend repeats preflight and revision checks on this request.
+      const received = await localTagsService.applyAlbumBatch(approved.request);
+      validateLocalAlbumTagBatchResult(received, approved.request);
+      outcome = received;
+      // Apply responses deliberately do not use the catalog/request guard: writes already ran.
+      setResult(received);
+    } catch (cause) {
+      setApplyIssue(localAlbumTagApplyErrorKind(cause));
+    } finally {
+      applyInFlight.current = false;
+      setApplying(false);
+      // This callback only queries/reconciles the existing catalog; it never rescans MPD.
+      try { onBatchFinished?.(outcome); }
+      catch { setMessage({ kind: "warning", text: t("albumTagEditor.catalogNotifyFailed") }); }
     }
   };
 
@@ -248,7 +315,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
           <button
             type="button"
             onClick={requestClose}
-            disabled={previewing}
+            disabled={applying || previewing}
             aria-label={t("albumTagEditor.close")}
             className="rounded-lg p-2 text-[#888888] hover:bg-[#252525] hover:text-white disabled:opacity-50"
           >
@@ -256,11 +323,15 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
           </button>
         </header>
 
-        {draft && mustReload && (
+        {draft && mustReload && !applying && !result && !applyIssue && (
           <p role="status" className="mx-5 mt-4 text-xs text-amber-200">
             {t(snapshotCurrent ? "albumTagEditor.stale" : "albumTagEditor.unavailable")}
           </p>
         )}
+        {applying && <p role="status" className="mx-5 mt-4 text-sm text-amber-200">{t("albumTagEditor.applying")}</p>}
+        {applyIssue && <p role="alert" className="mx-5 mt-4 text-sm text-amber-200">
+          {t(applyIssue === "conflict" ? "albumTagEditor.applyConflict" : "albumTagEditor.applyUnknown")}
+        </p>}
         {message && (
           <div
             role={message.kind === "error" ? "alert" : "status"}
@@ -304,7 +375,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                 {localAlbumTagFields.map((field, index) => {
                   const fieldDraft = draft.fields[field];
                   const state = fieldDraft.summary.state;
-                  const disabled = Boolean(analysis?.blocked || !snapshotCurrent || reloading);
+                  const disabled = Boolean(applying || consumed.current || analysis?.blocked || !snapshotCurrent || reloading);
                   return (
                     <div key={field} className="space-y-1.5">
                       <label htmlFor={`local-album-tag-${field}`} className="text-xs text-[#BBBBBB]">
@@ -347,6 +418,37 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                 })}
               </div>
 
+              {result && (
+                <section aria-label={t("albumTagEditor.resultTitle")} className="mt-5 rounded-xl border border-[#333333] p-4 text-xs text-[#CCCCCC]">
+                  <h3 className="text-sm font-bold text-white">{t("albumTagEditor.resultTitle")}</h3>
+                  <p className="mt-2">{t("albumTagEditor.resultSummary", {
+                    committed: result.committed_count, unchanged: result.unchanged_count,
+                    failed: result.failed_count, notAttempted: result.not_attempted_count,
+                  })}</p>
+                  <p className="mt-2">{t("albumTagEditor.partialCommitStatus", { value: t(result.partial_commit ? "albumTagEditor.yes" : "albumTagEditor.no") })}</p>
+                  {result.partial_commit && <p className="mt-2 text-amber-200">{t("albumTagEditor.partialCommit")}</p>}
+                  {!result.applicable && <p className="mt-2 text-amber-200">{t(result.blocked_reason === "cue_virtual"
+                    ? "albumTagEditor.cueBlocked" : "albumTagEditor.inspectionBlocked")}</p>}
+                  <p className="mt-2">{t("albumTagEditor.independentWrites")}</p>
+                  <ul className="mt-3 space-y-3">
+                    {result.tracks.map((track) => (
+                      <li key={track.uri} className="rounded-lg border border-[#333333] p-3">
+                        <p className="break-all font-mono">{track.uri}</p>
+                        <p className="mt-1 font-bold">{t(`albumTagEditor.outcomes.${track.state}`)}</p>
+                        {track.error && <p className="mt-1 text-amber-200">
+                          {track.state === "committed" && <span>{t("albumTagEditor.committedWarning")} </span>}
+                          {t(`albumTagEditor.writeErrors.${track.error.code}`)}
+                        </p>}
+                        <p className="mt-1">{t(`albumTagEditor.refresh.${track.mpd_refresh.state}`, { jobId: track.mpd_refresh.job_id })}</p>
+                        {track.mpd_refresh.error_code && <p className="mt-1 text-amber-200">
+                          {t(`albumTagEditor.refreshErrors.${track.mpd_refresh.error_code}`)}
+                        </p>}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-3 text-amber-200">{t("albumTagEditor.newInspectionRequired")}</p>
+                </section>
+              )}
               {previewView && (
                 <div className={`mt-5 rounded-xl border px-4 py-3 ${
                   previewView.applicable
@@ -400,7 +502,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                 <button
                   type="button"
                   onClick={reload}
-                  disabled={!available || previewing || reloading}
+                  disabled={applying || !available || previewing || reloading}
                   className="flex items-center gap-2 rounded-lg border border-amber-400/30 px-3 py-2 text-xs font-bold text-amber-200 hover:bg-amber-400/10 disabled:opacity-50"
                 >
                   <RotateCcw size={14} className={reloading ? "animate-spin" : ""} />
@@ -408,28 +510,53 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                 </button>
               </div>
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={requestClose}
-                  disabled={previewing}
-                  className="rounded-lg border border-[#333333] px-4 py-2 text-sm font-semibold text-white hover:bg-[#252525] disabled:opacity-50"
-                >
-                  {t("albumTagEditor.cancel")}
-                </button>
-                <button
-                  type="submit"
-                  disabled={!analysis?.dirty || analysis.blocked || mustReload || previewing || reloading}
-                  className="flex items-center gap-2 rounded-lg bg-[#E5A00D] px-4 py-2 text-sm font-bold text-black hover:bg-[#F5B01D] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {previewing ? <LoaderCircle size={16} className="animate-spin" /> : <Eye size={16} />}
-                  {t(previewing ? "albumTagEditor.previewing" : "albumTagEditor.preview")}
-                </button>
+                {!applying && (consumed.current || result || applyIssue) ? (
+                  <button
+                    type="button"
+                    onClick={requestClose}
+                    disabled={applying || previewing}
+                    className="rounded-lg border border-[#333333] px-4 py-2 text-sm font-semibold text-white hover:bg-[#252525] disabled:opacity-50"
+                  >{t("albumTagEditor.closeButton")}</button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={requestClose}
+                      disabled={applying || previewing}
+                      className="rounded-lg border border-[#333333] px-4 py-2 text-sm font-semibold text-white hover:bg-[#252525] disabled:opacity-50"
+                    >
+                      {t("albumTagEditor.cancel")}
+                    </button>
+                    {applying || (previewView?.canApply && !mustReload) ? (
+                      <button
+                        key="apply"
+                        type="button"
+                        onClick={() => { void requestApply(); }}
+                        disabled={applying || consumed.current || !previewView?.canApply || mustReload}
+                        className="flex items-center gap-2 rounded-lg bg-[#E5A00D] px-4 py-2 text-sm font-bold text-black disabled:opacity-40"
+                      >
+                        {applying && <LoaderCircle size={16} className="animate-spin" />}
+                        {t(applying ? "albumTagEditor.applyingButton" : "albumTagEditor.apply")}
+                      </button>
+                    ) : (
+                      <button
+                        key="preview"
+                        type="submit"
+                        disabled={applying || consumed.current || !analysis?.dirty || analysis.blocked || mustReload || previewing || reloading}
+                        className="flex items-center gap-2 rounded-lg bg-[#E5A00D] px-4 py-2 text-sm font-bold text-black hover:bg-[#F5B01D] disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {previewing ? <LoaderCircle size={16} className="animate-spin" /> : <Eye size={16} />}
+                        {t(previewing ? "albumTagEditor.previewing" : "albumTagEditor.preview")}
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
             </footer>
           </form>
         ) : (
           <div className="min-h-32 p-5">
-            <button type="button" disabled={!available || loading || reloading} onClick={reload}
+            <button type="button" disabled={applying || !available || loading || reloading} onClick={reload}
               className="text-sm text-amber-200 disabled:opacity-40">{t("albumTagEditor.reload")}</button>
           </div>
         )}

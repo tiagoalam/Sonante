@@ -165,3 +165,33 @@ export interface LocalAlbumTagBatchPreflightError {
   code: LocalAlbumTagBatchPreflightErrorCode;
   message?: string;
 }
+
+export type LocalAlbumTagBatchTrackOutcomeState =
+  | "unchanged" | "committed" | "failed" | "not_attempted";
+
+export interface LocalAlbumTagMpdRefresh {
+  state: "not_needed" | "accepted" | "failed";
+  job_id: number | null;
+  error_code: LocalTagMpdRefreshErrorCode | null;
+}
+
+export interface LocalAlbumTagBatchTrackResult {
+  uri: string;
+  state: LocalAlbumTagBatchTrackOutcomeState;
+  expected_revision: string;
+  tags: LocalTrackTags | null;
+  error: LocalTrackTagsError | null;
+  mpd_refresh: LocalAlbumTagMpdRefresh;
+}
+
+export interface LocalAlbumTagBatchResult {
+  album_id: string;
+  applicable: boolean;
+  blocked_reason: LocalAlbumTagBatchBlockedReason | null;
+  tracks: LocalAlbumTagBatchTrackResult[];
+  committed_count: number;
+  unchanged_count: number;
+  failed_count: number;
+  not_attempted_count: number;
+  partial_commit: boolean;
+}

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   LocalAlbumTagBatchPlan,
+  LocalAlbumTagBatchResult,
   LocalAlbumTagBatchPreflightRequest,
   LocalAlbumTagInspection,
   LocalTrackTags,
@@ -28,4 +29,7 @@ export const localTagsService = {
 
   preflightAlbumBatch: (request: LocalAlbumTagBatchPreflightRequest): Promise<LocalAlbumTagBatchPlan> =>
     invoke<LocalAlbumTagBatchPlan>("preflight_local_album_tag_batch", { request }),
+
+  applyAlbumBatch: (request: LocalAlbumTagBatchPreflightRequest): Promise<LocalAlbumTagBatchResult> =>
+    invoke<LocalAlbumTagBatchResult>("apply_local_album_tag_batch", { request }),
 };

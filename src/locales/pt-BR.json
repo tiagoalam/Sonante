@@ -297,6 +297,57 @@
     }
   },
   "albumTagEditor": {
+    "apply": "Aplicar alterações",
+    "applyingButton": "Aplicando…",
+    "closeButton": "Fechar",
+    "applyConfirm": "Aplicar as alterações revisadas a {{count}} arquivos? Cada arquivo é gravado separadamente. Gravações anteriores não são revertidas se um arquivo posterior falhar.",
+    "applying": "Gravando metadata do álbum… Aguarde os resultados por arquivo.",
+    "resultTitle": "Resultados por arquivo",
+    "resultSummary": "{{committed}} gravados · {{unchanged}} inalterados · {{failed}} com falha · {{notAttempted}} não tentados",
+    "partialCommitStatus": "Gravação parcial: {{value}}",
+    "yes": "Sim",
+    "no": "Não",
+    "partialCommit": "Alguns arquivos foram gravados; outros falharam ou não foram tentados. Gravações anteriores permanecem salvas.",
+    "independentWrites": "Os arquivos são gravados separadamente. Uma falha posterior não desfaz gravações anteriores.",
+    "committedWarning": "Gravado, com ressalva após a gravação.",
+    "newInspectionRequired": "Estes resultados permanecem aqui até fechar ou recarregar. Uma nova inspeção e prévia são obrigatórias antes de outra aplicação.",
+    "applyConflict": "O álbum ou as revisões não correspondem mais às alterações revisadas. Suas edições foram mantidas. Inspecione novamente antes de aplicar.",
+    "applyUnknown": "Nenhum resultado confiável de gravação foi recebido. Alguns arquivos podem ter sido alterados. Suas edições foram mantidas; inspecione novamente antes de qualquer nova tentativa. Não haverá repetição automática.",
+    "resultReloadConfirm": "Inspecionar novamente e descartar os resultados exibidos e as edições atuais?",
+    "resultCloseConfirm": "Fechar e dispensar os resultados ou aviso exibidos?",
+    "catalogNotifyFailed": "Não foi possível solicitar a atualização do catálogo. Os resultados de gravação permanecem válidos.",
+    "outcomes": {
+      "unchanged": "Inalterado",
+      "committed": "Gravado",
+      "failed": "Falha na gravação",
+      "not_attempted": "Não tentado"
+    },
+    "refresh": {
+      "not_needed": "Atualização MPD não necessária",
+      "accepted": "Atualização MPD solicitada/pendente (job {{jobId}}); conclusão não confirmada.",
+      "failed": "A atualização MPD falhou; a metadata gravada permanece salva."
+    },
+    "writeErrors": {
+      "invalid_local_path": "Caminho local inválido.",
+      "outside_configured_roots": "Arquivo fora das pastas configuradas.",
+      "file_not_found": "Arquivo não encontrado.",
+      "cue_virtual": "Faixa CUE virtual não pode ser editada.",
+      "unsupported_format": "Formato não editável.",
+      "read_failed": "Não foi possível ler a metadata.",
+      "invalid_tag_update": "Os valores das tags foram recusados.",
+      "revision_conflict": "O arquivo mudou após a inspeção.",
+      "permission_denied": "Permissão negada.",
+      "transaction_failed": "A operação de gravação do arquivo falhou.",
+      "metadata_preservation_failed": "A preservação da metadata do arquivo falhou.",
+      "durability_failed": "O backend não pôde confirmar armazenamento durável."
+    },
+    "refreshErrors": {
+      "invalid_uri": "URI de atualização inválida.",
+      "mpd_unavailable": "MPD indisponível.",
+      "update_command_failed": "MPD recusou a solicitação de atualização.",
+      "invalid_response": "Resposta de atualização MPD inválida.",
+      "refresh_task_failed": "A tarefa de atualização MPD falhou."
+    },
     "edit": "Editar metadata do álbum",
     "title": "Editar metadata do álbum",
     "close": "Fechar editor de metadata do álbum",

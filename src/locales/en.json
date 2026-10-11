@@ -297,6 +297,57 @@
     }
   },
   "albumTagEditor": {
+    "apply": "Apply changes",
+    "applyingButton": "Applying…",
+    "closeButton": "Close",
+    "applyConfirm": "Apply the reviewed changes to {{count}} files? Each file is written separately. Earlier writes are not rolled back if a later file fails.",
+    "applying": "Writing album metadata… Wait for the per-file results.",
+    "resultTitle": "Results by file",
+    "resultSummary": "{{committed}} written · {{unchanged}} unchanged · {{failed}} failed · {{notAttempted}} not attempted",
+    "partialCommitStatus": "Partial commit: {{value}}",
+    "yes": "Yes",
+    "no": "No",
+    "partialCommit": "Some files were written; others failed or were not attempted. Earlier writes remain saved.",
+    "independentWrites": "Files are written independently. A later failure does not undo earlier writes.",
+    "committedWarning": "Written, with a post-write warning.",
+    "newInspectionRequired": "These results remain here until you close or reload. A new inspection and preview are required before another Apply.",
+    "applyConflict": "The album or revisions no longer match the reviewed changes. Your edits were kept. Inspect again before applying.",
+    "applyUnknown": "No reliable write result was received. Some files may have been changed. Your edits were kept; inspect again before any new attempt. No automatic retry will be made.",
+    "resultReloadConfirm": "Inspect again and discard the displayed results and current edits?",
+    "resultCloseConfirm": "Close and dismiss the displayed results or warning?",
+    "catalogNotifyFailed": "The catalog update could not be requested. The write results remain valid.",
+    "outcomes": {
+      "unchanged": "Unchanged",
+      "committed": "Written",
+      "failed": "Write failed",
+      "not_attempted": "Not attempted"
+    },
+    "refresh": {
+      "not_needed": "MPD refresh not needed",
+      "accepted": "MPD refresh requested/pending (job {{jobId}}); completion is not confirmed.",
+      "failed": "MPD refresh failed; the written metadata remains saved."
+    },
+    "writeErrors": {
+      "invalid_local_path": "Invalid local path.",
+      "outside_configured_roots": "File outside configured folders.",
+      "file_not_found": "File not found.",
+      "cue_virtual": "Virtual CUE track cannot be edited.",
+      "unsupported_format": "Format is not editable.",
+      "read_failed": "Metadata could not be read.",
+      "invalid_tag_update": "Tag values were rejected.",
+      "revision_conflict": "File changed after inspection.",
+      "permission_denied": "Permission denied.",
+      "transaction_failed": "File write operation failed.",
+      "metadata_preservation_failed": "File metadata preservation failed.",
+      "durability_failed": "The backend could not confirm durable storage."
+    },
+    "refreshErrors": {
+      "invalid_uri": "Invalid refresh URI.",
+      "mpd_unavailable": "MPD is unavailable.",
+      "update_command_failed": "MPD rejected the refresh request.",
+      "invalid_response": "Invalid MPD refresh response.",
+      "refresh_task_failed": "The MPD refresh task failed."
+    },
     "edit": "Edit album metadata",
     "title": "Edit album metadata",
     "close": "Close album metadata editor",

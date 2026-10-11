@@ -2,6 +2,7 @@ import type {
   LocalAlbumFieldState,
   LocalAlbumFieldSummary,
   LocalAlbumTagBatchPlan,
+  LocalAlbumTagBatchResult,
   LocalAlbumTagBatchPreflightRequest,
   LocalAlbumTagBatchUpdate,
   LocalAlbumTagInspection,
@@ -35,7 +36,7 @@ export interface LocalAlbumTagPreviewView {
   blockedReason: LocalAlbumTagBatchPlan["blocked_reason"];
   changeCount: number;
   unchangedCount: number;
-  canApply: false;
+  canApply: boolean;
   files: {
     uri: string;
     needsWrite: boolean;
@@ -199,7 +200,7 @@ export function localAlbumTagPreviewView(
     blockedReason: plan.blocked_reason,
     changeCount: plan.change_count,
     unchangedCount: plan.unchanged_count,
-    canApply: false,
+    canApply: plan.applicable && plan.change_count > 0 && !files.some((file) => file.blocked),
     files,
   };
 }
@@ -222,4 +223,45 @@ export function createLocalAlbumTagRequestGuard() {
       return available && token.context === context && token.generation === generation;
     },
   };
+}
+
+// Clone and freeze the exact request used by preflight; the plan is presentation only.
+export function freezeLocalAlbumTagBatchRequest(request: LocalAlbumTagBatchPreflightRequest): LocalAlbumTagBatchPreflightRequest {
+  const copy = structuredClone(request);
+  copy.tracks.forEach(Object.freeze);
+  Object.freeze(copy.tracks);
+  Object.values(copy.update).forEach(Object.freeze);
+  Object.freeze(copy.update);
+  return Object.freeze(copy);
+}
+
+// Reject untrustworthy IPC responses without claiming that no writes occurred.
+export function validateLocalAlbumTagBatchResult(result: LocalAlbumTagBatchResult, request: LocalAlbumTagBatchPreflightRequest): void {
+  if (!result || result.album_id !== request.album_id || !Array.isArray(result.tracks)
+    || typeof result.applicable !== "boolean" || typeof result.partial_commit !== "boolean") throw new Error("invalid_result");
+  const expected = new Map(request.tracks.map((track) => [track.uri, track.revision]));
+  const seen = new Set<string>();
+  const counts = { unchanged: 0, committed: 0, failed: 0, not_attempted: 0 };
+  for (const track of result.tracks) {
+    if (!track || seen.has(track.uri) || !expected.has(track.uri)
+      || track.expected_revision !== expected.get(track.uri)
+      || !Object.prototype.hasOwnProperty.call(counts, track.state) || !track.mpd_refresh
+      || !["not_needed", "accepted", "failed"].includes(track.mpd_refresh.state)
+      || (track.mpd_refresh.state === "accepted" && (!Number.isSafeInteger(track.mpd_refresh.job_id) || track.mpd_refresh.job_id! < 0))) {
+      throw new Error("invalid_result");
+    }
+    seen.add(track.uri);
+    counts[track.state]++;
+  }
+  if (seen.size !== expected.size || result.committed_count !== counts.committed
+    || result.unchanged_count !== counts.unchanged || result.failed_count !== counts.failed
+    || result.not_attempted_count !== counts.not_attempted
+    || result.partial_commit !== (counts.committed > 0 && (counts.failed > 0 || counts.not_attempted > 0))) throw new Error("invalid_result");
+}
+
+export function localAlbumTagApplyErrorKind(cause: unknown): "conflict" | "unknown" {
+  const code = cause && typeof cause === "object" && "code" in cause ? cause.code : null;
+  // AlbumCatalogFailure also represents a failed blocking task, which may have written.
+  return ["revision_conflict", "membership_changed", "invalid_snapshot", "duplicate_expected_uri", "album_not_found"].includes(String(code))
+    ? "conflict" : "unknown";
 }
