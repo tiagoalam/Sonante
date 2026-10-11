@@ -670,5 +670,104 @@
     "formatExplanation": "The MPD status describes a reported decoded format, not the original codec or the signal received by the DAC. It does not verify Hi-Res, native DSD or bit-perfect playback.",
     "sharedExplanation": "ALSA default follows system routing, which may involve PipeWire, PulseAudio or dmix, with possible mixing and conversion. The endpoint is not measured here.",
     "directExplanation": "The configured ALSA endpoint bypasses the shared default route. This view does not confirm that the PCM is open, hardware format support, or absence of processing. Software volume and ReplayGain can modify PCM."
+  },
+  "libraryDoctor": {
+    "title": "Library Doctor",
+    "open": "Diagnose album",
+    "close": "Close",
+    "inspectAgain": "Inspect again",
+    "loading": "Reading tags from this album’s files…",
+    "stale": "The album, catalog or availability changed. The previous result was discarded. Request a new inspection when the library is available.",
+    "unavailable": "The library is unavailable for diagnosis. Wait for a confirmed catalog and for updates or saves to finish, then request a new inspection.",
+    "pendingDiscard": "The previous read is still running. Its result will be discarded; wait before inspecting again.",
+    "coverage": "Inspection coverage",
+    "physicalReads": "Physical files read / total",
+    "readCount": "{{read}} / {{total}}",
+    "failures": "Read failures",
+    "cueTracks": "Virtual CUE tracks",
+    "findings": "Findings",
+    "fileFailures": "Per-file failures",
+    "uri": "URI",
+    "field": "Field",
+    "originalValue": "Original value",
+    "valueNull": "Not obtained (null)",
+    "valueEmpty": "Empty (\"\")",
+    "evidenceCount_one": "Expand evidence ({{count}})",
+    "evidenceCount_other": "Expand evidence ({{count}})",
+    "noFindings": "No findings in the checks performed",
+    "noReadableConclusion": "No physical files were read. An absence of findings does not establish that there are no problems.",
+    "unperformed": "Checks not performed",
+    "limitsTitle": "How to interpret this result",
+    "coverageStates": {
+      "no_reads": "No physical read coverage. CUE tracks, if present, were not checked.",
+      "partial": "Partial coverage. Read failures or CUE tracks leave parts of the album undiagnosed.",
+      "performed": "The returned physical files were read. Results are limited to the checks performed."
+    },
+    "levels": {
+      "advisory": "Advisory observation",
+      "inconsistency": "Inconsistency",
+      "possible_conflict": "Possible conflict"
+    },
+    "codes": {
+      "album_artist_absent": "Album Artist not obtained from the read tag",
+      "album_artist_empty": "Empty Album Artist in the read tag",
+      "date_uninterpretable": "Uninterpretable date",
+      "year_divergence": "Different years among interpretable dates",
+      "number_indeterminate": "Indeterminate numbering",
+      "track_exceeds_total": "Track number exceeds the declared total",
+      "disc_exceeds_total": "Disc number exceeds the declared total",
+      "possible_number_conflict": "Repeated positive disc and track numbers",
+      "cue_checks_not_performed": "CUE present, without tag or numbering checks"
+    },
+    "fields": {
+      "album_artist": "Album Artist",
+      "date": "Date",
+      "track_number": "Track number",
+      "track_total": "Track total",
+      "disc_number": "Disc number",
+      "disc_total": "Disc total",
+      "cue": "CUE"
+    },
+    "checks": {
+      "missing_tracks": "Missing tracks",
+      "content_duplicates": "Duplicate file content",
+      "canonicalization_discarded_entries": "Entries discarded when grouping the catalog",
+      "cue_metadata": "CUE track tags",
+      "cue_numbering": "CUE track numbering"
+    },
+    "limits": {
+      "membership": "Inspection covers only tracks associated with this album by the current catalog. It does not search for missing tracks or entries discarded during that grouping.",
+      "dates": "Years are compared only in valid year, year-month or year-month-day dates. Different precision within the same year is not a divergence. Original text is preserved; an uninterpretable date is not an absent date.",
+      "numbers": "An unobtained number may mean a missing tag or a value that could not be interpreted. We do not assume disc 1 or missing tracks. Numbers are compared only with positive declared totals.",
+      "conflicts": "Repeated positive disc and track numbers are only a possible conflict. They do not prove duplicate files; the same track number on different discs is legitimate. File content is not compared.",
+      "cue": "CUE presence is reported, but its tags and numbering are not checked. Reading all physical files does not make CUE coverage complete.",
+      "snapshot": "This result reflects one read, not an atomic snapshot: files are read at different times and can change during inspection.",
+      "invalidation": "Closing this screen or invalidating the result discards replies in this interface. It does not cancel a file read that has already started."
+    },
+    "errors": {
+      "state_unavailable": "Could not access the library state.",
+      "catalog_read_failed": "The album catalog query failed or was blocked by an update. No diagnosis was confirmed.",
+      "album_not_found": "The album was not found in the current catalog.",
+      "task_failed": "The diagnostic task failed. No diagnosis was confirmed.",
+      "report_mismatch": "The reply belongs to another album and was discarded.",
+      "invalid_report": "The diagnostic reply is invalid and was discarded.",
+      "read_in_progress": "A previous diagnostic read is still running. Its result will not be reused. Wait, then request a new inspection explicitly.",
+      "unknown": "Could not obtain the diagnosis. Request a new inspection when the library is available."
+    },
+    "fileErrors": {
+      "invalid_local_path": "Invalid local URI.",
+      "outside_configured_roots": "File is outside the configured local folders.",
+      "file_not_found": "File not found.",
+      "cue_virtual": "Virtual CUE track was not inspected.",
+      "unsupported_format": "Format does not support tag reading.",
+      "read_failed": "Could not read the file’s tags.",
+      "invalid_tag_update": "Invalid tag data.",
+      "revision_conflict": "The file changed during the operation.",
+      "permission_denied": "Access permission denied.",
+      "transaction_failed": "File operation failed.",
+      "metadata_preservation_failed": "Could not preserve metadata.",
+      "durability_failed": "Could not confirm the file operation.",
+      "unknown": "Unidentified read failure."
+    }
   }
 }

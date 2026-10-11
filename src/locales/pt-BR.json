@@ -670,5 +670,104 @@
     "formatExplanation": "O status MPD descreve um formato decodificado reportado, não o codec original ou o sinal recebido pelo DAC. Não comprova Hi-Res, DSD nativo ou reprodução bit-perfect.",
     "sharedExplanation": "ALSA default segue o roteamento do sistema, que pode envolver PipeWire, PulseAudio ou dmix, com possíveis etapas de mistura e conversão. O endpoint não é medido aqui.",
     "directExplanation": "O endpoint ALSA configurado não utiliza a rota compartilhada default. Esta visualização não confirma PCM aberto, suporte do hardware ao formato ou ausência de processamento. Volume por software e ReplayGain podem modificar PCM."
+  },
+  "libraryDoctor": {
+    "title": "Library Doctor",
+    "open": "Diagnosticar álbum",
+    "close": "Fechar",
+    "inspectAgain": "Inspecionar novamente",
+    "loading": "Lendo as tags dos arquivos deste álbum…",
+    "stale": "O álbum, catálogo ou disponibilidade mudou. O resultado anterior foi descartado. Faça uma nova inspeção quando a biblioteca estiver disponível.",
+    "unavailable": "A biblioteca não está disponível para diagnóstico. Aguarde o catálogo confirmado e o fim de atualizações ou salvamentos; depois solicite uma nova inspeção.",
+    "pendingDiscard": "A leitura anterior ainda está em andamento. Seu resultado será descartado; aguarde antes de inspecionar novamente.",
+    "coverage": "Cobertura desta inspeção",
+    "physicalReads": "Arquivos físicos lidos / total",
+    "readCount": "{{read}} / {{total}}",
+    "failures": "Falhas de leitura",
+    "cueTracks": "Faixas virtuais CUE",
+    "findings": "Achados",
+    "fileFailures": "Falhas por arquivo",
+    "uri": "URI",
+    "field": "Campo",
+    "originalValue": "Valor original",
+    "valueNull": "Não obtido (null)",
+    "valueEmpty": "Vazio (\"\")",
+    "evidenceCount_one": "Expandir evidência ({{count}})",
+    "evidenceCount_other": "Expandir evidências ({{count}})",
+    "noFindings": "Nenhum achado nas verificações realizadas",
+    "noReadableConclusion": "Nenhum arquivo físico foi lido. A ausência de achados não permite concluir que não há problemas.",
+    "unperformed": "Verificações não realizadas",
+    "limitsTitle": "Como interpretar este resultado",
+    "coverageStates": {
+      "no_reads": "Sem cobertura de leitura física. As faixas CUE, se presentes, não foram verificadas.",
+      "partial": "Cobertura parcial. Falhas de leitura ou faixas CUE deixam partes do álbum sem diagnóstico.",
+      "performed": "Os arquivos físicos retornados foram lidos. O resultado se limita às verificações realizadas."
+    },
+    "levels": {
+      "advisory": "Observação consultiva",
+      "inconsistency": "Inconsistência",
+      "possible_conflict": "Possível conflito"
+    },
+    "codes": {
+      "album_artist_absent": "Album Artist não obtido na tag lida",
+      "album_artist_empty": "Album Artist vazio na tag lida",
+      "date_uninterpretable": "Data não interpretável",
+      "year_divergence": "Anos diferentes entre datas interpretáveis",
+      "number_indeterminate": "Numeração indeterminada",
+      "track_exceeds_total": "Número da faixa maior que o total declarado",
+      "disc_exceeds_total": "Número do disco maior que o total declarado",
+      "possible_number_conflict": "Repetição de disco e faixa positivos",
+      "cue_checks_not_performed": "CUE presente, sem verificação de tags ou numeração"
+    },
+    "fields": {
+      "album_artist": "Artista do álbum (Album Artist)",
+      "date": "Data",
+      "track_number": "Número da faixa",
+      "track_total": "Total de faixas",
+      "disc_number": "Número do disco",
+      "disc_total": "Total de discos",
+      "cue": "CUE"
+    },
+    "checks": {
+      "missing_tracks": "Faixas faltantes",
+      "content_duplicates": "Duplicação pelo conteúdo dos arquivos",
+      "canonicalization_discarded_entries": "Entradas descartadas ao agrupar o catálogo",
+      "cue_metadata": "Tags das faixas CUE",
+      "cue_numbering": "Numeração das faixas CUE"
+    },
+    "limits": {
+      "membership": "A inspeção usa apenas as faixas que o catálogo atual associa a este álbum. Não procura faixas faltantes nem entradas descartadas nesse agrupamento.",
+      "dates": "Anos são comparados apenas em datas válidas no formato ano, ano-mês ou ano-mês-dia. Precisões diferentes do mesmo ano não são divergência. Os textos originais são preservados; data não interpretável não significa ausente.",
+      "numbers": "Um número não obtido pode ser uma tag ausente ou um valor que não foi possível interpretar. Não presumimos disco 1 nem faixas faltantes. Só comparamos números com totais positivos declarados.",
+      "conflicts": "Uma repetição de disco e faixa positivos é apenas um possível conflito. Não comprova arquivos duplicados; repetir o mesmo número de faixa em discos diferentes é legítimo. Não comparamos o conteúdo dos arquivos.",
+      "cue": "A presença de CUE é informada, mas suas tags e numeração não são verificadas. Ler todos os arquivos físicos não torna a cobertura de CUE completa.",
+      "snapshot": "Este resultado é um retrato de uma leitura, não um snapshot atômico: os arquivos são lidos em momentos diferentes e podem mudar durante a inspeção.",
+      "invalidation": "Fechar a tela ou invalidar o resultado descarta as respostas nesta interface. Isso não cancela uma leitura de arquivos já iniciada."
+    },
+    "errors": {
+      "state_unavailable": "Não foi possível acessar o estado da biblioteca.",
+      "catalog_read_failed": "A consulta do álbum ao catálogo falhou ou foi bloqueada por uma atualização. Nenhum diagnóstico foi confirmado.",
+      "album_not_found": "O álbum não foi encontrado no catálogo atual.",
+      "task_failed": "A tarefa de diagnóstico falhou. Nenhum diagnóstico foi confirmado.",
+      "report_mismatch": "A resposta pertence a outro álbum e foi descartada.",
+      "invalid_report": "A resposta de diagnóstico é inválida e foi descartada.",
+      "read_in_progress": "Uma leitura de diagnóstico anterior ainda está em andamento. Seu resultado não será reutilizado. Aguarde e solicite uma nova inspeção explicitamente.",
+      "unknown": "Não foi possível obter o diagnóstico. Solicite uma nova inspeção quando a biblioteca estiver disponível."
+    },
+    "fileErrors": {
+      "invalid_local_path": "URI local inválida.",
+      "outside_configured_roots": "Arquivo fora das pastas locais configuradas.",
+      "file_not_found": "Arquivo não encontrado.",
+      "cue_virtual": "Faixa virtual CUE não inspecionada.",
+      "unsupported_format": "Formato não suportado para leitura de tags.",
+      "read_failed": "Não foi possível ler as tags do arquivo.",
+      "invalid_tag_update": "Dados de tags inválidos.",
+      "revision_conflict": "O arquivo mudou durante a operação.",
+      "permission_denied": "Permissão de acesso negada.",
+      "transaction_failed": "Falha na operação do arquivo.",
+      "metadata_preservation_failed": "Falha ao preservar metadados.",
+      "durability_failed": "Não foi possível confirmar a operação do arquivo.",
+      "unknown": "Falha de leitura não identificada."
+    }
   }
 }

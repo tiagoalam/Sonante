@@ -8,6 +8,7 @@ mod config;
 mod config_save_operation;
 mod diagnostics;
 mod favorites;
+mod library_doctor;
 mod local_media;
 mod local_import_preview;
 mod local_import_artwork;
@@ -2700,6 +2701,36 @@ async fn get_local_album_tracks(
 }
 
 #[tauri::command]
+async fn get_local_album_doctor(
+    album_id: String,
+    config_state: State<'_, ConfigState>,
+    audio_state: State<'_, AudioState>,
+) -> Result<library_doctor::Report, library_doctor::DoctorError> {
+    let local_folders = config_state
+        .0
+        .lock()
+        .map_err(|_| library_doctor::DoctorError::StateUnavailable)?
+        .local_folders
+        .clone();
+    let socket_path = audio_state
+        .0
+        .lock()
+        .map_err(|_| library_doctor::DoctorError::StateUnavailable)?
+        .local_album_socket_path();
+    // Both shared locks are released before catalog and filesystem I/O.
+    tauri::async_runtime::spawn_blocking(move || {
+        library_doctor::inspect_album_at(
+            &socket_path,
+            &MpdSupervisor::library_dir(),
+            &album_id,
+            &local_folders,
+        )
+    })
+    .await
+    .map_err(|_| library_doctor::DoctorError::TaskFailed)?
+}
+
+#[tauri::command]
 async fn resolve_local_library_path(
     path: String,
     config_state: State<'_, ConfigState>,
@@ -4502,6 +4533,7 @@ pub fn run() {
             set_window_title,
             list_local_directory,
             get_local_album_tracks,
+            get_local_album_doctor,
             resolve_local_library_path,
             get_local_track_tags,
             get_local_album_tag_inspection,

@@ -18,6 +18,7 @@ import {
   Heart,
   ListPlus,
   Pencil,
+  Stethoscope,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LocalImportPreviewSection } from "./LocalImportPreviewSection";
@@ -65,6 +66,8 @@ import { VirtualList, type VirtualListHandle } from "./VirtualList";
 import { AlbumArtworkPlaceholder } from "./AlbumArtworkPlaceholder";
 import { ToolbarSelect } from "./ToolbarSelect";
 import { LocalAlbumTagEditorModal } from "./LocalAlbumTagEditorModal";
+import { LibraryDoctorModal } from "./LibraryDoctorModal";
+import { libraryDoctorAvailable } from "../utils/libraryDoctor";
 import { LocalTagEditorModal } from "./LocalTagEditorModal";
 import type { LocalTrackTags } from "../types/localTags";
 import { createAlbumTracksLoader, type AlbumTracksState } from "../utils/localAlbumTracks";
@@ -263,6 +266,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
   const [tagEditorAlbum, setTagEditorAlbum] = useState<LocalAlbum | null>(null);
+  const [doctorAlbum, setDoctorAlbum] = useState<LocalAlbum | null>(null);
+  const doctorSelectedAlbum = useRef(selectedAlbum?.id);
+  doctorSelectedAlbum.current = selectedAlbum?.id;
+  useEffect(() => {
+    setDoctorAlbum(current => current?.id === selectedAlbum?.id ? current : null);
+  }, [selectedAlbum?.id]);
   const libraryUpdatingForTags = useRef(isLibraryUpdating);
   libraryUpdatingForTags.current = isLibraryUpdating;
   const albumTagEditingAvailable = (albumId: string) => {
@@ -916,7 +925,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   </div>
                 )}
 
-                <div className="pt-2 flex items-center space-x-3">
+                <div className="pt-2 flex flex-wrap items-center gap-3">
                   <button
                     onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks.length ? albumTracks : undefined, 0)}
                     disabled={!isPlaybackAvailable || !tracksReady}
@@ -963,6 +972,18 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   >
                     <Pencil size={15} />
                     <span>{t("albumTagEditor.edit")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!catalogConfirmed}
+                    onClick={() => {
+                      if (libraryDoctorAvailable(localAlbumCatalog.getSnapshot(), libraryUpdatingRef.current, selectedAlbum.id)) setDoctorAlbum(selectedAlbum);
+                    }}
+                    className="flex items-center gap-2 rounded-xl border border-[#2B2B2B] bg-[#1E1E1E] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#282828] disabled:cursor-not-allowed disabled:opacity-40"
+                    title={t("libraryDoctor.open")}
+                  >
+                    <Stethoscope size={15} />
+                    <span>{t("libraryDoctor.open")}</span>
                   </button>
                 </div>
               </div>
@@ -1396,6 +1417,18 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
             }
           }}
           onClose={() => setTagEditorAlbum(null)}
+        />
+      )}
+      {doctorAlbum && selectedAlbum?.id === doctorAlbum.id && (
+        <LibraryDoctorModal
+          albumId={doctorAlbum.id}
+          displayName={doctorAlbum.title}
+          available={catalogConfirmed && albums.some(album => album.id === doctorAlbum.id)}
+          catalogVersion={catalog}
+          isAvailable={() => localAlbumCatalog.getSnapshot() === catalog
+            && doctorSelectedAlbum.current === doctorAlbum.id
+            && libraryDoctorAvailable(localAlbumCatalog.getSnapshot(), libraryUpdatingRef.current, doctorAlbum.id)}
+          onClose={() => setDoctorAlbum(null)}
         />
       )}
       {tagEditorTrack && (
