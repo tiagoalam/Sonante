@@ -64,6 +64,7 @@ import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./VirtualAlbumGri
 import { VirtualList, type VirtualListHandle } from "./VirtualList";
 import { AlbumArtworkPlaceholder } from "./AlbumArtworkPlaceholder";
 import { ToolbarSelect } from "./ToolbarSelect";
+import { LocalAlbumTagEditorModal } from "./LocalAlbumTagEditorModal";
 import { LocalTagEditorModal } from "./LocalTagEditorModal";
 import type { LocalTrackTags } from "../types/localTags";
 import { createAlbumTracksLoader, type AlbumTracksState } from "../utils/localAlbumTracks";
@@ -261,6 +262,15 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const observedCatalogRefreshRevision = useRef(catalogRefreshRevision);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
+  const [tagEditorAlbum, setTagEditorAlbum] = useState<LocalAlbum | null>(null);
+  const libraryUpdatingForTags = useRef(isLibraryUpdating);
+  libraryUpdatingForTags.current = isLibraryUpdating;
+  const albumTagEditingAvailable = (albumId: string) => {
+    const current = localAlbumCatalog.getSnapshot();
+    return current.loaded && !current.loading && !current.error && !current.mpdBusy
+      && !current.saveBlocked && !libraryUpdatingForTags.current
+      && current.albums.some((album) => album.id === albumId);
+  };
   const [tagEditorTrack, setTagEditorTrack] = useState<LocalItem | null>(null);
   const [scrollContainer, setScrollContainer] = useState<HTMLDivElement | null>(null);
 
@@ -938,6 +948,18 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       fill={favoriteIds.has(selectedAlbum.folder_path) ? "#E5A00D" : "none"}
                     />
                   </button>
+                  <button
+                    type="button"
+                    disabled={!catalogConfirmed}
+                    onClick={() => {
+                      if (albumTagEditingAvailable(selectedAlbum.id)) setTagEditorAlbum(selectedAlbum);
+                    }}
+                    className="flex items-center gap-2 rounded-xl border border-[#2B2B2B] bg-[#1E1E1E] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#282828] disabled:cursor-not-allowed disabled:opacity-40"
+                    title={t("albumTagEditor.edit")}
+                  >
+                    <Pencil size={15} />
+                    <span>{t("albumTagEditor.edit")}</span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -1353,6 +1375,16 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               : t("playlists.addAlbum")
           }
           onClose={() => setPlaylistItems(null)}
+        />
+      )}
+      {tagEditorAlbum && (
+        <LocalAlbumTagEditorModal
+          albumId={tagEditorAlbum.id}
+          displayName={tagEditorAlbum.title}
+          available={catalogConfirmed && albums.some((album) => album.id === tagEditorAlbum.id)}
+          catalogVersion={catalog}
+          isAvailable={() => localAlbumCatalog.getSnapshot() === catalog && albumTagEditingAvailable(tagEditorAlbum.id)}
+          onClose={() => setTagEditorAlbum(null)}
         />
       )}
       {tagEditorTrack && (

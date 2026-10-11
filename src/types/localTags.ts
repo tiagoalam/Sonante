@@ -75,3 +75,93 @@ export interface LocalTrackTagsError {
   unsupported_reason?: string | null;
   committed?: boolean;
 }
+
+export type LocalAlbumTrackKind = "physical" | "cue_virtual";
+
+export type LocalAlbumFieldState =
+  | "common"
+  | "absent"
+  | "mixed"
+  | "indeterminate"
+  | "not_applicable";
+
+export interface LocalAlbumFieldSummary {
+  state: LocalAlbumFieldState;
+  value: string | null;
+}
+
+export interface LocalAlbumTagFields {
+  album: LocalAlbumFieldSummary;
+  album_artist: LocalAlbumFieldSummary;
+  date: LocalAlbumFieldSummary;
+  genre: LocalAlbumFieldSummary;
+}
+
+export interface LocalAlbumTrackInspection {
+  uri: string;
+  kind: LocalAlbumTrackKind;
+  tags: LocalTrackTags | null;
+  issue: LocalTrackTagsError | null;
+}
+
+export interface LocalAlbumTagInspection {
+  album_id: string;
+  tracks: LocalAlbumTrackInspection[];
+  fields: LocalAlbumTagFields;
+  physical_track_count: number;
+  cue_virtual_count: number;
+  inspection_complete: boolean;
+}
+
+export interface LocalAlbumTagBatchExpectedTrack {
+  uri: string;
+  kind: LocalAlbumTrackKind;
+  revision: string | null;
+}
+
+export interface LocalAlbumTagBatchUpdate {
+  album: TagFieldUpdate<string>;
+  album_artist: TagFieldUpdate<string>;
+  date: TagFieldUpdate<string>;
+  genre: TagFieldUpdate<string>;
+}
+
+export interface LocalAlbumTagBatchPreflightRequest {
+  album_id: string;
+  tracks: LocalAlbumTagBatchExpectedTrack[];
+  update: LocalAlbumTagBatchUpdate;
+}
+
+export type LocalAlbumTagBatchBlockedReason =
+  | "track_inspection_failed"
+  | "cue_virtual";
+
+export interface LocalAlbumTagBatchTrackPlan {
+  uri: string;
+  expected_revision: string;
+  update: LocalTrackTagUpdate;
+  needs_write: boolean;
+  issue: LocalTrackTagsError | null;
+}
+
+export interface LocalAlbumTagBatchPlan {
+  album_id: string;
+  applicable: boolean;
+  blocked_reason: LocalAlbumTagBatchBlockedReason | null;
+  tracks: LocalAlbumTagBatchTrackPlan[];
+  change_count: number;
+  unchanged_count: number;
+}
+
+export type LocalAlbumTagBatchPreflightErrorCode =
+  | "album_catalog_failure"
+  | "album_not_found"
+  | "membership_changed"
+  | "duplicate_expected_uri"
+  | "invalid_snapshot"
+  | "revision_conflict";
+
+export interface LocalAlbumTagBatchPreflightError {
+  code: LocalAlbumTagBatchPreflightErrorCode;
+  message?: string;
+}
