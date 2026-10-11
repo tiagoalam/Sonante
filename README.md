@@ -6,8 +6,6 @@ Sonante is a desktop music player built for people who want to **listen to, navi
 
 **Platform:** Linux (x86_64) · **Interface:** English / Português (Brasil) · **Stack:** React, TypeScript, Tauri, Rust, MPD, ALSA
 
-> **Release status:** [v0.4.8](https://github.com/tiagoalam/Sonante/releases/tag/v0.4.8) is the latest published stable release. **v0.4.9 is being validated** on the [`release/0.4.9`](https://github.com/tiagoalam/Sonante/tree/release/0.4.9) branch. Packages mentioned below are planned release outputs, **not an announcement that v0.4.9 is available**.
-
 [Releases](https://github.com/tiagoalam/Sonante/releases) · [Report an issue](https://github.com/tiagoalam/Sonante/issues) · [Source code](https://github.com/tiagoalam/Sonante)
 
 ## Highlights
@@ -25,11 +23,11 @@ Sonante is designed for substantial, imperfect real-world libraries: multiple st
 
 ## Installation
 
-Download official releases from the [GitHub Releases page](https://github.com/tiagoalam/Sonante/releases). The v0.4.9 packaging workflow targets **DEB, RPM, and Arch Linux packages for x86_64**. Distribution-specific installation and upgrade checks remain part of the release validation.
+Download Sonante v0.4.9 from [GitHub Releases](https://github.com/tiagoalam/Sonante/releases/tag/v0.4.9). Prebuilt packages are available for **Debian/Ubuntu (DEB), Fedora (RPM), and Arch Linux/Manjaro (`.pkg.tar.zst`)**, for x86_64. Choose the package for your distribution.
 
 ### Debian / Ubuntu — DEB
 
-*After v0.4.9 is published*, download its `.deb` package and `SHA256SUMS-ubuntu.txt`, then run from their directory:
+Download the `.deb` package and `SHA256SUMS-ubuntu.txt` from the release page, then run from their directory:
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS-ubuntu.txt
@@ -38,7 +36,7 @@ sudo apt install ./Sonante_0.4.9_amd64.deb
 
 ### Fedora — RPM
 
-*After v0.4.9 is published*, download the `.rpm` package and `SHA256SUMS-ubuntu.txt`:
+Download the `.rpm` package and `SHA256SUMS-ubuntu.txt` from the release page:
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS-ubuntu.txt
@@ -49,7 +47,7 @@ The required MPD and native libraries must be available from your configured rep
 
 ### Arch Linux / Manjaro — pacman
 
-*After v0.4.9 is published*, download the `.pkg.tar.zst` package and `SHA256SUMS-arch.txt`:
+Download the `.pkg.tar.zst` package and `SHA256SUMS-arch.txt` from the release page:
 
 ```bash
 sha256sum -c SHA256SUMS-arch.txt
@@ -65,6 +63,7 @@ Package installation does **not** enable a system-wide MPD service. Sonante mana
 - **ALSA** and `aplay` (usually from `alsa-utils`) for audio devices.
 - **OpenSSL 3**, `xdg-open`, and an **XDG Desktop Portal** backend for integration with the desktop and folder selection.
 - **WirePlumber / `wpctl` is optional**, used when available for Shared-mode volume control through PipeWire.
+- **`webp-pixbuf-loader` is optional for artwork**: it is recommended by the DEB/RPM packages and listed as an optional dependency in Arch. Without it, some WebP artwork previews may be unavailable.
 
 Exact native dependencies vary by distribution and are checked as part of packaging. The Ubuntu 22.04 build is additionally checked against a maximum required **GLIBC 2.35** symbol version; this does not guarantee compatibility with every distribution or device.
 
@@ -127,14 +126,14 @@ Configuration directories and sensitive files are created with restrictive Linux
 
 ## Build from source
 
-Development requires **Node.js 22**, npm, a stable Rust toolchain, and the native development dependencies for Tauri 2, GTK 3, WebKitGTK 4.1, ALSA, and OpenSSL. See the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/) and the [CI workflow](https://github.com/tiagoalam/Sonante/blob/release/0.4.9/.github/workflows/ci.yml) for the Ubuntu build environment.
+Development requires **Node.js 22**, npm, a stable Rust toolchain, and the native development dependencies for Tauri 2, GTK 3, WebKitGTK 4.1, ALSA, and OpenSSL. See the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/) and the [CI workflow](https://github.com/tiagoalam/Sonante/blob/main/.github/workflows/ci.yml) for the Ubuntu build environment.
 
-To build the **0.4.9 development branch** without publishing or installing a system package:
+To build **v0.4.9** from its release tag without installing a system package:
 
 ```bash
 git clone https://github.com/tiagoalam/Sonante.git
 cd Sonante
-git switch release/0.4.9
+git checkout v0.4.9
 npm ci
 npm run tauri -- build --no-bundle -- --locked
 ```
@@ -163,7 +162,7 @@ The CI also checks packaging versions, native ELF requirements, and package cont
 
 Sonante prioritizes **reliable playback, conservative MPD lifecycle management, safe library changes, and clear audio reporting** over claiming support for every possible codec or audio feature. Platform and hardware behavior must be tested rather than inferred from a successful build.
 
-The current local tag editor handles single FLAC tracks, not batch album edits; availability of codecs, network sources, and DAC capabilities depends on your system. Packaging for v0.4.9 remains subject to automated and clean-install validation until the release is published.
+The current local tag editor handles single FLAC tracks, not batch album edits; availability of codecs, network sources, and DAC capabilities depends on your system. Sonante v0.4.9 provides DEB, RPM, and Arch packages for x86_64. Compatibility depends on the distribution, its available dependencies, and the selected audio hardware.
 
 Bug reports and reproducible feedback can be submitted through [GitHub Issues](https://github.com/tiagoalam/Sonante/issues).
 
