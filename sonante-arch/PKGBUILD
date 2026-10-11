@@ -5,7 +5,7 @@ pkgrel=1
 pkgdesc="Linux desktop audio player for local and Plex libraries"
 arch=('x86_64')
 url="https://github.com/tiagoalam/sonante"
-license=('custom')
+license=('GPL-3.0-only')
 depends=(
     'alsa-lib'
     'alsa-utils'
@@ -53,5 +53,8 @@ package() {
         "${pkgdir}/usr/share/icons/hicolor/256x256/apps/sonante.png"
     install -Dm644 'src-tauri/icons/icon.png' \
         "${pkgdir}/usr/share/icons/hicolor/512x512/apps/sonante.png"
+    install -Dm644 'LICENSE' "${pkgdir}/usr/share/licenses/sonante/LICENSE"
+    install -Dm644 'AUTHORS' "${pkgdir}/usr/share/doc/sonante/AUTHORS"
+    install -Dm644 'THIRD_PARTY_NOTICES' "${pkgdir}/usr/share/doc/sonante/THIRD_PARTY_NOTICES"
     install -Dm644 'README.md' "${pkgdir}/usr/share/doc/sonante/README.md"
 }

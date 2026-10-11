@@ -526,7 +526,8 @@
     "devTitle": "Desenvolvimento",
     "devDesc": "Construído em Rust, Tauri, React e MPD.",
     "builtWith": "Desenvolvido com",
-    "forEnthusiasts": "para entusiastas de áudio"
+    "forEnthusiasts": "para entusiastas de áudio",
+    "license": "Licenciado sob {{license}}. Copyright 2026 Tiago Alam. Sem garantia. Componentes de terceiros mantêm suas próprias licenças."
   },
   "albumView": {
     "plexAlbum": "Álbum Plex",

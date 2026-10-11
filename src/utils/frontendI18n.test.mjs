@@ -19,6 +19,19 @@ function flatten(value, prefix = "", result = {}) {
 const catalogs = Object.fromEntries(Object.entries(resources).map(([lng, data]) => [lng, flatten(data.translation)]));
 const parameters = value => [...new Set([...value.matchAll(/{{-?\s*(\w+)(?:\s*,[^}]+)?\s*}}/g)].map(match => match[1]))].sort();
 
+test("About shows version-only licensing and preserves third-party ownership", async () => {
+  const component = readFileSync(new URL("components/AboutModal.tsx", src), "utf8");
+  assert.match(component, /t\("about\.license", \{ license: "GPL-3\.0-only" \}\)/);
+  for (const lng of ["en", "pt-BR"]) {
+    const instance = i18next.createInstance();
+    await instance.init({ lng, resources, fallbackLng: false });
+    const message = instance.t("about.license", { license: "GPL-3.0-only" });
+    assert.ok(message.includes("GPL-3.0-only"));
+    assert.ok(message.includes("2026 Tiago Alam"));
+    assert.doesNotMatch(message, /{{|or later|ou posterior/);
+  }
+});
+
 test("locale keys, interpolation variables and plural families match", () => {
   assert.deepEqual(Object.keys(catalogs.en).sort(), Object.keys(catalogs["pt-BR"]).sort());
   for (const [key, value] of Object.entries(catalogs.en)) {

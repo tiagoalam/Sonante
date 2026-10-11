@@ -16,4 +16,14 @@ for (const dep of ["mpd", "alsa-utils", "xdg-utils", "xdg-desktop-portal", "alsa
 assert.ok(!tauri.bundle.linux.deb.depends.includes("wireplumber"));
 assert.ok(!tauri.bundle.linux.rpm.depends.includes("wireplumber"));
 assert.deepEqual(tauri.bundle.targets, ["deb", "rpm"]);
+assert.equal(pkg.license, "GPL-3.0-only");
+assert.equal(lock.packages[""].license, pkg.license);
+assert.match(read("src-tauri/Cargo.toml"), /^license = "GPL-3.0-only"$/m);
+assert.equal(tauri.bundle.license, pkg.license);
+assert.equal(tauri.bundle.licenseFile, "../LICENSE");
+assert.match(read("sonante-arch/PKGBUILD"), /^license=\('GPL-3\.0-only'\)$/m);
+assert.ok(read("LICENSE").includes("Version 3, 29 June 2007"));
+for (const fmt of ["deb", "rpm"]) {
+  for (const source of Object.values(tauri.bundle.linux[fmt].files)) read(`src-tauri/${source}`);
+}
 console.log(`Packaging versions and runtime contracts verified: ${pkg.version}`);

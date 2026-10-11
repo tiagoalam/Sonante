@@ -30,7 +30,9 @@
   "active": true,
   "targets": ["deb", "rpm"],
   "shortDescription": "Linux desktop audio player for local and Plex libraries",
-  "license": "LicenseRef-Proprietary",
+  "license": "GPL-3.0-only",
+  "licenseFile": "../LICENSE",
+  "copyright": "Copyright 2026 Tiago Alam",
   "category": "Music",
   "homepage": "https://github.com/tiagoalam/Sonante",
   "icon": [
@@ -42,6 +44,12 @@
   ],
   "linux": {
     "deb": {
+      "files": {
+        "/usr/share/doc/sonante/LICENSE": "../LICENSE",
+        "/usr/share/doc/sonante/AUTHORS": "../AUTHORS",
+        "/usr/share/doc/sonante/THIRD_PARTY_NOTICES": "../THIRD_PARTY_NOTICES",
+        "/usr/share/doc/sonante/copyright": "../packaging/debian-copyright"
+      },
       "recommends": ["xdg-desktop-portal-gtk", "webp-pixbuf-loader"],
       "depends": [
         "mpd",
@@ -53,6 +61,11 @@
       ]
     },
     "rpm": {
+      "files": {
+        "/usr/share/licenses/sonante/LICENSE": "../LICENSE",
+        "/usr/share/doc/sonante/AUTHORS": "../AUTHORS",
+        "/usr/share/doc/sonante/THIRD_PARTY_NOTICES": "../THIRD_PARTY_NOTICES"
+      },
       "recommends": ["xdg-desktop-portal-gtk", "webp-pixbuf-loader"],
       "release": "1",
       "depends": [

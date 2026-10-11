@@ -3,6 +3,7 @@ name = "sonante"
 version = "0.4.9"
 description = "Linux desktop audio player for local and Plex libraries"
 authors = ["Tiago Alam"]
+license = "GPL-3.0-only"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

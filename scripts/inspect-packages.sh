@@ -11,6 +11,8 @@ for package in "${packages[@]}"; do
       dpkg-deb -c "$package"
       test "$(dpkg-deb -f "$package" Version)" = "$version"
       test "$(dpkg-deb -f "$package" Architecture)" = amd64
+      dpkg-deb --fsys-tarfile "$package" | tar -xOf - usr/share/doc/sonante/LICENSE | cmp - LICENSE
+      dpkg-deb --fsys-tarfile "$package" | tar -xOf - usr/share/doc/sonante/copyright | cmp - packaging/debian-copyright
       contents="$(dpkg-deb --fsys-tarfile "$package" | tar -tf -)"
       depends="$(dpkg-deb -f "$package" Depends)"
       for dep in mpd alsa-utils xdg-utils xdg-desktop-portal libasound2 libwebkit2gtk-4.1-0 libssl3; do
@@ -21,6 +23,7 @@ for package in "${packages[@]}"; do
       rpm -K "$package"
       rpm -qip "$package"
       rpm -qlp "$package"
+      test "$(rpm -qp --queryformat '%{LICENSE}' "$package")" = GPL-3.0-only
       test "$(rpm -qp --queryformat '%{VERSION}' "$package")" = "$version"
       test "$(rpm -qp --queryformat '%{ARCH}' "$package")" = x86_64
       contents="$(rpm -qlp "$package")"
@@ -33,6 +36,14 @@ for package in "${packages[@]}"; do
   [[ "$contents" == *usr/bin/sonante* ]]
   [[ "$contents" == *share/applications/*.desktop* ]]
   [[ "$contents" == *share/icons/hicolor* ]]
+  if [[ "$package" == *.deb ]]; then
+    [[ "$contents" == *usr/share/doc/sonante/LICENSE* ]]
+  else
+    [[ "$contents" == *usr/share/licenses/sonante/LICENSE* ]]
+  fi
+  for file in AUTHORS THIRD_PARTY_NOTICES; do
+    [[ "$contents" == *usr/share/doc/sonante/$file* ]]
+  done
   # No personal state, system MPD configuration or service shipped.
   if [[ "$contents" == *etc/mpd* || "$contents" == *queue_cache.json* || "$contents" == *systemd/system/mpd* ]]; then
     echo 'Unexpected state/service in package' >&2; exit 1

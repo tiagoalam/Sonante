@@ -85,6 +85,9 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
               </div>
             </div>
           </div>
+          <p className="text-[11px] text-[#888888] leading-relaxed">
+            {t("about.license", { license: "GPL-3.0-only" })}
+          </p>
         </div>
 
         {/* Rodapé */}
