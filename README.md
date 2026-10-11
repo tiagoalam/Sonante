@@ -1,163 +1,174 @@
 # Sonante
 
-Sonante is a Linux desktop music player for local libraries and Plex Media Server. Its frontend is built with React and TypeScript; Tauri and Rust provide the native backend, while a dedicated MPD process handles playback through ALSA.
+**A library-first music player for Linux — local collections and Plex, in one place.**
 
-The project currently targets Linux and is developed and packaged on Arch Linux/Manjaro.
+Sonante is a desktop music player built for people who want to **listen to, navigate, and maintain their music collections** without giving up control of playback. It combines local folders and Plex Media Server with a dedicated [Music Player Daemon (MPD)](https://www.musicpd.org/) instance, a native Rust backend, and a React interface.
 
-## Features
+**Platform:** Linux (x86_64) · **Interface:** English / Português (Brasil) · **Stack:** React, TypeScript, Tauri, Rust, MPD, ALSA
 
-- Local libraries assembled from multiple directories and indexed by MPD.
-- Plex authentication, music libraries, albums, artists, search, collections, and remote playback.
-- Persistent Plex server identity with dynamic selection of reachable local, remote-direct, or relay connections.
-- Queue controls, play/pause, seek, next/previous navigation, and mirrored queue metadata.
-- Unified local and Plex album favorites.
-- Collection artwork mosaics and secure Plex artwork loading with lazy viewport loading, bounded concurrency, and an in-memory LRU cache.
-- Shared and Direct ALSA output modes.
-- Volume control through PipeWire, ALSA hardware mixers, or MPD software mixing according to the active backend.
-- ReplayGain modes provided to MPD: off, track, and album.
-- English and Brazilian Portuguese interface.
+> **Release status:** [v0.4.8](https://github.com/tiagoalam/Sonante/releases/tag/v0.4.8) is the latest published stable release. **v0.4.9 is being validated** on the [`release/0.4.9`](https://github.com/tiagoalam/Sonante/tree/release/0.4.9) branch. Packages mentioned below are planned release outputs, **not an announcement that v0.4.9 is available**.
 
-## Audio model
+[Releases](https://github.com/tiagoalam/Sonante/releases) · [Report an issue](https://github.com/tiagoalam/Sonante/issues) · [Source code](https://github.com/tiagoalam/Sonante)
 
-MPD is the playback engine. Sonante generates a private MPD configuration, starts and supervises the process, communicates through a per-user Unix socket, and sends decoded audio to an ALSA output selected by the user.
+## Highlights
 
-### Shared
+| Area | What Sonante offers |
+| --- | --- |
+| **Local music** | Multiple local folders and mounted shares; album, artist, year, genre, and folder browsing; source selection and incremental library updates. |
+| **Plex** | Account authorization, server/library selection, album and artist navigation, years, genres, collections, and remote playback. |
+| **Playback** | Queue management, play/pause, next/previous, seek, session restoration without automatic playback, and desktop media-key integration through MPRIS2. |
+| **Collection tools** | Local and Plex favorites, named playlists, availability-aware playlist playback, and an individual-track FLAC tag editor. |
+| **Artwork & browsing** | Local and Plex album artwork, virtualized grids for large catalogs, and artwork caching with bounded work. |
+| **Audio controls** | Shared and Direct output choices, device availability checks, ReplayGain settings, an explanatory Signal Path, and a separate Now Playing window with visualization. |
 
-Shared mode points MPD at the ALSA `default` device so the host audio stack can provide coexistence with other applications. Mixing and resampling behavior are controlled by the host configuration, which may use PipeWire, PulseAudio, or ALSA dmix.
-
-When PipeWire is configured and `wpctl` successfully probes the default sink, Sonante disables MPD mixing and reads/writes volume through that PipeWire sink. If the initial probe is unavailable, Sonante explicitly uses MPD's software mixer. A later `wpctl` failure makes volume temporarily unavailable instead of silently changing mixers.
-
-### Direct
-
-Direct mode points MPD at the selected ALSA hardware endpoint, normally an address such as `hw:CARD=...,DEV=...`.
-
-Sonante uses an ALSA hardware mixer only when it can associate the PCM endpoint with a mixer device and find exactly one usable playback-volume control. Missing, invalid, or ambiguous controls fall back to MPD software volume.
-
-Direct mode can request DoP in the generated MPD configuration. That setting is a request to MPD and does not confirm native DSD operation, the format received by the DAC, or an unmodified end-to-end signal path. ReplayGain and software volume also change the signal path.
-
-### Formats
-
-Audio format support comes from the installed MPD build and its enabled decoder plugins. Sonante does not ship codecs or maintain a separate extension whitelist. Use `mpd --version` on the target system to inspect the formats and decoder plugins available there. The format displayed by Sonante is the value reported by MPD, not a measurement at the ALSA endpoint or DAC.
-
-## Plex and security
-
-- A Plex server is persisted by its `machineIdentifier`, independently of a transient connection URL.
-- The backend validates and selects an available connection and resolves stable media references only when playback begins.
-- Artwork is represented publicly as a stable server ID plus a relative Plex path. Authentication tokens remain in the Rust backend and are not placed in image URLs or frontend state.
-- Legacy authenticated artwork in favorites and the queue cache is migrated when the server identity is known; otherwise only the unsafe artwork is discarded.
-- Large artwork uses a bounded 600×600 Plex thumbnail fallback while preserving MIME and response-size checks.
-- On Linux, Sonante-created configuration directories use mode `0700`; `config.json`, `favorites.json`, `queue_cache.json`, and atomic-save temporary files use mode `0600`.
-
-## Runtime dependencies
-
-Sonante currently depends on system components rather than bundling them:
-
-- MPD is required for playback and library indexing.
-- ALSA and `aplay` (`alsa-lib` and `alsa-utils` on Arch) are used for output and device discovery.
-- GTK 3, WebKitGTK 4.1, and Ayatana AppIndicator support the Tauri desktop application.
-- `xdg-open` is used to open the Plex authentication page.
-- OpenSSL is used by the native HTTP stack.
-- WirePlumber is optional. When its `wpctl` utility is available and PipeWire probing succeeds, Sonante uses it for Shared volume control; otherwise the documented MPD software fallback remains available.
+Sonante is designed for substantial, imperfect real-world libraries: multiple storage locations, multi-disc albums, CUE-based albums, varying metadata, and sources that may temporarily become unavailable.
 
 ## Installation
 
-### Arch Linux / Manjaro
+Download official releases from the [GitHub Releases page](https://github.com/tiagoalam/Sonante/releases). The v0.4.9 packaging workflow targets **DEB, RPM, and Arch Linux packages for x86_64**. Distribution-specific installation and upgrade checks remain part of the release validation.
 
-Sonante 0.4.0 is distributed as an Arch package. Download the `.pkg.tar.zst` file from the GitHub release and install it with pacman:
+### Debian / Ubuntu — DEB
+
+*After v0.4.9 is published*, download its `.deb` package and `SHA256SUMS-ubuntu.txt`, then run from their directory:
 
 ```bash
-sudo pacman -U ./sonante-0.4.0-1-x86_64.pkg.tar.zst
+sha256sum --ignore-missing -c SHA256SUMS-ubuntu.txt
+sudo apt install ./Sonante_0.4.9_amd64.deb
 ```
 
-The package does not configure a system-wide MPD service. Sonante starts and supervises its own MPD process.
+### Fedora — RPM
 
-### Build from source
-
-Install the build and runtime dependencies on Arch Linux or Manjaro:
+*After v0.4.9 is published*, download the `.rpm` package and `SHA256SUMS-ubuntu.txt`:
 
 ```bash
-sudo pacman -S --needed base-devel git nodejs npm rust \
-  gtk3 webkit2gtk-4.1 libayatana-appindicator \
-  alsa-lib alsa-utils openssl mpd xdg-utils
+sha256sum --ignore-missing -c SHA256SUMS-ubuntu.txt
+sudo dnf install ./Sonante-0.4.9-1.x86_64.rpm
 ```
 
-WirePlumber is optional:
+The required MPD and native libraries must be available from your configured repositories. Sonante does not add third-party repositories.
+
+### Arch Linux / Manjaro — pacman
+
+*After v0.4.9 is published*, download the `.pkg.tar.zst` package and `SHA256SUMS-arch.txt`:
 
 ```bash
-sudo pacman -S --needed wireplumber
+sha256sum -c SHA256SUMS-arch.txt
+sudo pacman -U ./sonante-0.4.9-1-x86_64.pkg.tar.zst
 ```
 
-Clone and build the application without generating distribution bundles:
+Package installation does **not** enable a system-wide MPD service. Sonante manages a private MPD process for its own session.
+
+### System requirements
+
+- A Linux desktop with **GTK 3 and WebKitGTK 4.1** support.
+- **MPD** for playback, decoding, and local-library indexing; available formats depend on the installed MPD build.
+- **ALSA** and `aplay` (usually from `alsa-utils`) for audio devices.
+- **OpenSSL 3**, `xdg-open`, and an **XDG Desktop Portal** backend for integration with the desktop and folder selection.
+- **WirePlumber / `wpctl` is optional**, used when available for Shared-mode volume control through PipeWire.
+
+Exact native dependencies vary by distribution and are checked as part of packaging. The Ubuntu 22.04 build is additionally checked against a maximum required **GLIBC 2.35** symbol version; this does not guarantee compatibility with every distribution or device.
+
+## Getting started
+
+1. **Choose an audio output.** Shared mode uses the system's default ALSA route; Direct mode targets a selected ALSA hardware endpoint.
+2. **Add your music.** Register one or more local folders, connect a Plex server, or use both.
+3. **Browse your collection.** Explore albums, artists, years, genres, and the source-specific views; add tracks to the queue or save them to a playlist.
+4. **Adjust playback.** Use the player controls, your desktop media keys, or the Now Playing window.
+
+The first-run wizard guides you through these choices. Plex sign-in uses an external authorization flow rather than asking you to paste a token into the interface.
+
+## Library management
+
+### Local collections
+
+Sonante presents multiple configured roots through a managed virtual library indexed by MPD. Library changes use guarded preparation and verification rather than rewriting the original music files simply to make them discoverable. Mounted volumes and network shares may be used as local sources if they are accessible to the process.
+
+Local browsing includes **Albums, Artists, Years, Genres, and Folders**. Album handling also accounts for multi-disc layouts and supported physical/virtual CUE representations. The interface is designed to remain usable with large catalogs through pagination and virtualized rendering.
+
+**Tag editing:** the current editor can inspect supported local-track metadata and edit **individual FLAC files** using a temporary-file-and-replace approach with conflict checks. Editing metadata intentionally changes the selected physical file. Plex tracks, virtual CUE tracks, and unsupported formats are not writable through this editor. **Batch album tag editing is not part of v0.4.9.**
+
+### Plex libraries
+
+Plex connectivity is associated with a server's stable identity, not just a temporary URL. Sonante can use validated server connections and resolve playback references when needed. It offers **Albums, Artists, Years, Genres, and Collections**, along with favorites and playlists spanning supported local and Plex items.
+
+Artwork requests are handled through the backend; authenticated Plex URLs and access tokens are not exposed as frontend image URLs. A missing or unreachable Plex source is reported as unavailable rather than being treated as a permanently empty collection.
+
+## Audio: what Shared and Direct mean
+
+Sonante uses its **own supervised MPD process** as the actual decoder and playback engine. The application itself does not implement a separate PCM decoder/output pipeline.
+
+| | Shared | Direct |
+| --- | --- | --- |
+| **MPD output** | ALSA `default` | Selected ALSA hardware endpoint (typically `hw:CARD=...,DEV=...`) |
+| **System audio** | May coexist with other applications through PipeWire, PulseAudio, or dmix, depending on the host | Requests access to a hardware endpoint; availability and exclusivity depend on the device and host |
+| **Volume** | PipeWire sink via `wpctl` when available and verified; otherwise MPD software volume | ALSA hardware mixer when a usable control can be identified; otherwise MPD software volume |
+| **Resampling / mixing** | May occur in the host audio stack | Depends on the effective MPD/ALSA/device configuration |
+
+The interface offers **ReplayGain** controls and can request **DoP** when configured for a compatible Direct output. DoP is not the same as native DSD, and enabling it does not prove that a DAC received DSD data.
+
+**Sonante does not claim verified bit-perfect output.** The displayed sample rate, bit depth, and channel information are **reported by MPD**, not measured at the DAC. Software volume, ReplayGain, resampling, and external mixing can change the actual signal. The Signal Path view is an explanation of the selected route and known status, **not an end-to-end audio measurement**.
+
+For actual decoder support on your system, inspect `mpd --version`.
+
+## Privacy and application data
+
+Sonante stores its per-user configuration and library state locally. Typical paths (under the XDG configuration directory) include:
+
+| File / directory | Purpose |
+| --- | --- |
+| `~/.config/sonante/config.json` | Audio, source, and Plex settings |
+| `~/.config/sonante/favorites.json` | Favorite albums |
+| `~/.config/sonante/queue_cache.json` | Cached queue metadata |
+| `~/.config/sonante/mpd.conf` and `mpd.db` | Private MPD configuration and catalog |
+| `~/.config/sonante/library/` | Managed virtual library |
+| `$XDG_RUNTIME_DIR/sonante/` | Private MPD runtime socket and process metadata, when the runtime directory is available |
+
+Configuration directories and sensitive files are created with restrictive Linux permissions. Plex credentials require special handling: **do not share configuration files or diagnostic output containing tokens**. Uninstalling the application package does not itself remove your personal library or configuration files.
+
+## Build from source
+
+Development requires **Node.js 22**, npm, a stable Rust toolchain, and the native development dependencies for Tauri 2, GTK 3, WebKitGTK 4.1, ALSA, and OpenSSL. See the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/) and the [CI workflow](https://github.com/tiagoalam/Sonante/blob/release/0.4.9/.github/workflows/ci.yml) for the Ubuntu build environment.
+
+To build the **0.4.9 development branch** without publishing or installing a system package:
 
 ```bash
-git clone https://github.com/tiagoalam/sonante.git
-cd sonante
+git clone https://github.com/tiagoalam/Sonante.git
+cd Sonante
+git switch release/0.4.9
 npm ci
 npm run tauri -- build --no-bundle -- --locked
 ```
 
-The executable is written to `src-tauri/target/release/sonante`.
+The native executable is written to `src-tauri/target/release/sonante`.
 
-To build the Arch package from a checkout containing the 0.4.0 tag:
-
-```bash
-cd sonante-arch
-makepkg -s
-```
-
-## Development
-
-Install JavaScript dependencies:
-
-```bash
-npm ci
-```
-
-Run the Tauri application in development mode:
+For development:
 
 ```bash
 npm run tauri dev
 ```
 
-Run the available checks and tests:
+For tests and checks:
 
 ```bash
-./node_modules/.bin/tsc --noEmit
-node tests/plexArtworkCache.test.mjs
-cargo test --manifest-path src-tauri/Cargo.toml
-cargo check --manifest-path src-tauri/Cargo.toml
-```
-
-Build only the frontend:
-
-```bash
+npm run test:frontend
 npm run build
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+cargo check --manifest-path src-tauri/Cargo.toml --locked
+python3 -m unittest discover -s tests -p 'packaging_test.py'
 ```
 
-Build the native release executable without producing `.deb` or AppImage bundles:
+The CI also checks packaging versions, native ELF requirements, and package contents. The Arch package is built using an Arch environment; **AppImage is not a validated distribution target for v0.4.9**.
 
-```bash
-npm run tauri -- build --no-bundle -- --locked
-```
+## Project status and scope
 
-## Persistent and runtime files
+Sonante prioritizes **reliable playback, conservative MPD lifecycle management, safe library changes, and clear audio reporting** over claiming support for every possible codec or audio feature. Platform and hardware behavior must be tested rather than inferred from a successful build.
 
-- `~/.config/sonante/config.json`: application, audio, and Plex configuration.
-- `~/.config/sonante/favorites.json`: local and Plex favorites.
-- `~/.config/sonante/queue_cache.json`: mirrored queue metadata; it is not an MPD playback-state restore file.
-- `~/.config/sonante/mpd.conf` and `mpd.db`: generated MPD configuration and database.
-- `~/.config/sonante/library/`: virtual library of symlinks to configured local roots.
-- `$XDG_RUNTIME_DIR/sonante/mpd.socket` and `mpd.pid`: per-user MPD runtime endpoints. A private directory below the Sonante configuration directory is used when `XDG_RUNTIME_DIR` is unavailable.
+The current local tag editor handles single FLAC tracks, not batch album edits; availability of codecs, network sources, and DAC capabilities depends on your system. Packaging for v0.4.9 remains subject to automated and clean-install validation until the release is published.
 
-## Packaging status
-
-Version 0.4.0 publishes an Arch/Manjaro package and source archives generated by the GitHub tag.
-
-- A `.deb` is intentionally not distributed in this release. It will be reconsidered after building against an Ubuntu 22.04 baseline and testing on clean Ubuntu/Debian virtual machines.
-- AppImage is intentionally not distributed because the project does not yet have a validated way to provide its required MPD runtime on a clean installation.
+Bug reports and reproducible feedback can be submitted through [GitHub Issues](https://github.com/tiagoalam/Sonante/issues).
 
 ## License
 
-Copyright © 2026 Tiago Alam. All rights reserved.
+**Copyright © 2026 Tiago Alam. All rights reserved.**
 
-The repository currently has no standalone `LICENSE` file and is not published under an OSI-approved open-source license. The source may be inspected and built for personal use, but redistribution, sale, sublicensing, paid hosting, or republication of substantial copies or derivatives requires prior authorization from the author.
+The repository is not currently published under an OSI-approved open-source license and does not contain a standalone `LICENSE` file. Source availability does not, by itself, grant redistribution, sublicensing, or commercial-use permissions; contact the author for authorization where required.
