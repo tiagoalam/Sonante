@@ -9,7 +9,7 @@ use std::time::Duration;
 
 const PLEX_CLIENT_ID: &str = "sonante-audio-player";
 const PLEX_PRODUCT_NAME: &str = "Sonante";
-const PLEX_VERSION: &str = "0.4.8";
+const PLEX_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PLEX_RESOURCES_URL: &str =
     "https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1";
 const PLEX_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1310,7 +1310,7 @@ mod tests {
         )
     }
 
-    fn media_client_for_test(config: &AppConfig) -> PlexClient {
+    pub(super) fn media_client_for_test(config: &AppConfig) -> PlexClient {
         let mut path_mappings = HashMap::new();
         if config.playback_mode == "local"
             && !config.remote_share_path.is_empty()
@@ -1381,6 +1381,421 @@ mod tests {
         let serialized = serde_json::to_string(&track).unwrap();
         assert!(!serialized.contains("SECRET"));
         assert!(!serialized.contains("route.invalid"));
+    }
+
+    fn navigation_metadata() -> serde_json::Value {
+        serde_json::json!({"MediaContainer": {"Metadata": [{
+            "type": "track", "ratingKey": "track-1",
+            "parentRatingKey": "album-2", "grandparentRatingKey": "artist-3",
+            "parentTitle": "Álbum homônimo", "grandparentTitle": "Artista",
+            "thumb": "https://private.invalid/image?X-Plex-Token=SECRET",
+            "Media": [{"Part": [{"key": "/library/parts/1/file.flac", "file": "/private/music.flac"}]}]
+        }]}})
+    }
+
+    #[test]
+    fn plex_catalog_genres_use_existing_album_responses_and_preserve_legacy_contract() {
+        let mut body = serde_json::json!({"MediaContainer": {"Metadata": [
+            {"ratingKey": "1", "title": "Same", "Genre": [{"tag": "Rock"}, {"tag": "Jazz"}, {"tag": "rock"}]},
+            {"ratingKey": "2", "title": "Same"},
+            {"ratingKey": "3", "Genre": [{"tag": null}, {"tag": 42}, {"tag": ""}, {"tag": "TEST_ACCOUNT_TOKEN"}, {"tag": "https://private/?X-Plex-Token=SECRET"}]},
+            {"ratingKey": "4", "Genre": "Rock"}
+        ]}});
+        body["MediaContainer"]["Hub"] = serde_json::json!([{
+            "type": "album", "Metadata": body["MediaContainer"]["Metadata"].clone()
+        }]);
+        let (client, _server) = availability_client_for_test("200 OK", body);
+        let albums = tauri::async_runtime::block_on(client.get_albums("1", "added")).unwrap();
+        assert_eq!(albums[0].genres, ["Rock", "Jazz"]);
+        for album in &albums[1..] {
+            assert!(album.genres.is_empty());
+        }
+        assert_ne!(albums[0].rating_key, albums[1].rating_key);
+        assert!(!serde_json::to_string(&albums)
+            .unwrap()
+            .contains("TEST_ACCOUNT_TOKEN"));
+        let collection = tauri::async_runtime::block_on(client.get_collection_albums("1")).unwrap();
+        let artist = tauri::async_runtime::block_on(client.get_artist_albums("1")).unwrap();
+        assert_eq!(collection[0].genres, albums[0].genres);
+        assert_eq!(artist[0].genres, albums[0].genres);
+        let search = tauri::async_runtime::block_on(client.search("Same", Some("1"))).unwrap();
+        assert_eq!(search.albums[0].genres, albums[0].genres);
+        let mut legacy = serde_json::to_value(&albums[0]).unwrap();
+        legacy.as_object_mut().unwrap().remove("genres");
+        let restored: PlexAlbum = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.rating_key, albums[0].rating_key);
+        assert!(restored.genres.is_empty());
+    }
+
+    fn navigation_connection() -> ResolvedPlexConnection {
+        ResolvedPlexConnection {
+            server_id: "fixture-machine-id".to_string(),
+            base_url: "https://private-route.invalid".to_string(),
+            token: "SECRET".to_string(),
+            generation: 0,
+        }
+    }
+
+    #[test]
+    fn player_navigation_album_thumb_prioritizes_parent_and_uses_only_album_fallback() {
+        let connection = navigation_connection();
+        for (parent, fallback, expected) in [
+            (
+                Some("/library/metadata/album-2/thumb/1"),
+                Some("/library/metadata/album-2/thumb/2"),
+                Some("/library/metadata/album-2/thumb/1"),
+            ),
+            (
+                None,
+                Some("/library/metadata/album-2/thumb/2"),
+                Some("/library/metadata/album-2/thumb/2"),
+            ),
+            (
+                Some("invalid"),
+                Some("/library/metadata/album-2/thumb"),
+                Some("/library/metadata/album-2/thumb"),
+            ),
+            (None, Some("/library/metadata/track-1/thumb/2"), None),
+            (None, Some("/library/metadata/artist-3/thumb/2"), None),
+        ] {
+            let mut body = navigation_metadata();
+            body["MediaContainer"]["Metadata"][0]["parentThumb"] = serde_json::json!(parent);
+            body["MediaContainer"]["Metadata"][0]["thumb"] = serde_json::json!(fallback);
+            let result =
+                parse_track_navigation(&body, "track-1", "/library/parts/1/file.flac", &connection)
+                    .unwrap();
+            assert_eq!(
+                result.album.thumb.as_ref().map(|image| image.path.as_str()),
+                expected
+            );
+            if let Some(image) = result.album.thumb {
+                assert_eq!(image.server_id, connection.server_id);
+                assert!(image.is_valid());
+            }
+        }
+    }
+
+    #[test]
+    fn player_navigation_absent_invalid_or_authenticated_images_do_not_prevent_navigation() {
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!(42),
+            serde_json::json!(""),
+            serde_json::json!("/private/music/cover.jpg"),
+            serde_json::json!("https://host/image?X-Plex-Token=SECRET"),
+            serde_json::json!("//host/library/metadata/album-2/thumb/1"),
+            serde_json::json!("/library/metadata/album-2/thumb/../private"),
+            serde_json::json!("/library/metadata/album-2/thumb/1?X-Plex-Token=SECRET"),
+            serde_json::json!("/library/metadata/album-2/thumb/1?%58-Plex-Token=SECRET"),
+            serde_json::json!("/library/metadata/album-2/thumb/1?token=SECRET"),
+            serde_json::json!("/library/metadata/album-2/thumb/1\n"),
+        ] {
+            let mut body = navigation_metadata();
+            body["MediaContainer"]["Metadata"][0]["parentThumb"] = value.clone();
+            body["MediaContainer"]["Metadata"][0]["thumb"] = value;
+            let result = parse_track_navigation(
+                &body,
+                "track-1",
+                "/library/parts/1/file.flac",
+                &navigation_connection(),
+            )
+            .unwrap();
+            assert!(result.album.thumb.is_none());
+            let serialized = serde_json::to_string(&result).unwrap();
+            assert!(!serialized.contains("SECRET"));
+            assert!(!serialized.contains("/private/"));
+            assert!(!serialized.contains("X-Plex-Token"));
+        }
+        // Even a credential that resembles a valid thumbnail timestamp must be discarded.
+        let mut connection = navigation_connection();
+        connection.token = "12345".to_string();
+        let mut body = navigation_metadata();
+        body["MediaContainer"]["Metadata"][0]["parentThumb"] =
+            serde_json::json!("/library/metadata/album-2/thumb/12345");
+        assert!(
+            parse_track_navigation(&body, "track-1", "/library/parts/1/file.flac", &connection)
+                .unwrap()
+                .album
+                .thumb
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn player_navigation_returns_album_image_from_existing_metadata_connection() {
+        let mut body = navigation_metadata();
+        body["MediaContainer"]["Metadata"][0]["parentThumb"] =
+            serde_json::json!("/library/metadata/album-2/thumb/1");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let (client, _server) = image_client_with_handler(move |path| {
+            assert_eq!(path.split('?').next(), Some("/library/metadata/track-1"));
+            observed.fetch_add(1, Ordering::SeqCst);
+            MockResponse::json("200 OK", body.clone())
+        });
+        let locator = plex_locator(
+            "fixture-machine-id",
+            "/library/parts/1/file.flac",
+            Some("track-1"),
+            None,
+        );
+        let result = tauri::async_runtime::block_on(client.resolve_track_navigation(&locator)).unwrap();
+        assert_eq!(
+            result.album.thumb,
+            Some(image_ref("/library/metadata/album-2/thumb/1"))
+        );
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("TEST_ACCOUNT_TOKEN"));
+        assert!(!serialized.contains("private.invalid"));
+        assert!(!serialized.contains("/private/"));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn player_navigation_validates_metadata_over_managed_connection_without_returning_secrets() {
+        let (client, _server) = availability_client_for_test("200 OK", navigation_metadata());
+        let locator = plex_locator(
+            "fixture-machine-id",
+            "/library/parts/1/file.flac",
+            Some("track-1"),
+            None,
+        );
+        let result =
+            tauri::async_runtime::block_on(client.resolve_track_navigation(&locator)).unwrap();
+        assert_eq!(result.album.rating_key, "album-2");
+        assert_eq!(result.artist_rating_key, "artist-3");
+        assert_eq!(result.album.artist_rating_key.as_deref(), Some("artist-3"));
+        let serialized = serde_json::to_string(&result).unwrap();
+        for private in [
+            "SECRET",
+            "X-Plex-Token",
+            "private.invalid",
+            "/private/",
+            "/library/parts/",
+        ] {
+            assert!(!serialized.contains(private));
+        }
+    }
+
+    #[test]
+    fn player_navigation_rejects_wrong_server_legacy_identity_and_authenticated_references() {
+        let (client, _server) = availability_client_for_test("200 OK", navigation_metadata());
+        for locator in [
+            plex_locator(
+                "other-server",
+                "/library/parts/1/file.flac",
+                Some("track-1"),
+                None,
+            ),
+            plex_locator(
+                "fixture-machine-id",
+                "/library/parts/1/file.flac",
+                None,
+                None,
+            ),
+            plex_locator(
+                "fixture-machine-id",
+                "/library/parts/1/file.flac?X-Plex-Token=SECRET",
+                Some("track-1"),
+                None,
+            ),
+            plex_locator(
+                "fixture-machine-id",
+                "/library/parts/1/file.flac",
+                Some("../secret"),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                tauri::async_runtime::block_on(client.resolve_track_navigation(&locator))
+                    .unwrap_err(),
+                "PLAYER_NAVIGATION_UNAVAILABLE"
+            );
+        }
+        let wrong_route = MockServer::start(|_| {
+            MockResponse::json(
+                "200 OK",
+                serde_json::json!({"MediaContainer": {"machineIdentifier": "different-server"}}),
+            )
+        });
+        let config = manager_config(&wrong_route.base_url, Some("fixture-machine-id"));
+        let wrong_client = media_client_for_test(&config);
+        let locator = plex_locator(
+            "fixture-machine-id",
+            "/library/parts/1/file.flac",
+            Some("track-1"),
+            None,
+        );
+        assert!(
+            tauri::async_runtime::block_on(wrong_client.resolve_track_navigation(&locator))
+                .is_err()
+        );
+        let mut foreign_metadata = navigation_metadata();
+        foreign_metadata["MediaContainer"]["machineIdentifier"] =
+            serde_json::json!("another-server");
+        let (client, _server) = availability_client_for_test("200 OK", foreign_metadata);
+        assert_eq!(
+            tauri::async_runtime::block_on(client.resolve_track_navigation(&locator)).unwrap_err(),
+            "PLAYER_NAVIGATION_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn player_navigation_rejects_missing_incompatible_or_ambiguous_metadata() {
+        let valid = navigation_metadata();
+        let mut cases = vec![
+            serde_json::json!({}),
+            serde_json::json!({"MediaContainer": {"Metadata": []}}),
+        ];
+        for (field, value) in [
+            ("type", serde_json::json!("album")),
+            ("ratingKey", serde_json::json!("another-track")),
+            ("parentRatingKey", serde_json::Value::Null),
+            ("grandparentRatingKey", serde_json::Value::Null),
+            ("parentRatingKey", serde_json::json!("artist-3")),
+            (
+                "parentRatingKey",
+                serde_json::json!("https://host/?X-Plex-Token=SECRET"),
+            ),
+            ("parentTitle", serde_json::Value::Null),
+            (
+                "grandparentTitle",
+                serde_json::json!("https://host/?X-Plex-Token=SECRET"),
+            ),
+            ("Media", serde_json::Value::Null),
+        ] {
+            let mut body = valid.clone();
+            body["MediaContainer"]["Metadata"][0][field] = value;
+            cases.push(body);
+        }
+        let mut wrong_part = valid.clone();
+        wrong_part["MediaContainer"]["Metadata"][0]["Media"][0]["Part"][0]["key"] =
+            serde_json::json!("/library/parts/other/file.flac");
+        cases.push(wrong_part);
+        let mut duplicate = valid.clone();
+        let part = duplicate["MediaContainer"]["Metadata"][0]["Media"][0]["Part"][0].clone();
+        duplicate["MediaContainer"]["Metadata"][0]["Media"][0]["Part"]
+            .as_array_mut()
+            .unwrap()
+            .push(part);
+        cases.push(duplicate);
+        let mut multiple = valid.clone();
+        let track = multiple["MediaContainer"]["Metadata"][0].clone();
+        multiple["MediaContainer"]["Metadata"]
+            .as_array_mut()
+            .unwrap()
+            .push(track);
+        cases.push(multiple);
+        for body in cases {
+            assert_eq!(
+                parse_track_navigation(
+                    &body,
+                    "track-1",
+                    "/library/parts/1/file.flac",
+                    &navigation_connection()
+                )
+                .unwrap_err(),
+                "PLAYER_NAVIGATION_UNAVAILABLE"
+            );
+        }
+        // Names never disambiguate homonymous albums: only the parent identity does.
+        let mut other = valid.clone();
+        other["MediaContainer"]["Metadata"][0]["parentRatingKey"] = serde_json::json!("album-99");
+        assert_ne!(
+            parse_track_navigation(
+                &valid,
+                "track-1",
+                "/library/parts/1/file.flac",
+                &navigation_connection()
+            )
+            .unwrap()
+            .album
+            .rating_key,
+            parse_track_navigation(
+                &other,
+                "track-1",
+                "/library/parts/1/file.flac",
+                &navigation_connection()
+            )
+            .unwrap()
+            .album
+            .rating_key
+        );
+    }
+
+    #[test]
+    fn player_navigation_http_and_metadata_failures_are_explicit_and_sanitized() {
+        let locator = plex_locator(
+            "fixture-machine-id",
+            "/library/parts/1/file.flac",
+            Some("track-1"),
+            None,
+        );
+        for (status, body) in [
+            ("401 Unauthorized", navigation_metadata()),
+            ("500 Internal Server Error", navigation_metadata()),
+            ("200 OK", serde_json::json!({})),
+        ] {
+            let (client, _server) = availability_client_for_test(status, body);
+            assert_eq!(
+                tauri::async_runtime::block_on(client.resolve_track_navigation(&locator))
+                    .unwrap_err(),
+                "PLAYER_NAVIGATION_UNAVAILABLE"
+            );
+        }
+        let mut credential_in_title = navigation_metadata();
+        credential_in_title["MediaContainer"]["Metadata"][0]["parentTitle"] =
+            serde_json::json!("TEST_ACCOUNT_TOKEN");
+        let (client, _server) = availability_client_for_test("200 OK", credential_in_title);
+        assert_eq!(
+            tauri::async_runtime::block_on(client.resolve_track_navigation(&locator)).unwrap_err(),
+            "PLAYER_NAVIGATION_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn player_navigation_rejects_server_selection_changed_during_metadata_request() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let server = MockServer::start(move |path| {
+            if path.starts_with("/identity") {
+                MockResponse::json(
+                    "200 OK",
+                    serde_json::json!({"MediaContainer": {"machineIdentifier": "fixture-machine-id"}}),
+                )
+            } else if path.starts_with("/library/sections") {
+                MockResponse::json("200 OK", serde_json::json!({"MediaContainer": {}}))
+            } else {
+                assert_eq!(path.split('?').next(), Some("/library/metadata/track-1"));
+                started_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+                MockResponse::json("200 OK", navigation_metadata())
+            }
+        });
+        let config = manager_config(&server.base_url, Some("fixture-machine-id"));
+        let client = media_client_for_test(&config);
+        let manager = client.connection_manager.clone();
+        let worker = thread::spawn(move || {
+            let locator = plex_locator(
+                "fixture-machine-id",
+                "/library/parts/1/file.flac",
+                Some("track-1"),
+                None,
+            );
+            tauri::async_runtime::block_on(client.resolve_track_navigation(&locator))
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        manager.update_config(&manager_config(&server.base_url, Some("other-server")));
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            worker.join().unwrap().unwrap_err(),
+            "PLAYER_NAVIGATION_UNAVAILABLE"
+        );
     }
 
     #[test]
@@ -2297,6 +2712,8 @@ pub struct PlexAlbum {
     pub artist: String,
     pub artist_rating_key: Option<String>,
     pub year: Option<u32>,
+    #[serde(default)]
+    pub genres: Vec<String>,
     pub thumb: Option<PlexImageRef>,
 }
 
@@ -2321,6 +2738,130 @@ pub struct PlexTrack {
     pub media_locator: MediaLocator,
 }
 
+/// Navigation only: artwork is a safe server-relative reference, never a playback URL or file path.
+#[derive(Debug, Serialize, Clone)]
+pub struct PlexTrackNavigation {
+    pub album: PlexAlbum,
+    pub artist_rating_key: String,
+    pub artist_name: String,
+}
+
+fn plex_album_genres(item: &serde_json::Value, connection: &ResolvedPlexConnection) -> Vec<String> {
+    let mut genres = Vec::new();
+    if let Some(entries) = item["Genre"].as_array() {
+        for entry in entries {
+            if let Some(value) = entry["tag"].as_str() {
+                if connection.token.is_empty() || !value.contains(&connection.token) {
+                    crate::catalog_genres::add_genre(&mut genres, value);
+                }
+            }
+        }
+    }
+    genres
+}
+
+fn navigation_rating_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+}
+
+fn navigation_text(value: &serde_json::Value) -> Result<String, String> {
+    value
+        .as_str()
+        .filter(|text| {
+            !text.trim().is_empty()
+                && text.len() <= 4096
+                && !text.chars().any(char::is_control)
+                && !contains_plex_token(text)
+                && !text.contains("://")
+        })
+        .map(str::to_string)
+        .ok_or_else(|| "PLAYER_NAVIGATION_UNAVAILABLE".to_string())
+}
+
+fn parse_track_navigation(
+    json: &serde_json::Value,
+    rating_key: &str,
+    part_key: &str,
+    connection: &ResolvedPlexConnection,
+) -> Result<PlexTrackNavigation, String> {
+    let invalid = || "PLAYER_NAVIGATION_UNAVAILABLE".to_string();
+    let metadata = json["MediaContainer"]["Metadata"]
+        .as_array()
+        .ok_or_else(invalid)?;
+    if metadata.len() != 1 {
+        return Err(invalid());
+    }
+    let track = &metadata[0];
+    if track["type"].as_str() != Some("track") || track["ratingKey"].as_str() != Some(rating_key) {
+        return Err(invalid());
+    }
+    let mut matches = 0;
+    for media in track["Media"].as_array().ok_or_else(invalid)? {
+        for part in media["Part"].as_array().ok_or_else(invalid)? {
+            if part["key"].as_str() == Some(part_key) {
+                matches += 1;
+            }
+        }
+    }
+    if matches != 1 {
+        return Err(invalid());
+    }
+    let album_key = track["parentRatingKey"]
+        .as_str()
+        .filter(|key| navigation_rating_key(key))
+        .ok_or_else(invalid)?;
+    let artist_key = track["grandparentRatingKey"]
+        .as_str()
+        .filter(|key| navigation_rating_key(key))
+        .ok_or_else(invalid)?;
+    if album_key == rating_key || artist_key == rating_key || album_key == artist_key {
+        return Err(invalid());
+    }
+    let artist_name = navigation_text(&track["grandparentTitle"])?;
+    Ok(PlexTrackNavigation {
+        album: PlexAlbum {
+            rating_key: album_key.to_string(),
+            title: navigation_text(&track["parentTitle"])?,
+            artist: artist_name.clone(),
+            artist_rating_key: Some(artist_key.to_string()),
+            year: None,
+            genres: Vec::new(),
+            thumb: navigation_album_thumb(track, album_key, connection),
+        },
+        artist_rating_key: artist_key.to_string(),
+        artist_name,
+    })
+}
+
+fn navigation_album_thumb(
+    track: &serde_json::Value,
+    album_key: &str,
+    connection: &ResolvedPlexConnection,
+) -> Option<PlexImageRef> {
+    let prefix = format!("/library/metadata/{album_key}/thumb");
+    ["parentThumb", "thumb"].into_iter().find_map(|field| {
+        let path = track[field].as_str()?;
+        // Only an album thumbnail endpoint proves that a fallback belongs to this album.
+        // Exclude filesystem paths, query credentials and encoded/traversal suffixes.
+        let suffix = path.strip_prefix(&prefix)?;
+        if !suffix.is_empty()
+            && !suffix.strip_prefix('/').is_some_and(|timestamp| {
+                !timestamp.is_empty() && timestamp.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        {
+            return None;
+        }
+        if !connection.token.is_empty() && path.contains(&connection.token) {
+            return None;
+        }
+        PlexImageRef::from_connection(connection, path)
+    })
+}
+
 #[derive(Clone)]
 pub struct PlexClient {
     connection_manager: Arc<PlexConnectionManager>,
@@ -2336,6 +2877,105 @@ pub enum PlexMediaAvailability {
 }
 
 impl PlexClient {
+    #[cfg(test)]
+    pub(crate) fn playback_client_for_test(config: &AppConfig) -> Self {
+        // Keep rediscovery local even when a delayed mock probe fails.
+        tests::media_client_for_test(config)
+    }
+
+    pub fn navigation_server_is_selected(&self, server_id: &str) -> bool {
+        self.connection_manager
+            .snapshot()
+            .ok()
+            .and_then(|snapshot| snapshot.identity)
+            .is_some_and(|identity| identity.machine_identifier == server_id)
+    }
+
+    pub async fn resolve_track_navigation(
+        &self,
+        locator: &MediaLocator,
+    ) -> Result<PlexTrackNavigation, String> {
+        let invalid = || "PLAYER_NAVIGATION_UNAVAILABLE".to_string();
+        let MediaLocator::Plex {
+            server_id,
+            part_key,
+            rating_key: Some(rating_key),
+            ..
+        } = locator
+        else {
+            return Err(invalid());
+        };
+        if validate_plex_server_id(server_id).is_err()
+            || !is_valid_plex_path(part_key)
+            || part_key.len() > 4096
+            || part_key.contains(['?', '#'])
+            || contains_plex_token(part_key)
+            || !navigation_rating_key(rating_key)
+        {
+            return Err(invalid());
+        }
+        let snapshot = self.connection_manager.snapshot().map_err(|_| invalid())?;
+        if snapshot
+            .identity
+            .as_ref()
+            .map(|identity| identity.machine_identifier.as_str())
+            != Some(server_id.as_str())
+        {
+            return Err(invalid());
+        }
+        let path = format!("/library/metadata/{}", urlencoding::encode(rating_key));
+        let (json, connection): (serde_json::Value, _) = self
+            .connection_manager
+            .request_json(&path, "resolver a navegação da faixa")
+            .await
+            .map_err(|_| invalid())?;
+        // Both the resolved route and the current selection must still belong to this server.
+        let current = self.connection_manager.snapshot().map_err(|_| invalid())?;
+        if connection.server_id != *server_id
+            || current.generation != connection.generation
+            || current
+                .identity
+                .as_ref()
+                .map(|identity| identity.machine_identifier.as_str())
+                != Some(server_id.as_str())
+        {
+            return Err(invalid());
+        }
+        if let Some(identity) = json["MediaContainer"].get("machineIdentifier") {
+            if identity.as_str() != Some(server_id.as_str()) {
+                return Err(invalid());
+            }
+        }
+        let mut result = parse_track_navigation(&json, rating_key, part_key, &connection)?;
+        // Do not publish a credential even if a malformed server places it in a display field.
+        let fields = [
+            result.album.title.as_str(),
+            result.album.artist.as_str(),
+            result.album.rating_key.as_str(),
+            result.artist_rating_key.as_str(),
+            part_key.as_str(),
+        ];
+        for token in [
+            connection.token.as_str(),
+            current.account_token.as_str(),
+            current.resolved_token.as_deref().unwrap_or(""),
+        ] {
+            if !token.is_empty() && fields.iter().any(|field| field.contains(token)) {
+                return Err(invalid());
+            }
+            if !token.is_empty()
+                && result
+                    .album
+                    .thumb
+                    .as_ref()
+                    .is_some_and(|image| image.path.contains(token))
+            {
+                result.album.thumb = None;
+            }
+        }
+        Ok(result)
+    }
+
     pub async fn media_availability(&self, locator: &MediaLocator) -> PlexMediaAvailability {
         self.media_availability_with_artwork(locator).await.0
     }
@@ -2538,6 +3178,7 @@ impl PlexClient {
                                     artist,
                                     artist_rating_key,
                                     year,
+                                    genres: plex_album_genres(item, &connection),
                                     thumb,
                                 });
                             }
@@ -2774,6 +3415,7 @@ impl PlexClient {
                     artist,
                     artist_rating_key,
                     year,
+                    genres: plex_album_genres(item, &connection),
                     thumb,
                 });
             }
@@ -2853,6 +3495,7 @@ impl PlexClient {
                     artist,
                     artist_rating_key,
                     year,
+                    genres: plex_album_genres(item, &connection),
                     thumb,
                 });
             }
@@ -2893,6 +3536,7 @@ impl PlexClient {
                     artist,
                     artist_rating_key: Some(artist_rating_key.to_string()),
                     year,
+                    genres: plex_album_genres(item, &connection),
                     thumb,
                 });
             }

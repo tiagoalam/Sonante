@@ -30,12 +30,21 @@ export interface AudioDevice {
   name: string;
 }
 
+export interface DeviceAvailability {
+  id: string;
+  state: "available" | "busy" | "indeterminate" | "current_sonante";
+}
+
 export interface VolumeStatus {
   value: number;
   muted: boolean;
   writable: boolean;
   available: boolean;
   backend: "alsa_hardware" | "pipewire" | "mpd_software" | "unavailable";
+}
+
+export interface PlaybackDiagnostic {
+  code: "output_busy" | "output_unavailable" | "playback_error";
 }
 
 export interface PlaybackStatus {
@@ -51,6 +60,7 @@ export interface PlaybackStatus {
   plex_image?: PlexImageRef | null;
   volume: VolumeStatus;
   is_updating: boolean; // <-- Necessário para o ícone de indexação/sincronização
+  playback_error?: PlaybackDiagnostic | null;
 }
 
 export type MpdUnavailableReason =
@@ -70,7 +80,13 @@ export interface MpdStatusSnapshot {
   playback: PlaybackStatus | null;
 }
 
+export interface ConfiguredSignalRoute {
+  mode: "shared" | "direct";
+  endpoint: string | null;
+}
+
 export interface NowPlayingSnapshot {
+  route: ConfiguredSignalRoute | null;
   health: MpdHealth;
   playback: PlaybackStatus;
 }

@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { CurrentMedia } from "../types/audio";
+import type { PlayerPlexNavigation } from "../types/plex";
 
 import {
   PlexLibrary,
@@ -12,6 +14,8 @@ import {
 } from "../types/plex";
 
 export const plexService = {
+  resolvePlayerNavigation: (media: Extract<CurrentMedia, { kind: "plex" }>): Promise<PlayerPlexNavigation> =>
+    invoke<PlayerPlexNavigation>("resolve_player_plex_navigation", { media }),
   getLibraries: (): Promise<PlexLibrary[]> =>
     invoke<PlexLibrary[]>("get_plex_libraries"),
 

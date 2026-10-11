@@ -1,3 +1,4 @@
+import { logError, logWarning } from "../utils/frontendDiagnostics";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -60,7 +61,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
         if (!disposed) setPlaylists(items);
       })
       .catch((cause) => {
-        console.error("Falha ao carregar playlists:", cause);
+        logError("playlists.load", cause);
         if (!disposed) setError(t("playlists.loadError"));
       })
       .finally(() => {
@@ -87,10 +88,10 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
         );
         statuses
           .filter((status) => status.reason)
-          .forEach((status) => console.warn("Item de playlist indisponível:", status.reason));
+          .forEach((status) => logWarning("playlists.item-unavailable", status.reason));
       })
       .catch((cause) => {
-        console.error("Falha ao resolver itens da playlist:", cause);
+        logError("playlists.resolve-items", cause);
         if (!disposed) setError(t("playlists.resolveError"));
       })
       .finally(() => {
@@ -116,7 +117,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
       setNewName("");
       setSelectedId(created.id);
     } catch (cause) {
-      console.error("Falha ao criar playlist:", cause);
+      logError("playlists.create", cause);
       setError(
         isDuplicatePlaylistNameError(cause)
           ? t("playlists.duplicateName")
@@ -149,7 +150,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
       );
       setEditingId(null);
     } catch (cause) {
-      console.error("Falha ao renomear playlist:", cause);
+      logError("playlists.rename", cause);
       setError(
         isDuplicatePlaylistNameError(cause)
           ? t("playlists.duplicateName")
@@ -177,7 +178,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
         return next;
       });
     } catch (cause) {
-      console.error("Falha ao remover item da playlist:", cause);
+      logError("playlists.remove-item", cause);
       setError(t("playlists.removeError"));
     } finally {
       setBusy(false);
@@ -194,7 +195,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
     try {
       replacePlaylist(await playlistsService.reorderItems(playlist.id, orderedIds));
     } catch (cause) {
-      console.error("Falha ao reordenar playlist:", cause);
+      logError("playlists.reorder", cause);
       setError(t("playlists.reorderError"));
     } finally {
       setBusy(false);
@@ -218,7 +219,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
       if (selectedId === playlist.id) setSelectedId(null);
       if (editingId === playlist.id) setEditingId(null);
     } catch (cause) {
-      console.error("Falha ao excluir playlist:", cause);
+      logError("playlists.delete", cause);
       setError(t("playlists.deleteError"));
     } finally {
       setBusy(false);
@@ -240,7 +241,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
         setPlaybackFeedback(t("playlists.skippedCount", { count: result.skipped_count }));
       }
     } catch (cause) {
-      console.error("Falha ao tocar playlist:", cause);
+      logError("playlists.play", cause);
       const message = String(cause);
       if (selectedIdRef.current === playlistId) setError(t(message.includes("playlist_no_playable_items")
         ? "playlists.noPlayableItems"

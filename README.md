@@ -168,6 +168,16 @@ Bug reports and reproducible feedback can be submitted through [GitHub Issues](h
 
 ## License
 
-**Copyright © 2026 Tiago Alam. All rights reserved.**
+**Copyright © 2026 Tiago Alam.**
 
-The repository is not currently published under an OSI-approved open-source license and does not contain a standalone `LICENSE` file. Source availability does not, by itself, grant redistribution, sublicensing, or commercial-use permissions; contact the author for authorization where required.
+Sonante's original code is licensed under the **GNU General Public License,
+version 3 only** (`GPL-3.0-only`). You may use, modify, and redistribute it under
+the terms of [LICENSE](LICENSE). No later version is automatically permitted.
+Sonante is provided without any warranty.
+
+See [AUTHORS](AUTHORS) for authorship. Third-party libraries and assets retain
+their respective licenses; see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
+The Lucide elements used in the application icon and UI retain their ISC/MIT
+notices. Distribution of compiled packages also requires making the corresponding
+source available under the applicable licenses, including the sources of bundled
+dependencies.

@@ -4,9 +4,14 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   linux:
@@ -28,10 +33,10 @@ jobs:
             file \
             libxdo-dev \
             libssl-dev \
-            libayatana-appindicator3-dev \
             librsvg2-dev \
+            webp-pixbuf-loader \
             libasound2-dev \
-            pkg-config
+            pkg-config rpm desktop-file-utils python3
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -53,8 +58,8 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Test Plex artwork cache
-        run: node tests/plexArtworkCache.test.mjs
+      - name: Test frontend
+        run: npm run test:frontend
 
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
@@ -62,17 +67,88 @@ jobs:
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked
       
-      - name: Build Debian package
-        run: npm run tauri -- build --bundles deb -- --locked
+      - name: Verify packaging versions
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node scripts/verify-packaging.mjs
 
-      - name: Inspect Debian package
+      - name: Test packaging contracts
+        run: python3 -m unittest discover -s tests -p 'packaging_test.py'
+
+      - name: Build native executable
+        run: npm run tauri -- build --no-bundle -- --locked
+
+      - name: Inspect native dependencies and GLIBC symbols
+        run: bash scripts/inspect-elf.sh src-tauri/target/release/sonante 2.35 | tee native-abi.txt
+
+      - name: Prepare RPM requirements from the built executable
+        run: python3 scripts/rpm-elf-deps.py src-tauri/target/release/sonante "$RUNNER_TEMP/sonante-rpm.json"
+
+      - name: Build DEB and RPM packages
+        run: npm run tauri -- bundle --bundles deb,rpm --config "$RUNNER_TEMP/sonante-rpm.json"
+
+      - name: Inspect packages and create checksums
         run: |
-          ls -lh src-tauri/target/release/bundle/deb/
-          dpkg-deb -I src-tauri/target/release/bundle/deb/*.deb
+          VERSION="$(node -p "require('./package.json').version")"
+          bash scripts/inspect-packages.sh "$VERSION" | tee package-inspection.txt
+          mkdir artifacts
+          cp src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/rpm/*.rpm artifacts/
+          cp native-abi.txt package-inspection.txt artifacts/
+          cd artifacts
+          sha256sum *.deb *.rpm > SHA256SUMS-ubuntu.txt
+          sha256sum -c SHA256SUMS-ubuntu.txt
 
-      - name: Upload Debian package
+      - name: Upload DEB and RPM candidates
         uses: actions/upload-artifact@v4
         with:
-          name: sonante-ubuntu-22.04-deb
-          path: src-tauri/target/release/bundle/deb/*.deb
+          name: sonante-ubuntu-22.04-packages
+          path: artifacts/*
+          if-no-files-found: error
+
+  arch:
+    name: Arch Linux package
+    runs-on: ubuntu-22.04
+    container: archlinux:base-devel
+    steps:
+      - name: Install Arch build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git nodejs npm rust python file binutils \
+            gtk3 webkit2gtk-4.1 alsa-lib alsa-utils \
+            openssl mpd xdg-utils xdg-desktop-portal desktop-file-utils
+      - uses: actions/checkout@v4
+      - name: Verify packaging versions
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node scripts/verify-packaging.mjs
+      - name: Stage exact checkout and build as an unprivileged user
+        run: |
+          bash scripts/prepare-arch-ci.sh "$GITHUB_WORKSPACE/arch-build"
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          cd arch-build
+          runuser -u builder -- makepkg --noconfirm --cleanbuild
+      - name: Inspect Arch package
+        run: |
+          cd arch-build
+          test "$(find . -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)" = 1
+          pacman -Qip ./*.pkg.tar.zst
+          pacman -Qlp ./*.pkg.tar.zst
+          bsdtar -xOf ./*.pkg.tar.zst .PKGINFO | tee package-info.txt
+          VERSION="$(node -p "require('../package.json').version")"
+          grep -Fx "pkgver = $VERSION-1" package-info.txt
+          for dep in mpd alsa-utils xdg-utils webkit2gtk-4.1; do grep -Fx "depend = $dep" package-info.txt; done
+          bsdtar -tf ./*.pkg.tar.zst | grep -Fx usr/bin/sonante
+          desktop-file-validate src/sonante.desktop
+          bash ../scripts/inspect-elf.sh src/sonante/src-tauri/target/release/sonante | tee native-abi-arch.txt
+          sha256sum *.pkg.tar.zst > SHA256SUMS-arch.txt
+          sha256sum -c SHA256SUMS-arch.txt
+      - name: Upload Arch candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonante-arch-package
+          path: |
+            arch-build/*.pkg.tar.zst
+            arch-build/SHA256SUMS-arch.txt
+            arch-build/package-info.txt
+            arch-build/native-abi-arch.txt
           if-no-files-found: error

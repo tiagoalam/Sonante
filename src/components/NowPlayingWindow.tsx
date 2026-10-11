@@ -1,3 +1,5 @@
+import { SignalPath } from "./SignalPath";
+import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useRef, useState } from "react";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -115,7 +117,7 @@ export const NowPlayingWindow: React.FC = () => {
       startRequested = true;
       await startAudioAnalyzer(sessionId);
     }).catch((err) => {
-      if (!disposed) console.error("Falha ao iniciar análise da janela Now Playing:", err);
+      if (!disposed) logError("now-playing.analyzer-start", err);
     });
 
     void getCurrentWindow()
@@ -124,7 +126,7 @@ export const NowPlayingWindow: React.FC = () => {
         if (!disposed) setIsFullscreen(value);
       })
       .catch((err) => {
-        if (!disposed) console.error("Falha ao consultar fullscreen:", err);
+        if (!disposed) logError("now-playing.fullscreen-status", err);
       });
 
     return () => {
@@ -133,7 +135,7 @@ export const NowPlayingWindow: React.FC = () => {
       cleanups.forEach((cleanup) => cleanup());
       if (startRequested) {
         void stopAudioAnalyzer(sessionId).catch((err) => {
-          console.error("Falha ao encerrar análise da janela Now Playing:", err);
+          logError("now-playing.analyzer-stop", err);
         });
       }
     };
@@ -153,7 +155,7 @@ export const NowPlayingWindow: React.FC = () => {
       setControlFailed(false);
     } catch (err) {
       setControlFailed(true);
-      console.error("Falha em controle da janela Now Playing:", err);
+      logError("now-playing.control", err);
     }
   };
 
@@ -180,7 +182,7 @@ export const NowPlayingWindow: React.FC = () => {
       await getCurrentWindow().setFullscreen(nextValue);
       setIsFullscreen(nextValue);
     } catch (err) {
-      console.error("Falha ao alternar fullscreen:", err);
+      logError("now-playing.fullscreen-toggle", err);
     }
   };
 
@@ -192,7 +194,7 @@ export const NowPlayingWindow: React.FC = () => {
       : volumeBackendLabel;
   const analyzerInactiveLabel = analyzerReason
     ? t(`nowPlaying.analyzerReason.${analyzerReason}`, {
-        defaultValue: analyzerReason,
+        defaultValue: t("nowPlaying.vuUnavailable"),
       })
     : t("nowPlaying.vuUnavailable");
 
@@ -248,7 +250,7 @@ export const NowPlayingWindow: React.FC = () => {
               type="button"
               onClick={() => {
                 void getCurrentWindow().close().catch((err) => {
-                  console.error("Falha ao fechar a janela Now Playing:", err);
+                  logError("now-playing.close", err);
                 });
               }}
               className="rounded-full border border-white/15 bg-black/25 p-2.5 text-white/75 backdrop-blur-md transition hover:border-white/30 hover:text-white"
@@ -260,66 +262,49 @@ export const NowPlayingWindow: React.FC = () => {
         </header>
 
         <section
-          className={`mx-auto grid min-h-0 w-full flex-1 items-center gap-8 overflow-y-auto md:grid-cols-[minmax(240px,0.75fr)_minmax(400px,1.25fr)] ${
+          className={`mx-auto grid min-h-0 w-full flex-1 items-center gap-8 overflow-x-hidden overflow-y-auto md:grid-cols-[minmax(0,0.75fr)_minmax(0,1.25fr)] ${
             isFullscreen
-              ? "max-w-[1500px] grid-rows-[minmax(0,1fr)] py-3 lg:gap-16"
+              ? "max-w-[1500px] py-3 lg:gap-16"
               : "max-w-6xl py-6 lg:gap-14"
           }`}
         >
           <div
-            className={`mx-auto aspect-square w-full overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 shadow-2xl shadow-black/50 ${
+            className={`mx-auto flex w-full min-w-0 flex-col gap-3 ${
               isFullscreen ? "max-w-[min(44vh,500px)]" : "max-w-[min(58vh,560px)]"
             }`}
           >
-            {hasTrack && status?.plex_image ? (
-              <PlexImage
-                image={status.plex_image}
-                alt={status.album || status.title}
-                className="h-full w-full object-cover"
-                fallback={<Disc3 size={80} className="text-white/15" />}
-              />
-            ) : hasTrack && status?.thumb ? (
-              <img
-                src={status.thumb}
-                alt={status.album || status.title}
-                className="h-full w-full object-cover"
-              />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center">
-                <Disc3 size={96} className="text-white/15" />
-              </div>
-            )}
+            <div className="aspect-square w-full shrink-0 overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 shadow-2xl shadow-black/50">
+              {hasTrack && status?.plex_image ? (
+                <PlexImage
+                  image={status.plex_image}
+                  alt={status.album || status.title}
+                  className="h-full w-full object-cover"
+                  fallback={<Disc3 size={80} className="text-white/15" />}
+                />
+              ) : hasTrack && status?.thumb ? (
+                <img
+                  src={status.thumb}
+                  alt={status.album || status.title}
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center">
+                  <Disc3 size={96} className="text-white/15" />
+                </div>
+              )}
+            </div>
+            {status && <SignalPath route={snapshot?.route ?? null} status={status} health={health ?? { state: "starting" }} />}
           </div>
 
           <div
             className={`flex min-w-0 flex-col ${
-              isFullscreen ? "h-full min-h-0 self-stretch justify-start" : "justify-center"
+              isFullscreen ? "min-h-0 self-stretch justify-start" : "justify-center"
             }`}
           >
             {!status ? (
               <p className="text-sm text-white/55">{t("nowPlaying.waitingForStatus")}</p>
             ) : (
               <>
-                <div
-                  className={`flex flex-wrap items-center gap-2 ${isFullscreen ? "mb-2" : "mb-4"}`}
-                >
-                  {hasTrack && status.current_media && (
-                    <span className="rounded-full border border-[#E5A00D]/35 bg-[#E5A00D]/10 px-3 py-1 text-[10px] font-bold tracking-[0.18em] text-[#F2B933]">
-                      {status.current_media.kind === "plex"
-                        ? t("nowPlaying.sourcePlex")
-                        : t("nowPlaying.sourceLocal")}
-                    </span>
-                  )}
-                  {isAvailable && status.audio_format && (
-                    <span
-                      className="rounded-full border border-white/10 bg-white/5 px-3 py-1 font-mono text-[10px] font-semibold tracking-wide text-white/65"
-                      title={t("player.formatReportedByMpd")}
-                    >
-                      {status.audio_format}
-                    </span>
-                  )}
-                </div>
-
                 <h2 className="line-clamp-2 text-3xl font-black leading-tight tracking-tight sm:text-4xl lg:text-5xl">
                   {hasTrack ? status.title : t("player.noTrack")}
                 </h2>

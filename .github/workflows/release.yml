@@ -1,89 +1,47 @@
-name: Release Debian package
+name: Release Linux packages
 
 on:
+  workflow_dispatch:
   release:
     types: [published]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  deb:
-    name: Debian package
+  # Manual dispatch builds candidates only. Publication is reachable solely
+  # from an already-published release, after every CI/packaging job succeeds.
+  packages:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  upload:
+    if: github.event_name == 'release'
+    needs: packages
     runs-on: ubuntu-22.04
-
+    permissions:
+      contents: write
     steps:
-      - name: Checkout release tag
-        uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libasound2-dev \
-            pkg-config
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      - name: Verify release version
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          VERSION="${RELEASE_TAG#v}"
-
-          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          TAURI_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-
-          echo "Release tag:    $VERSION"
-          echo "package.json:   $PACKAGE_VERSION"
-          echo "tauri.conf:     $TAURI_VERSION"
-
-          test "$VERSION" = "$PACKAGE_VERSION"
-          test "$VERSION" = "$TAURI_VERSION"
-          grep -q "^version = \"$VERSION\"" src-tauri/Cargo.toml
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Build Debian package
-        run: npm run tauri -- build --bundles deb -- --locked
-
-      - name: Inspect package
-        run: |
-          ls -lh src-tauri/target/release/bundle/deb/
-          dpkg-deb -I src-tauri/target/release/bundle/deb/*.deb
-
-      - name: Upload package to GitHub Release
+          pattern: sonante-*-package*
+          path: artifacts
+      - name: Verify and upload all package formats
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
         run: |
-          DEB="$(find src-tauri/target/release/bundle/deb \
-            -maxdepth 1 -type f -name '*.deb' -print -quit)"
-
-          test -n "$DEB"
-
-          gh release upload "$RELEASE_TAG" "$DEB" --clobber
+          set -euo pipefail
+          for directory in artifacts/*; do
+            (cd "$directory" && sha256sum -c SHA256SUMS-*.txt)
+          done
+          mapfile -t packages < <(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.pkg.tar.zst' \) | sort)
+          test "${#packages[@]}" = 3
+          find artifacts -name '*.deb' | grep -q .
+          find artifacts -name '*.rpm' | grep -q .
+          find artifacts -name '*.pkg.tar.zst' | grep -q .
+          mapfile -t checksums < <(find artifacts -name 'SHA256SUMS-*.txt' | sort)
+          gh release upload "$RELEASE_TAG" "${packages[@]}" "${checksums[@]}"

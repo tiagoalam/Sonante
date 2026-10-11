@@ -16,3 +16,16 @@ export interface AppConfig {
   audio_buffer_size_kb: number;
   replay_gain: "off" | "track" | "album";
 }
+
+export type ConfigSavePhase = "preparing" | "indexing" | "validating" | "completed" | "failed" | "uncertain";
+export interface ConfigSaveOperation {
+  id: string;
+  phase: ConfigSavePhase;
+  error: string | null;
+}
+export type ConfigSaveResponse = { status: "completed" } | { status: "accepted"; operation: ConfigSaveOperation };
+
+export interface QueueClearAuthorization {
+  confirmed: true;
+  binding: string;
+}

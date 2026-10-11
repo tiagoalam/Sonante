@@ -5,6 +5,14 @@ export interface LocalLibrarySourceOption {
   label: string;
 }
 
+// Presentation only: never derive a managed source ID from a configured physical path.
+export function localLibrarySelectorPresentation(folders: readonly string[]): { mode: "empty" | "single" | "multiple"; label?: string } {
+  if (folders.length === 0) return { mode: "empty" };
+  if (folders.length > 1) return { mode: "multiple" };
+  const path = folders[0].replace(/\/+$/u, "");
+  return { mode: "single", label: path.slice(path.lastIndexOf("/") + 1) || folders[0] };
+}
+
 export function localLibrarySourceOptions(
   albums: readonly LocalAlbum[],
 ): LocalLibrarySourceOption[] {

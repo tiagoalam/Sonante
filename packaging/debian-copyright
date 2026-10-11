@@ -1,0 +1,13 @@
+Sonante
+Copyright 2026 Tiago Alam
+Original author: Tiago Alam
+Source: https://github.com/tiagoalam/Sonante
+SPDX-License-Identifier: GPL-3.0-only
+
+Sonante's original code is free software under the GNU General Public License,
+version 3 only. It is distributed without any warranty. The complete license
+is installed at /usr/share/doc/sonante/LICENSE.
+
+Third-party code and assets retain their own licenses and copyright notices.
+See /usr/share/doc/sonante/THIRD_PARTY_NOTICES and the upstream dependency
+sources identified there and in the source distribution's lockfiles.

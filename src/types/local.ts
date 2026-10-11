@@ -13,6 +13,7 @@ export interface LocalAlbum {
   title: string;
   artist: string;
   year?: string;
+  genres?: string[];
   folder_path: string;
   source_id?: string | null;
   track_count: number;
@@ -24,4 +25,9 @@ export interface LocalAlbumDisc {
   label: string;
   folder_path: string;
   track_count: number;
+}
+
+export interface LocalAlbumDiscTracks {
+  disc: LocalAlbumDisc;
+  tracks: LocalItem[];
 }

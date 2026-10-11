@@ -1,4 +1,6 @@
-import React, { useEffect, useState, useRef, useCallback, useMemo, memo } from "react";
+import { configuredSignalRoute } from "./utils/signalPath";
+import { logError } from "./utils/frontendDiagnostics";
+import React, { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo, useSyncExternalStore, memo } from "react";
 import {
   Disc3,
   Folder,
@@ -24,23 +26,32 @@ import { PlayerBar } from "./components/PlayerBar";
 import { AlbumView } from "./components/AlbumView";
 import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
-import { LocalBrowserView } from "./components/LocalBrowserView";
-import { localArtworkEnrichment } from "./utils/localArtworkSession";
-import { initialMediaSource } from "./utils/appBootstrap";
+import { LocalBrowserView, localAlbumCatalog } from "./components/LocalBrowserView";
+import { localCatalogActivity } from "./utils/localAlbumCatalog";
+import { localArtworkEnrichment, localArtworkResolver } from "./utils/localArtworkSession";
+import { artworkReadBlocked } from "./utils/localArtwork";
+import { createMainSectionPreference, type MainSection } from "./utils/appBootstrap";
 import { FavoritesView } from "./components/FavoritesView";
 import { PlaylistsView } from "./components/PlaylistsView";
 import { PlaylistPickerModal } from "./components/PlaylistPickerModal";
-import { SettingsModal } from "./components/SettingsModal";
+import { SettingsModal, QueueClearConfirmationDialog, formatConfigError } from "./components/SettingsModal";
 import { AboutModal } from "./components/AboutModal";
 import { WelcomeWizard } from "./components/WelcomeWizard";
 import { PlexImage } from "./components/PlexImage";
 import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./components/VirtualAlbumGrid";
 import { VirtualList, type VirtualListHandle } from "./components/VirtualList";
 import { ToolbarSelect } from "./components/ToolbarSelect";
+import { deriveAlbumGenres, filterAlbumsByGenre, validAlbumGenre } from "./utils/albumGenres";
+import { AlbumGenreGrid } from "./components/AlbumGenreGrid";
 import { SidebarNavItem } from "./components/SidebarNavItem";
 import { plexService } from "./services/plex";
-import { audioService } from "./services/audio";
+import { audioService, LOCAL_LIBRARY_RECONCILED_EVENT } from "./services/audio";
 import { configService } from "./services/config";
+import { createLocalImportPreview } from "./utils/localImportPreview";
+import type { PreviewAlbum } from "./types/localImportPreview";
+import { configSavePending, monitorConfigSave } from "./utils/configSaveMonitor";
+import type { ConfigSavePhase, QueueClearAuthorization } from "./types/config";
+import { createQueueClearConfirmationFlow, queueClearBinding, type QueueClearConfirmation } from "./utils/queueClearConfirmation";
 import { favoritesService } from "./services/favorites";
 import {
   NOW_PLAYING_READY_EVENT,
@@ -69,6 +80,7 @@ import {
   type PlexAlbumSortMode,
 } from "./utils/plexAlbumNavigation";
 import { LOCAL_ALBUM_INDEX_BUCKETS } from "./utils/localAlbumNavigation";
+import { currentMediaKey, PlayerNavigationRequests, visitPlayerTarget, type PlayerNavigationTarget, type PlayerNavigationSession } from "./utils/playerNavigation";
 import {
   albumsForPlexArtist,
   derivePlexArtists,
@@ -144,7 +156,7 @@ const PlexCollectionArtwork = memo<{ collection: PlexCollection }>(({ collection
           setFailedMosaicSlots(new Set());
         })
         .catch((err) => {
-          if (!disposed) console.error("Falha ao carregar capas da coleção Plex:", err);
+          if (!disposed) logError("plex.collection-artwork", err);
         });
     };
 
@@ -309,20 +321,69 @@ PlexAlbumCard.displayName = "PlexAlbumCard";
 
 export function App() {
   const { t } = useTranslation();
+  const localCatalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const [mediaSource, setMediaSource] = useState<"plex" | "local" | "favorites" | "playlists" | null>(null);
+  const [mediaSource, setMediaSource] = useState<MainSection | null>(null);
+  const [playerNavigation, setPlayerNavigation] = useState<PlayerNavigationSession | null>(null);
+  const playerTarget = playerNavigation?.target ?? null;
+  const playerReturnSection = playerNavigation?.returnSection ?? null;
+  const setPlayerTarget = (target: PlayerNavigationTarget | null) => {
+    setPlayerNavigation(previous => previous && target ? { ...previous, target, revision: previous.revision + 1 } : null);
+  };
+  const [playerNavigationError, setPlayerNavigationError] = useState(false);
+  const playerNavigationRequests = useMemo(() => new PlayerNavigationRequests(), []);
+  // Keep the previous view (including its context and scroll) mounted while visiting the player target.
+  const centralSection = playerReturnSection ?? mediaSource;
+  const mainSectionPreferenceRef = useRef<ReturnType<typeof createMainSectionPreference> | null>(null);
+  if (!mainSectionPreferenceRef.current) {
+    mainSectionPreferenceRef.current = createMainSectionPreference(setMediaSource);
+  }
+  const mainSectionPreference = mainSectionPreferenceRef.current;
   const [bootstrapError, setBootstrapError] = useState(false);
+  const [managedSavePending, setManagedSavePending] = useState(false);
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
   const [localSelectedArtist, setLocalSelectedArtist] = useState<string | null>(null);
+  const [localCatalogRevision, setLocalCatalogRevision] = useState(0);
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
   const [loadingLibraries, setLoadingLibraries] = useState(true);
   const [selectedLibrary, setSelectedLibrary] = useState<PlexLibrary | null>(null);
-  const [plexViewMode, setPlexViewMode] = useState<"albums" | "artists" | "years" | "collections">("albums");
+  const [plexViewMode, setPlexViewMode] = useState<"albums" | "artists" | "years" | "genres" | "collections">("albums");
   const [hasCollections, setHasCollections] = useState(false);
   const [plexSortMode, setPlexSortMode] = useState<PlexAlbumSortMode>("added_recent");
+  const [selectedPlexGenre, setSelectedPlexGenre] = useState<string | null>(null);
   const [plexArtistSortMode, setPlexArtistSortMode] = useState<PlexArtistSortMode>("artist_asc");
   const [showSettings, setShowSettings] = useState(false);
+  const queueClearFlowRef = useRef(createQueueClearConfirmationFlow());
+  const [queueClearConfirmation, setQueueClearConfirmation] = useState<QueueClearConfirmation | null>(null);
+  const configSaveInProgressRef = useRef(false);
+  const configSaveGenerationRef = useRef(0);
+  const [configSavePhase, setConfigSavePhase] = useState<"local" | "other" | null>(null);
+  const [localSavePhase, setLocalSavePhase] = useState<ConfigSavePhase | null>(null);
+  const [importPreview, setImportPreview] = useState<PreviewAlbum[]>([]);
+  const importPreviewRef = useRef<ReturnType<typeof createLocalImportPreview> | null>(null);
+  const configSaveMonitorRef = useRef<ReturnType<typeof monitorConfigSave> | null>(null);
+  const [configSaveNotice, setConfigSaveNotice] = useState<{
+    kind: "success" | "error";
+    detail?: string;
+    reloadFailed?: boolean;
+    refusal?: "fullRescan" | "planChanged" | "queueChanged" | "queueCheckRequired";
+    stagingCleanupFailed?: boolean;
+    uncertain?: boolean;
+    statusUnavailable?: boolean;
+  } | null>(null);
+  // Expire only visible success notices; progress and failures stay explicit.
+  useEffect(() => {
+    if (configSavePhase || configSaveNotice?.kind !== "success" || configSaveNotice.uncertain || configSaveNotice.statusUnavailable) return;
+    const notice = configSaveNotice;
+    const generation = configSaveGenerationRef.current;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      if (!active || configSaveInProgressRef.current || generation !== configSaveGenerationRef.current) return;
+      setConfigSaveNotice(current => current === notice ? null : current);
+    }, 30_000);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [configSaveNotice, configSavePhase]);
   const [showAbout, setShowAbout] = useState(false);
 
   // Favoritos Plex (IDs em cache)
@@ -360,9 +421,12 @@ export function App() {
   const [plexScrollContainer, setPlexScrollContainer] = useState<HTMLDivElement | null>(null);
 
   const statusRef = useRef(playbackStatus);
-  useEffect(() => {
-    localArtworkEnrichment.setUpdating(playbackStatus.is_updating);
-  }, [playbackStatus.is_updating]);
+  useLayoutEffect(() => {
+    // Publish the artwork gate before child passive effects start cover queries.
+    const blocked = artworkReadBlocked(playbackStatus.is_updating, localCatalog);
+    localArtworkResolver.setContext(blocked, localCatalog.albums);
+    localArtworkEnrichment.setUpdating(blocked);
+  }, [playbackStatus.is_updating, localCatalog]);
   useEffect(() => {
     localArtworkEnrichment.setOnlineEnabled(config?.online_artwork_enabled ?? false);
   }, [config?.online_artwork_enabled]);
@@ -375,6 +439,7 @@ export function App() {
   }, [isPlaybackAvailable]);
   const nowPlayingReadyRef = useRef(false);
   const nowPlayingSnapshotRef = useRef({
+    route: configuredSignalRoute(config),
     health: mpdHealth,
     playback: playbackStatus,
   });
@@ -413,6 +478,46 @@ export function App() {
 
   const [loading, setLoading] = useState(false);
 
+  useLayoutEffect(() => {
+    playerNavigationRequests.setContext(JSON.stringify([
+      currentMediaKey(playbackStatus.current_media), mediaSource, selectedLibrary?.key,
+      activeAlbum?.rating_key, activeArtist?.rating_key, activeCollection?.rating_key,
+      plexViewMode, searchQuery, config?.plex_server_id,
+    ]));
+  }, [playbackStatus.current_media, mediaSource, selectedLibrary, activeAlbum, activeArtist,
+    activeCollection, plexViewMode, searchQuery, config?.plex_server_id, playerNavigationRequests]);
+  useLayoutEffect(() => { playerNavigationRequests.invalidate(); }, [localCatalog.albums,
+    localCatalog.saveBlocked, localCatalog.loading, localCatalog.mpdBusy, localCatalog.error,
+    playbackStatus.is_updating, mpdHealth.state, config?.plex_token, playerNavigationRequests]);
+  useEffect(() => () => playerNavigationRequests.invalidate(), [playerNavigationRequests]);
+
+  const closePlayerNavigation = () => {
+    playerNavigationRequests.invalidate();
+    setPlayerNavigation(null);
+    if (playerReturnSection) mainSectionPreference.navigate(playerReturnSection);
+  };
+
+  useEffect(() => {
+    if (playerTarget?.kind === "plex") closePlayerNavigation();
+  }, [config?.plex_server_id, config?.plex_token]);
+
+  const navigateFromPlayer = (view: "album" | "artist") => {
+    setPlayerNavigationError(false);
+    void playerNavigationRequests.open(
+      playbackStatus.current_media, view,
+      localCatalog.loaded && !localCatalog.loading && !localCatalog.saveBlocked && !localCatalog.mpdBusy
+        && !localCatalog.error && !playbackStatus.is_updating ? localCatalog.albums : [],
+      plexService.resolvePlayerNavigation,
+      target => {
+        setPlayerNavigation(previous => visitPlayerTarget(previous, target, centralSection ?? target.kind));
+        mainSectionPreference.navigate(target.kind);
+      },
+      () => setPlayerNavigationError(true),
+      playbackStatus.artist,
+      audioService.getLocalAlbumTracks,
+    );
+  };
+
   const refreshPlexFavorites = useCallback(() => {
     favoritesService
       .getFavorites()
@@ -422,8 +527,168 @@ export function App() {
           .map((f) => String(f.id));
         setPlexFavIds(new Set(ids));
       })
-      .catch(console.error);
+      .catch(error => logError("favorites.load", error));
   }, []);
+
+  const beginConfigSave = (phase: "local" | "other"): boolean => {
+    if (configSaveInProgressRef.current) return false;
+    if (queueClearFlowRef.current.isPending()) return false;
+    configSaveGenerationRef.current += 1;
+    configSaveInProgressRef.current = true;
+    if (phase === "local") localAlbumCatalog.setSaveBlocked(true);
+    setConfigSavePhase(phase);
+    setConfigSaveNotice(null);
+    return true;
+  };
+
+  const finishConfigSave = () => {
+    configSaveInProgressRef.current = false;
+    setConfigSavePhase(null);
+    setLocalSavePhase(null);
+  };
+
+  const reportLocalFoldersSaveFailure = async (error: unknown, uncertain = false, isCurrent = () => true) => {
+    const detail = formatConfigError(error);
+    const [reason, cleanup] = detail.split(";");
+    const refusal = reason === "LOCAL_SOURCE_FULL_RESCAN_REQUIRED" ? "fullRescan"
+      : reason === "LOCAL_SOURCE_TARGETED_PLAN_CHANGED" ? "planChanged"
+      : !uncertain && reason === "LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE" ? "queueChanged"
+      : !uncertain && queueClearBinding(detail) ? "queueCheckRequired" : undefined;
+    logError("settings.local-folders-save", error);
+    let reloadFailed = false;
+    try {
+      const confirmed = await configService.getConfig();
+      if (!isCurrent()) return;
+      setConfig(confirmed);
+      if (!uncertain) localAlbumCatalog.setSaveBlocked(false);
+    } catch (reloadError) {
+      reloadFailed = true;
+      logError("settings.reload-confirmed", reloadError);
+    }
+    if (!isCurrent()) return;
+    setConfigSaveNotice({
+      kind: "error",
+      detail: refusal ? undefined : detail,
+      reloadFailed,
+      refusal,
+      stagingCleanupFailed: Boolean(refusal) && cleanup === "LOCAL_SOURCE_STAGING_CLEANUP_FAILED",
+      uncertain,
+    });
+  };
+
+  useEffect(() => {
+    let disposed = false;
+    const preview = createLocalImportPreview(configService.getLocalImportPreview, setImportPreview);
+    importPreviewRef.current = preview;
+    const monitor = monitorConfigSave(configService.getSaveOperation, (operation) => {
+      preview.observe(operation);
+      const generation = ++configSaveGenerationRef.current;
+      const isCurrent = () => !disposed && generation === configSaveGenerationRef.current;
+      const confirmation = queueClearFlowRef.current.observe(operation);
+      if (operation.phase === "uncertain") localAlbumCatalog.setSaveBlocked(true);
+      setQueueClearConfirmation(null);
+      if (configSavePending(operation)) {
+        localAlbumCatalog.setSaveBlocked(true);
+        configSaveInProgressRef.current = true;
+        setConfigSavePhase("local");
+        setLocalSavePhase(operation.phase);
+        setConfigSaveNotice(null);
+        return;
+      }
+      void (async () => {
+        try {
+          if (confirmation) {
+            localAlbumCatalog.setSaveBlocked(false);
+            setQueueClearConfirmation(confirmation);
+            setConfigSaveNotice(null);
+          } else if (operation.phase === "completed") {
+            const confirmed = await configService.getConfig();
+            if (!isCurrent()) return;
+            setConfig(confirmed);
+            localAlbumCatalog.setSaveBlocked(false);
+            setLocalCatalogRevision((revision) => revision + 1);
+            setConfigSaveNotice({ kind: "success" });
+          } else {
+            await reportLocalFoldersSaveFailure(operation.error ?? operation.phase, operation.phase === "uncertain", isCurrent);
+          }
+        } catch (error) {
+          if (isCurrent()) await reportLocalFoldersSaveFailure(error, true, isCurrent);
+        } finally {
+          if (isCurrent()) finishConfigSave();
+        }
+      })();
+    }, (error) => {
+      logError("settings.save-status", error);
+      if (configSaveMonitorRef.current?.isPending()) {
+        // Losing the observer is not evidence of failure/completion. Keep the
+        // pending operation and continue observing without enabling another Save.
+        setConfigSaveNotice({ kind: "error", statusUnavailable: true });
+      }
+    });
+    configSaveMonitorRef.current = monitor;
+    return () => {
+      disposed = true;
+      monitor.dispose();
+      preview.dispose();
+      importPreviewRef.current = null;
+      configSaveMonitorRef.current = null;
+      queueClearFlowRef.current.discard();
+    };
+  }, []);
+
+  const startLocalFoldersSave = (nextConfig: AppConfig, authorization?: QueueClearAuthorization): boolean => {
+    const monitor = configSaveMonitorRef.current;
+    if (!monitor || !beginConfigSave("local")) return false;
+    const generation = configSaveGenerationRef.current;
+    const isCurrent = () => generation === configSaveGenerationRef.current && configSaveMonitorRef.current === monitor;
+    importPreviewRef.current?.clear();
+    const proposal = queueClearFlowRef.current.begin(nextConfig);
+    setQueueClearConfirmation(null);
+    setLocalSavePhase("preparing");
+    monitor.beginAcceptance();
+    void (async () => {
+      try {
+        const response = await configService.saveConfig(proposal, authorization);
+        if (!isCurrent()) return;
+        if (response.status === "accepted") {
+          queueClearFlowRef.current.accepted(response.operation.id);
+          monitor.accepted(response.operation);
+        } else {
+          queueClearFlowRef.current.discard();
+          monitor.acceptanceFailed();
+          const confirmed = await configService.getConfig();
+          if (!isCurrent()) return;
+          setConfig(confirmed);
+          localAlbumCatalog.setSaveBlocked(false);
+          setLocalCatalogRevision((revision) => revision + 1);
+          setConfigSaveNotice({ kind: "success" });
+          finishConfigSave();
+        }
+      } catch (error) {
+        if (!isCurrent()) return;
+        queueClearFlowRef.current.discard();
+        monitor.acceptanceFailed();
+        await reportLocalFoldersSaveFailure(error, false, isCurrent);
+        if (isCurrent()) finishConfigSave();
+      }
+    })();
+    return true;
+  };
+
+  const cancelQueueClear = (operationId: string) => {
+    if (configSaveInProgressRef.current) return;
+    if (!queueClearFlowRef.current.cancel(operationId)) return;
+    setQueueClearConfirmation(null);
+    setShowSettings(true);
+  };
+
+  const confirmQueueClear = (operationId: string) => {
+    if (configSaveInProgressRef.current) return;
+    const request = queueClearFlowRef.current.confirm(operationId);
+    if (!request) return;
+    setQueueClearConfirmation(null);
+    startLocalFoldersSave(request.config, request.authorization);
+  };
 
   // Carga inicial de configurações e dispositivos
   useEffect(() => {
@@ -433,11 +698,12 @@ export function App() {
         if (disposed) return;
         setConfig(cfg);
         setDevices(devs);
-        setMediaSource(initialMediaSource(cfg));
+        mainSectionPreference.restore(cfg);
       })
       .catch((error) => {
         if (!disposed) {
-          console.error("Falha no bootstrap inicial:", error);
+          logError("app.bootstrap", error);
+          setManagedSavePending(formatConfigError(error).includes("MANAGED_FOLDERS_SAVE_PENDING"));
           setBootstrapError(true);
         }
       });
@@ -456,7 +722,7 @@ export function App() {
       if (disposed) cleanup();
       else unlisten = cleanup;
     }).catch((err) => {
-      if (!disposed) console.error("Falha ao escutar a janela Now Playing:", err);
+      if (!disposed) logError("app.now-playing-listener", err);
     });
 
     return () => {
@@ -467,12 +733,32 @@ export function App() {
   }, [publishCurrentNowPlayingSnapshot]);
 
   useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen(LOCAL_LIBRARY_RECONCILED_EVENT, () => {
+      if (!disposed) localAlbumCatalog.requestRefresh();
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch((error) => {
+      if (!disposed) logError("local.reconciliation-listener", error);
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     nowPlayingSnapshotRef.current = {
+      route: configuredSignalRoute(config),
       health: mpdHealth,
       playback: playbackStatus,
     };
     publishCurrentNowPlayingSnapshot();
-  }, [mpdHealth, playbackStatus, publishCurrentNowPlayingSnapshot]);
+  }, [config, mpdHealth, playbackStatus, publishCurrentNowPlayingSnapshot]);
 
   // Atualiza favoritos Plex ao alternar a fonte de mídia
   useEffect(() => {
@@ -492,6 +778,7 @@ export function App() {
         if (disposed || generation !== statusRequestGenerationRef.current) return;
 
         if (snapshot.health.state === "available" && snapshot.playback) {
+          localAlbumCatalog.onMpdStatus(snapshot.playback.is_updating);
           setMpdHealth(snapshot.health);
           setPlaybackStatus(snapshot.playback);
         } else if (snapshot.health.state === "available") {
@@ -502,7 +789,7 @@ export function App() {
       } catch (err) {
         if (!disposed && generation === statusRequestGenerationRef.current) {
           setMpdHealth({ state: "unavailable", reason: "protocol_unavailable" });
-          console.error("Erro ao consultar saúde do motor de áudio:", err);
+          logError("audio.health", err);
         }
       } finally {
         if (!disposed) {
@@ -525,9 +812,9 @@ export function App() {
       const trackLabel = playbackStatus.artist
         ? `${playbackStatus.artist} — ${playbackStatus.title}`
         : playbackStatus.title;
-      audioService.setWindowTitle(`Sonante • ${trackLabel}`).catch(console.error);
+      audioService.setWindowTitle(`Sonante • ${trackLabel}`).catch(error => logError("app.window-title", error));
     } else {
-      audioService.setWindowTitle("Sonante").catch(console.error);
+      audioService.setWindowTitle("Sonante").catch(error => logError("app.window-title", error));
     }
   }, [isPlaybackAvailable, playbackStatus.state, playbackStatus.title, playbackStatus.artist]);
 
@@ -542,18 +829,22 @@ export function App() {
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
+        if (playerTarget) return; // The previous search field is hidden while visiting the player target.
         searchInputRef.current?.focus();
         searchInputRef.current?.select();
         return;
       }
 
       if (e.key === "Escape") {
+        playerNavigationRequests.invalidate();
         if (showAbout) {
           setShowAbout(false);
         } else if (showSettings) {
           setShowSettings(false);
         } else if (showQueue) {
           setShowQueue(false);
+        } else if (playerTarget) {
+          closePlayerNavigation();
         } else if (searchQuery) {
           setSearchQuery("");
         } else if (activeEl instanceof HTMLElement) {
@@ -570,40 +861,43 @@ export function App() {
 
       if (e.code === "Space") {
         e.preventDefault();
-        audioService.togglePlay().catch(console.error);
+        audioService.togglePlay().catch(error => logError("player.toggle", error));
       } else if (e.code === "ArrowRight") {
         e.preventDefault();
-        audioService.next().catch(console.error);
+        playerNavigationRequests.invalidate();
+        audioService.next().catch(error => logError("player.next", error));
       } else if (e.code === "ArrowLeft") {
         e.preventDefault();
-        audioService.previous().catch(console.error);
+        playerNavigationRequests.invalidate();
+        audioService.previous().catch(error => logError("player.previous", error));
       } else if (e.code === "ArrowUp") {
         e.preventDefault();
         if (!current.volume.available || !current.volume.writable) return;
         const nextVol = Math.min(current.volume.value + 5, 100);
-        audioService.setVolume(nextVol).catch(console.error);
+        audioService.setVolume(nextVol).catch(error => logError("player.volume", error));
       } else if (e.code === "ArrowDown") {
         e.preventDefault();
         if (!current.volume.available || !current.volume.writable) return;
         const prevVol = Math.max(current.volume.value - 5, 0);
-        audioService.setVolume(prevVol).catch(console.error);
+        audioService.setVolume(prevVol).catch(error => logError("player.volume", error));
       } else if (e.key.toLowerCase() === "m") {
         e.preventDefault();
         if (!current.volume.available || !current.volume.writable) return;
         const currentVol = current.volume.value;
         audioService
           .setVolume(!current.volume.muted && currentVol > 0 ? 0 : currentVol || 100)
-          .catch(console.error);
+          .catch(error => logError("player.volume", error));
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showSettings, showAbout, showQueue, searchQuery]);
+  }, [showSettings, showAbout, showQueue, searchQuery, playerTarget]);
 
   // Carregar ou Limpar Bibliotecas do Plex
   useEffect(() => {
     if (!config?.plex_token || config.plex_token.trim().length === 0) {
+      mainSectionPreference.plexDiscoveryFinished(false);
       setLoadingLibraries(false);
       setLibraries([]);
       setSelectedLibrary(null);
@@ -616,6 +910,7 @@ export function App() {
       setSelectedPlexDecade(null);
       setSelectedPlexYear(null);
       setSelectedPlexUnknownYear(false);
+      setSelectedPlexGenre(null);
       return;
     }
 
@@ -625,6 +920,7 @@ export function App() {
       .getLibraries()
       .then((libs) => {
         if (disposed) return;
+        mainSectionPreference.plexDiscoveryFinished(libs.length > 0);
         setLibraries(libs);
         if (libs.length > 0) {
           setSelectedLibrary(libs[0]);
@@ -633,7 +929,10 @@ export function App() {
         }
       })
       .catch((err) => {
-        if (!disposed) console.error(err);
+        if (!disposed) {
+          mainSectionPreference.plexDiscoveryFinished(false);
+          logError("plex.libraries-load", err);
+        }
       })
       .finally(() => {
         if (!disposed) setLoadingLibraries(false);
@@ -664,6 +963,7 @@ export function App() {
     setSelectedPlexDecade(null);
     setSelectedPlexYear(null);
     setSelectedPlexUnknownYear(false);
+    setSelectedPlexGenre(null);
     setSearchQuery("");
     setSearchResults(null);
     setAlbums([]);
@@ -678,7 +978,7 @@ export function App() {
       if (albumResult.status === "fulfilled") {
         setAlbums(albumResult.value);
       } else {
-        console.error("Falha ao carregar álbuns Plex:", albumResult.reason);
+        logError("plex.albums-load", albumResult.reason);
       }
       if (collectionResult.status === "fulfilled") {
         const loadedCollections = collectionResult.value;
@@ -690,7 +990,7 @@ export function App() {
       } else {
         setHasCollections(false);
         setPlexViewMode((current) => current === "collections" ? "albums" : current);
-        console.error("Falha ao consultar coleções Plex:", collectionResult.reason);
+        logError("plex.collections-load", collectionResult.reason);
       }
       setLoading(false);
     });
@@ -705,7 +1005,7 @@ export function App() {
     const q = searchQuery.trim();
     const generation = plexSearchRequestGenerationRef.current + 1;
     plexSearchRequestGenerationRef.current = generation;
-    if (q.length === 0 || mediaSource !== "plex") {
+    if (q.length === 0 || centralSection !== "plex") {
       setSearchResults(null);
       setIsSearching(false);
       return;
@@ -719,7 +1019,7 @@ export function App() {
           if (generation === plexSearchRequestGenerationRef.current) setSearchResults(res);
         })
         .catch((error) => {
-          if (generation === plexSearchRequestGenerationRef.current) console.error(error);
+          if (generation === plexSearchRequestGenerationRef.current) logError("plex.search", error);
         })
         .finally(() => {
           if (generation === plexSearchRequestGenerationRef.current) setIsSearching(false);
@@ -732,7 +1032,7 @@ export function App() {
         plexSearchRequestGenerationRef.current += 1;
       }
     };
-  }, [searchQuery, selectedLibrary, mediaSource]);
+  }, [searchQuery, selectedLibrary, centralSection]);
 
   const handleSelectCollection = async (col: PlexCollection) => {
     setActiveCollection(col);
@@ -741,7 +1041,7 @@ export function App() {
       const items = await getCachedCollectionAlbums(col.server_id, col.rating_key, true);
       setCollectionAlbums(items);
     } catch (err) {
-      console.error("Falha ao carregar álbuns da coleção:", err);
+      logError("plex.collection-albums", err);
     } finally {
       setLoading(false);
     }
@@ -764,7 +1064,7 @@ export function App() {
         audioService.playTracks(metaTracks, 0);
       }
     } catch (err) {
-      console.error("Falha na reprodução rápida:", err);
+      logError("plex.quick-play", err);
     }
   }, []);
 
@@ -794,7 +1094,7 @@ export function App() {
         return next;
       });
     } catch (err) {
-      console.error("Erro ao favoritar no Plex:", err);
+      logError("plex.favorite-toggle", err);
     }
   }, []);
 
@@ -805,7 +1105,7 @@ export function App() {
     setActiveArtist({ rating_key: normalizedArtistKey, name: artistName });
   }, []);
 
-  const handlePlexModeChange = (mode: "albums" | "artists" | "years" | "collections") => {
+  const handlePlexModeChange = (mode: "albums" | "artists" | "years" | "genres" | "collections") => {
     setPlexViewMode(mode);
     setActiveAlbum(null);
     setActiveArtist(null);
@@ -814,9 +1114,13 @@ export function App() {
     setSelectedPlexDecade(null);
     setSelectedPlexYear(null);
     setSelectedPlexUnknownYear(false);
+    setSelectedPlexGenre(null);
   };
 
   const resetAllNavigation = () => {
+    playerNavigationRequests.invalidate();
+    setPlayerNavigation(null);
+    setPlayerNavigationError(false);
     setLocalSelectedArtist(null);
     setActiveAlbum(null);
     setActiveCollection(null);
@@ -825,6 +1129,7 @@ export function App() {
     setSelectedPlexDecade(null);
     setSelectedPlexYear(null);
     setSelectedPlexUnknownYear(false);
+    setSelectedPlexGenre(null);
     setSearchQuery("");
     setSearchResults(null);
   };
@@ -845,6 +1150,7 @@ export function App() {
     setSelectedPlexDecade(null);
     setSelectedPlexYear(null);
     setSelectedPlexUnknownYear(false);
+    setSelectedPlexGenre(null);
     setSearchQuery("");
     setSearchResults(null);
     setSelectedLibrary(library);
@@ -870,6 +1176,12 @@ export function App() {
     { value: "artist_asc", label: t("plex.sortArtistAsc") },
     { value: "artist_desc", label: t("plex.sortArtistDesc") },
   ], [t]);
+  const plexGenreOptions = useMemo(() => deriveAlbumGenres(albums), [albums]);
+  const activePlexGenre = plexViewMode === "genres" ? validAlbumGenre(selectedPlexGenre, plexGenreOptions) : null;
+  const selectedPlexGenreSummary = plexGenreOptions.find(genre => genre.value === activePlexGenre);
+  const selectedPlexGenreAlbums = useMemo(() => activePlexGenre === null ? [] : sortPlexAlbums(filterAlbumsByGenre(albums, activePlexGenre), plexSortMode),
+    [albums, activePlexGenre, plexSortMode]);
+  useEffect(() => { if (selectedPlexGenre !== activePlexGenre) setSelectedPlexGenre(activePlexGenre); }, [selectedPlexGenre, activePlexGenre]);
   const sortedPlexAlbums = useMemo(
     () => sortPlexAlbums(albums, plexSortMode),
     [albums, plexSortMode],
@@ -910,8 +1222,11 @@ export function App() {
     || fallbackPlexArtist
     || selectedPlexDecade !== null
     || selectedPlexYear !== null
-    || selectedPlexUnknownYear,
+    || selectedPlexUnknownYear
+    || activePlexGenre !== null,
   );
+  const visibleSearchAlbums = useMemo(() => filterAlbumsByGenre(searchResults?.albums ?? [],
+    activePlexGenre), [searchResults, activePlexGenre]);
   const showPlexAlbumIndex = searchQuery.trim().length === 0
     && plexViewMode === "albums"
     && isTextPlexAlbumSort(plexSortMode);
@@ -924,6 +1239,8 @@ export function App() {
       setActiveCollection(null);
     } else if (fallbackPlexArtist) {
       setFallbackPlexArtist(null);
+    } else if (activePlexGenre !== null) {
+      setSelectedPlexGenre(null);
     } else if (selectedPlexUnknownYear) {
       setSelectedPlexUnknownYear(false);
     } else if (selectedPlexYear !== null) {
@@ -936,9 +1253,11 @@ export function App() {
   if (!config || mediaSource === null) {
     return (
       <main className="h-screen w-screen flex items-center justify-center bg-[#121212] text-[#E0E0E0]">
-        <div className="text-center">
+        <div className="max-w-xl px-6 text-center">
           <h1 className="text-xl font-black tracking-wider text-[#E5A00D]">SONANTE</h1>
-          <p className="mt-3 text-sm text-[#888888]">{t(bootstrapError ? "app.bootstrapError" : "welcome.starting")}</p>
+          <p className="mt-3 text-sm text-[#888888]">
+            {t(managedSavePending ? "app.managedSavePending" : bootstrapError ? "app.bootstrapError" : "wizard.starting")}
+          </p>
         </div>
       </main>
     );
@@ -951,18 +1270,16 @@ export function App() {
         devices={devices}
         onFinish={(newConfig) => {
           setConfig(newConfig);
-          if (newConfig.plex_token && newConfig.plex_token.trim().length > 0) {
-            setMediaSource("plex");
-          } else {
-            setMediaSource("local");
-          }
+          mainSectionPreference.finishSetup(newConfig);
         }}
       />
     );
   }
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-[#121212] text-[#E0E0E0] overflow-hidden select-none">
+    <div className="h-screen w-screen flex flex-col bg-[#121212] text-[#E0E0E0] overflow-hidden select-none"
+      onClickCapture={() => playerNavigationRequests.invalidate()}
+      onChangeCapture={() => playerNavigationRequests.invalidate()}>
       <div className="min-h-0 flex-1 flex overflow-hidden">
         {/* Barra Lateral */}
         <aside className="flex min-h-0 w-56 shrink-0 flex-col overflow-hidden border-r border-[#262626] bg-[#181818] p-3">
@@ -983,7 +1300,7 @@ export function App() {
                   active={mediaSource === "local"}
                   onClick={() => {
                     resetAllNavigation();
-                    setMediaSource("local");
+                    mainSectionPreference.navigate("local");
                   }}
                   trailing={!isPlaybackAvailable ? (
                     <span
@@ -992,8 +1309,8 @@ export function App() {
                     >
                       <CircleAlert size={13} />
                     </span>
-                  ) : playbackStatus.is_updating ? (
-                    <span className="flex items-center text-[#E5A00D]" title={t("sidebar.indexingTooltip")}>
+                  ) : localCatalogActivity(playbackStatus.is_updating, localCatalog) ? (
+                    <span className="flex items-center text-[#E5A00D]" title={t(playbackStatus.is_updating ? "sidebar.indexingTooltip" : "localBrowser.organizing")}>
                       <RefreshCw size={13} className="animate-spin" />
                     </span>
                   ) : (
@@ -1008,7 +1325,7 @@ export function App() {
                   active={mediaSource === "plex"}
                   onClick={() => {
                     resetAllNavigation();
-                    setMediaSource("plex");
+                    mainSectionPreference.navigate("plex");
                   }}
                 />
               </nav>
@@ -1025,7 +1342,7 @@ export function App() {
                   active={mediaSource === "favorites"}
                   onClick={() => {
                     resetAllNavigation();
-                    setMediaSource("favorites");
+                    mainSectionPreference.navigate("favorites");
                   }}
                 />
                 <SidebarNavItem
@@ -1034,7 +1351,7 @@ export function App() {
                   active={mediaSource === "playlists"}
                   onClick={() => {
                     resetAllNavigation();
-                    setMediaSource("playlists");
+                    mainSectionPreference.navigate("playlists");
                   }}
                 />
               </nav>
@@ -1045,7 +1362,7 @@ export function App() {
             <SidebarNavItem
               icon={Settings}
               label={t("sidebar.preferences")}
-              onClick={() => setShowSettings(true)}
+              onClick={() => { if (!configSaveInProgressRef.current) setShowSettings(true); }}
             />
             <SidebarNavItem
               icon={Info}
@@ -1056,20 +1373,24 @@ export function App() {
         </aside>
 
         {/* Painel Central */}
-        {mediaSource === "playlists" ? (
+        <div className={playerTarget ? "hidden" : "contents"}>
+        {centralSection === "playlists" ? (
           <PlaylistsView isPlaybackAvailable={isPlaybackAvailable} />
-        ) : mediaSource === "favorites" ? (
+        ) : centralSection === "favorites" ? (
           <FavoritesView
             onFavoritesChanged={refreshPlexFavorites}
             isPlaybackAvailable={isPlaybackAvailable}
           />
-        ) : mediaSource === "local" ? (
+        ) : centralSection === "local" ? (
           <LocalBrowserView
             initialArtist={localSelectedArtist}
             onClearInitialArtist={() => setLocalSelectedArtist(null)}
+            importPreview={importPreview}
+            catalogRefreshRevision={localCatalogRevision}
             isPlaybackAvailable={isPlaybackAvailable}
             isLibraryUpdating={playbackStatus.is_updating}
             onlineArtworkEnabled={config?.online_artwork_enabled ?? false}
+            configuredLocalFolders={config?.local_folders ?? []}
           />
         ) : !isPlexConnected ? (
           <main className="flex-1 flex flex-col items-center justify-center bg-[#121212] select-none p-8 text-center animate-in fade-in duration-200">
@@ -1081,7 +1402,7 @@ export function App() {
               {t("plex.disconnectedDesc")}
             </p>
             <button
-              onClick={() => setShowSettings(true)}
+              onClick={() => { if (!configSaveInProgressRef.current) setShowSettings(true); }}
               className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer"
             >
               <ExternalLink size={15} />
@@ -1130,13 +1451,15 @@ export function App() {
                         ? activeCollection.title
                         : fallbackPlexArtist
                           ? fallbackPlexArtist.name
+                          : selectedPlexGenreSummary
+                            ? selectedPlexGenreSummary.label
                           : selectedPlexUnknownYear
                             ? t("plex.unknownYear")
                             : selectedPlexYear !== null
                               ? String(selectedPlexYear)
                               : selectedPlexDecade !== null
                                 ? `${selectedPlexDecade}s`
-                                : t("player.source.plex")}
+                                : plexViewMode === "genres" ? t("common.genresLabel") : t("player.source.plex")}
                   </h2>
                   {searchQuery.trim().length === 0 && (
                     <p className="mt-0.5 text-xs text-[#888888]">
@@ -1144,6 +1467,8 @@ export function App() {
                         ? t("plex.albumsCount", { count: collectionAlbums.length })
                         : fallbackPlexArtist
                           ? t("plex.albumsCount", { count: fallbackPlexArtistAlbums.length })
+                          : activePlexGenre !== null
+                            ? t("plex.albumsCount", { count: selectedPlexGenreAlbums.length })
                           : selectedPlexUnknownYear || selectedPlexYear !== null
                             ? t("plex.albumsCount", { count: selectedPlexYearAlbums.length })
                             : selectedPlexDecadeSummary
@@ -1187,6 +1512,15 @@ export function App() {
                   }`}
                 >
                   {t("plex.tabYears")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handlePlexModeChange("genres")}
+                  className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                    plexViewMode === "genres" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                  }`}
+                >
+                  {t("common.genresLabel")}
                 </button>
                 {hasCollections && (
                   <button
@@ -1232,7 +1566,7 @@ export function App() {
                 )}
               </div>
 
-              {!hasPlexSubview && searchQuery.trim().length === 0 && plexViewMode === "albums" && (
+              {searchQuery.trim().length === 0 && ((!hasPlexSubview && plexViewMode === "albums") || activePlexGenre !== null) && (
                 <div className="flex items-center gap-2 text-xs text-[#888888]">
                   <span>{t("plex.sortLabel")}</span>
                   <ToolbarSelect
@@ -1297,7 +1631,7 @@ export function App() {
                   </div>
                 ) : searchResults &&
                   (searchResults.artists.length > 0 ||
-                    searchResults.albums.length > 0 ||
+                    visibleSearchAlbums.length > 0 ||
                     searchResults.tracks.length > 0) ? (
                   <div className="space-y-8">
                     {searchResults.artists.length > 0 && (
@@ -1328,13 +1662,13 @@ export function App() {
                       </div>
                     )}
 
-                    {searchResults.albums.length > 0 && (
+                    {visibleSearchAlbums.length > 0 && (
                       <div>
                         <h3 className="text-sm font-bold text-[#888888] uppercase tracking-wider mb-3">
                           {t("plex.albums")}
                         </h3>
                         <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
-                          {searchResults.albums.map((album) => {
+                          {visibleSearchAlbums.map((album) => {
                             const albumKey = String(album.rating_key || "");
                             return (
                               <PlexAlbumCard
@@ -1346,7 +1680,7 @@ export function App() {
                                 onToggleFav={handleTogglePlexCardFav}
                                 onSelectArtist={handleSelectArtist}
                                 removeFavText={t("favorites.removeFavorite")}
-                                addFavText={t("favorites.title")}
+                                addFavText={t("common.addFavorite")}
                                 playAlbumText={t("plex.playAlbum")}
                                 isPlaybackAvailable={isPlaybackAvailable}
                               />
@@ -1462,7 +1796,7 @@ export function App() {
                         onToggleFav={handleTogglePlexCardFav}
                         onSelectArtist={handleSelectArtist}
                         removeFavText={t("favorites.removeFavorite")}
-                        addFavText={t("favorites.title")}
+                        addFavText={t("common.addFavorite")}
                         playAlbumText={t("plex.playAlbum")}
                         isPlaybackAvailable={isPlaybackAvailable}
                       />
@@ -1486,7 +1820,7 @@ export function App() {
                         onToggleFav={handleTogglePlexCardFav}
                         onSelectArtist={handleSelectArtist}
                         removeFavText={t("favorites.removeFavorite")}
-                        addFavText={t("favorites.title")}
+                        addFavText={t("common.addFavorite")}
                         playAlbumText={t("plex.playAlbum")}
                         isPlaybackAvailable={isPlaybackAvailable}
                       />
@@ -1510,20 +1844,47 @@ export function App() {
                         onToggleFav={handleTogglePlexCardFav}
                         onSelectArtist={handleSelectArtist}
                         removeFavText={t("favorites.removeFavorite")}
-                        addFavText={t("favorites.title")}
+                        addFavText={t("common.addFavorite")}
                         playAlbumText={t("plex.playAlbum")}
                         isPlaybackAvailable={isPlaybackAvailable}
                       />
                     );
                   }}
                 />
+              ) : plexViewMode === "genres" ? (
+                activePlexGenre !== null ? (
+                  <VirtualAlbumGrid
+                    items={selectedPlexGenreAlbums}
+                    getItemKey={(album) => album.rating_key}
+                    scrollContainer={plexScrollContainer}
+                    resetKey={JSON.stringify([selectedLibrary?.key, "genre", activePlexGenre, plexSortMode])}
+                    renderItem={(album) => {
+                      const albumKey = String(album.rating_key || "");
+                      return (
+                        <PlexAlbumCard
+                          album={album}
+                          isFav={albumKey ? plexFavIds.has(albumKey) : false}
+                          onSelect={setActiveAlbum}
+                          onPlayQuick={handlePlayQuick}
+                          onToggleFav={handleTogglePlexCardFav}
+                          onSelectArtist={handleSelectArtist}
+                          removeFavText={t("favorites.removeFavorite")}
+                          addFavText={t("common.addFavorite")}
+                          playAlbumText={t("plex.playAlbum")}
+                          isPlaybackAvailable={isPlaybackAvailable}
+                        />
+                      );
+                    }}
+                  />
+                ) : <AlbumGenreGrid genres={plexGenreOptions} onSelect={setSelectedPlexGenre}
+                  albumCountLabel={count => t("plex.albumsCount", { count })} />
               ) : plexViewMode === "albums" ? (
                 <VirtualAlbumGrid
                   ref={plexGridRef}
                   items={sortedPlexAlbums}
                   getItemKey={(album) => album.rating_key}
                   scrollContainer={plexScrollContainer}
-                  resetKey={plexAlbumNavigationResetKey(selectedLibrary?.key ?? null, plexSortMode)}
+                  resetKey={JSON.stringify([plexAlbumNavigationResetKey(selectedLibrary?.key ?? null, plexSortMode)])}
                   renderItem={(album) => {
                     const albumKey = String(album.rating_key || "");
                     return (
@@ -1535,7 +1896,7 @@ export function App() {
                         onToggleFav={handleTogglePlexCardFav}
                         onSelectArtist={handleSelectArtist}
                         removeFavText={t("favorites.removeFavorite")}
-                        addFavText={t("favorites.title")}
+                        addFavText={t("common.addFavorite")}
                         playAlbumText={t("plex.playAlbum")}
                         isPlaybackAvailable={isPlaybackAvailable}
                       />
@@ -1596,7 +1957,7 @@ export function App() {
                         aria-label={t("plex.decadeLabel", { decade: decade.decade })}
                         className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
                       >
-                        <span className="block text-xl font-bold text-white">{decade.decade}s</span>
+                        <span className="block text-xl font-bold text-white">{t("plex.decadeShort", { decade: decade.decade })}</span>
                         <span className="mt-1 block text-xs text-[#777777]">
                           {t("plex.albumsCount", { count: decade.albumCount })}
                         </span>
@@ -1639,40 +2000,114 @@ export function App() {
             </div>
           </main>
         )}
+        </div>
+        {playerTarget && (
+          <div className="contents">
+            {playerTarget.kind === "local" ? (
+              <LocalBrowserView
+                key={`${playerNavigation?.revision}:${playerTarget.view}:${playerTarget.albumId}`}
+                playerTarget={playerTarget}
+                onPlayerNavigationBack={closePlayerNavigation}
+                catalogRefreshRevision={localCatalogRevision}
+                isPlaybackAvailable={isPlaybackAvailable}
+                isLibraryUpdating={playbackStatus.is_updating}
+                onlineArtworkEnabled={config?.online_artwork_enabled ?? false}
+                configuredLocalFolders={config?.local_folders ?? []}
+              />
+            ) : playerTarget.view === "album" ? (
+              <AlbumView
+                key={`${playerNavigation?.revision}:${playerTarget.album.rating_key}`}
+                album={playerTarget.album}
+                onBack={() => playerTarget.returnToArtist
+                  ? setPlayerTarget({ ...playerTarget, view: "artist", returnToArtist: false })
+                  : closePlayerNavigation()}
+                onSelectArtist={artist => setPlayerTarget({ ...playerTarget, artist, view: "artist", returnToArtist: false })}
+                onToggleFavorite={refreshPlexFavorites}
+                isPlaybackAvailable={isPlaybackAvailable}
+              />
+            ) : (
+              <ArtistView
+                key={`${playerNavigation?.revision}:${playerTarget.artist.rating_key}`}
+                artist={playerTarget.artist}
+                onBack={closePlayerNavigation}
+                onSelectAlbum={album => setPlayerTarget({ ...playerTarget, album, view: "album", returnToArtist: true })}
+                status={playbackStatus}
+                isPlaybackAvailable={isPlaybackAvailable}
+              />
+            )}
+          </div>
+        )}
       </div>
 
+      {playerNavigationError && (
+        <div role="alert" className="flex items-center justify-between gap-4 border-t border-[#383838] bg-[#211D14] px-6 py-2 text-xs text-[#D7AD52]">
+          <span>{t("player.navigationUnavailable")}</span>
+          <button type="button" onClick={() => setPlayerNavigationError(false)} aria-label={t("player.dismissNavigationError")} className="p-1"><X size={14} /></button>
+        </div>
+      )}
+
       <PlayerBar
+        route={configuredSignalRoute(config)}
         status={playbackStatus}
         health={mpdHealth}
         onOpenNowPlaying={() => {
           openNowPlayingWindow(t("nowPlaying.windowTitle")).catch((err) => {
-            console.error("Falha ao abrir a janela Now Playing:", err);
+            logError("now-playing.open", err);
           });
         }}
         onToggleQueue={() => setShowQueue(!showQueue)}
         isQueueOpen={showQueue}
-        onNavigateToArtist={(artistName) => {
-          if (playbackStatus.current_media?.kind !== "plex") {
-            resetAllNavigation();
-            setMediaSource("local");
-            setLocalSelectedArtist(artistName);
-          } else {
-            resetAllNavigation();
-            setMediaSource("plex");
-            setSearchQuery(artistName);
-          }
-        }}
-        onNavigateToAlbum={() => {
-          if (playbackStatus.current_media?.kind !== "plex") {
-            resetAllNavigation();
-            setMediaSource("local");
-          } else if (playbackStatus.album) {
-            resetAllNavigation();
-            setMediaSource("plex");
-            setSearchQuery(playbackStatus.album);
-          }
-        }}
+        onNavigateToArtist={() => navigateFromPlayer("artist")}
+        onNavigateToAlbum={() => navigateFromPlayer("album")}
       />
+      {(configSavePhase || configSaveNotice) && (
+        <div
+          role={configSaveNotice?.kind === "error" ? "alert" : "status"}
+          aria-live={configSaveNotice?.kind === "error" ? "assertive" : "polite"}
+          className="fixed bottom-28 right-6 z-40 max-h-[60vh] max-w-sm overflow-y-auto rounded-lg border border-[#383838] bg-[#1D1D1D] p-4 text-xs text-white shadow-xl"
+        >
+          <div className="flex items-start gap-2">
+            {configSavePhase ? (
+              <RefreshCw size={16} className="shrink-0 animate-spin text-[#E5A00D]" />
+            ) : configSaveNotice?.kind === "success" ? (
+              <CheckCircle2 size={16} className="shrink-0 text-[#4BB543]" />
+            ) : (
+              <CircleAlert size={16} className="shrink-0 text-red-400" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold">
+                {configSavePhase === "local" ? t(localSavePhase === "preparing" ? "settings.preparingLibrary"
+                  : localSavePhase === "validating" ? "settings.validatingLibrary" : "settings.updatingLibrary")
+                  : configSavePhase === "other" ? t("settings.savingSettings")
+                  : configSaveNotice?.kind === "success" ? t("settings.libraryUpdateSucceeded")
+                  : configSaveNotice?.uncertain ? t("settings.librarySaveUncertain")
+                  : configSaveNotice?.refusal === "fullRescan" ? t("settings.fullIndexRequired")
+                  : configSaveNotice?.refusal === "planChanged" ? t("settings.libraryChangedBeforeSave")
+                  : configSaveNotice?.refusal === "queueChanged" ? t("settings.queueClearStale")
+                  : configSaveNotice?.refusal === "queueCheckRequired" ? t("settings.queueClearCheckRequired")
+                  : t("settings.libraryUpdateFailed")}
+              </div>
+              {configSavePhase === "local" && <div className="mt-1 text-[#999999]">{t("settings.indexingMayTakeTime")}</div>}
+              {configSaveNotice?.kind === "error" && (
+                <div className="mt-1 whitespace-pre-wrap break-words text-red-300">
+                  {configSaveNotice.refusal && <div>{t("settings.noChangesApplied")}</div>}
+                  {configSaveNotice.refusal === "fullRescan" && <div className="mt-1">{t("settings.fullIndexNotStarted")}</div>}
+                  {(configSaveNotice.refusal === "queueChanged" || configSaveNotice.refusal === "queueCheckRequired") && <div className="mt-1">{t("settings.queueClearRecheck")}</div>}
+                  {configSaveNotice.detail}
+                  {configSaveNotice.statusUnavailable && <div>{t("settings.librarySaveStatusUnavailable")}</div>}
+                  {configSaveNotice.stagingCleanupFailed && <div className="mt-1">{t("settings.stagingCleanupFailed")}</div>}
+                  {configSaveNotice.reloadFailed && <div className="mt-1">{t("settings.confirmedConfigUnavailable")}</div>}
+                </div>
+              )}
+            </div>
+            {configSaveNotice && (
+              <button type="button" onClick={() => setConfigSaveNotice(null)} aria-label={t("settings.dismissStatus")} className="shrink-0 text-[#999999] hover:text-white">
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {playlistItems && (
         <PlaylistPickerModal
           items={playlistItems}
@@ -1692,14 +2127,27 @@ export function App() {
         <SettingsModal
           onClose={() => setShowSettings(false)}
           isLibraryUpdating={playbackStatus.is_updating}
+          onLibraryRescanned={() => setLocalCatalogRevision((revision) => revision + 1)}
           onSaveStarted={(audioRestartExpected) => {
+            if (!beginConfigSave("other")) return false;
             if (audioRestartExpected) invalidateStatusRequests();
+            return true;
           }}
+          onSaveFinished={finishConfigSave}
+          onSaveAccepted={(operation) => configSaveMonitorRef.current?.accepted(operation)}
+          onStartLocalFoldersSave={startLocalFoldersSave}
           onSaved={(audioRestartExpected) => {
             if (audioRestartExpected) invalidateStatusRequests();
-            configService.getConfig().then(setConfig).catch(console.error);
+            configService.getConfig().then(setConfig).catch(error => logError("settings.reload", error));
             refreshPlexFavorites();
           }}
+        />
+      )}
+
+      {queueClearConfirmation && !configSavePhase && (
+        <QueueClearConfirmationDialog
+          onCancel={() => cancelQueueClear(queueClearConfirmation.operationId)}
+          onConfirm={() => confirmQueueClear(queueClearConfirmation.operationId)}
         />
       )}
 

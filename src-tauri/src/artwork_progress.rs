@@ -53,21 +53,27 @@ fn load(dir: &Path) -> Index {
     if let Err(error) =
         crate::persistence::prepare_private_file_for_load(&path, "progresso de capas")
     {
-        eprintln!("Progresso de capas indisponível: {error}");
+        eprintln!(
+            "[Artwork] Artwork progress unavailable: {}",
+            crate::diagnostics::error_summary(&error)
+        );
         return Index::default();
     }
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == ErrorKind::NotFound => return Index::default(),
         Err(error) => {
-            eprintln!("Falha ao ler progresso de capas: {error}");
+            eprintln!(
+                "[Artwork] Failed to read artwork progress: {}",
+                crate::diagnostics::error_summary(&error)
+            );
             return Index::default();
         }
     };
     match serde_json::from_slice::<Index>(&bytes) {
         Ok(index) if index.version == VERSION => index,
         _ => {
-            eprintln!("Progresso de capas inválido; reconstruindo apenas esse estado descartável.");
+            eprintln!("[Artwork] Invalid artwork progress; rebuilding only this disposable state.");
             Index::default()
         }
     }
@@ -104,14 +110,17 @@ pub fn read_at(dir: &Path, now: u64) -> BTreeMap<String, Entry> {
     let _guard = match PROGRESS_LOCK.lock() {
         Ok(guard) => guard,
         Err(_) => {
-            eprintln!("Progresso de capas indisponível: lock corrompido.");
+            eprintln!("[Artwork] Artwork progress unavailable: lock poisoned.");
             return BTreeMap::new();
         }
     };
     let online = match crate::online_artwork::cache_entry_statuses(dir, now) {
         Ok(statuses) => statuses,
         Err(error) => {
-            eprintln!("Estado do cache online indisponível: {error}");
+            eprintln!(
+                "[Artwork] Online cache state unavailable: {}",
+                crate::diagnostics::error_summary(&error)
+            );
             BTreeMap::new()
         }
     };

@@ -34,7 +34,7 @@ pub(crate) fn select_mixer(
 pub(crate) fn detect_for_pcm(pcm_device: &str) -> MixerSelection {
     let Some(mixer_device) = mixer_device_for_pcm(pcm_device) else {
         eprintln!(
-            "[Supervisor] Dispositivo ALSA Direct sem associação segura a uma placa de mixer; usando volume por software."
+            "[Supervisor] ALSA Direct device has no safe mixer card association; using software volume."
         );
         return MixerSelection::Software;
     };
@@ -43,8 +43,8 @@ pub(crate) fn detect_for_pcm(pcm_device: &str) -> MixerSelection {
         Ok(controls) => controls,
         Err(error) => {
             eprintln!(
-                "[Supervisor] Não foi possível sondar o mixer ALSA de {}: {}. Usando volume por software.",
-                mixer_device, error
+                "[Supervisor] Failed to probe ALSA mixer: {}. Using software volume.",
+                crate::diagnostics::error_summary(&error)
             );
             return MixerSelection::Software;
         }
@@ -52,16 +52,11 @@ pub(crate) fn detect_for_pcm(pcm_device: &str) -> MixerSelection {
 
     match controls.as_slice() {
         [] => {
-            println!(
-                "[Supervisor] Nenhum controle ALSA de volume de reprodução utilizável em {}; usando volume por software.",
-                mixer_device
-            );
+            println!("[Supervisor] No usable ALSA playback volume control; using software volume.");
         }
         [control] => {
             println!(
-                "[Supervisor] Mixer ALSA de hardware selecionado: dispositivo={}, controle={}#{}, canais={}, faixa={}..{}.",
-                mixer_device,
-                control.name,
+                "[Supervisor] ALSA hardware mixer selected: control_index={}, channels={}, range={}..{}.",
                 control.index,
                 control.channels.join(","),
                 control.min,
@@ -69,25 +64,9 @@ pub(crate) fn detect_for_pcm(pcm_device: &str) -> MixerSelection {
             );
         }
         _ => {
-            let descriptions = controls
-                .iter()
-                .map(|control| {
-                    format!(
-                        "{}#{} [{}] {}..{}",
-                        control.name,
-                        control.index,
-                        control.channels.join(","),
-                        control.min,
-                        control.max
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
             eprintln!(
-                "[Supervisor] Mixer ALSA ambíguo em {} ({} controles: {}); seleção explícita será necessária. Usando volume por software.",
-                mixer_device,
-                controls.len(),
-                descriptions
+                "[Supervisor] Ambiguous ALSA mixer ({} controls); explicit selection will be required. Using software volume.",
+                controls.len()
             );
         }
     }

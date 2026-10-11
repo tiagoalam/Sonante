@@ -4,6 +4,7 @@ import {
   filterLocalAlbumsByScope,
   localLibraryScopeResetKey,
   localLibrarySourceOptions,
+  localLibrarySelectorPresentation,
   validLocalLibrarySourceSelection,
 } from "./localLibraryScope.ts";
 import { virtualGridMetrics } from "./virtualGrid.ts";
@@ -16,6 +17,17 @@ const album = (id, title, artist, source_id) => ({
   folder_path: `${source_id ?? "Unknown"}/${id}`,
   track_count: 1,
   discs: [],
+});
+
+test("configured source count controls presentation even when all or some sources are empty", () => {
+  assert.deepEqual(localLibrarySelectorPresentation([]), { mode: "empty" });
+  assert.deepEqual(localLibrarySelectorPresentation(["/fixture/Reggae/"]), { mode: "single", label: "Reggae" });
+  assert.deepEqual(localLibrarySelectorPresentation(["/fixture/Reggae", "/fixture/Empty"]), { mode: "multiple" });
+  const catalog = [album("1", "Album", "Artist", "managed-opaque-id")];
+  assert.deepEqual(localLibrarySourceOptions(catalog), [{ id: "managed-opaque-id", label: "managed-opaque-id" }]);
+  assert.equal(localLibrarySelectorPresentation(["/fixture/Empty"]).mode, "single");
+  assert.deepEqual(filterLocalAlbumsByScope(catalog, null, ""), catalog, "a single-source presentation never changes internal scope");
+  assert.equal(validLocalLibrarySourceSelection("Reggae", localLibrarySourceOptions(catalog)), null, "display names never become guessed managed IDs");
 });
 
 test("source options are deduplicated and sorted case-insensitively", () => {

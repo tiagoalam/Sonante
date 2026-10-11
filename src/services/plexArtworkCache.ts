@@ -14,6 +14,7 @@ type ObjectUrlFactory = (bytes: ArrayBuffer) => string;
 type ObjectUrlRevoker = (url: string) => void;
 
 export type PlexArtworkLease = {
+  readonly objectUrl: string | null;
   promise: Promise<string>;
   release: () => void;
   invalidate: () => void;
@@ -108,6 +109,11 @@ export class PlexArtworkCache {
     this.requestQueue = new ArtworkRequestQueue(maximumConcurrentRequests);
   }
 
+  acquireCached(image: PlexImageRef): PlexArtworkLease | null {
+    const entry = this.entries.get(plexImageCacheKey(image));
+    return entry?.objectUrl && !entry.invalidated ? this.acquire(image) : null;
+  }
+
   acquire(image: PlexImageRef): PlexArtworkLease {
     const key = plexImageCacheKey(image);
     let entry = this.entries.get(key);
@@ -153,6 +159,7 @@ export class PlexArtworkCache {
       }
     };
     return {
+      objectUrl: entry.objectUrl ?? null,
       promise: entry.promise,
       release,
       invalidate: () => {

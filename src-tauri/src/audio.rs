@@ -1,3 +1,4 @@
+use crate::local_media;
 use crate::plex::{contains_plex_token, legacy_plex_image_ref, PlexImageRef};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -6,8 +7,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AudioDevice {
@@ -54,6 +56,61 @@ pub enum VolumeBackend {
     MpdSoftware,
     Unavailable,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetedLibraryUpdateErrorCode {
+    InvalidUri,
+    MpdUnavailable,
+    UpdateCommandFailed,
+    InvalidResponse,
+    RefreshTaskFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum MpdJobIdParseError {
+    MissingJob,
+    DuplicateJob,
+    InvalidJob,
+    ContradictoryResponse,
+    Ack,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum MpdRefreshCompletion {
+    Completed,
+    Timeout,
+    TransportError(String),
+    ProtocolError(String),
+    Unavailable(String),
+}
+
+#[allow(dead_code)]
+enum MpdStatusQueryError {
+    Transport(String),
+    Protocol(String),
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct CatalogAuditResult {
+    pub(crate) total_files: usize,
+    pub(crate) invalid_count: usize,
+    pub(crate) invalid_uris: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl CatalogAuditResult {
+    pub(crate) fn is_clean(&self) -> bool {
+        self.invalid_count == 0
+    }
+}
+
+#[allow(dead_code)]
+const MAX_CATALOG_AUDIT_SAMPLES: usize = 8;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct VolumeStatus {
@@ -205,6 +262,8 @@ pub struct LocalAlbum {
     pub title: String,
     pub artist: String,
     pub year: Option<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
     pub folder_path: String,
     pub source_id: Option<String>,
     pub track_count: usize,
@@ -217,6 +276,45 @@ pub struct LocalAlbumDisc {
     pub label: String,
     pub folder_path: String,
     pub track_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalAlbumDiscTracks {
+    pub disc: LocalAlbumDisc,
+    pub tracks: Vec<LocalItem>,
+}
+
+/// Only allowlisted codes cross IPC; MPD error text may contain credentials or paths.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum PlaybackDiagnostic {
+    OutputBusy,
+    OutputUnavailable,
+    PlaybackError,
+}
+
+impl PlaybackDiagnostic {
+    fn from_mpd_error(error: &str) -> Self {
+        // Match ALSA output context AND a known terminal error, not arbitrary
+        // "busy" / "not found" text which could describe a media source.
+        let alsa_open = error.contains("Failed to open ALSA device ");
+        if alsa_open && error.ends_with(": Device or resource busy") {
+            Self::OutputBusy
+        } else if (alsa_open
+            && [
+                ": No such device",
+                ": No such device or address",
+                ": No such file or directory",
+            ]
+            .iter()
+            .any(|suffix| error.ends_with(suffix)))
+            || error == "All audio outputs are disabled"
+        {
+            Self::OutputUnavailable
+        } else {
+            Self::PlaybackError
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -233,6 +331,8 @@ pub struct PlaybackStatus {
     pub plex_image: Option<PlexImageRef>,
     pub volume: VolumeStatus,
     pub is_updating: bool,
+    #[serde(default)]
+    pub playback_error: Option<PlaybackDiagnostic>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,10 +350,10 @@ pub enum PlaybackState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-struct PlaybackResumeSnapshot {
-    queue_index: usize,
-    elapsed: f64,
-    state: PlaybackState,
+pub(crate) struct PlaybackResumeSnapshot {
+    pub(crate) queue_index: usize,
+    pub(crate) elapsed: f64,
+    pub(crate) state: PlaybackState,
 }
 
 impl PlaybackResumeSnapshot {
@@ -307,6 +407,55 @@ pub struct DeviceSwitchSnapshot {
     pub state: PlaybackState,
 }
 
+#[derive(Clone, PartialEq)]
+#[allow(dead_code)]
+pub(crate) struct MpdPlaybackSnapshot {
+    pub(crate) uris: Vec<String>,
+    pub(crate) current_index: Option<usize>,
+    pub(crate) elapsed: f64,
+    pub(crate) state: PlaybackState,
+    pub(crate) playlist_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MpdQueueStatus {
+    playlist_version: u64,
+    playlist_length: usize,
+    current_index: Option<usize>,
+    elapsed: f64,
+    state: PlaybackState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MpdQueueEntry {
+    pub(crate) uri: String,
+    pub(crate) pos: usize,
+    pub(crate) id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MpdQueueStructure {
+    pub(crate) entries: Vec<MpdQueueEntry>,
+    pub(crate) playlist_version: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MpdQueueStructureError {
+    Invalid,
+    Changed,
+    QueryFailed,
+}
+
+impl std::fmt::Display for MpdQueueStructureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Invalid => "LOCAL_SOURCE_REMOVAL_QUEUE_INVALID",
+            Self::Changed => "LOCAL_SOURCE_REMOVAL_QUEUE_CHANGED",
+            Self::QueryFailed => "LOCAL_SOURCE_REMOVAL_QUEUE_QUERY_FAILED",
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct DeviceSwitchPreparationError {
     pub cause: String,
@@ -348,21 +497,28 @@ enum PictureResponse {
     Chunk(PictureChunk),
 }
 
-pub fn find_folder_cover_path(dir: &Path) -> Option<String> {
-    let candidate_names = [
-        "cover.jpg", "cover.jpeg", "cover.png",
-        "Folder.jpg", "folder.jpg", "folder.jpeg", "folder.png",
-        "front.jpg", "Front.jpg", "front.png", "Front.png",
-        "albumart.jpg", "AlbumArtSmall.jpg"
-    ];
+pub(crate) const LOCAL_FOLDER_COVER_NAMES: &[&str] = &[
+    "cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
+    "Folder.jpg", "folder.jpg", "folder.jpeg", "folder.png", "folder.webp",
+    "front.jpg", "Front.jpg", "front.png", "Front.png", "front.webp", "Front.webp",
+    "albumart.jpg", "AlbumArtSmall.jpg",
+];
 
-    for name in &candidate_names {
+pub fn find_folder_cover_path(dir: &Path) -> Option<String> {
+    for name in LOCAL_FOLDER_COVER_NAMES {
         let p = dir.join(name);
-        if p.is_file() {
-            if let Ok(bytes) = std::fs::read(&p) {
-                if bytes.len() <= MAX_LOCAL_COVER_BYTES {
+        if let Ok(metadata) = std::fs::metadata(&p) {
+            if !metadata.is_file() || metadata.len() > MAX_LOCAL_COVER_BYTES as u64 {
+                continue;
+            }
+            if let Ok(file) = std::fs::File::open(&p) {
+                if let Some(bytes) = read_limited_local_cover(file, metadata.len()) {
                     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("jpeg").to_lowercase();
-                    let mime = if ext == "png" { "image/png" } else { "image/jpeg" };
+                    let mime = match ext.as_str() {
+                        "png" => "image/png",
+                        "webp" => "image/webp",
+                        _ => "image/jpeg",
+                    };
                     let b64 = BASE64.encode(&bytes);
                     return Some(format!("data:{};base64,{}", mime, b64));
                 }
@@ -370,6 +526,19 @@ pub fn find_folder_cover_path(dir: &Path) -> Option<String> {
         }
     }
     None
+}
+
+fn read_limited_local_cover(reader: impl Read, size_hint: u64) -> Option<Vec<u8>> {
+    if size_hint > MAX_LOCAL_COVER_BYTES as u64 {
+        return None;
+    }
+    // Metadata is only an early rejection: the file may grow before or during reading.
+    let mut bytes = Vec::with_capacity(size_hint as usize + 1);
+    reader
+        .take(MAX_LOCAL_COVER_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= MAX_LOCAL_COVER_BYTES).then_some(bytes)
 }
 
 fn check_hdmi_connected(card_num: &str, dev_id: &str) -> Option<String> {
@@ -501,23 +670,322 @@ pub struct AudioEngine {
     queue: Vec<TrackMetadata>,
     restored_resume: Option<PlaybackResumeSnapshot>,
     startup_restore: StartupQueueRestore,
+    queue_structure_reserved: Arc<AtomicU8>,
+}
+
+const QUEUE_STRUCTURE_RESERVED: u8 = 1;
+const LOGICAL_RESUME_RESERVED: u8 = 2;
+
+/// Excludes structural commands without retaining AudioState during MPD jobs.
+/// An ordinary reservation releases on drop. Destructive owners must prove
+/// completion/recovery before releasing; uncertainty keeps the fence active.
+pub(crate) struct QueueStructureReservation(Arc<AtomicU8>, bool, Arc<()>);
+
+impl Drop for QueueStructureReservation {
+    fn drop(&mut self) {
+        if self.1 {
+            self.0.store(0, Ordering::SeqCst);
+        }
+    }
+}
+
+impl QueueStructureReservation {
+    pub(crate) fn arm_destructive(&mut self) {
+        self.1 = false;
+    }
+    pub(crate) fn release_after_confirmed_completion(&mut self) {
+        self.1 = true;
+    }
+}
+
+/// Owns the structural fence while playback references are resolved off-lock.
+pub(crate) struct DeviceSwitchQueueSnapshot {
+    owner: QueueStructureReservation,
+    tracks: Vec<TrackMetadata>,
+}
+
+pub(crate) struct ResolvedDeviceSwitchQueue {
+    snapshot: DeviceSwitchQueueSnapshot,
+    playback_uris: Vec<String>,
+}
+
+impl DeviceSwitchQueueSnapshot {
+    pub(crate) fn tracks(&self) -> &[TrackMetadata] {
+        &self.tracks
+    }
+
+    pub(crate) fn bind_resolved_uris(
+        self,
+        playback_uris: Vec<String>,
+    ) -> Result<ResolvedDeviceSwitchQueue, String> {
+        if playback_uris.len() != self.tracks.len() {
+            return Err("A fila mudou durante a preparação da troca de saída.".into());
+        }
+        for uri in &playback_uris {
+            if uri.trim().is_empty() {
+                return Err("Faixa sem referência de mídia válida.".into());
+            }
+            AudioEngine::quote_mpd_argument(uri)?;
+        }
+        Ok(ResolvedDeviceSwitchQueue {
+            snapshot: self,
+            playback_uris,
+        })
+    }
+}
+
+/// Captured under AudioState. The cursor fence is opt-in, so ordinary structural
+/// reservations for proven unaffected queues still allow player commands.
+#[allow(dead_code)] // Prepared for a later transactional admission change.
+pub(crate) struct ReservedLogicalQueueSnapshot {
+    pub(crate) tracks: Vec<TrackMetadata>,
+    pub(crate) resume: PlaybackResumeSnapshot,
+    identity: Arc<()>,
+}
+
+/// Issued only after read-only MPD recovery verification, bound to one owner.
+#[allow(dead_code)]
+pub(crate) struct VerifiedLogicalQueueRestore {
+    tracks: Vec<TrackMetadata>,
+    resume: PlaybackResumeSnapshot,
+    cache: Vec<u8>,
+    identity: Arc<()>,
+}
+
+/// Short-lived I/O capability issued under AudioState to its reservation owner.
+/// Player mutations are fenced; status/queue queries retain access during I/O.
+pub(crate) struct ReservedQueueEffect<'reservation> {
+    socket_path: String,
+    owner: Arc<AtomicU8>,
+    identity: Arc<()>,
+    _owner_scope: std::marker::PhantomData<&'reservation QueueStructureReservation>,
+}
+
+impl ReservedQueueEffect<'_> {
+    fn ensure_active(&self) -> Result<(), String> {
+        if self.owner.load(Ordering::SeqCst) == 0 {
+            return Err("LOCAL_SOURCE_REMOVAL_QUEUE_OWNER_INVALID".into());
+        }
+        Ok(())
+    }
+
+    /// Recovery itself is the owner's responsibility. Verify a neutral stopped
+    /// MPD and restored occurrences; never start audio or position the PCM here.
+    #[allow(dead_code)]
+    pub(crate) fn confirm_reserved_logical_queue_restore(
+        &self,
+        captured: &ReservedLogicalQueueSnapshot,
+        expected: &MpdPlaybackSnapshot,
+    ) -> Result<VerifiedLogicalQueueRestore, String> {
+        self.confirm_reserved_logical_queue_restore_with(
+            captured,
+            expected,
+            AudioEngine::encode_queue_cache_with_resume,
+        )
+    }
+
+    fn confirm_reserved_logical_queue_restore_with(
+        &self,
+        captured: &ReservedLogicalQueueSnapshot,
+        expected: &MpdPlaybackSnapshot,
+        encode: impl FnOnce(
+            &[TrackMetadata],
+            Option<&PlaybackResumeSnapshot>,
+        ) -> Result<Vec<u8>, String>,
+    ) -> Result<VerifiedLogicalQueueRestore, String> {
+        self.ensure_active()?;
+        let failure = "LOCAL_SOURCE_REMOVAL_QUEUE_RECOVERY_UNCONFIRMED";
+        if !Arc::ptr_eq(&self.identity, &captured.identity)
+            || self.owner.load(Ordering::SeqCst) & LOGICAL_RESUME_RESERVED == 0
+            || !captured.resume.valid_for(captured.tracks.len())
+            || expected.state != PlaybackState::Stopped
+            || expected.current_index.is_some()
+            || expected.elapsed != 0.0
+            || expected.uris.len() != captured.tracks.len()
+        {
+            return Err(failure.into());
+        }
+        let queue =
+            AudioEngine::capture_mpd_queue_structure(&self.socket_path).map_err(|_| failure)?;
+        let actual =
+            AudioEngine::capture_mpd_playback_snapshot(&self.socket_path).map_err(|_| failure)?;
+        let status = AudioEngine::send_command_to_socket(&self.socket_path, "status")
+            .map_err(|_| failure)?;
+        let final_status = AudioEngine::parse_mpd_queue_status(&status).map_err(|_| failure)?;
+        if actual.uris != expected.uris
+            || actual.state != PlaybackState::Stopped
+            || actual.current_index.is_some()
+            || actual.elapsed != 0.0
+            || final_status.state != PlaybackState::Stopped
+            || final_status.current_index.is_some()
+            || final_status.elapsed != 0.0
+            || final_status.playlist_version != actual.playlist_version
+            || final_status.playlist_length != actual.uris.len()
+            || status.iter().any(|line| line.starts_with("error: "))
+        {
+            return Err(failure.into());
+        }
+        // Reuse the durable contract's occurrence/media validation. Plex URIs
+        // remain ephemeral and the original stable identity is retained.
+        crate::managed_save_intent::QueueBackup::new_with_logical_resume(
+            &captured.tracks,
+            &expected.uris,
+            &queue,
+            &actual,
+            crate::managed_save_intent::BackupLogicalResume {
+                queue_index: captured.resume.queue_index,
+                elapsed: captured.resume.elapsed,
+                state: captured.resume.state,
+            },
+        )
+        .map_err(|_| failure)?;
+        let mut tracks = captured.tracks.clone();
+        for (track, uri) in tracks.iter_mut().zip(&expected.uris) {
+            track.uri = uri.clone();
+            track.thumb = None;
+            track.plex_image = None;
+        }
+        let cache = encode(&tracks, Some(&captured.resume)).map_err(|_| failure)?;
+        self.ensure_active()?;
+        Ok(VerifiedLogicalQueueRestore {
+            tracks,
+            resume: captured.resume,
+            cache,
+            identity: Arc::clone(&self.identity),
+        })
+    }
+
+    /// Only the owner can clear. Cache I/O is performed by the durable intention
+    /// after releasing AudioState. Neither ACK nor a lost response is a proof.
+    pub(crate) fn clear_reserved_queue(
+        &self,
+        expected: &MpdQueueStructure,
+    ) -> Result<(MpdQueueStructure, Vec<u8>), String> {
+        self.ensure_active()?;
+        if AudioEngine::capture_mpd_queue_structure(&self.socket_path)
+            .map_err(|_| "LOCAL_SOURCE_REMOVAL_QUEUE_CLEAR_UNCONFIRMED")?
+            != *expected
+        {
+            return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE".into());
+        }
+        AudioEngine::send_command_to_socket(&self.socket_path, "clear")
+            .map_err(|_| "LOCAL_SOURCE_REMOVAL_QUEUE_CLEAR_UNCONFIRMED")?;
+        let queue = AudioEngine::capture_mpd_queue_structure(&self.socket_path)
+            .map_err(|_| "LOCAL_SOURCE_REMOVAL_QUEUE_CLEAR_UNCONFIRMED")?;
+        let playback = AudioEngine::capture_mpd_playback_snapshot(&self.socket_path)
+            .map_err(|_| "LOCAL_SOURCE_REMOVAL_QUEUE_CLEAR_UNCONFIRMED")?;
+        if !queue.entries.is_empty()
+            || !playback.uris.is_empty()
+            || queue.playlist_version != playback.playlist_version
+            || playback.state != PlaybackState::Stopped
+            || playback.current_index.is_some()
+            || playback.elapsed != 0.0
+        {
+            return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CLEAR_UNCONFIRMED".into());
+        }
+        Ok((
+            queue,
+            AudioEngine::encode_queue_cache_with_resume(&[], None)?,
+        ))
+    }
+
+    /// The existing recovery restores active snapshots paused first. Verify
+    /// that seek, then resume only an originally Playing snapshot and verify it.
+    pub(crate) fn confirm_reserved_queue_restore(
+        &self,
+        tracks: Vec<TrackMetadata>,
+        snapshot: &MpdPlaybackSnapshot,
+        is_shared: bool,
+    ) -> Result<(Vec<TrackMetadata>, Vec<u8>), String> {
+        self.ensure_active()?;
+        let failure = "LOCAL_SOURCE_REMOVAL_QUEUE_RECOVERY_UNCONFIRMED";
+        if tracks.len() != snapshot.uris.len()
+            || tracks.iter().zip(&snapshot.uris).any(|(track, uri)| track.uri != *uri)
+            // MPD's stopped restore cannot select a cursor without starting audio.
+            // Never claim that such a snapshot has been recovered.
+            || (snapshot.state == PlaybackState::Stopped
+                && (snapshot.current_index.is_some() || snapshot.elapsed != 0.0))
+        {
+            return Err(failure.into());
+        }
+        let queue =
+            AudioEngine::capture_mpd_queue_structure(&self.socket_path).map_err(|_| failure)?;
+        let mut actual =
+            AudioEngine::capture_mpd_playback_snapshot(&self.socket_path).map_err(|_| failure)?;
+        let paused = snapshot.state != PlaybackState::Stopped;
+        if queue
+            .entries
+            .iter()
+            .map(|entry| &entry.uri)
+            .ne(snapshot.uris.iter())
+            || actual.uris != snapshot.uris
+            || actual.playlist_version != queue.playlist_version
+            || actual.state
+                != if paused {
+                    PlaybackState::Paused
+                } else {
+                    PlaybackState::Stopped
+                }
+            || actual.current_index != snapshot.current_index
+            || (actual.elapsed - snapshot.elapsed).abs() > 0.01
+            || AudioEngine::send_command_to_socket(&self.socket_path, "status")
+                .map_err(|_| failure)?
+                .iter()
+                .any(|line| line.starts_with("error: "))
+        {
+            return Err(failure.into());
+        }
+        if snapshot.state == PlaybackState::Playing {
+            AudioEngine::send_command_to_socket(&self.socket_path, "pause 0")
+                .map_err(|_| failure)?;
+            AudioEngine::verify_shared_progress_at(&self.socket_path, is_shared)
+                .map_err(|_| failure)?;
+            actual = AudioEngine::capture_mpd_playback_snapshot(&self.socket_path)
+                .map_err(|_| failure)?;
+            if actual.uris != snapshot.uris
+                || actual.state != PlaybackState::Playing
+                || actual.current_index != snapshot.current_index
+                || actual.elapsed < snapshot.elapsed
+                || AudioEngine::send_command_to_socket(&self.socket_path, "status")
+                    .map_err(|_| failure)?
+                    .iter()
+                    .any(|line| line.starts_with("error: "))
+            {
+                return Err(failure.into());
+            }
+        }
+        let resume = if paused {
+            Some(PlaybackResumeSnapshot {
+                queue_index: snapshot.current_index.ok_or(failure)?,
+                elapsed: actual.elapsed,
+                state: actual.state,
+            })
+        } else {
+            None
+        };
+        let bytes = AudioEngine::encode_queue_cache_with_resume(&tracks, resume.as_ref())?;
+        Ok((tracks, bytes))
+    }
 }
 
 const LOCAL_ALBUM_PAGE_SIZE: usize = 500;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct AlbumCollector {
     title: String,
     year: Option<String>,
+    genres: Vec<String>,
     track_count: usize,
     folder_path: String,
+    track_uris: Vec<String>,
+    tracks: Vec<(String, LocalItem)>,
     album_artist: Option<(String, String)>,
     album_artist_consistent: bool,
     artists: HashMap<String, (String, usize)>,
     discs: Vec<LocalAlbumDisc>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct LocalAlbumCollection {
     physical: HashMap<String, AlbumCollector>,
     cue: HashMap<String, AlbumCollector>,
@@ -529,8 +997,28 @@ struct VirtualCueTrackPath {
 }
 
 impl AlbumCollector {
+    fn into_disc_tracks(self) -> Vec<LocalAlbumDiscTracks> {
+        let tracks = self.tracks;
+        self.discs
+            .into_iter()
+            .map(|disc| LocalAlbumDiscTracks {
+                tracks: tracks
+                    .iter()
+                    .filter(|(disc_path, _)| disc_path == &disc.folder_path)
+                    .map(|(_, track)| track.clone())
+                    .collect(),
+                disc,
+            })
+            .collect()
+    }
+
     fn merge_title_variant(&mut self, other: Self) {
+        for genre in &other.genres {
+            crate::catalog_genres::add_genre(&mut self.genres, genre);
+        }
         self.track_count += other.track_count;
+        self.track_uris.extend(other.track_uris);
+        self.tracks.extend(other.tracks);
         for other_disc in other.discs {
             if let Some(disc) = self
                 .discs
@@ -571,7 +1059,12 @@ impl AlbumCollector {
     }
 
     fn merge_disc(&mut self, other: Self) {
+        for genre in &other.genres {
+            crate::catalog_genres::add_genre(&mut self.genres, genre);
+        }
         self.track_count += other.track_count;
+        self.track_uris.extend(other.track_uris);
+        self.tracks.extend(other.tracks);
         if self.year.is_none() {
             self.year = other.year;
         }
@@ -658,30 +1151,12 @@ impl AlbumCollector {
 
 impl AudioEngine {
     fn virtual_cue_track_path(file: &str) -> Option<VirtualCueTrackPath> {
+        if !local_media::is_virtual_cue_track_uri(file) {
+            return None;
+        }
         let path = Path::new(file);
-        if path
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            return None;
-        }
-
-        let leaf = path.file_name()?.to_str()?;
-        let track_number = leaf.strip_prefix("track")?;
-        if track_number.is_empty() || !track_number.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
-
         let cue_directory = path.parent()?;
-        let cue_name = cue_directory.file_name()?.to_str()?;
-        if !cue_name.to_ascii_lowercase().ends_with(".cue") {
-            return None;
-        }
-
         let physical_folder = cue_directory.parent()?;
-        if physical_folder.as_os_str().is_empty() {
-            return None;
-        }
 
         Some(VirtualCueTrackPath {
             cue_directory: cue_directory.to_string_lossy().into_owned(),
@@ -803,6 +1278,37 @@ impl AudioEngine {
             folder,
             title.trim().to_lowercase()
         )
+    }
+
+    fn local_album_scope(album_id: &str) -> Result<&str, String> {
+        let (length, remainder) = album_id
+            .split_once(':')
+            .ok_or_else(|| "ID de álbum local inválido.".to_string())?;
+        let folder_length = length
+            .parse::<usize>()
+            .map_err(|_| "ID de álbum local inválido.".to_string())?;
+        let folder = remainder
+            .get(..folder_length)
+            .ok_or_else(|| "ID de álbum local inválido.".to_string())?;
+        let title = remainder
+            .get(folder_length..)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .filter(|title| !title.is_empty())
+            .ok_or_else(|| "ID de álbum local inválido.".to_string())?;
+        if Self::local_album_id(folder, title) != album_id
+            || !local_media::is_safe_relative_mpd_uri(folder)
+        {
+            return Err("ID de álbum local inválido.".to_string());
+        }
+        Ok(folder)
+    }
+
+    pub(crate) fn local_album_base_filter(folder: &str) -> Result<String, String> {
+        if !local_media::is_safe_relative_mpd_uri(folder) {
+            return Err("Diretório de álbum local inválido.".to_string());
+        }
+        let escaped = folder.replace('\\', "\\\\").replace('\'', "\\'");
+        Self::quote_mpd_argument(&format!("(base '{escaped}')"))
     }
 
     fn consolidate_dominant_album_titles(map: &mut HashMap<String, AlbumCollector>) {
@@ -973,17 +1479,32 @@ impl AudioEngine {
         socket_path: &str,
         valid_source_ids: &HashSet<String>,
     ) -> Result<Vec<LocalAlbum>, String> {
+        let collection = Self::get_local_album_collection_at(socket_path)?;
+        Ok(Self::finalize_local_album_collection(
+            collection,
+            valid_source_ids,
+        ))
+    }
+
+    fn get_local_album_collection_at(socket_path: &str) -> Result<LocalAlbumCollection, String> {
+        Self::get_local_album_collection_for_filter_at(socket_path, "\"(base '')\"")
+    }
+
+    fn get_local_album_collection_for_filter_at(
+        socket_path: &str,
+        filter: &str,
+    ) -> Result<LocalAlbumCollection, String> {
         let status = Self::send_command_to_socket(socket_path, "status")
             .map_err(|e| format!("Falha ao verificar atualização da biblioteca: {e}"))?;
         if status.iter().any(|line| line.starts_with("updating_db: ")) {
             return Err("Biblioteca local em atualização no MPD; tente novamente após a atualização.".to_string());
         }
-        let count = Self::send_command_to_socket(socket_path, "count \"(base '')\"")
+        let count = Self::send_command_to_socket(socket_path, &format!("count {filter}"))
             .map_err(|e| format!("Falha ao contar músicas da biblioteca local: {e}"))?;
         let total = Self::parse_local_album_count(&count)?;
         let mut collection = LocalAlbumCollection::default();
         for (start, end) in Self::local_album_windows(total) {
-            let command = format!("find \"(base '')\" window {start}:{end}");
+            let command = format!("find {filter} window {start}:{end}");
             let lines = Self::send_command_to_socket(socket_path, &command)
                 .map_err(|e| format!("Falha ao ler página {start}:{end} da biblioteca local: {e}"))?;
             let found = Self::collect_local_album_page(&mut collection, lines)
@@ -995,19 +1516,38 @@ impl AudioEngine {
                 ));
             }
         }
-        Ok(Self::finalize_local_album_collection(
-            collection,
-            valid_source_ids,
-        ))
+        Ok(collection)
+    }
+
+    pub(crate) fn get_local_album_track_uris_at(
+        socket_path: &str,
+        album_id: &str,
+    ) -> Result<Option<Vec<String>>, String> {
+        let collection = Self::get_local_album_collection_at(socket_path)?;
+        Ok(Self::canonical_local_album_map(collection)
+            .remove(album_id)
+            .filter(|collector| collector.track_count > 0 && !collector.folder_path.is_empty())
+            .map(|collector| collector.track_uris))
+    }
+
+    pub(crate) fn get_local_album_tracks_at(
+        socket_path: &str,
+        album_id: &str,
+    ) -> Result<Option<Vec<LocalAlbumDiscTracks>>, String> {
+        let scope = Self::local_album_scope(album_id)?;
+        let filter = Self::local_album_base_filter(scope)?;
+        let collection = Self::get_local_album_collection_for_filter_at(socket_path, &filter)?;
+        Ok(Self::canonical_local_album_map(collection)
+            .remove(album_id)
+            .filter(|collector| collector.track_count > 0 && !collector.folder_path.is_empty())
+            .map(AlbumCollector::into_disc_tracks))
     }
 
     fn finalize_local_album_collection(
         collection: LocalAlbumCollection,
         valid_source_ids: &HashSet<String>,
     ) -> Vec<LocalAlbum> {
-        let mut map = Self::canonical_local_album_collectors(collection);
-        Self::consolidate_dominant_album_titles(&mut map);
-        Self::consolidate_local_album_discs(&mut map);
+        let map = Self::canonical_local_album_map(collection);
 
         let mut albums: Vec<LocalAlbum> = map
             .into_iter()
@@ -1020,6 +1560,7 @@ impl AudioEngine {
                     title: col.title,
                     artist,
                     year: col.year,
+                    genres: col.genres,
                     folder_path: col.folder_path,
                     source_id,
                     track_count: col.track_count,
@@ -1030,6 +1571,15 @@ impl AudioEngine {
 
         albums.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         albums
+    }
+
+    fn canonical_local_album_map(
+        collection: LocalAlbumCollection,
+    ) -> HashMap<String, AlbumCollector> {
+        let mut map = Self::canonical_local_album_collectors(collection);
+        Self::consolidate_dominant_album_titles(&mut map);
+        Self::consolidate_local_album_discs(&mut map);
+        map
     }
 
     fn local_album_source_id(
@@ -1057,14 +1607,21 @@ impl AudioEngine {
         collection: LocalAlbumCollection,
     ) -> HashMap<String, AlbumCollector> {
         let mut canonical = collection.physical;
-        for (key, cue) in collection.cue {
+        for (key, mut cue) in collection.cue {
             match canonical.entry(key) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let mut genres = entry.get().genres.clone();
+                    for genre in &cue.genres {
+                        crate::catalog_genres::add_genre(&mut genres, genre);
+                    }
                     if entry.get().track_count == 1
                         && cue.track_count >= 2
                         && cue.discs.len() == 1
                     {
+                        cue.genres = genres;
                         entry.insert(cue);
+                    } else {
+                        entry.get_mut().genres = genres;
                     }
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
@@ -1080,18 +1637,24 @@ impl AudioEngine {
         lines: Vec<String>,
     ) -> Result<usize, String> {
         let mut cur_file = String::new();
+        let mut cur_title = None;
         let mut cur_album = None;
         let mut cur_artist = None;
         let mut cur_album_artist = None;
         let mut cur_date = None;
+        let mut cur_genres = Vec::new();
+        let mut cur_duration = None;
 
         let commit_track = |collection: &mut LocalAlbumCollection,
                             file: &str,
+                            track_title: Option<String>,
                             album: Option<String>,
                             artist: Option<String>,
                             album_artist: Option<String>,
-                            date: Option<String>| {
-            if file.is_empty() {
+                            date: Option<String>,
+                            genres: Vec<String>,
+                            duration: Option<f64>| {
+            if file.is_empty() || !local_media::is_catalog_track_uri(file) {
                 return;
             }
             let path = Path::new(file);
@@ -1132,8 +1695,11 @@ impl AudioEngine {
             let entry = map.entry(key).or_insert_with(|| AlbumCollector {
                 title: title.clone(),
                 year: date.clone(),
+                genres: Vec::new(),
                 track_count: 0,
                 folder_path: physical_folder.clone(),
+                track_uris: Vec::new(),
+                tracks: Vec::new(),
                 album_artist: None,
                 album_artist_consistent: true,
                 artists: HashMap::new(),
@@ -1141,9 +1707,26 @@ impl AudioEngine {
             });
 
             if title > entry.title {
-                entry.title = title;
+                entry.title = title.clone();
             }
             entry.track_count += 1;
+            entry.track_uris.push(file.to_string());
+            entry.tracks.push((
+                disc_path.clone(),
+                LocalItem {
+                    item_type: "file".to_string(),
+                    path: file.to_string(),
+                    name: path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(file)
+                        .to_string(),
+                    title: track_title,
+                    artist: artist.clone(),
+                    album: Some(title.clone()),
+                    duration,
+                },
+            ));
             if let Some(disc) = entry
                 .discs
                 .iter_mut()
@@ -1159,6 +1742,9 @@ impl AudioEngine {
                 });
             }
             entry.add_artist_metadata(artist, album_artist);
+            for genre in genres {
+                crate::catalog_genres::add_genre(&mut entry.genres, &genre);
+            }
             if entry.year.is_none() && date.is_some() {
                 entry.year = date;
             }
@@ -1175,18 +1761,28 @@ impl AudioEngine {
                         commit_track(
                             collection,
                             &cur_file,
+                            cur_title.take(),
                             cur_album.take(),
                             cur_artist.take(),
                             cur_album_artist.take(),
                             cur_date.take(),
+                            std::mem::take(&mut cur_genres),
+                            cur_duration.take(),
                         );
                         cur_file = v.to_string();
                         found += 1;
                     }
+                    "Title" if !cur_file.is_empty() => cur_title = Some(v.to_string()),
                     "Album" if !cur_file.is_empty() => cur_album = Some(v.to_string()),
                     "Artist" if !cur_file.is_empty() => cur_artist = Some(v.to_string()),
                     "AlbumArtist" if !cur_file.is_empty() => cur_album_artist = Some(v.to_string()),
+                    "Genre" if !cur_file.is_empty() => crate::catalog_genres::add_genre(&mut cur_genres, v),
                     "Date" if !cur_file.is_empty() => cur_date = Some(v.chars().take(4).collect::<String>()),
+                    "duration" | "Time" | "time" | "Duration" if !cur_file.is_empty() => {
+                        if cur_duration.is_none() {
+                            cur_duration = v.trim().parse::<f64>().ok();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1195,10 +1791,13 @@ impl AudioEngine {
         commit_track(
             collection,
             &cur_file,
+            cur_title,
             cur_album,
             cur_artist,
             cur_album_artist,
             cur_date,
+            cur_genres,
+            cur_duration,
         );
 
         Ok(found)
@@ -1212,8 +1811,564 @@ impl AudioEngine {
         Self::send_command_to_socket(socket_path, "rescan").map(|_| ())
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn request_mpd_rescan_job(socket_path: &str) -> Result<u64, String> {
+        let lines = Self::send_command_to_socket(socket_path, "rescan")?;
+        Self::parse_mpd_update_job_id(&lines).map_err(|error| match error {
+            MpdJobIdParseError::MissingJob => {
+                "Resposta do rescan MPD não contém job ID.".to_string()
+            }
+            MpdJobIdParseError::DuplicateJob => {
+                "Resposta do rescan MPD contém mais de um job ID.".to_string()
+            }
+            MpdJobIdParseError::InvalidJob => {
+                "Resposta do rescan MPD contém job ID inválido.".to_string()
+            }
+            MpdJobIdParseError::ContradictoryResponse => {
+                "Resposta do rescan MPD contém campos inesperados.".to_string()
+            }
+            MpdJobIdParseError::Ack => "MPD recusou o comando rescan.".to_string(),
+        })
+    }
+
     pub fn update_library(socket_path: &str) -> Result<(), String> {
         Self::send_command_to_socket(socket_path, "update").map(|_| ())
+    }
+
+    pub fn update_library_path(
+        socket_path: &str,
+        relative_uri: &str,
+    ) -> Result<u64, TargetedLibraryUpdateErrorCode> {
+        if !crate::local_media::is_safe_relative_mpd_uri(relative_uri) {
+            return Err(TargetedLibraryUpdateErrorCode::InvalidUri);
+        }
+        let quoted = Self::quote_mpd_argument(relative_uri)
+            .map_err(|_| TargetedLibraryUpdateErrorCode::InvalidUri)?;
+        let lines = Self::send_command_to_socket(socket_path, &format!("update {quoted}"))
+            .map_err(|error| {
+                if error.starts_with("ACK") {
+                    TargetedLibraryUpdateErrorCode::UpdateCommandFailed
+                } else {
+                    TargetedLibraryUpdateErrorCode::MpdUnavailable
+                }
+            })?;
+        let mut job_ids = lines.iter().filter_map(|line| {
+            line.strip_prefix("updating_db: ")
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+        });
+        let Some(job_id) = job_ids.next() else {
+            return Err(TargetedLibraryUpdateErrorCode::InvalidResponse);
+        };
+        if job_ids.next().is_some() {
+            return Err(TargetedLibraryUpdateErrorCode::InvalidResponse);
+        }
+        Ok(job_id)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn parse_mpd_update_job_id(
+        lines: &[String],
+    ) -> Result<u64, MpdJobIdParseError> {
+        Self::parse_mpd_updating_db(lines, false)?.ok_or(MpdJobIdParseError::MissingJob)
+    }
+
+    fn parse_mpd_updating_db(
+        lines: &[String],
+        allow_unrelated_fields: bool,
+    ) -> Result<Option<u64>, MpdJobIdParseError> {
+        let mut job_id = None;
+        for line in lines {
+            if line.starts_with("ACK") {
+                return Err(MpdJobIdParseError::Ack);
+            }
+            if line.starts_with("updating_db") {
+                let value = line
+                    .strip_prefix("updating_db: ")
+                    .ok_or(MpdJobIdParseError::InvalidJob)?;
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(MpdJobIdParseError::InvalidJob);
+                }
+                let parsed = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or(MpdJobIdParseError::InvalidJob)?;
+                if job_id.replace(parsed).is_some() {
+                    return Err(MpdJobIdParseError::DuplicateJob);
+                }
+            } else if !allow_unrelated_fields {
+                return Err(MpdJobIdParseError::ContradictoryResponse);
+            }
+        }
+        Ok(job_id)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn wait_for_mpd_update_job(
+        socket_path: &str,
+        expected_job_id: u64,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> MpdRefreshCompletion {
+        if expected_job_id == 0 || poll_interval.is_zero() {
+            return MpdRefreshCompletion::ProtocolError(
+                "Parâmetros inválidos para espera do refresh MPD.".to_string(),
+            );
+        }
+        Self::wait_for_mpd_update_state(
+            socket_path,
+            Some(expected_job_id),
+            timeout,
+            poll_interval,
+        )
+    }
+
+    pub(crate) fn wait_for_mpd_idle(
+        socket_path: &str,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> MpdRefreshCompletion {
+        Self::wait_for_mpd_update_state(socket_path, None, timeout, poll_interval)
+    }
+
+    /// Settings Save owns a managed transaction: an active MPD job is pending,
+    /// irrespective of its duration. Only shutdown cancels this wait; transport
+    /// and protocol failures retain the existing explicit error classification.
+    pub(crate) fn wait_for_managed_mpd_update(
+        socket_path: &str,
+        expected_job_id: Option<u64>,
+        poll_interval: Duration,
+        mut shutdown_requested: impl FnMut() -> bool,
+    ) -> Result<MpdRefreshCompletion, ()> {
+        if expected_job_id == Some(0) || poll_interval.is_zero() {
+            return Ok(MpdRefreshCompletion::ProtocolError(
+                "Parâmetros inválidos para espera do refresh MPD.".to_string(),
+            ));
+        }
+        let poll_interval = poll_interval.clamp(Duration::from_millis(10), Duration::from_secs(1));
+        loop {
+            if shutdown_requested() {
+                return Err(());
+            }
+            match Self::active_mpd_update_job(socket_path) {
+                Ok(Some(active))
+                    if expected_job_id.is_none() || expected_job_id == Some(active) => {}
+                Ok(_) => return Ok(MpdRefreshCompletion::Completed),
+                Err(MpdStatusQueryError::Unavailable(message)) => {
+                    return Ok(MpdRefreshCompletion::Unavailable(message))
+                }
+                Err(MpdStatusQueryError::Transport(message)) => {
+                    return Ok(MpdRefreshCompletion::TransportError(message))
+                }
+                Err(MpdStatusQueryError::Protocol(message)) => {
+                    return Ok(MpdRefreshCompletion::ProtocolError(message))
+                }
+            }
+            std::thread::sleep(poll_interval);
+        }
+    }
+
+    fn wait_for_mpd_update_state(
+        socket_path: &str,
+        expected_job_id: Option<u64>,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> MpdRefreshCompletion {
+        if poll_interval.is_zero() {
+            return MpdRefreshCompletion::ProtocolError(
+                "Parâmetros inválidos para espera do refresh MPD.".to_string(),
+            );
+        }
+        let poll_interval = poll_interval.clamp(
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+        );
+        let started = Instant::now();
+        loop {
+            match Self::active_mpd_update_job(socket_path) {
+                Ok(Some(active_job_id))
+                    if expected_job_id.is_none()
+                        || expected_job_id == Some(active_job_id) => {}
+                Ok(_) => return MpdRefreshCompletion::Completed,
+                Err(MpdStatusQueryError::Unavailable(message)) => {
+                    return MpdRefreshCompletion::Unavailable(message)
+                }
+                Err(MpdStatusQueryError::Transport(message)) => {
+                    return MpdRefreshCompletion::TransportError(message)
+                }
+                Err(MpdStatusQueryError::Protocol(message)) => {
+                    return MpdRefreshCompletion::ProtocolError(message)
+                }
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return MpdRefreshCompletion::Timeout;
+            }
+            std::thread::sleep(poll_interval.min(timeout.saturating_sub(elapsed)));
+        }
+    }
+
+    #[allow(dead_code)]
+    fn active_mpd_update_job(socket_path: &str) -> Result<Option<u64>, MpdStatusQueryError> {
+        let lines = Self::send_command_to_socket(socket_path, "status").map_err(|error| {
+            if error.starts_with("Falha ao conectar no socket MPD:") {
+                MpdStatusQueryError::Unavailable(error)
+            } else if error.starts_with("ACK") || error.starts_with("Handshake inválido") {
+                MpdStatusQueryError::Protocol(error)
+            } else {
+                MpdStatusQueryError::Transport(error)
+            }
+        })?;
+        Self::parse_mpd_updating_db(&lines, true).map_err(|_| {
+            MpdStatusQueryError::Protocol(
+                "Status MPD contém campo updating_db inválido.".to_string(),
+            )
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn audit_raw_local_catalog(
+        lines: &[String],
+    ) -> Result<CatalogAuditResult, String> {
+        let mut result = CatalogAuditResult {
+            total_files: 0,
+            invalid_count: 0,
+            invalid_uris: Vec::new(),
+        };
+        for line in lines {
+            if line.starts_with("ACK") {
+                return Err("MPD recusou a leitura do catálogo local.".to_string());
+            }
+            if line.starts_with("file:") && !line.starts_with("file: ") {
+                return Err("Resposta do catálogo contém registro file malformado.".to_string());
+            }
+            let Some(uri) = line.strip_prefix("file: ") else {
+                continue;
+            };
+            result.total_files += 1;
+            let structurally_valid = local_media::is_structurally_valid_local_uri(uri);
+            let accepted = structurally_valid && local_media::is_catalog_track_uri(uri);
+            if !accepted {
+                result.invalid_count += 1;
+                if result.invalid_uris.len() < MAX_CATALOG_AUDIT_SAMPLES {
+                    result.invalid_uris.push(if structurally_valid {
+                        uri.to_string()
+                    } else {
+                        "<invalid local URI>".to_string()
+                    });
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn audit_mpd_local_catalog_at(
+        socket_path: &str,
+    ) -> Result<CatalogAuditResult, String> {
+        let lines = Self::send_command_to_socket(socket_path, "listall")?;
+        Self::audit_raw_local_catalog(&lines)
+    }
+
+    pub(crate) fn read_validated_local_catalog_at(
+        socket_path: &str,
+    ) -> Result<HashSet<String>, String> {
+        let lines = Self::send_command_to_socket(socket_path, "listall")?;
+        if !Self::audit_raw_local_catalog(&lines)?.is_clean() {
+            return Err("LOCAL_SOURCE_REMOVAL_INVALID_CATALOG".to_string());
+        }
+        // Compare typed records: a CUE can legitimately appear both as a
+        // directory and a playlist, but duplicate records are ambiguous.
+        let mut records = HashSet::new();
+        for line in lines {
+            let Some((kind, uri)) = line.split_once(": ") else {
+                return Err("LOCAL_SOURCE_REMOVAL_INVALID_CATALOG".to_string());
+            };
+            if !matches!(kind, "file" | "directory" | "playlist")
+                || !local_media::is_safe_relative_mpd_uri(uri)
+            {
+                return Err("LOCAL_SOURCE_REMOVAL_INVALID_CATALOG".to_string());
+            }
+            if !records.insert(line) {
+                return Err("LOCAL_SOURCE_REMOVAL_DUPLICATE_URI".to_string());
+            }
+        }
+        Ok(records)
+    }
+
+    /// Identity proof for removal refreshes. Playback is deliberately excluded:
+    /// status/song/elapsed may advance while the ordered playlist stays intact.
+    pub(crate) fn capture_mpd_queue_structure(
+        socket_path: &str,
+    ) -> Result<MpdQueueStructure, MpdQueueStructureError> {
+        use MpdQueueStructureError::{Changed, Invalid, QueryFailed};
+        let before = Self::parse_mpd_queue_status(
+            &Self::send_command_to_socket(socket_path, "status").map_err(|_| QueryFailed)?,
+        ).map_err(|_| Invalid)?;
+        let entries = Self::parse_mpd_queue_entries(
+            &Self::send_command_to_socket(socket_path, "playlistinfo").map_err(|_| QueryFailed)?,
+        )?;
+        let after = Self::parse_mpd_queue_status(
+            &Self::send_command_to_socket(socket_path, "status").map_err(|_| QueryFailed)?,
+        ).map_err(|_| Invalid)?;
+        if before.playlist_version != after.playlist_version
+            || before.playlist_length != after.playlist_length
+        {
+            return Err(Changed);
+        }
+        if entries.len() != after.playlist_length {
+            return Err(Invalid);
+        }
+        Self::validate_mpd_playback_cursor(&after).map_err(|_| Invalid)?;
+        Ok(MpdQueueStructure { entries, playlist_version: after.playlist_version })
+    }
+
+    fn parse_mpd_queue_entries(lines: &[String]) -> Result<Vec<MpdQueueEntry>, MpdQueueStructureError> {
+        use MpdQueueStructureError::Invalid;
+        let mut entries = Vec::new();
+        let mut current: Option<(String, Option<usize>, Option<u64>)> = None;
+        let mut ids = HashSet::new();
+        let mut finish = |entry: (String, Option<usize>, Option<u64>)| {
+            let (uri, pos, id) = entry;
+            let pos = pos.ok_or(Invalid)?;
+            let id = id.ok_or(Invalid)?;
+            if pos != entries.len() || !ids.insert(id) {
+                return Err(Invalid);
+            }
+            entries.push(MpdQueueEntry { uri, pos, id });
+            Ok(())
+        };
+        for line in lines {
+            let Some((key, value)) = line.split_once(": ") else {
+                if ["file:", "Pos:", "Id:"].iter().any(|key| line.starts_with(key)) {
+                    return Err(Invalid);
+                }
+                continue;
+            };
+            match key {
+                "file" => {
+                    if let Some(entry) = current.take() { finish(entry)?; }
+                    if value.is_empty() || Self::quote_mpd_argument(value).is_err() { return Err(Invalid); }
+                    current = Some((value.to_string(), None, None));
+                }
+                "Pos" => {
+                    let entry = current.as_mut().ok_or(Invalid)?;
+                    if entry.1.replace(value.parse().map_err(|_| Invalid)?).is_some() { return Err(Invalid); }
+                }
+                "Id" => {
+                    let entry = current.as_mut().ok_or(Invalid)?;
+                    if entry.2.replace(value.parse().map_err(|_| Invalid)?).is_some() { return Err(Invalid); }
+                }
+                _ => {} // Tags do not define queue identity.
+            }
+        }
+        if let Some(entry) = current { finish(entry)?; }
+        Ok(entries)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn capture_mpd_playback_snapshot(
+        socket_path: &str,
+    ) -> Result<MpdPlaybackSnapshot, String> {
+        let before = Self::parse_mpd_queue_status(&Self::send_command_to_socket(
+            socket_path,
+            "status",
+        )?)?;
+        let uris = Self::parse_mpd_playlist_uris(&Self::send_command_to_socket(
+            socket_path,
+            "playlistinfo",
+        )?)?;
+        let after = Self::parse_mpd_queue_status(&Self::send_command_to_socket(
+            socket_path,
+            "status",
+        )?)?;
+
+        if before.playlist_version != after.playlist_version
+            || before.playlist_length != after.playlist_length
+        {
+            return Err("A fila do MPD mudou durante a captura de rollback.".to_string());
+        }
+        if uris.len() != after.playlist_length {
+            return Err(format!(
+                "playlistinfo retornou {} item(ns), mas playlistlength informou {}.",
+                uris.len(), after.playlist_length
+            ));
+        }
+        Self::validate_mpd_playback_cursor(&after)?;
+
+        Ok(MpdPlaybackSnapshot {
+            uris,
+            current_index: after.current_index,
+            elapsed: after.elapsed,
+            state: after.state,
+            playlist_version: after.playlist_version,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn restore_mpd_playback_snapshot(
+        socket_path: &str,
+        snapshot: &MpdPlaybackSnapshot,
+    ) -> Result<(), String> {
+        Self::validate_mpd_playback_snapshot(snapshot)?;
+        let mut commands = String::from("command_list_begin\nclear\n");
+        for uri in &snapshot.uris {
+            commands.push_str(&format!("add {}\n", Self::quote_mpd_argument(uri)?));
+        }
+        if snapshot.state != PlaybackState::Stopped {
+            let current_index = snapshot.current_index.ok_or_else(|| {
+                "Snapshot ativo do MPD não contém índice da faixa atual.".to_string()
+            })?;
+            commands.push_str(&format!("play {current_index}\n"));
+            commands.push_str("pause 1\n");
+        }
+        commands.push_str("command_list_end");
+        Self::send_command_to_socket(socket_path, &commands)
+            .map_err(|error| Self::sanitize_mpd_error(error, &snapshot.uris))?;
+
+        if snapshot.state == PlaybackState::Stopped {
+            return Ok(());
+        }
+        if snapshot.elapsed > 0.0 {
+            Self::send_command_to_socket(
+                socket_path,
+                &format!("seekcur {:.3}", snapshot.elapsed),
+            )
+            .map_err(|error| Self::sanitize_mpd_error(error, &snapshot.uris))?;
+        }
+        Ok(())
+    }
+
+    fn parse_mpd_queue_status(lines: &[String]) -> Result<MpdQueueStatus, String> {
+        let mut playlist_version: Option<u64> = None;
+        let mut playlist_length: Option<usize> = None;
+        let mut current_index: Option<usize> = None;
+        let mut elapsed: Option<f64> = None;
+        let mut state: Option<PlaybackState> = None;
+        for line in lines {
+            let Some((key, value)) = line.split_once(": ") else {
+                if ["playlist", "playlistlength", "song", "elapsed", "state"]
+                    .iter()
+                    .any(|key| line.starts_with(key))
+                {
+                    return Err("Status MPD contém campo de fila malformado.".to_string());
+                }
+                continue;
+            };
+            match key {
+                "playlist" => {
+                    if playlist_version
+                        .replace(Self::parse_mpd_number("playlist", value)?)
+                        .is_some()
+                    {
+                        return Err("Status MPD contém playlist duplicada.".to_string());
+                    }
+                }
+                "playlistlength" => {
+                    if playlist_length
+                        .replace(Self::parse_mpd_number("playlistlength", value)?)
+                        .is_some()
+                    {
+                        return Err("Status MPD contém playlistlength duplicado.".to_string());
+                    }
+                }
+                "song" => {
+                    if current_index
+                        .replace(Self::parse_mpd_number("song", value)?)
+                        .is_some()
+                    {
+                        return Err("Status MPD contém song duplicado.".to_string());
+                    }
+                }
+                "elapsed" => {
+                    if elapsed
+                        .replace(Self::parse_mpd_number("elapsed", value)?)
+                        .is_some()
+                    {
+                        return Err("Status MPD contém elapsed duplicado.".to_string());
+                    }
+                }
+                "state" => {
+                    if state.replace(Self::parse_playback_state(value)?).is_some() {
+                        return Err("Status MPD contém state duplicado.".to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let state = state.ok_or_else(|| "Status MPD sem estado de reprodução.".to_string())?;
+        let elapsed = match elapsed {
+            None if state == PlaybackState::Stopped => 0.0,
+            Some(value) if value.is_finite() && value >= 0.0 => value,
+            _ => return Err("Status MPD sem posição válida da faixa atual.".to_string()),
+        };
+        Ok(MpdQueueStatus {
+            playlist_version: playlist_version
+                .ok_or_else(|| "Status MPD sem versão da playlist.".to_string())?,
+            playlist_length: playlist_length
+                .ok_or_else(|| "Status MPD sem playlistlength.".to_string())?,
+            current_index,
+            elapsed,
+            state,
+        })
+    }
+
+    fn parse_mpd_playlist_uris(lines: &[String]) -> Result<Vec<String>, String> {
+        let mut uris = Vec::new();
+        for line in lines {
+            if line.starts_with("file:") && !line.starts_with("file: ") {
+                return Err("playlistinfo contém URI malformada.".to_string());
+            }
+            let Some(uri) = line.strip_prefix("file: ") else {
+                continue;
+            };
+            if uri.is_empty() {
+                return Err("playlistinfo contém URI vazia.".to_string());
+            }
+            Self::quote_mpd_argument(uri)?;
+            uris.push(uri.to_string());
+        }
+        Ok(uris)
+    }
+
+    fn validate_mpd_playback_cursor(status: &MpdQueueStatus) -> Result<(), String> {
+        if status.playlist_length == 0 {
+            if status.current_index.is_some() || status.state != PlaybackState::Stopped {
+                return Err("Status MPD inconsistente para fila vazia.".to_string());
+            }
+            return Ok(());
+        }
+        if status
+            .current_index
+            .is_some_and(|index| index >= status.playlist_length)
+        {
+            return Err("Status MPD contém índice fora da fila.".to_string());
+        }
+        if status.state != PlaybackState::Stopped && status.current_index.is_none() {
+            return Err("Status MPD ativo sem índice da faixa atual.".to_string());
+        }
+        Ok(())
+    }
+
+    fn validate_mpd_playback_snapshot(snapshot: &MpdPlaybackSnapshot) -> Result<(), String> {
+        for uri in &snapshot.uris {
+            if uri.is_empty() {
+                return Err("Snapshot do MPD contém URI vazia.".to_string());
+            }
+            Self::quote_mpd_argument(uri)?;
+        }
+        if !snapshot.elapsed.is_finite() || snapshot.elapsed < 0.0 {
+            return Err("Snapshot do MPD contém posição inválida.".to_string());
+        }
+        let status = MpdQueueStatus {
+            playlist_version: snapshot.playlist_version,
+            playlist_length: snapshot.uris.len(),
+            current_index: snapshot.current_index,
+            elapsed: snapshot.elapsed,
+            state: snapshot.state,
+        };
+        Self::validate_mpd_playback_cursor(&status)
     }
 
     #[cfg(test)]
@@ -1424,7 +2579,10 @@ impl AudioEngine {
             if let Err(error) =
                 crate::persistence::prepare_private_file_for_load(&p, "queue_cache.json")
             {
-                eprintln!("[Persistência] {}", error);
+                eprintln!(
+                    "[Persistence] Failed to validate queue cache permissions: {}",
+                    crate::diagnostics::error_summary(&error)
+                );
             }
             if p.exists() {
                 match std::fs::File::open(&p) {
@@ -1438,18 +2596,24 @@ impl AudioEngine {
                                             &json,
                                             "queue_cache.json",
                                         ) {
-                                            eprintln!("[Persistência] {}", error);
+                                            eprintln!("[Persistence] Failed to persist migrated queue cache: {}", crate::diagnostics::error_summary(&error));
                                         }
                                     }
-                                    Err(error) => eprintln!("[Persistência] {}", error),
+                                    Err(error) => eprintln!("[Persistence] Failed to encode migrated queue cache: {}", crate::diagnostics::error_summary(&error)),
                                 }
                             }
                             return (queue, resume);
                         }
-                        Err(error) => eprintln!("[Persistência] {}", error),
+                        Err(error) => eprintln!(
+                            "[Persistence] Failed to decode queue cache: {}",
+                            crate::diagnostics::error_summary(&error)
+                        ),
                     },
                     Err(error) => {
-                        eprintln!("[Persistência] Falha ao abrir cache da fila: {}", error)
+                        eprintln!(
+                            "[Persistence] Failed to open queue cache: {}",
+                            crate::diagnostics::error_summary(&error)
+                        )
                     }
                 }
             }
@@ -1470,6 +2634,7 @@ impl AudioEngine {
             queue,
             restored_resume,
             startup_restore,
+            queue_structure_reserved: Arc::new(AtomicU8::new(0)),
         }
     }
 
@@ -1554,13 +2719,11 @@ impl AudioEngine {
         socket_path: &str,
         library_dir: &Path,
         path: &str,
+        local_folders: &[String],
     ) -> Result<Option<String>, String> {
-        let relative = Path::new(path);
-        let full_path = if relative.is_absolute() {
-            relative.to_path_buf()
-        } else {
-            library_dir.join(relative)
-        };
+        let resolved = local_media::resolve_local_path(library_dir, path, local_folders)
+            .map_err(|error| error.to_string())?;
+        let full_path = resolved.physical_path;
         let local_cover = if full_path.is_dir() {
             find_folder_cover_path(&full_path)
         } else {
@@ -1568,9 +2731,6 @@ impl AudioEngine {
         };
         if local_cover.is_some() {
             return Ok(local_cover);
-        }
-        if relative.is_absolute() || path.is_empty() {
-            return Ok(None);
         }
         Self::embedded_cover_for_folder(socket_path, path)
     }
@@ -1585,6 +2745,7 @@ impl AudioEngine {
             .iter()
             .filter_map(|line| line.strip_prefix("file: "))
             .filter(|uri| Path::new(uri).parent() == Some(Path::new(folder)))
+            .filter(|uri| local_media::is_catalog_track_uri(uri))
             .take(MAX_EMBEDDED_COVER_TRACK_PROBES);
         for uri in tracks {
             if let Some(cover) = Self::embedded_cover_for_track(socket_path, uri)? {
@@ -1826,6 +2987,7 @@ impl AudioEngine {
     }
 
     pub fn persist_shutdown_resume(&mut self) -> Result<(), String> {
+        self.ensure_logical_resume_available()?;
         let captured = self.capture_playback_snapshot()?;
         if captured == self.restored_resume {
             return Ok(());
@@ -1842,6 +3004,184 @@ impl AudioEngine {
         self.startup_restore == StartupQueueRestore::Pending
     }
 
+    /// Called under AudioState, before copying the logical queue. Startup must
+    /// be ready; device/catalog recovery is serialized by the Save slot.
+    pub(crate) fn reserve_queue_structure(&mut self) -> Option<QueueStructureReservation> {
+        if self.startup_restore != StartupQueueRestore::Ready
+            || self
+                .queue_structure_reserved
+                .compare_exchange(
+                    0,
+                    QUEUE_STRUCTURE_RESERVED,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_err()
+        {
+            return None;
+        }
+        Some(QueueStructureReservation(
+            Arc::clone(&self.queue_structure_reserved),
+            true,
+            Arc::new(()),
+        ))
+    }
+
+    fn require_queue_owner(&self, owner: &QueueStructureReservation) -> Result<(), String> {
+        if !Arc::ptr_eq(&owner.0, &self.queue_structure_reserved)
+            || owner.0.load(Ordering::SeqCst) == 0
+        {
+            return Err("LOCAL_SOURCE_REMOVAL_QUEUE_OWNER_INVALID".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn capture_device_switch_queue(
+        &mut self,
+    ) -> Result<DeviceSwitchQueueSnapshot, String> {
+        let owner = self
+            .reserve_queue_structure()
+            .ok_or("A fila não está disponível para preparar a troca de saída.")?;
+        Ok(DeviceSwitchQueueSnapshot {
+            owner,
+            tracks: self.queue.clone(),
+        })
+    }
+
+    pub(crate) fn validate_device_switch_queue(
+        &self,
+        resolved: &ResolvedDeviceSwitchQueue,
+    ) -> Result<(), String> {
+        self.require_queue_owner(&resolved.snapshot.owner)?;
+        // Compare ordered media identities, including duplicate occurrences.
+        // Presentation metadata and transient Plex routes are not identities.
+        let tracks = &resolved.snapshot.tracks;
+        if self.startup_restore != StartupQueueRestore::Ready
+            || self.queue.len() != tracks.len()
+            || resolved.playback_uris.len() != tracks.len()
+            || !self.queue.iter().zip(tracks).all(|(current, captured)| {
+                current.media_locator == captured.media_locator && current.uri == captured.uri
+            })
+        {
+            return Err("A fila mudou durante a preparação da troca de saída.".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_reserved_device_switch(
+        &mut self,
+        resolved: &ResolvedDeviceSwitchQueue,
+    ) -> Result<Option<DeviceSwitchSnapshot>, DeviceSwitchPreparationError> {
+        self.validate_device_switch_queue(resolved)
+            .map_err(|cause| DeviceSwitchPreparationError {
+                cause,
+                snapshot: None,
+            })?;
+        self.prepare_device_switch()
+    }
+
+    pub(crate) fn queue_has_logical_resume(&self) -> bool {
+        self.restored_resume.is_some()
+    }
+
+    /// Called under AudioState: capture and fence are atomic relative to all
+    /// player commands. No MPD/filesystem I/O and no cursor fence on failure.
+    #[allow(dead_code)]
+    pub(crate) fn capture_reserved_logical_queue(
+        &self,
+        owner: &QueueStructureReservation,
+    ) -> Result<ReservedLogicalQueueSnapshot, String> {
+        self.require_queue_owner(owner)?;
+        if self.startup_restore != StartupQueueRestore::Ready {
+            return Err("LOCAL_SOURCE_REMOVAL_LOGICAL_RESUME_INVALID".into());
+        }
+        let resume = self
+            .restored_resume
+            .filter(|cursor| cursor.valid_for(self.queue.len()))
+            .ok_or("LOCAL_SOURCE_REMOVAL_LOGICAL_RESUME_INVALID")?;
+        let tracks = self.queue.clone();
+        owner.0.fetch_or(LOGICAL_RESUME_RESERVED, Ordering::SeqCst);
+        Ok(ReservedLogicalQueueSnapshot {
+            tracks,
+            resume,
+            identity: Arc::clone(&owner.2),
+        })
+    }
+
+    /// Consume a verified capability under AudioState. Durable cache writing is
+    /// still performed by the transaction owner after releasing AudioState.
+    #[allow(dead_code)]
+    pub(crate) fn apply_verified_reserved_logical_queue(
+        &mut self,
+        owner: &QueueStructureReservation,
+        verified: VerifiedLogicalQueueRestore,
+    ) -> Result<Vec<u8>, String> {
+        self.require_queue_owner(owner)?;
+        if !Arc::ptr_eq(&owner.2, &verified.identity)
+            || owner.0.load(Ordering::SeqCst) & LOGICAL_RESUME_RESERVED == 0
+            || !verified.resume.valid_for(verified.tracks.len())
+        {
+            return Err("LOCAL_SOURCE_REMOVAL_QUEUE_OWNER_INVALID".into());
+        }
+        self.queue = verified.tracks;
+        self.restored_resume = Some(verified.resume);
+        self.startup_restore = StartupQueueRestore::Ready;
+        Ok(verified.cache)
+    }
+
+    fn ensure_logical_resume_available(&self) -> Result<(), String> {
+        if self.queue_structure_reserved.load(Ordering::SeqCst) & LOGICAL_RESUME_RESERVED != 0 {
+            return Err("LOCAL_SOURCE_REMOVAL_LOGICAL_RESUME_RESERVED: aguarde a conclusão da remoção de fontes locais.".into());
+        }
+        Ok(())
+    }
+
+    /// A destructive transaction that cannot prove recovery keeps mutations
+    /// fenced even after its worker returns. Startup is also blocked by its intent.
+    pub(crate) fn retain_uncertain_queue_reservation(
+        &mut self,
+        owner: &mut QueueStructureReservation,
+    ) {
+        if self.require_queue_owner(owner).is_ok() {
+            self.startup_restore = StartupQueueRestore::Failed;
+            owner.1 = false;
+        }
+    }
+
+    pub(crate) fn begin_reserved_queue_effect<'reservation>(
+        &mut self,
+        owner: &'reservation mut QueueStructureReservation,
+    ) -> Result<ReservedQueueEffect<'reservation>, String> {
+        self.require_queue_owner(owner)?;
+        owner.arm_destructive();
+        self.startup_restore = StartupQueueRestore::Failed;
+        Ok(ReservedQueueEffect {
+            socket_path: self.socket_path.clone(),
+            owner: Arc::clone(&owner.0),
+            identity: Arc::clone(&owner.2),
+            _owner_scope: std::marker::PhantomData,
+        })
+    }
+
+    pub(crate) fn apply_verified_reserved_queue(
+        &mut self,
+        owner: &QueueStructureReservation,
+        tracks: Vec<TrackMetadata>,
+    ) -> Result<(), String> {
+        self.require_queue_owner(owner)?;
+        self.queue = tracks;
+        self.restored_resume = None;
+        self.startup_restore = StartupQueueRestore::Ready;
+        Ok(())
+    }
+
+    fn ensure_queue_structure_available(&self) -> Result<(), String> {
+        if self.queue_structure_reserved.load(Ordering::SeqCst) != 0 {
+            return Err("LOCAL_SOURCE_REMOVAL_QUEUE_RESERVED: aguarde a conclusão da remoção de fontes locais.".to_string());
+        }
+        Ok(())
+    }
+
     pub fn fail_startup_queue_restore(&mut self) {
         if self.startup_queue_pending() {
             self.startup_restore = StartupQueueRestore::Failed;
@@ -1852,6 +3192,7 @@ impl AudioEngine {
         if !self.startup_queue_pending() {
             return Ok(());
         }
+        self.ensure_queue_structure_available()?;
         let commands = match self.device_switch_queue_restore_commands(None, playback_uris) {
             Ok(commands) => commands,
             Err(error) => {
@@ -1879,6 +3220,8 @@ impl AudioEngine {
             cause,
             snapshot: None,
         };
+        self.ensure_logical_resume_available()
+            .map_err(before_stop)?;
         let status_lines = self.send_command("status").map_err(before_stop)?;
         let mut state = None;
         let mut elapsed = 0.0;
@@ -1927,6 +3270,7 @@ impl AudioEngine {
     }
 
     /// Restaura fila, faixa e posição quando possível; Playing/Paused terminam pausados e Stopped permanece parado.
+    #[cfg(test)]
     pub fn restore_after_device_switch(
         &self,
         saved_state: Option<DeviceSwitchSnapshot>,
@@ -1945,7 +3289,59 @@ impl AudioEngine {
         )
     }
 
+    pub(crate) fn restore_after_reserved_device_switch(
+        &self,
+        saved_state: Option<DeviceSwitchSnapshot>,
+        resolved: &ResolvedDeviceSwitchQueue,
+    ) -> Result<(), String> {
+        self.restore_after_reserved_device_switch_with(
+            saved_state,
+            resolved,
+            &mut |command| self.send_command(command),
+            &mut std::thread::sleep,
+        )
+    }
+
+    fn restore_after_reserved_device_switch_with<F, S>(
+        &self,
+        saved_state: Option<DeviceSwitchSnapshot>,
+        resolved: &ResolvedDeviceSwitchQueue,
+        send_command: &mut F,
+        sleep: &mut S,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&str) -> Result<Vec<String>, String>,
+        S: FnMut(Duration),
+    {
+        self.validate_device_switch_queue(resolved)?;
+        if self.queue.is_empty() {
+            return Ok(());
+        }
+        self.restore_device_switch_playback_with(
+            saved_state,
+            &resolved.playback_uris,
+            send_command,
+            sleep,
+        )
+    }
+
+    #[cfg(test)]
     fn restore_after_device_switch_with<F, S>(
+        &self,
+        saved_state: Option<DeviceSwitchSnapshot>,
+        playback_uris: &[String],
+        send_command: &mut F,
+        sleep: &mut S,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&str) -> Result<Vec<String>, String>,
+        S: FnMut(Duration),
+    {
+        self.ensure_queue_structure_available()?;
+        self.restore_device_switch_playback_with(saved_state, playback_uris, send_command, sleep)
+    }
+
+    fn restore_device_switch_playback_with<F, S>(
         &self,
         saved_state: Option<DeviceSwitchSnapshot>,
         playback_uris: &[String],
@@ -2032,7 +3428,7 @@ impl AudioEngine {
         }
 
         eprintln!(
-            "[Audio] Aviso: o MPD manteve a faixa ativa, mas recusou restaurar a posição temporal (Not seekable)."
+            "[Audio] Warning: MPD kept the track active but refused to restore its time position (Not seekable)."
         );
         Ok(())
     }
@@ -2090,6 +3486,7 @@ impl AudioEngine {
         playback_uris: Vec<String>,
         start_index: usize,
     ) -> Result<(), String> {
+        self.ensure_queue_structure_available()?;
         if tracks.is_empty() {
             return Err("Não é possível iniciar uma fila vazia.".to_string());
         }
@@ -2130,6 +3527,7 @@ impl AudioEngine {
     }
 
     pub fn play_uris(&mut self, uris: Vec<String>, start_index: usize) -> Result<(), String> {
+        self.ensure_queue_structure_available()?;
         if uris.iter().any(|uri| Self::contains_plex_token(uri)) {
             return Err(
                 "URLs Plex autenticadas não são aceitas como identidade persistente da faixa."
@@ -2158,6 +3556,7 @@ impl AudioEngine {
     }
 
     fn ensure_startup_queue_ready(&self) -> Result<(), String> {
+        self.ensure_logical_resume_available()?;
         match self.startup_restore {
             StartupQueueRestore::Ready => Ok(()),
             StartupQueueRestore::Pending => Err("A fila ainda está sendo restaurada no MPD.".to_string()),
@@ -2186,17 +3585,17 @@ impl AudioEngine {
         )
     }
 
-    pub fn play(&mut self) -> Result<(), String> {
+    pub fn play(&mut self, is_shared: bool) -> Result<(), String> {
         self.ensure_startup_queue_ready()?;
         if self.restored_resume.is_some() {
-            return self.toggle_play_pause();
+            return self.toggle_play_pause(is_shared);
         }
         if let Some(command) =
             explicit_playback_command(self.playback_state()?, ExplicitPlaybackRequest::Play)
         {
             self.send_command(command)?;
         }
-        Ok(())
+        self.verify_shared_play_resume_progress(is_shared)
     }
 
     pub fn pause(&mut self) -> Result<(), String> {
@@ -2212,7 +3611,7 @@ impl AudioEngine {
         Ok(())
     }
 
-    pub fn toggle_play_pause(&mut self) -> Result<(), String> {
+    pub fn toggle_play_pause(&mut self, is_shared: bool) -> Result<(), String> {
         self.ensure_startup_queue_ready()?;
         if let Some(snapshot) = self.restored_resume {
             if !snapshot.valid_for(self.queue.len()) {
@@ -2224,20 +3623,50 @@ impl AudioEngine {
                 let mut send = |command: &str| self.send_command(command);
                 Self::restore_position(snapshot.elapsed, &mut send, &mut std::thread::sleep)?;
             }
-            return match self.observed_mpd_playback_state()? {
+            match self.observed_mpd_playback_state()? {
                 PlaybackState::Playing => Ok(()),
                 PlaybackState::Paused => self.send_command("pause 0").map(|_| ()),
                 PlaybackState::Stopped => {
                     Err("O MPD parou após a tentativa de retomar a faixa.".to_string())
                 }
+            }?;
+        } else {
+            let status = self.get_status()?;
+            match status.state.as_str() {
+                "play" => return self.send_command("pause 1").map(|_| ()),
+                "pause" => self.send_command("pause 0")?,
+                _ => self.send_command("play")?,
             };
         }
-        let status = self.get_status()?;
-        match status.state.as_str() {
-            "play" => self.send_command("pause 1").map(|_| ()),
-            "pause" => self.send_command("pause 0").map(|_| ()),
-            _ => self.send_command("play").map(|_| ()),
+        self.verify_shared_play_resume_progress(is_shared)
+    }
+
+    fn verify_shared_play_resume_progress(&self, is_shared: bool) -> Result<(), String> {
+        Self::verify_shared_progress_at(&self.socket_path, is_shared)
+    }
+
+    fn verify_shared_progress_at(socket_path: &str, is_shared: bool) -> Result<(), String> {
+        if !is_shared {
+            return Ok(());
         }
+        // Same bounded sampling and single recovery as Shared Next/Previous.
+        // Never seek, rebuild the queue or retry the play command here.
+        let operation = "Play/Resume";
+        std::thread::sleep(SHARED_PROGRESS_SAMPLE_DELAY);
+        let first =
+            Self::parse_progress_status(Self::send_command_to_socket(socket_path, "status")?)?;
+        std::thread::sleep(SHARED_PROGRESS_SAMPLE_DELAY);
+        let second =
+            Self::parse_progress_status(Self::send_command_to_socket(socket_path, "status")?)?;
+        Self::validate_shared_playing_samples(operation, first, second)?;
+        if second.elapsed - first.elapsed >= SHARED_MIN_PROGRESS {
+            return Ok(());
+        }
+        Self::recover_shared_stall(
+            operation,
+            &mut |command| Self::send_command_to_socket(socket_path, command),
+            &mut std::thread::sleep,
+        )
     }
 
     fn change_track_with<F, S>(
@@ -2435,7 +3864,7 @@ impl AudioEngine {
         self.queue.clone()
     }
 
-    pub fn play_index(&mut self, index: usize) -> Result<(), String> {
+    pub fn play_index(&mut self, index: usize, is_shared: bool) -> Result<(), String> {
         self.ensure_startup_queue_ready()?;
         if index >= self.queue.len() {
             return Err(format!(
@@ -2446,10 +3875,11 @@ impl AudioEngine {
         }
         self.send_command(&format!("play {}", index))?;
         self.restored_resume = None;
-        Ok(())
+        self.verify_shared_play_resume_progress(is_shared)
     }
 
     pub fn clear_queue(&mut self) -> Result<(), String> {
+        self.ensure_queue_structure_available()?;
         self.send_command("clear")?;
         self.queue.clear();
         self.restored_resume = None;
@@ -2457,14 +3887,19 @@ impl AudioEngine {
         self.save_queue_cache()
     }
 
+    #[cfg(test)]
     pub fn list_directory(&self, path: &str) -> Result<Vec<LocalItem>, String> {
+        Self::list_directory_at(&self.socket_path, path)
+    }
+
+    pub(crate) fn list_directory_at(socket_path: &str, path: &str) -> Result<Vec<LocalItem>, String> {
         let cmd = if path.trim().is_empty() {
             "lsinfo".to_string()
         } else {
             format!("lsinfo {}", Self::quote_mpd_argument(path)?)
         };
 
-        let lines = self.send_command(&cmd)?;
+        let lines = Self::send_command_to_socket(socket_path, &cmd)?;
         let mut items = Vec::new();
         let mut current_item: Option<LocalItem> = None;
 
@@ -2490,15 +3925,17 @@ impl AudioEngine {
                         if let Some(item) = current_item.take() {
                             items.push(item);
                         }
-                        let name = v.split('/').last().unwrap_or(v).to_string();
-                        current_item = Some(LocalItem {
-                            item_type: "file".to_string(),
-                            path: v.to_string(),
-                            name,
-                            title: None,
-                            artist: None,
-                            album: None,
-                            duration: None,
+                        current_item = local_media::is_catalog_track_uri(v).then(|| {
+                            let name = v.split('/').last().unwrap_or(v).to_string();
+                            LocalItem {
+                                item_type: "file".to_string(),
+                                path: v.to_string(),
+                                name,
+                                title: None,
+                                artist: None,
+                                album: None,
+                                duration: None,
+                            }
                         });
                     }
                     "Title" => {
@@ -2573,6 +4010,7 @@ impl AudioEngine {
         let mut song_index: Option<usize> = None;
         let mut volume: i32 = 100;
         let mut is_updating = false;
+        let mut playback_error = None;
 
         for line in lines {
             if let Some((k, v)) = line.split_once(": ") {
@@ -2587,6 +4025,7 @@ impl AudioEngine {
                     "song" => song_index = Some(Self::parse_mpd_number("song", v)?),
                     "volume" => volume = Self::parse_mpd_number("volume", v)?,
                     "updating_db" => is_updating = true,
+                    "error" => playback_error = Some(PlaybackDiagnostic::from_mpd_error(v)),
                     _ => {}
                 }
             }
@@ -2627,6 +4066,7 @@ impl AudioEngine {
                             .flatten(),
                         volume: VolumeStatus::from_mpd(volume),
                         is_updating,
+                        playback_error,
                     });
                 }
             }
@@ -2643,6 +4083,7 @@ impl AudioEngine {
                 plex_image: None,
                 volume: VolumeStatus::from_mpd(volume),
                 is_updating,
+                playback_error,
             });
         }
 
@@ -2759,6 +4200,7 @@ impl AudioEngine {
             plex_image,
             volume: VolumeStatus::from_mpd(volume),
             is_updating,
+            playback_error,
         })
     }
 }
@@ -2774,6 +4216,299 @@ mod tests {
     use std::thread;
 
     static ALBUM_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn toggle_play_pause_characterizes_transport_commands_without_recovery() {
+        for (state, command) in [("play", "pause 1"), ("pause", "pause 0"), ("stop", "play")] {
+            let mut script = vec![(
+                "status",
+                match state {
+                    "play" => "state: play\nelapsed: 16.0\nOK\n",
+                    "pause" => "state: pause\nelapsed: 16.0\nOK\n",
+                    _ => "state: stop\nOK\n",
+                },
+            )];
+            if state != "stop" {
+                script.push(("currentsong", "OK\n"));
+            }
+            script.push((command, "OK\n"));
+            let (socket, server) = fake_album_mpd(script);
+            let mut engine = engine_with_track("local/faixa.flac");
+            engine.socket_path = socket;
+            let queue = engine.queue.clone();
+            engine.toggle_play_pause(false).unwrap();
+            assert_eq!(engine.queue, queue);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn explicit_play_characterizes_idempotence_and_resume_transport() {
+        for (state, command) in [
+            ("play", None),
+            ("pause", Some("pause 0")),
+            ("stop", Some("play")),
+        ] {
+            let response = match state {
+                "play" => "state: play\nelapsed: 16.0\nOK\n",
+                "pause" => "state: pause\nelapsed: 16.0\nOK\n",
+                _ => "state: stop\nOK\n",
+            };
+            let mut script = vec![("status", response)];
+            if let Some(command) = command {
+                script.push((command, "OK\n"));
+            }
+            let (socket, server) = fake_album_mpd(script);
+            let mut engine = engine_with_track("local/faixa.flac");
+            engine.socket_path = socket;
+            engine.play(false).unwrap();
+            server.join().unwrap();
+        }
+    }
+
+    fn play_resume_script(
+        script: Vec<(&'static str, &'static str)>,
+        track: TrackMetadata,
+        explicit_play: bool,
+        is_shared: bool,
+        cursor: Option<PlaybackResumeSnapshot>,
+    ) -> (Result<(), String>, Option<PlaybackResumeSnapshot>) {
+        let (socket, server) = fake_album_mpd(script);
+        let mut engine = engine_with_track("local/Música com espaços.flac");
+        engine.socket_path = socket;
+        engine.queue = vec![track];
+        engine.restored_resume = cursor;
+        let queue = engine.queue.clone();
+        let result = if explicit_play {
+            engine.play(is_shared)
+        } else {
+            engine.toggle_play_pause(is_shared)
+        };
+        assert_eq!(engine.queue, queue);
+        server.join().unwrap();
+        (result, engine.restored_resume)
+    }
+
+    #[test]
+    fn shared_play_resume_with_progress_does_not_recover() {
+        for (state, explicit, command) in [
+            ("pause", false, Some("pause 0")),
+            ("stop", false, Some("play")),
+            ("pause", true, Some("pause 0")),
+            ("stop", true, Some("play")),
+            ("play", true, None),
+        ] {
+            let mut script = vec![(
+                "status",
+                match state {
+                    "pause" => "state: pause\nelapsed: 16.0\nOK\n",
+                    "play" => "state: play\nelapsed: 16.0\nOK\n",
+                    _ => "state: stop\nOK\n",
+                },
+            )];
+            if !explicit && state != "stop" {
+                script.push(("currentsong", "OK\n"));
+            }
+            if let Some(command) = command {
+                script.push((command, "OK\n"));
+            }
+            script.extend([
+                ("status", "state: play\nelapsed: 16.0\nOK\n"),
+                ("status", "state: play\nelapsed: 16.09\nOK\n"),
+            ]);
+            let track = engine_with_track("local/Música com espaços.flac")
+                .queue
+                .remove(0);
+            play_resume_script(script, track, explicit, true, None)
+                .0
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn shared_play_resume_stall_recovers_once_without_queue_or_position_commands() {
+        for track in [
+            engine_with_track("local/Música com espaços.flac")
+                .queue
+                .remove(0),
+            plex_track(),
+        ] {
+            for explicit in [false, true] {
+                let mut script = vec![("status", "state: pause\nelapsed: 16.0\nOK\n")];
+                if !explicit {
+                    script.push(("currentsong", "OK\n"));
+                }
+                script.extend([
+                    ("pause 0", "OK\n"),
+                    ("status", "state: play\nelapsed: 16.0\nOK\n"),
+                    ("status", "state: play\nelapsed: 16.0\nOK\n"),
+                    ("pause 1", "OK\n"),
+                    ("pause 0", "OK\n"),
+                    ("status", "state: play\nelapsed: 16.0\nOK\n"),
+                    ("status", "state: play\nelapsed: 16.09\nOK\n"),
+                ]);
+                play_resume_script(script, track.clone(), explicit, true, None)
+                    .0
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn shared_play_resume_restored_cursor_is_selected_and_sought_only_once() {
+        for explicit in [false, true] {
+            for track in [
+                engine_with_track("local/Música com espaços.flac")
+                    .queue
+                    .remove(0),
+                plex_track(),
+            ] {
+                let cursor = PlaybackResumeSnapshot {
+                    queue_index: 0,
+                    elapsed: 16.0,
+                    state: PlaybackState::Paused,
+                };
+                let script = vec![
+                    ("play 0", "OK\n"),
+                    ("seekcur 16.0", "OK\n"),
+                    ("status", "state: pause\nelapsed: 16.0\nOK\n"),
+                    ("pause 0", "OK\n"),
+                    ("status", "state: play\nelapsed: 16.0\nOK\n"),
+                    ("status", "state: play\nelapsed: 16.0\nOK\n"),
+                    ("pause 1", "OK\n"),
+                    ("pause 0", "OK\n"),
+                    ("status", "state: play\nelapsed: 16.0\nOK\n"),
+                    ("status", "state: play\nelapsed: 16.09\nOK\n"),
+                ];
+                let (result, remaining) =
+                    play_resume_script(script, track, explicit, true, Some(cursor));
+                result.unwrap();
+                assert!(remaining.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn shared_play_resume_persistent_stall_is_an_error_after_one_recovery() {
+        let script = vec![
+            ("status", "state: stop\nOK\n"),
+            ("play", "OK\n"),
+            ("status", "state: play\nelapsed: 16.0\nOK\n"),
+            ("status", "state: play\nelapsed: 16.0\nOK\n"),
+            ("pause 1", "OK\n"),
+            ("pause 0", "OK\n"),
+            ("status", "state: play\nelapsed: 16.0\nOK\n"),
+            ("status", "state: play\nelapsed: 16.0\nOK\n"),
+        ];
+        let track = engine_with_track("local/faixa.flac").queue.remove(0);
+        let error = play_resume_script(script, track, false, true, None)
+            .0
+            .unwrap_err();
+        assert!(error.contains("permaneceu congelada"));
+        assert!(error.contains("Play/Resume"));
+    }
+
+    #[test]
+    fn shared_play_resume_pause_has_no_progress_poll_or_recovery() {
+        let script = vec![
+            ("status", "state: play\nelapsed: 16.0\nOK\n"),
+            ("currentsong", "OK\n"),
+            ("pause 1", "OK\n"),
+        ];
+        let track = engine_with_track("local/faixa.flac").queue.remove(0);
+        play_resume_script(script, track, false, true, None)
+            .0
+            .unwrap();
+    }
+
+    #[test]
+    fn shared_play_resume_propagates_mpd_errors_at_each_step() {
+        let commands = [
+            "status", "play", "status", "status", "pause 1", "pause 0", "status", "status",
+        ];
+        let replies = [
+            "state: stop\nOK\n",
+            "OK\n",
+            "state: play\nelapsed: 16.0\nOK\n",
+            "state: play\nelapsed: 16.0\nOK\n",
+            "OK\n",
+            "OK\n",
+            "state: play\nelapsed: 16.0\nOK\n",
+            "state: play\nelapsed: 16.09\nOK\n",
+        ];
+        for fail_at in 0..commands.len() {
+            let script = commands[..=fail_at]
+                .iter()
+                .enumerate()
+                .map(|(index, &command)| {
+                    (
+                        command,
+                        if index == fail_at {
+                            "ACK [5@0] {test} simulated failure\n"
+                        } else {
+                            replies[index]
+                        },
+                    )
+                })
+                .collect();
+            let track = engine_with_track("local/faixa.flac").queue.remove(0);
+            let error = play_resume_script(script, track, true, true, None)
+                .0
+                .unwrap_err();
+            assert!(error.contains("ACK"), "step {fail_at}: {error}");
+        }
+    }
+
+    #[test]
+    fn shared_play_resume_invalid_status_or_changed_state_never_recovers() {
+        for response in [
+            "state: stop\nelapsed: 16.0\nOK\n",
+            "state: pause\nelapsed: 16.0\nOK\n",
+            "state: play\nelapsed: NaN\nOK\n",
+            "state: play\nelapsed: -1.0\nOK\n",
+            "state: invalid\nelapsed: 16.0\nOK\n",
+            "elapsed: 16.0\nOK\n",
+        ] {
+            let mut script = vec![
+                ("status", "state: stop\nOK\n"),
+                ("play", "OK\n"),
+                ("status", response),
+            ];
+            if response.starts_with("state: stop") || response.starts_with("state: pause") {
+                script.push(("status", response));
+            }
+            let track = engine_with_track("local/faixa.flac").queue.remove(0);
+            assert!(play_resume_script(script, track, true, true, None)
+                .0
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn shared_play_resume_requires_ready_startup_queue() {
+        for state in [StartupQueueRestore::Pending, StartupQueueRestore::Failed] {
+            let mut engine = engine_with_track("local/faixa.flac");
+            engine.startup_restore = state;
+            assert!(engine.play(true).unwrap_err().contains("restaurada"));
+            assert!(engine
+                .toggle_play_pause(true)
+                .unwrap_err()
+                .contains("restaurada"));
+        }
+    }
+
+    #[test]
+    fn shared_play_resume_transport_failure_during_progress_is_not_success() {
+        let (socket, server) = fake_mpd_script(vec![
+            ("status".into(), Some("state: stop\nOK\n".into())),
+            ("play".into(), Some("OK\n".into())),
+            ("status".into(), None),
+        ]);
+        let mut engine = engine_with_track("local/faixa.flac");
+        engine.socket_path = socket;
+        assert!(engine.play(true).unwrap_err().contains("encerrada"));
+        server.join().unwrap();
+    }
 
     #[test]
     fn explicit_play_is_idempotent_and_uses_mpd_resume_commands() {
@@ -3006,10 +4741,136 @@ mod tests {
     }
 
     #[test]
+    fn local_album_collection_counts_raw_files_but_keeps_only_catalog_tracks() {
+        let lines = album_test_lines(&[
+            "file: Music/Artist/First/01.flac",
+            "Album: First",
+            "Artist: First Artist",
+            "file: Music/Artist/Rejected/program.prg",
+            "Album: Rejected",
+            "Artist: Rejected Artist",
+            "Date: 1999",
+            "file: Music/Artist/Artwork/cover.jpg",
+            "Album: Artwork",
+            "file: Music/Artist/Second/02.opus",
+            "Album: Second",
+            "Artist: Second Artist",
+            "file: Music/Artist/Cue/image.cue/track0001",
+            "Album: Cue",
+            "Artist: Cue Artist",
+        ]);
+        let mut collection = LocalAlbumCollection::default();
+
+        let raw_count = AudioEngine::collect_local_album_page(&mut collection, lines).unwrap();
+
+        assert_eq!(raw_count, 5);
+        assert_eq!(collection.physical.len(), 2);
+        assert_eq!(collection.cue.len(), 1);
+        assert_eq!(
+            collection.physical[&album_id("Music/Artist/First", "First")].track_uris,
+            vec!["Music/Artist/First/01.flac"]
+        );
+        assert_eq!(
+            collection.physical[&album_id("Music/Artist/Second", "Second")].track_uris,
+            vec!["Music/Artist/Second/02.opus"]
+        );
+        assert_eq!(
+            collection.cue[&album_id("Music/Artist/Cue", "Cue")].track_uris,
+            vec!["Music/Artist/Cue/image.cue/track0001"]
+        );
+        assert!(!collection
+            .physical
+            .keys()
+            .any(|key| key.contains("rejected") || key.contains("artwork")));
+    }
+
+    #[test]
+    fn list_directory_keeps_directories_and_only_emits_catalog_tracks() {
+        let response = concat!(
+            "directory: Music/Álbuns Com Espaço\n",
+            "file: Music/01 válida.flac\n",
+            "Title: Válida\n",
+            "file: Music/program.prg\n",
+            "Title: Rejeitada\n",
+            "Artist: Artista Rejeitado\n",
+            "file: Music/disc.iso\n",
+            "Album: ISO Rejeitado\n",
+            "file: Music/cover.WeBp\n",
+            "Title: Artwork Rejeitado\n",
+            "directory: Music/image.cue\n",
+            "file: Music/image.cue/track0001\n",
+            "Title: Faixa CUE\n",
+            "file: Music/Único Espaço.MP3\n",
+            "Artist: Artista Válido\n",
+            "OK\n",
+        );
+        let (socket, server) = fake_album_mpd(vec![("lsinfo \"Music\"", response)]);
+        let engine = AudioEngine::new(&socket, "");
+
+        let items = engine.list_directory("Music").unwrap();
+
+        server.join().unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.item_type.as_str(), item.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("directory", "Music/Álbuns Com Espaço"),
+                ("file", "Music/01 válida.flac"),
+                ("directory", "Music/image.cue"),
+                ("file", "Music/image.cue/track0001"),
+                ("file", "Music/Único Espaço.MP3"),
+            ]
+        );
+        assert_eq!(items[1].title.as_deref(), Some("Válida"));
+        assert_eq!(items[3].title.as_deref(), Some("Faixa CUE"));
+        assert_eq!(items[4].artist.as_deref(), Some("Artista Válido"));
+        assert!(items.iter().all(|item| {
+            item.title.as_deref() != Some("Rejeitada")
+                && item.artist.as_deref() != Some("Artista Rejeitado")
+                && item.album.as_deref() != Some("ISO Rejeitado")
+                && item.title.as_deref() != Some("Artwork Rejeitado")
+        }));
+    }
+
+    #[test]
+    fn list_directory_at_preserves_instance_listing_and_errors() {
+        let response = concat!(
+            "directory: Music/Álbuns\n",
+            "file: Music/one.flac\nTitle: One\nArtist: Artist\nAlbum: Album\nTime: 1:02\nduration: 99\n",
+            "file: Music/cover.jpg\nTitle: Ignore\n",
+            "file: Music/image.CUE/track0001\nTitle: Virtual\nduration: 12.5\nOK\n",
+        );
+        let path = "Music/Álbum com \"aspas\"";
+        let command = "lsinfo \"Music/Álbum com \\\"aspas\\\"\"";
+        let (socket, server) = fake_album_mpd(vec![(command, response), (command, response)]);
+        let engine = AudioEngine::new(&socket, "");
+        let old = engine.list_directory(path).unwrap();
+        let detached = AudioEngine::list_directory_at(&socket, path).unwrap();
+        assert_eq!(serde_json::to_value(&old).unwrap(), serde_json::to_value(&detached).unwrap());
+        assert_eq!(detached.len(), 3);
+        assert_eq!(detached[1].duration, Some(62.0));
+        assert_eq!(detached[2].duration, Some(12.5));
+        server.join().unwrap();
+
+        let ack = "ACK [50@0] {lsinfo} directory not found\n";
+        let (socket, server) = fake_album_mpd(vec![("lsinfo", ack), ("lsinfo", ack)]);
+        let engine = AudioEngine::new(&socket, "");
+        assert_eq!(engine.list_directory(" ").unwrap_err(), AudioEngine::list_directory_at(&socket, " ").unwrap_err());
+        server.join().unwrap();
+        for invalid in ["folder\nkill", "folder\rkill", "folder\0kill"] {
+            assert_eq!(engine.list_directory(invalid).unwrap_err(), AudioEngine::list_directory_at(&socket, invalid).unwrap_err());
+        }
+        assert_eq!(engine.list_directory("Music").unwrap_err(), AudioEngine::list_directory_at(&socket, "Music").unwrap_err());
+    }
+
+    #[test]
     fn physical_tracks_win_over_a_duplicate_cue_album() {
         let collection = collect_album_pages(vec![cue_fixture_lines(
             "FLAC/Donovan/Album", "Donovan Album", 20, 20,
         )]);
+        let membership = AudioEngine::canonical_local_album_map(collection.clone());
         let albums = AudioEngine::finalize_local_album_collection(
             collection,
             &HashSet::from(["FLAC".to_string()]),
@@ -3021,6 +4882,13 @@ mod tests {
         assert_eq!(albums[0].discs.len(), 1);
         assert_eq!(albums[0].discs[0].folder_path, "FLAC/Donovan/Album");
         assert_eq!(albums[0].source_id.as_deref(), Some("FLAC"));
+        assert_eq!(
+            membership[&album_id("FLAC/Donovan/Album", "Donovan Album")]
+                .track_uris,
+            (1..=20)
+                .map(|index| format!("FLAC/Donovan/Album/{index:02}.flac"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -3028,6 +4896,7 @@ mod tests {
         let collection = collect_album_pages(vec![cue_fixture_lines(
             "Music/Artist/Album", "Album", 1, 10,
         )]);
+        let membership = AudioEngine::canonical_local_album_map(collection.clone());
         let albums = AudioEngine::finalize_local_album_collection(
             collection,
             &HashSet::from(["Music".to_string()]),
@@ -3043,6 +4912,12 @@ mod tests {
         );
         assert_eq!(albums[0].discs[0].track_count, 10);
         assert_eq!(albums[0].source_id.as_deref(), Some("Music"));
+        assert_eq!(
+            membership[&album_id("Music/Artist/Album", "Album")].track_uris,
+            (1..=10)
+                .map(|index| format!("Music/Artist/Album/image.cue/track{index:04}"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -3113,6 +4988,19 @@ mod tests {
             album.discs[0].folder_path,
             "Music/Artist/Album/image.cue"
         );
+        assert_eq!(
+            album.track_uris,
+            (1..=10)
+                .map(|index| format!("Music/Artist/Album/image.cue/track{index:04}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(!album
+            .track_uris
+            .contains(&"Music/Artist/Album/01.flac".to_string()));
+        assert_eq!(
+            album.track_uris.iter().collect::<HashSet<_>>().len(),
+            album.track_uris.len()
+        );
     }
 
     #[test]
@@ -3125,6 +5013,58 @@ mod tests {
         );
         assert_eq!(albums.len(), 2);
         assert_eq!(albums.iter().map(|album| album.track_count).sum::<usize>(), 4);
+    }
+
+    #[test]
+    fn album_membership_separates_logical_albums_in_the_same_folder() {
+        let mut map = AudioEngine::canonical_local_album_map(collect_album_pages(vec![
+            album_test_lines(&[
+                "file: Music/Shared/first-a.flac",
+                "Title: First A",
+                "Album: First",
+                "duration: 61.5",
+                "file: Music/Shared/second.flac",
+                "Title: Second",
+                "Album: Second",
+                "file: Music/Shared/first-b.flac",
+                "Title: First B",
+                "Album: First",
+            ]),
+        ]));
+
+        assert_eq!(
+            map[&album_id("Music/Shared", "First")].track_uris,
+            vec![
+                "Music/Shared/first-a.flac".to_string(),
+                "Music/Shared/first-b.flac".to_string(),
+            ]
+        );
+        assert_eq!(
+            map[&album_id("Music/Shared", "Second")].track_uris,
+            vec!["Music/Shared/second.flac".to_string()]
+        );
+
+        let first = map
+            .remove(&album_id("Music/Shared", "First"))
+            .unwrap()
+            .into_disc_tracks();
+        let second = map
+            .remove(&album_id("Music/Shared", "Second"))
+            .unwrap()
+            .into_disc_tracks();
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0]
+                .tracks
+                .iter()
+                .map(|track| track.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Music/Shared/first-a.flac", "Music/Shared/first-b.flac"]
+        );
+        assert_eq!(first[0].tracks[0].title.as_deref(), Some("First A"));
+        assert_eq!(first[0].tracks[0].duration, Some(61.5));
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].tracks[0].path, "Music/Shared/second.flac");
     }
 
     #[test]
@@ -3357,6 +5297,14 @@ mod tests {
             ]
         );
         assert_eq!(album.display_artist(), "Various Artists");
+        assert_eq!(
+            album.track_uris,
+            vec![
+                "Artist/Album/CD1/track.flac".to_string(),
+                "Artist/Album/CD1/track2.flac".to_string(),
+                "Artist/Album/CD2/track.flac".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -3589,6 +5537,15 @@ mod tests {
         assert_eq!(album.track_count, 501);
         assert_eq!(album.discs.len(), 2);
         assert_eq!(album.display_artist(), "Big Youth");
+        let mut expected = (0..500)
+            .map(|index| format!("Artist/Album/CD1/{index}.flac"))
+            .collect::<Vec<_>>();
+        expected.push("Artist/Album/CD2/one.flac".to_string());
+        assert_eq!(album.track_uris, expected);
+        assert_eq!(
+            album.track_uris.iter().collect::<HashSet<_>>().len(),
+            album.track_uris.len()
+        );
     }
 
     fn source_test_disc(folder_path: &str) -> LocalAlbumDisc {
@@ -3680,6 +5637,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_album_track_query_returns_only_the_selected_canonical_album() {
+        let (path, server) = fake_album_mpd(vec![
+            ("status", "state: stop\nOK\n"),
+            ("count \"(base 'Music/Shared')\"", "songs: 3\nOK\n"),
+            (
+                "find \"(base 'Music/Shared')\" window 0:3",
+                "file: Music/Shared/first-a.flac\nTitle: First A\nAlbum: First\nduration: 61.5\nfile: Music/Shared/other.flac\nTitle: Other\nAlbum: Other\nfile: Music/Shared/first-b.flac\nTitle: First B\nAlbum: First\nOK\n",
+            ),
+        ]);
+
+        let groups = AudioEngine::get_local_album_tracks_at(
+            &path,
+            &album_id("Music/Shared", "First"),
+        )
+        .unwrap()
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0]
+                .tracks
+                .iter()
+                .map(|track| track.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Music/Shared/first-a.flac", "Music/Shared/first-b.flac"]
+        );
+        assert_eq!(groups[0].tracks[0].title.as_deref(), Some("First A"));
+        assert_eq!(groups[0].tracks[0].duration, Some(61.5));
+    }
+
+    #[test]
+    fn local_album_track_query_scopes_multidisc_grouping_to_the_album_root() {
+        let (path, server) = fake_album_mpd(vec![
+            ("status", "state: stop\nOK\n"),
+            ("count \"(base 'Artist/Album')\"", "songs: 2\nOK\n"),
+            (
+                "find \"(base 'Artist/Album')\" window 0:2",
+                "file: Artist/Album/CD2/two.flac\nTitle: Two\nAlbum: Album CD2\nfile: Artist/Album/CD1/one.flac\nTitle: One\nAlbum: Album CD1\nOK\n",
+            ),
+        ]);
+
+        let groups = AudioEngine::get_local_album_tracks_at(
+            &path,
+            &album_id("Artist/Album", "Album"),
+        )
+        .unwrap()
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].disc.number, 1);
+        assert_eq!(groups[0].tracks[0].path, "Artist/Album/CD1/one.flac");
+        assert_eq!(groups[1].disc.number, 2);
+        assert_eq!(groups[1].tracks[0].path, "Artist/Album/CD2/two.flac");
+    }
+
+    #[test]
+    fn local_album_track_query_preserves_cue_membership_within_its_scope() {
+        let (path, server) = fake_album_mpd(vec![
+            ("status", "state: stop\nOK\n"),
+            ("count \"(base 'Artist/Album')\"", "songs: 3\nOK\n"),
+            (
+                "find \"(base 'Artist/Album')\" window 0:3",
+                "file: Artist/Album/image.flac\nAlbum: Album\nfile: Artist/Album/image.cue/track0001\nTitle: One\nAlbum: Album\nfile: Artist/Album/image.cue/track0002\nTitle: Two\nAlbum: Album\nOK\n",
+            ),
+        ]);
+
+        let groups = AudioEngine::get_local_album_tracks_at(
+            &path,
+            &album_id("Artist/Album", "Album"),
+        )
+        .unwrap()
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].disc.folder_path, "Artist/Album/image.cue");
+        assert_eq!(
+            groups[0]
+                .tracks
+                .iter()
+                .map(|track| track.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Artist/Album/image.cue/track0001",
+                "Artist/Album/image.cue/track0002",
+            ]
+        );
+    }
+
+    #[test]
+    fn local_album_scope_validates_ids_and_escapes_mpd_filter_arguments() {
+        let folder = "Music/O'Brien \"Mix\"\\Back";
+        let id = album_id(folder, "Album");
+        assert_eq!(AudioEngine::local_album_scope(&id).unwrap(), folder);
+        assert_eq!(
+            AudioEngine::local_album_base_filter(folder).unwrap(),
+            "\"(base 'Music/O\\\\'Brien \\\"Mix\\\"\\\\\\\\Back')\""
+        );
+
+        for invalid in [
+            "999:Music:album".to_string(),
+            "05:Music:album".to_string(),
+            album_id("../Music", "Album"),
+            album_id("Music/Bad\nPath", "Album"),
+        ] {
+            assert!(AudioEngine::local_album_scope(&invalid).is_err());
+        }
+    }
+
     fn fake_album_mpd(responses: Vec<(&'static str, &'static str)>) -> (String, thread::JoinHandle<()>) {
         let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("sonante-albums-{}-{id}.sock", std::process::id()));
@@ -3697,6 +5766,378 @@ mod tests {
             std::fs::remove_file(path).unwrap();
         });
         (socket_path, server)
+    }
+
+    fn fake_short_mpd(
+        responses: Vec<(&'static str, Option<&'static str>)>,
+    ) -> (String, thread::JoinHandle<()>) {
+        let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from(format!("/tmp/sm{}-{id}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let socket_path = path.to_string_lossy().into_owned();
+        let server = thread::spawn(move || {
+            for (expected, response) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.write_all(b"OK MPD 0.23.5\n").unwrap();
+                let mut command = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut command)
+                    .unwrap();
+                assert_eq!(command, format!("{expected}\n"));
+                if let Some(response) = response {
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            }
+            std::fs::remove_file(path).unwrap();
+        });
+        (socket_path, server)
+    }
+
+    fn fake_slow_mpd_response(
+        expected: &'static str,
+        delay: Duration,
+    ) -> (String, thread::JoinHandle<()>) {
+        let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from(format!("/tmp/smt{}-{id}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let socket_path = path.to_string_lossy().into_owned();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"OK MPD 0.23.5\n").unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(command, format!("{expected}\n"));
+            thread::sleep(delay);
+            std::fs::remove_file(path).unwrap();
+        });
+        (socket_path, server)
+    }
+
+    fn fake_mpd_script(
+        responses: Vec<(String, Option<String>)>,
+    ) -> (String, thread::JoinHandle<()>) {
+        let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from(format!("/tmp/smp{}-{id}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let socket_path = path.to_string_lossy().into_owned();
+        let server = thread::spawn(move || {
+            for (expected, response) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.write_all(b"OK MPD 0.23.5\n").unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut actual = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    assert!(!line.is_empty(), "comando MPD simulado terminou antes do esperado");
+                    actual.push_str(&line);
+                    if !actual.starts_with("command_list_begin\n")
+                        || line == "command_list_end\n"
+                    {
+                        break;
+                    }
+                }
+                assert_eq!(actual.trim_end(), expected);
+                if let Some(response) = response {
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            }
+            std::fs::remove_file(path).unwrap();
+        });
+        (socket_path, server)
+    }
+
+    fn queue_status_response(
+        playlist_version: u64,
+        playlist_length: usize,
+        state: PlaybackState,
+        current_index: Option<usize>,
+        elapsed: Option<f64>,
+    ) -> String {
+        let state = match state {
+            PlaybackState::Stopped => "stop",
+            PlaybackState::Paused => "pause",
+            PlaybackState::Playing => "play",
+        };
+        let mut response = format!(
+            "playlist: {playlist_version}\nplaylistlength: {playlist_length}\nstate: {state}\n"
+        );
+        if let Some(index) = current_index {
+            response.push_str(&format!("song: {index}\n"));
+        }
+        if let Some(elapsed) = elapsed {
+            response.push_str(&format!("elapsed: {elapsed}\n"));
+        }
+        response.push_str("OK\n");
+        response
+    }
+
+    fn playlistinfo_response(uris: &[&str]) -> String {
+        let mut response = String::new();
+        for uri in uris {
+            response.push_str(&format!("file: {uri}\nTitle: ignored metadata\n"));
+        }
+        response.push_str("OK\n");
+        response
+    }
+
+    #[test]
+    fn rollback_snapshot_capture_is_read_only_and_uses_real_mpd_uris() {
+        let before = queue_status_response(
+            7,
+            2,
+            PlaybackState::Playing,
+            Some(1),
+            Some(12.0),
+        );
+        let after = queue_status_response(
+            7,
+            2,
+            PlaybackState::Playing,
+            Some(1),
+            Some(12.5),
+        );
+        let uris = [
+            "Music/Álbum/01 faixa.flac",
+            "https://plex.invalid/stream?id=2",
+        ];
+        let (socket, server) = fake_mpd_script(vec![
+            ("status".to_string(), Some(before)),
+            (
+                "playlistinfo".to_string(),
+                Some(playlistinfo_response(&uris)),
+            ),
+            ("status".to_string(), Some(after)),
+        ]);
+
+        let snapshot = AudioEngine::capture_mpd_playback_snapshot(&socket).unwrap();
+
+        assert_eq!(snapshot.uris, uris.map(str::to_string));
+        assert_eq!(snapshot.current_index, Some(1));
+        assert_eq!(snapshot.elapsed, 12.5);
+        assert_eq!(snapshot.state, PlaybackState::Playing);
+        assert_eq!(snapshot.playlist_version, 7);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rollback_snapshot_capture_supports_empty_stopped_paused_and_playing() {
+        let cases = [
+            (PlaybackState::Stopped, Vec::<&str>::new(), None, None),
+            (
+                PlaybackState::Stopped,
+                vec!["one.flac", "two.flac"],
+                Some(1),
+                Some(3.0),
+            ),
+            (
+                PlaybackState::Paused,
+                vec!["one.flac"],
+                Some(0),
+                Some(4.5),
+            ),
+            (
+                PlaybackState::Playing,
+                vec!["one.flac"],
+                Some(0),
+                Some(5.5),
+            ),
+        ];
+        for (state, uris, current_index, elapsed) in cases {
+            let status = queue_status_response(11, uris.len(), state, current_index, elapsed);
+            let (socket, server) = fake_mpd_script(vec![
+                ("status".to_string(), Some(status.clone())),
+                (
+                    "playlistinfo".to_string(),
+                    Some(playlistinfo_response(&uris)),
+                ),
+                ("status".to_string(), Some(status)),
+            ]);
+
+            let snapshot = AudioEngine::capture_mpd_playback_snapshot(&socket).unwrap();
+
+            assert_eq!(snapshot.state, state);
+            assert_eq!(snapshot.uris, uris.iter().map(|uri| uri.to_string()).collect::<Vec<_>>());
+            assert_eq!(snapshot.current_index, current_index);
+            assert_eq!(snapshot.elapsed, elapsed.unwrap_or(0.0));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn rollback_snapshot_capture_rejects_concurrent_playlist_change() {
+        let (socket, server) = fake_mpd_script(vec![
+            (
+                "status".to_string(),
+                Some(queue_status_response(
+                    20,
+                    1,
+                    PlaybackState::Paused,
+                    Some(0),
+                    Some(8.0),
+                )),
+            ),
+            (
+                "playlistinfo".to_string(),
+                Some(playlistinfo_response(&["one.flac"])),
+            ),
+            (
+                "status".to_string(),
+                Some(queue_status_response(
+                    21,
+                    1,
+                    PlaybackState::Paused,
+                    Some(0),
+                    Some(8.0),
+                )),
+            ),
+        ]);
+
+        let error = AudioEngine::capture_mpd_playback_snapshot(&socket)
+            .err()
+            .unwrap();
+
+        assert!(error.contains("mudou durante a captura"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rollback_snapshot_restore_rebuilds_queue_position_and_paused_state() {
+        for state in [PlaybackState::Paused, PlaybackState::Playing] {
+            let snapshot = MpdPlaybackSnapshot {
+                uris: vec![
+                    "Music/uma faixa.flac".to_string(),
+                    "Music/duas \\\"aspas\\\".flac".to_string(),
+                ],
+                current_index: Some(1),
+                elapsed: 42.567,
+                state,
+                playlist_version: 30,
+            };
+            let (socket, server) = fake_mpd_script(vec![
+                (
+                    "command_list_begin\nclear\nadd \"Music/uma faixa.flac\"\nadd \"Music/duas \\\\\\\"aspas\\\\\\\".flac\"\nplay 1\npause 1\ncommand_list_end".to_string(),
+                    Some("OK\n".to_string()),
+                ),
+                ("seekcur 42.567".to_string(), Some("OK\n".to_string())),
+            ]);
+
+            AudioEngine::restore_mpd_playback_snapshot(&socket, &snapshot).unwrap();
+            server.join().unwrap();
+        }
+
+        let stopped = MpdPlaybackSnapshot {
+            uris: vec!["one.flac".to_string()],
+            current_index: Some(0),
+            elapsed: 9.0,
+            state: PlaybackState::Stopped,
+            playlist_version: 31,
+        };
+        let (socket, server) = fake_mpd_script(vec![(
+            "command_list_begin\nclear\nadd \"one.flac\"\ncommand_list_end".to_string(),
+            Some("OK\n".to_string()),
+        )]);
+        AudioEngine::restore_mpd_playback_snapshot(&socket, &stopped).unwrap();
+        server.join().unwrap();
+
+        let empty = MpdPlaybackSnapshot {
+            uris: Vec::new(),
+            current_index: None,
+            elapsed: 0.0,
+            state: PlaybackState::Stopped,
+            playlist_version: 32,
+        };
+        let (socket, server) = fake_mpd_script(vec![(
+            "command_list_begin\nclear\ncommand_list_end".to_string(),
+            Some("OK\n".to_string()),
+        )]);
+        AudioEngine::restore_mpd_playback_snapshot(&socket, &empty).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rollback_snapshot_seek_failure_happens_after_paused_batch() {
+        let snapshot = MpdPlaybackSnapshot {
+            uris: vec!["Music/track.flac".to_string()],
+            current_index: Some(0),
+            elapsed: 12.345,
+            state: PlaybackState::Playing,
+            playlist_version: 33,
+        };
+        let (socket, server) = fake_mpd_script(vec![
+            (
+                "command_list_begin\nclear\nadd \"Music/track.flac\"\nplay 0\npause 1\ncommand_list_end"
+                    .to_string(),
+                Some("OK\n".to_string()),
+            ),
+            (
+                "seekcur 12.345".to_string(),
+                Some("ACK [50@0] {seekcur} failure\n".to_string()),
+            ),
+        ]);
+
+        let error = AudioEngine::restore_mpd_playback_snapshot(&socket, &snapshot).unwrap_err();
+        assert!(error.contains("ACK [50@0] {seekcur}"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rollback_snapshot_capture_propagates_ack_eof_and_transport_failures() {
+        let (socket, server) = fake_mpd_script(vec![(
+            "status".to_string(),
+            Some("ACK [5@0] {status} failed\n".to_string()),
+        )]);
+        assert!(AudioEngine::capture_mpd_playback_snapshot(&socket)
+            .err()
+            .unwrap()
+            .starts_with("ACK"));
+        server.join().unwrap();
+
+        let (socket, server) = fake_mpd_script(vec![("status".to_string(), None)]);
+        assert!(AudioEngine::capture_mpd_playback_snapshot(&socket)
+            .err()
+            .unwrap()
+            .contains("encerrada"));
+        server.join().unwrap();
+
+        let missing = format!("/tmp/smp{}-capture-missing.sock", std::process::id());
+        assert!(AudioEngine::capture_mpd_playback_snapshot(&missing)
+            .err()
+            .unwrap()
+            .contains("conectar"));
+    }
+
+    #[test]
+    fn rollback_snapshot_restore_reports_stale_ack_eof_and_transport_failures() {
+        let snapshot = MpdPlaybackSnapshot {
+            uris: vec!["stale.flac".to_string()],
+            current_index: None,
+            elapsed: 0.0,
+            state: PlaybackState::Stopped,
+            playlist_version: 40,
+        };
+        let command = "command_list_begin\nclear\nadd \"stale.flac\"\ncommand_list_end";
+
+        let (socket, server) = fake_mpd_script(vec![(
+            command.to_string(),
+            Some("ACK [50@2] {add} No such song\n".to_string()),
+        )]);
+        let error = AudioEngine::restore_mpd_playback_snapshot(&socket, &snapshot).unwrap_err();
+        assert!(error.contains("ACK [50@2] {add}"));
+        server.join().unwrap();
+
+        let (socket, server) = fake_mpd_script(vec![(command.to_string(), None)]);
+        assert!(AudioEngine::restore_mpd_playback_snapshot(&socket, &snapshot)
+            .unwrap_err()
+            .contains("encerrada"));
+        server.join().unwrap();
+
+        let missing = format!("/tmp/smp{}-restore-missing.sock", std::process::id());
+        assert!(AudioEngine::restore_mpd_playback_snapshot(&missing, &snapshot)
+            .unwrap_err()
+            .contains("conectar"));
     }
 
     fn fake_startup_restore_mpd(expected: String) -> (String, thread::JoinHandle<()>) {
@@ -3727,6 +6168,35 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sonante-cover-{}-{id}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         dir
+    }
+
+    fn get_test_local_cover(
+        socket_path: &str,
+        fixture: &Path,
+        path: &str,
+    ) -> Result<Option<String>, String> {
+        let source_id = Path::new(path)
+            .components()
+            .next()
+            .and_then(|component| match component {
+                std::path::Component::Normal(value) => value.to_str(),
+                _ => None,
+            })
+            .expect("test local path has a source ID");
+        let physical_root = fixture.join(source_id);
+        let library = fixture.join("library");
+        std::fs::create_dir_all(&physical_root).unwrap();
+        std::fs::create_dir_all(&library).unwrap();
+        let source_link = library.join(source_id);
+        if std::fs::symlink_metadata(&source_link).is_err() {
+            std::os::unix::fs::symlink(&physical_root, &source_link).unwrap();
+        }
+        AudioEngine::get_local_cover_at(
+            socket_path,
+            &library,
+            path,
+            &[physical_root.to_string_lossy().into_owned()],
+        )
     }
 
     fn fake_cover_mpd(responses: Vec<(String, Vec<u8>)>) -> (String, thread::JoinHandle<()>) {
@@ -3790,13 +6260,168 @@ mod tests {
         let folder = dir.join("Music");
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join("cover.jpg"), b"local cover").unwrap();
-        let cover =
-            AudioEngine::get_local_cover_at("/nonexistent/mpd.socket", &dir, "Music").unwrap();
+        let cover = get_test_local_cover("/nonexistent/mpd.socket", &dir, "Music").unwrap();
         assert_eq!(
             cover,
             Some(format!(
                 "data:image/jpeg;base64,{}",
                 BASE64.encode(b"local cover")
+            ))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn managed_local_cover_uses_configured_root_and_supports_webp_sidecar() {
+        let dir = cover_test_dir();
+        let root = dir.join("Music");
+        let album = root.join("Album");
+        let library = dir.join("library");
+        let staging = dir.join("library.next");
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::create_dir(&library).unwrap();
+        std::fs::write(album.join("cover.webp"), b"webp cover").unwrap();
+        crate::local_media::mirror::build_filtered_staging(
+            &staging,
+            &library,
+            std::slice::from_ref(&root),
+            "cover-managed",
+        )
+        .unwrap();
+        std::fs::remove_dir(&library).unwrap();
+        std::fs::rename(staging, &library).unwrap();
+        let folders = vec![root.to_string_lossy().into_owned()];
+
+        assert_eq!(
+            AudioEngine::get_local_cover_at(
+                "/nonexistent/mpd.socket",
+                &library,
+                "Music/Album",
+                &folders,
+            )
+            .unwrap(),
+            Some(format!(
+                "data:image/webp;base64,{}",
+                BASE64.encode(b"webp cover")
+            ))
+        );
+        assert!(AudioEngine::get_local_cover_at(
+            "/nonexistent/mpd.socket",
+            &library,
+            &album.to_string_lossy(),
+            &folders,
+        )
+        .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn conventional_jpeg_and_png_sidecars_remain_supported() {
+        for (name, mime) in [("cover.jpeg", "image/jpeg"), ("cover.png", "image/png")] {
+            let dir = cover_test_dir();
+            std::fs::write(dir.join(name), b"cover").unwrap();
+            assert_eq!(
+                find_folder_cover_path(&dir),
+                Some(format!("data:{mime};base64,{}", BASE64.encode(b"cover")))
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn local_cover_read_accepts_exact_limit() {
+        let bytes = vec![7; MAX_LOCAL_COVER_BYTES];
+        let result = read_limited_local_cover(bytes.as_slice(), bytes.len() as u64).unwrap();
+        assert_eq!(result, bytes);
+    }
+
+    #[test]
+    fn local_cover_read_rejects_oversized_metadata_without_reading() {
+        struct MustNotRead;
+        impl Read for MustNotRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("Oversized cover must be rejected before reading");
+            }
+        }
+        assert!(read_limited_local_cover(MustNotRead, MAX_LOCAL_COVER_BYTES as u64 + 1).is_none());
+    }
+
+    #[test]
+    fn local_cover_read_bounds_growth_after_metadata() {
+        let dir = cover_test_dir();
+        let path = dir.join("cover.jpg");
+        std::fs::write(&path, b"small").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let size_hint = file.metadata().unwrap().len();
+        // Deterministically grow the same opened file after capturing its metadata.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_LOCAL_COVER_BYTES as u64 + 4096)
+            .unwrap();
+        let mut file = file;
+        assert!(read_limited_local_cover(&mut file, size_hint).is_none());
+        assert_eq!(
+            std::io::Seek::stream_position(&mut file).unwrap(),
+            MAX_LOCAL_COVER_BYTES as u64 + 1
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn local_cover_read_accepts_shrink_after_metadata_and_rejects_read_error() {
+        assert_eq!(
+            read_limited_local_cover(&b"small"[..], 1024).unwrap(),
+            b"small"
+        );
+        struct FailedRead;
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("simulated cover read failure"))
+            }
+        }
+        assert!(read_limited_local_cover(FailedRead, 5).is_none());
+    }
+
+    #[test]
+    fn local_cover_skips_oversized_or_invalid_candidates_for_valid_fallback() {
+        let dir = cover_test_dir();
+        std::fs::File::create(dir.join("cover.jpg"))
+            .unwrap()
+            .set_len(MAX_LOCAL_COVER_BYTES as u64 + 1)
+            .unwrap();
+        std::fs::create_dir(dir.join("cover.jpeg")).unwrap();
+        std::fs::write(dir.join("cover.png"), b"fallback cover").unwrap();
+        assert_eq!(
+            find_folder_cover_path(&dir),
+            Some(format!(
+                "data:image/png;base64,{}", BASE64.encode(b"fallback cover")
+            ))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn generic_cover_resolution_preserves_plex_local_mount_absolute_paths() {
+        let dir = cover_test_dir();
+        let album = dir.join("Plex Album");
+        std::fs::create_dir(&album).unwrap();
+        std::fs::write(album.join("cover.jpg"), b"plex cover").unwrap();
+        let engine = AudioEngine {
+            socket_path: String::new(),
+            music_dir: String::new(),
+            queue: Vec::new(),
+            restored_resume: None,
+            startup_restore: StartupQueueRestore::Ready,
+            queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+        };
+
+        assert_eq!(
+            engine.resolve_cover(&album.to_string_lossy()),
+            Some(format!(
+                "data:image/jpeg;base64,{}",
+                BASE64.encode(b"plex cover")
             ))
         );
         std::fs::remove_dir_all(dir).unwrap();
@@ -3820,7 +6445,7 @@ mod tests {
                     picture_response(bytes.len(), Some(kind), bytes),
                 ),
             ]);
-            let cover = AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap();
+            let cover = get_test_local_cover(&socket, &dir, "Music").unwrap();
             assert_eq!(
                 cover,
                 Some(format!("data:{kind};base64,{}", BASE64.encode(bytes)))
@@ -3846,7 +6471,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            get_test_local_cover(&socket, &dir, "Music").unwrap(),
             Some(format!("data:image/jpeg;base64,{}", BASE64.encode(jpeg)))
         );
         server.join().unwrap();
@@ -3864,7 +6489,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            get_test_local_cover(&socket, &dir, "Music").unwrap(),
             None
         );
         server.join().unwrap();
@@ -3883,7 +6508,7 @@ mod tests {
         }
         let (socket, server) = fake_cover_mpd(responses);
         assert_eq!(
-            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            get_test_local_cover(&socket, &dir, "Music").unwrap(),
             None
         );
         server.join().unwrap();
@@ -3904,7 +6529,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            get_test_local_cover(&socket, &dir, "Music").unwrap(),
             None
         );
         server.join().unwrap();
@@ -3930,7 +6555,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            get_test_local_cover(&socket, &dir, "Music").unwrap(),
             Some(format!("data:image/jpeg;base64,{}", BASE64.encode(jpeg)))
         );
         server.join().unwrap();
@@ -3952,7 +6577,7 @@ mod tests {
                 ),
                 ("readpicture \"Music/one.flac\" 0".into(), response),
             ]);
-            assert!(AudioEngine::get_local_cover_at(&socket, &dir, "Music").is_err());
+            assert!(get_test_local_cover(&socket, &dir, "Music").is_err());
             server.join().unwrap();
             std::fs::remove_dir_all(dir).unwrap();
         }
@@ -3972,7 +6597,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            get_test_local_cover(&socket, &dir, "Music").unwrap(),
             None
         );
         server.join().unwrap();
@@ -3994,7 +6619,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            get_test_local_cover(&socket, &dir, "Music").unwrap(),
             Some(format!("data:image/jpeg;base64,{}", BASE64.encode(jpeg)))
         );
         server.join().unwrap();
@@ -4016,7 +6641,7 @@ mod tests {
                 picture_response(jpeg.len(), Some("image/jpeg"), jpeg),
             ),
         ]);
-        assert!(AudioEngine::get_local_cover_at(&socket, &dir, folder)
+        assert!(get_test_local_cover(&socket, &dir, folder)
             .unwrap()
             .is_some());
         server.join().unwrap();
@@ -4031,7 +6656,7 @@ mod tests {
             b"directory: Music/Sub\nfile: Music/Sub/deep.flac\nOK\n".to_vec(),
         )]);
         assert_eq!(
-            AudioEngine::get_local_cover_at(&socket, &dir, "Music").unwrap(),
+            get_test_local_cover(&socket, &dir, "Music").unwrap(),
             None
         );
         server.join().unwrap();
@@ -4048,6 +6673,7 @@ mod tests {
                 queue: Vec::new(),
                 restored_resume: None,
                 startup_restore: StartupQueueRestore::Ready,
+                queue_structure_reserved: Arc::new(AtomicU8::new(0)),
             };
             if command == "update" {
                 AudioEngine::update_library(&audio.socket_path).unwrap();
@@ -4064,9 +6690,398 @@ mod tests {
             queue: Vec::new(),
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
+            queue_structure_reserved: Arc::new(AtomicU8::new(0)),
         };
         assert!(AudioEngine::update_library(&audio.socket_path).is_err());
         server.join().unwrap();
+    }
+
+    #[test]
+    fn targeted_library_update_quotes_only_the_relative_mpd_uri_and_returns_job_id() {
+        let uri = "Música/Álbum com espaço/faixa \\\"mix\\\".flac";
+        let (socket, server) = fake_album_mpd(vec![(
+            "update \"Música/Álbum com espaço/faixa \\\\\\\"mix\\\\\\\".flac\"",
+            "updating_db: 42\nOK\n",
+        )]);
+
+        assert_eq!(AudioEngine::update_library_path(&socket, uri), Ok(42));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn targeted_library_update_rejects_non_relative_or_empty_scope_without_connecting() {
+        for uri in [
+            "",
+            "/mnt/music/track.flac",
+            "../music/track.flac",
+            "Music/../track.flac",
+            "https://example.invalid/track.flac",
+            "HTTP:remote-track",
+            "Music/X-Plex-Token=secret.flac",
+            "Music/track.flac\nrescan",
+        ] {
+            assert_eq!(
+                AudioEngine::update_library_path("/socket/must-not-be-used", uri),
+                Err(TargetedLibraryUpdateErrorCode::InvalidUri),
+                "{uri:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_job_parser_accepts_one_positive_id_and_rejects_invalid_responses() {
+        assert_eq!(
+            AudioEngine::parse_mpd_update_job_id(&["updating_db: 42".to_string()]),
+            Ok(42)
+        );
+        assert_eq!(
+            AudioEngine::parse_mpd_update_job_id(&[]),
+            Err(MpdJobIdParseError::MissingJob)
+        );
+        assert_eq!(
+            AudioEngine::parse_mpd_update_job_id(&[
+                "updating_db: 1".to_string(),
+                "updating_db: 2".to_string(),
+            ]),
+            Err(MpdJobIdParseError::DuplicateJob)
+        );
+        for value in ["", "0", "-1", "1.0", "abc", "18446744073709551616"] {
+            assert_eq!(
+                AudioEngine::parse_mpd_update_job_id(&[format!("updating_db: {value}")]),
+                Err(MpdJobIdParseError::InvalidJob),
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            AudioEngine::parse_mpd_update_job_id(&[
+                "updating_db: 1".to_string(),
+                "state: stop".to_string(),
+            ]),
+            Err(MpdJobIdParseError::ContradictoryResponse)
+        );
+        assert_eq!(
+            AudioEngine::parse_mpd_update_job_id(&[
+                "ACK [5@0] {update} failure".to_string(),
+            ]),
+            Err(MpdJobIdParseError::Ack)
+        );
+    }
+
+    #[test]
+    fn rescan_job_request_returns_real_job_id_and_rejects_invalid_responses() {
+        let (socket, server) =
+            fake_short_mpd(vec![("rescan", Some("updating_db: 73\nOK\n"))]);
+        assert_eq!(AudioEngine::request_mpd_rescan_job(&socket), Ok(73));
+        server.join().unwrap();
+
+        for response in ["OK\n", "updating_db: invalid\nOK\n"] {
+            let (socket, server) = fake_short_mpd(vec![("rescan", Some(response))]);
+            assert!(AudioEngine::request_mpd_rescan_job(&socket).is_err());
+            server.join().unwrap();
+        }
+
+        let (socket, server) = fake_short_mpd(vec![(
+            "rescan",
+            Some("ACK [5@0] {rescan} update failed\n"),
+        )]);
+        let error = AudioEngine::request_mpd_rescan_job(&socket).unwrap_err();
+        assert!(error.starts_with("ACK [5@0] {rescan}"));
+        server.join().unwrap();
+
+        let (socket, server) = fake_short_mpd(vec![("rescan", None)]);
+        let error = AudioEngine::request_mpd_rescan_job(&socket).unwrap_err();
+        assert!(error.contains("encerrada antes da resposta final"));
+        server.join().unwrap();
+
+        let (socket, server) =
+            fake_slow_mpd_response("rescan", Duration::from_millis(650));
+        let error = AudioEngine::request_mpd_rescan_job(&socket).unwrap_err();
+        assert!(error.contains("Falha ao ler resposta do MPD"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn managed_update_remains_pending_until_completion_or_shutdown() {
+        let (socket, server) = fake_short_mpd(vec![
+            ("status", Some("updating_db: 42\nstate: play\nOK\n")),
+            ("status", Some("updating_db: 42\nstate: play\nOK\n")),
+            ("status", Some("state: play\nOK\n")),
+        ]);
+        assert_eq!(
+            AudioEngine::wait_for_managed_mpd_update(
+                &socket,
+                Some(42),
+                Duration::from_millis(10),
+                || false,
+            ),
+            Ok(MpdRefreshCompletion::Completed)
+        );
+        server.join().unwrap();
+
+        let (socket, server) =
+            fake_short_mpd(vec![("status", Some("updating_db: 42\nstate: play\nOK\n"))]);
+        let mut polls = 0;
+        assert_eq!(
+            AudioEngine::wait_for_managed_mpd_update(
+                &socket,
+                Some(42),
+                Duration::from_millis(10),
+                || {
+                    polls += 1;
+                    polls > 1
+                },
+            ),
+            Err(())
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn managed_update_preserves_transport_protocol_and_unavailable_failures() {
+        for (response, protocol) in [
+            (None, false),
+            (Some("updating_db: bad\nOK\n"), true),
+            (Some("ACK [5@0] {status} refused\n"), true),
+        ] {
+            let (socket, server) = fake_short_mpd(vec![("status", response)]);
+            let result = AudioEngine::wait_for_managed_mpd_update(
+                &socket,
+                Some(42),
+                Duration::from_millis(10),
+                || false,
+            )
+            .unwrap();
+            assert!(if protocol {
+                matches!(result, MpdRefreshCompletion::ProtocolError(_))
+            } else {
+                matches!(result, MpdRefreshCompletion::TransportError(_))
+            });
+            server.join().unwrap();
+        }
+        let missing = format!("/tmp/sm{}-managed-missing.sock", std::process::id());
+        assert!(matches!(
+            AudioEngine::wait_for_managed_mpd_update(
+                &missing,
+                Some(42),
+                Duration::from_millis(10),
+                || false,
+            ),
+            Ok(MpdRefreshCompletion::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn bounded_update_wait_observes_active_job_then_completion() {
+        let (socket, server) = fake_short_mpd(vec![
+            ("status", Some("updating_db: 42\nstate: stop\nOK\n")),
+            ("status", Some("state: stop\nOK\n")),
+        ]);
+        assert_eq!(
+            AudioEngine::wait_for_mpd_update_job(
+                &socket,
+                42,
+                Duration::from_millis(100),
+                Duration::from_millis(1),
+            ),
+            MpdRefreshCompletion::Completed
+        );
+        server.join().unwrap();
+
+        let (socket, server) = fake_short_mpd(vec![(
+            "status",
+            Some("state: play\nvolume: 50\nsong: 3\nOK\n"),
+        )]);
+        assert_eq!(
+            AudioEngine::wait_for_mpd_update_job(
+                &socket,
+                42,
+                Duration::from_millis(100),
+                Duration::from_millis(1),
+            ),
+            MpdRefreshCompletion::Completed
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn bounded_idle_wait_observes_every_active_update_job() {
+        let (socket, server) = fake_short_mpd(vec![
+            ("status", Some("updating_db: 41\nstate: stop\nOK\n")),
+            ("status", Some("updating_db: 42\nstate: stop\nOK\n")),
+            ("status", Some("state: stop\nOK\n")),
+        ]);
+        assert_eq!(
+            AudioEngine::wait_for_mpd_idle(
+                &socket,
+                Duration::from_millis(100),
+                Duration::from_millis(1),
+            ),
+            MpdRefreshCompletion::Completed
+        );
+        server.join().unwrap();
+
+        let (socket, server) = fake_short_mpd(vec![(
+            "status",
+            Some("updating_db: 43\nstate: stop\nOK\n"),
+        )]);
+        assert_eq!(
+            AudioEngine::wait_for_mpd_idle(
+                &socket,
+                Duration::ZERO,
+                Duration::from_millis(1),
+            ),
+            MpdRefreshCompletion::Timeout
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn bounded_update_wait_distinguishes_timeout_transport_protocol_and_unavailable() {
+        let (socket, server) =
+            fake_short_mpd(vec![("status", Some("updating_db: 42\nOK\n"))]);
+        assert_eq!(
+            AudioEngine::wait_for_mpd_update_job(
+                &socket,
+                42,
+                Duration::ZERO,
+                Duration::from_millis(1),
+            ),
+            MpdRefreshCompletion::Timeout
+        );
+        server.join().unwrap();
+
+        let (socket, server) = fake_short_mpd(vec![("status", None)]);
+        assert!(matches!(
+            AudioEngine::wait_for_mpd_update_job(
+                &socket,
+                42,
+                Duration::from_millis(100),
+                Duration::from_millis(1),
+            ),
+            MpdRefreshCompletion::TransportError(_)
+        ));
+        server.join().unwrap();
+
+        for response in [
+            "ACK [5@0] {status} failure\n",
+            "updating_db:\nOK\n",
+            "updating_db:42\nOK\n",
+            "updating_db: \nOK\n",
+            "updating_db: -1\nOK\n",
+            "updating_db: 0\nOK\n",
+            "updating_db: abc\nOK\n",
+            "updating_db: 1.0\nOK\n",
+            "updating_db: 18446744073709551616\nOK\n",
+            "updating_db: 1\nupdating_db: 2\nOK\n",
+            "updating_db: 1\nupdating_db:broken\nOK\n",
+        ] {
+            let (socket, server) = fake_short_mpd(vec![("status", Some(response))]);
+            assert!(matches!(
+                AudioEngine::wait_for_mpd_update_job(
+                    &socket,
+                    42,
+                    Duration::from_millis(100),
+                    Duration::from_millis(1),
+                ),
+                MpdRefreshCompletion::ProtocolError(_)
+            ));
+            server.join().unwrap();
+        }
+
+        let missing = format!("/tmp/sm{}-missing.sock", std::process::id());
+        assert!(matches!(
+            AudioEngine::wait_for_mpd_update_job(
+                &missing,
+                42,
+                Duration::from_millis(100),
+                Duration::from_millis(1),
+            ),
+            MpdRefreshCompletion::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn raw_catalog_audit_reports_only_invalid_song_uris_with_bounded_samples() {
+        let clean = AudioEngine::audit_raw_local_catalog(&[
+            "file: Music/Album/one.flac".to_string(),
+            "file: Music/Album/two.dsf".to_string(),
+            "file: Music/Album/image.cue/track0001".to_string(),
+        ])
+        .unwrap();
+        assert!(clean.is_clean());
+        assert_eq!(clean.total_files, 3);
+
+        let invalid = [
+            "Music/Album/program.prg",
+            "Music/Album/disc.iso",
+            "Music/Album/cover.jpg",
+            "Music/Album/image.cue",
+            "Music/Album/unknown.bin",
+            "Music//Album/track.flac",
+            "/Music/Album/track.flac",
+            "Music/../Album/track.flac",
+            "Music/Album/extra-1.txt",
+            "Music/Album/extra-2.txt",
+        ];
+        let lines = invalid
+            .iter()
+            .map(|uri| format!("file: {uri}"))
+            .collect::<Vec<_>>();
+        let audit = AudioEngine::audit_raw_local_catalog(&lines).unwrap();
+        assert!(!audit.is_clean());
+        assert_eq!(audit.total_files, invalid.len());
+        assert_eq!(audit.invalid_count, invalid.len());
+        assert_eq!(
+            audit.invalid_uris,
+            [
+                "Music/Album/program.prg",
+                "Music/Album/disc.iso",
+                "Music/Album/cover.jpg",
+                "Music/Album/image.cue",
+                "Music/Album/unknown.bin",
+                "<invalid local URI>",
+                "<invalid local URI>",
+                "<invalid local URI>",
+            ]
+        );
+        assert!(AudioEngine::audit_raw_local_catalog(&["file:".to_string()]).is_err());
+        assert!(AudioEngine::audit_raw_local_catalog(&[
+            "ACK [5@0] {find} failure".to_string(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn raw_catalog_audit_can_read_catalog_from_fake_mpd() {
+        let (socket, server) = fake_short_mpd(vec![(
+            "listall",
+            Some("file: Music/Album/track.flac\nOK\n"),
+        )]);
+        let audit = AudioEngine::audit_mpd_local_catalog_at(&socket).unwrap();
+        assert!(audit.is_clean());
+        assert_eq!(audit.total_files, 1);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn targeted_library_update_distinguishes_ack_from_unavailable_mpd() {
+        let (socket, server) = fake_album_mpd(vec![(
+            "update \"Music/track.flac\"",
+            "ACK [5@0] {update} failure\n",
+        )]);
+        assert_eq!(
+            AudioEngine::update_library_path(&socket, "Music/track.flac"),
+            Err(TargetedLibraryUpdateErrorCode::UpdateCommandFailed)
+        );
+        server.join().unwrap();
+
+        assert_eq!(
+            AudioEngine::update_library_path(
+                "/tmp/sonante-targeted-update-does-not-exist.sock",
+                "Music/track.flac"
+            ),
+            Err(TargetedLibraryUpdateErrorCode::MpdUnavailable)
+        );
     }
 
     #[test]
@@ -4095,6 +7110,129 @@ mod tests {
         ] {
             assert!(AudioEngine::parse_local_album_count(&lines).is_err());
         }
+    }
+
+    #[test]
+    fn local_album_genres_preserve_cue_discs_identity_and_unknown_metadata() {
+        let lines = album_test_lines(&[
+            "file: A/Multi/CD1/image.flac",
+            "Album: Same",
+            "AlbumArtist: Artist",
+            "Genre: Rock",
+            "file: A/Multi/CD1/image.cue/track0001",
+            "Album: Same",
+            "AlbumArtist: Artist",
+            "Genre: Jazz",
+            "file: A/Multi/CD1/image.cue/track0002",
+            "Album: Same",
+            "AlbumArtist: Artist",
+            "Genre: rock",
+            "file: A/Multi/CD2/one.flac",
+            "Album: Same",
+            "AlbumArtist: Artist",
+            "Genre: Blues",
+            "Genre: Jazz",
+            "file: B/Multi/one.flac",
+            "Album: Same",
+            "AlbumArtist: Artist",
+            "Genre: Reggae",
+            "file: A/Unknown/one.flac",
+            "Genre: ",
+            "Genre: bad\nvalue",
+        ]);
+        let sources = ["A".to_string(), "B".to_string()].into_iter().collect();
+        let albums = AudioEngine::finalize_local_album_collection(
+            collect_album_pages(vec![lines.clone()]),
+            &sources,
+        );
+        let baseline = AudioEngine::finalize_local_album_collection(
+            collect_album_pages(vec![lines
+                .into_iter()
+                .filter(|line| !line.starts_with("Genre: "))
+                .collect()]),
+            &sources,
+        );
+        assert_eq!(albums.len(), baseline.len());
+        for album in &albums {
+            let previous = baseline
+                .iter()
+                .find(|previous| previous.id == album.id)
+                .unwrap();
+            assert_eq!(album.track_count, previous.track_count);
+            assert_eq!(album.folder_path, previous.folder_path);
+            assert_eq!(
+                serde_json::to_value(&album.discs).unwrap(),
+                serde_json::to_value(&previous.discs).unwrap()
+            );
+        }
+        let multi = albums
+            .iter()
+            .find(|album| album.source_id.as_deref() == Some("A") && album.title == "Same")
+            .unwrap();
+        assert_eq!(multi.track_count, 3);
+        assert_eq!(multi.discs.len(), 2);
+        assert!(multi
+            .discs
+            .iter()
+            .any(|disc| disc.folder_path.ends_with("image.cue")));
+        let genres: HashSet<_> = multi
+            .genres
+            .iter()
+            .map(|genre| genre.to_lowercase())
+            .collect();
+        assert_eq!(
+            genres,
+            ["rock", "jazz", "blues"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+        let other = albums
+            .iter()
+            .find(|album| album.source_id.as_deref() == Some("B"))
+            .unwrap();
+        assert_ne!(multi.id, other.id);
+        assert_eq!(other.genres, ["Reggae"]);
+        let unknown = albums
+            .iter()
+            .find(|album| album.folder_path == "A/Unknown")
+            .unwrap();
+        assert!(unknown.genres.is_empty());
+        let mut legacy = serde_json::to_value(multi).unwrap();
+        legacy.as_object_mut().unwrap().remove("genres");
+        let restored: LocalAlbum = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.id, multi.id);
+        assert!(restored.genres.is_empty());
+    }
+
+    #[test]
+    fn local_album_genres_union_across_pages_and_title_variants() {
+        let first = album_test_lines(&[
+            "file: A/Album/1.flac",
+            "Album: Album",
+            "Genre: Folk",
+            "file: A/Album/2.flac",
+            "Album: Album",
+            "Genre: Jazz",
+            "file: A/Album/3.flac",
+            "Album: Album",
+            "file: A/Album/4.flac",
+            "Album: Album",
+        ]);
+        let second = album_test_lines(&["file: A/Album/5.flac", "Album: Typo", "Genre: Rock"]);
+        let albums = AudioEngine::finalize_local_album_collection(
+            collect_album_pages(vec![first, second]),
+            &HashSet::new(),
+        );
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].track_count, 5);
+        assert_eq!(
+            albums[0].genres.iter().cloned().collect::<HashSet<_>>(),
+            ["Folk", "Jazz", "Rock"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
     }
 
     #[test]
@@ -4258,6 +7396,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dominant_title_merge_keeps_the_merged_folder_membership_only() {
+        let tracks = [
+            ("Music/Album/main-1.flac", Some("Canonical"), None, None),
+            ("Music/Album/main-2.flac", Some("Canonical"), None, None),
+            ("Music/Album/main-3.flac", Some("Canonical"), None, None),
+            ("Music/Album/main-4.flac", Some("Canonical"), None, None),
+            ("Music/Album/main-5.flac", Some("Canonical"), None, None),
+            ("Music/Album/main-6.flac", Some("Canonical"), None, None),
+            ("Music/Album/main-7.flac", Some("Canonical"), None, None),
+            ("Music/Album/main-8.flac", Some("Canonical"), None, None),
+            ("Music/Album/variant-a.flac", Some("Variant"), None, None),
+            ("Music/Album/variant-b.flac", Some("Variant"), None, None),
+            ("Music/Other/unrelated.flac", Some("Other"), None, None),
+        ];
+        let map = resolved_album_tracks(&tracks);
+        let membership = &map[&album_id("Music/Album", "Canonical")].track_uris;
+
+        assert_eq!(membership.len(), 10);
+        assert!(membership.iter().all(|uri| uri.starts_with("Music/Album/")));
+        assert!(!membership.contains(&"Music/Other/unrelated.flac".to_string()));
     }
 
     #[test]
@@ -4553,6 +7714,7 @@ mod tests {
             }],
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
+            queue_structure_reserved: Arc::new(AtomicU8::new(0)),
         }
     }
 
@@ -4569,6 +7731,730 @@ mod tests {
             duration: Some(180.0),
         });
         engine
+    }
+
+    fn engine_with_logical_resume() -> AudioEngine {
+        let mut engine = engine_with_two_tracks();
+        engine.restored_resume = Some(PlaybackResumeSnapshot {
+            queue_index: 1,
+            elapsed: 17.25,
+            state: PlaybackState::Paused,
+        });
+        engine
+    }
+
+    fn logical_recovery_script(
+        uris: &[String],
+        state: PlaybackState,
+        index: Option<usize>,
+        elapsed: f64,
+    ) -> Vec<(String, Option<String>)> {
+        let status = queue_status_response(34, uris.len(), state, index, Some(elapsed));
+        let mut playlist = String::new();
+        for (pos, uri) in uris.iter().enumerate() {
+            playlist.push_str(&format!("file: {uri}\nPos: {pos}\nId: {}\n", pos + 171));
+        }
+        playlist.push_str("OK\n");
+        let mut script = Vec::new();
+        for _ in 0..2 {
+            script.extend([
+                ("status".into(), Some(status.clone())),
+                ("playlistinfo".into(), Some(playlist.clone())),
+                ("status".into(), Some(status.clone())),
+            ]);
+        }
+        script.push(("status".into(), Some(status)));
+        script
+    }
+
+    #[test]
+    fn reserved_logical_resume_capture_is_atomic_and_blocks_concurrent_player_commands() {
+        let audio = Arc::new(Mutex::new(engine_with_logical_resume()));
+        let (owner, captured) = {
+            let mut engine = audio.lock().unwrap();
+            let owner = engine.reserve_queue_structure().unwrap();
+            let captured = engine.capture_reserved_logical_queue(&owner).unwrap();
+            assert!(engine.reserve_queue_structure().is_none());
+            assert_eq!(captured.tracks, engine.get_queue());
+            assert_eq!(Some(captured.resume), engine.restored_resume);
+            // Owner can re-read the frozen snapshot under AudioState.
+            assert_eq!(
+                engine
+                    .capture_reserved_logical_queue(&owner)
+                    .unwrap()
+                    .resume,
+                captured.resume
+            );
+            (owner, captured)
+        };
+        let concurrent = Arc::clone(&audio);
+        thread::spawn(move || {
+            let mut engine = concurrent.lock().unwrap();
+            // Invalid socket proves rejection happens before MPD/cache I/O.
+            let prefix = "LOCAL_SOURCE_REMOVAL_LOGICAL_RESUME_RESERVED";
+            assert!(engine.play(false).unwrap_err().starts_with(prefix));
+            assert!(engine.pause().unwrap_err().starts_with(prefix));
+            assert!(engine
+                .toggle_play_pause(false)
+                .unwrap_err()
+                .starts_with(prefix));
+            assert!(engine.play_index(0, false).unwrap_err().starts_with(prefix));
+            assert!(engine.next(false).unwrap_err().starts_with(prefix));
+            assert!(engine.previous(false).unwrap_err().starts_with(prefix));
+            assert!(engine.seek(4.0, false).unwrap_err().starts_with(prefix));
+            assert!(engine
+                .persist_shutdown_resume()
+                .unwrap_err()
+                .starts_with(prefix));
+            assert!(engine
+                .prepare_device_switch()
+                .unwrap_err()
+                .cause
+                .starts_with(prefix));
+            assert_eq!(Some(captured.resume), engine.restored_resume);
+            assert_eq!(captured.tracks, engine.get_queue());
+        })
+        .join()
+        .unwrap();
+        let mut engine = audio.lock().unwrap();
+        drop(owner); // RAII release does not acquire AudioState.
+        engine.ensure_startup_queue_ready().unwrap();
+        let owner = engine.reserve_queue_structure().unwrap();
+        engine.capture_reserved_logical_queue(&owner).unwrap();
+    }
+
+    #[test]
+    fn reserved_logical_resume_invalid_cursor_or_foreign_owner_never_arms_cursor_fence() {
+        for fault in 0..6 {
+            let mut engine = engine_with_logical_resume();
+            match fault {
+                0 => engine.restored_resume = None,
+                1 => engine.restored_resume.as_mut().unwrap().queue_index = 2,
+                2 => engine.restored_resume.as_mut().unwrap().elapsed = -1.0,
+                3 => engine.restored_resume.as_mut().unwrap().elapsed = f64::NAN,
+                4 => engine.restored_resume.as_mut().unwrap().elapsed = f64::INFINITY,
+                _ => engine.restored_resume.as_mut().unwrap().state = PlaybackState::Stopped,
+            }
+            let owner = engine.reserve_queue_structure().unwrap();
+            assert!(engine.capture_reserved_logical_queue(&owner).is_err());
+            engine.ensure_logical_resume_available().unwrap();
+        }
+        let engine = engine_with_logical_resume();
+        let mut other = engine_with_logical_resume();
+        let foreign = other.reserve_queue_structure().unwrap();
+        assert!(engine.capture_reserved_logical_queue(&foreign).is_err());
+        engine.ensure_logical_resume_available().unwrap();
+    }
+
+    #[test]
+    fn ordinary_queue_reservation_does_not_freeze_unaffected_logical_resume() {
+        let mut engine = engine_with_logical_resume();
+        let owner = engine.reserve_queue_structure().unwrap();
+        engine.ensure_logical_resume_available().unwrap();
+        let uri = &engine.queue[1].uri;
+        let (socket, server) = fake_mpd_script(vec![
+            ("play 1".into(), Some("OK\n".into())),
+            (
+                "status".into(),
+                Some("state: play\nsong: 1\nelapsed: 0\nOK\n".into()),
+            ),
+        ]);
+        let queue = engine.get_queue();
+        assert!(!uri.is_empty());
+        engine.socket_path = socket;
+        engine.restored_resume.as_mut().unwrap().elapsed = 0.0;
+        engine.play(false).unwrap();
+        assert!(engine.restored_resume.is_none());
+        assert_eq!(engine.get_queue(), queue);
+        server.join().unwrap();
+        drop(owner);
+    }
+
+    #[test]
+    fn reserved_logical_resume_recovery_restores_cursor_cache_without_play_or_seek() {
+        for state in [PlaybackState::Playing, PlaybackState::Paused] {
+            let mut engine = engine_with_logical_resume();
+            engine.restored_resume.as_mut().unwrap().state = state;
+            // Legitimate duplicate CUE occurrences and a Plex stable identity.
+            for track in &mut engine.queue {
+                track.uri = "Keep/Imagem.CUE/track0001".into();
+                track.thumb = Some("data:image/png;base64,ARTWORK".into());
+            }
+            let mut plex = plex_track();
+            plex.uri = "https://fixture.invalid/file?X-Plex-Token=SECRET".into();
+            engine.queue.push(plex);
+            let uris = engine
+                .queue
+                .iter()
+                .map(|t| t.uri.clone())
+                .collect::<Vec<_>>();
+            let expected = MpdPlaybackSnapshot {
+                uris: uris.clone(),
+                current_index: None,
+                elapsed: 0.0,
+                state: PlaybackState::Stopped,
+                playlist_version: 31,
+            };
+            let mut commands = "command_list_begin\nclear\n".to_owned();
+            for uri in &uris {
+                commands.push_str(&format!(
+                    "add {}\n",
+                    AudioEngine::quote_mpd_argument(uri).unwrap()
+                ));
+            }
+            commands.push_str("command_list_end");
+            let mut script = vec![(commands, Some("OK\n".into()))];
+            script.extend(logical_recovery_script(
+                &uris,
+                PlaybackState::Stopped,
+                None,
+                0.0,
+            ));
+            let (socket, server) = fake_mpd_script(script);
+            engine.socket_path = socket;
+            let mut owner = engine.reserve_queue_structure().unwrap();
+            let captured = engine.capture_reserved_logical_queue(&owner).unwrap();
+            let effect = engine.begin_reserved_queue_effect(&mut owner).unwrap();
+            AudioEngine::restore_mpd_playback_snapshot(&engine.socket_path, &expected).unwrap();
+            let verified = effect
+                .confirm_reserved_logical_queue_restore(&captured, &expected)
+                .unwrap();
+            drop(effect);
+            engine
+                .apply_verified_reserved_queue(&owner, Vec::new())
+                .unwrap();
+            let cache = engine
+                .apply_verified_reserved_logical_queue(&owner, verified)
+                .unwrap();
+            assert_eq!(engine.restored_resume, Some(captured.resume));
+            assert_eq!(engine.get_queue().len(), 3);
+            let saved = String::from_utf8_lossy(&cache);
+            for secret in ["SECRET", "https://", "ARTWORK", "thumb", "plex_image"] {
+                assert!(!saved.contains(secret));
+            }
+            let (decoded, resume, _) =
+                AudioEngine::decode_queue_cache_with_resume(cache.as_slice()).unwrap();
+            assert_eq!(decoded.len(), 3);
+            assert_eq!(resume, Some(captured.resume));
+            assert!(engine.play(false).is_err()); // Protected until durable completion.
+            owner.release_after_confirmed_completion();
+            drop(owner);
+            engine.ensure_startup_queue_ready().unwrap();
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn reserved_logical_resume_unproven_recovery_or_encoding_failure_never_publishes() {
+        for fault in ["uri", "state", "index", "elapsed", "error", "serialize"] {
+            let mut engine = engine_with_logical_resume();
+            let uris = engine
+                .queue
+                .iter()
+                .map(|t| t.uri.clone())
+                .collect::<Vec<_>>();
+            let mut actual = uris.clone();
+            if fault == "uri" {
+                actual[0] = "Other/one.flac".into();
+            }
+            let state = if fault == "state" {
+                PlaybackState::Playing
+            } else {
+                PlaybackState::Stopped
+            };
+            let index = if matches!(fault, "state" | "index") {
+                Some(0)
+            } else {
+                None
+            };
+            let elapsed = if fault == "elapsed" { 4.0 } else { 0.0 };
+            let mut script = logical_recovery_script(&actual, state, index, elapsed);
+            if fault == "error" {
+                script
+                    .last_mut()
+                    .unwrap()
+                    .1
+                    .as_mut()
+                    .unwrap()
+                    .insert_str(0, "error: /private/SECRET\n");
+            }
+            let (socket, server) = fake_mpd_script(script);
+            engine.socket_path = socket;
+            let mut owner = engine.reserve_queue_structure().unwrap();
+            let captured = engine.capture_reserved_logical_queue(&owner).unwrap();
+            let expected = MpdPlaybackSnapshot {
+                uris,
+                current_index: None,
+                elapsed: 0.0,
+                state: PlaybackState::Stopped,
+                playlist_version: 31,
+            };
+            let effect = engine.begin_reserved_queue_effect(&mut owner).unwrap();
+            let result = effect.confirm_reserved_logical_queue_restore_with(
+                &captured,
+                &expected,
+                |tracks, resume| {
+                    if fault == "serialize" {
+                        Err("simulated encoding SECRET".into())
+                    } else {
+                        AudioEngine::encode_queue_cache_with_resume(tracks, resume)
+                    }
+                },
+            );
+            assert_eq!(
+                result.err().unwrap(),
+                "LOCAL_SOURCE_REMOVAL_QUEUE_RECOVERY_UNCONFIRMED"
+            );
+            assert_eq!(engine.get_queue(), captured.tracks);
+            assert_eq!(engine.restored_resume, Some(captured.resume));
+            assert_eq!(engine.startup_restore, StartupQueueRestore::Failed);
+            drop(effect);
+            drop(owner);
+            assert!(engine.reserve_queue_structure().is_none());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn reserved_logical_resume_snapshot_and_proof_cannot_cross_reservation_owners() {
+        let mut engine = engine_with_logical_resume();
+        let owner = engine.reserve_queue_structure().unwrap();
+        let captured = engine.capture_reserved_logical_queue(&owner).unwrap();
+        drop(owner);
+        let mut next = engine.reserve_queue_structure().unwrap();
+        let current = engine.capture_reserved_logical_queue(&next).unwrap();
+        let expected = MpdPlaybackSnapshot {
+            uris: engine.queue.iter().map(|t| t.uri.clone()).collect(),
+            current_index: None,
+            elapsed: 0.0,
+            state: PlaybackState::Stopped,
+            playlist_version: 31,
+        };
+        let effect = engine.begin_reserved_queue_effect(&mut next).unwrap();
+        assert!(effect
+            .confirm_reserved_logical_queue_restore(&captured, &expected)
+            .is_err());
+        drop(effect);
+        // Private capability construction here tests the owner's apply boundary.
+        let wrong = VerifiedLogicalQueueRestore {
+            tracks: captured.tracks,
+            resume: captured.resume,
+            cache: vec![],
+            identity: captured.identity,
+        };
+        assert!(engine
+            .apply_verified_reserved_logical_queue(&next, wrong)
+            .is_err());
+        assert_eq!(engine.restored_resume, Some(current.resume));
+    }
+
+    #[test]
+    fn reserved_logical_resume_mpd_ack_or_eof_preserves_cursor_and_protection() {
+        for response in [Some("ACK [50@0] {status} /private/SECRET\n".into()), None] {
+            let mut engine = engine_with_logical_resume();
+            let (socket, server) = fake_mpd_script(vec![("status".into(), response)]);
+            engine.socket_path = socket;
+            let mut owner = engine.reserve_queue_structure().unwrap();
+            let captured = engine.capture_reserved_logical_queue(&owner).unwrap();
+            let expected = MpdPlaybackSnapshot {
+                uris: engine.queue.iter().map(|track| track.uri.clone()).collect(),
+                state: PlaybackState::Stopped,
+                current_index: None,
+                elapsed: 0.0,
+                playlist_version: 31,
+            };
+            let effect = engine.begin_reserved_queue_effect(&mut owner).unwrap();
+            assert_eq!(
+                effect
+                    .confirm_reserved_logical_queue_restore(&captured, &expected)
+                    .err()
+                    .unwrap(),
+                "LOCAL_SOURCE_REMOVAL_QUEUE_RECOVERY_UNCONFIRMED"
+            );
+            assert_eq!(engine.get_queue(), captured.tracks);
+            assert_eq!(engine.restored_resume, Some(captured.resume));
+            drop(effect);
+            drop(owner);
+            assert!(engine.play(false).is_err());
+            assert!(engine.reserve_queue_structure().is_none());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn queue_structure_reservation_excludes_mutations_and_releases_without_audio_lock() {
+        let mut engine = engine_with_track("Álbum/faixa.flac");
+        engine.startup_restore = StartupQueueRestore::Pending;
+        assert!(engine.reserve_queue_structure().is_none());
+        engine.startup_restore = StartupQueueRestore::Ready;
+        let reservation = engine.reserve_queue_structure().unwrap();
+        assert!(engine.reserve_queue_structure().is_none());
+        assert!(engine.clear_queue().unwrap_err().starts_with("LOCAL_SOURCE_REMOVAL_QUEUE_RESERVED"));
+        assert!(engine.play_tracks(engine.get_queue(), vec!["Álbum/faixa.flac".into()], 0)
+            .unwrap_err().starts_with("LOCAL_SOURCE_REMOVAL_QUEUE_RESERVED"));
+        assert!(engine.restore_after_device_switch(None, &["Álbum/faixa.flac".into()])
+            .unwrap_err().starts_with("LOCAL_SOURCE_REMOVAL_QUEUE_RESERVED"));
+        engine.startup_restore = StartupQueueRestore::Pending;
+        assert!(engine.restore_startup_queue(&["Álbum/faixa.flac".into()])
+            .unwrap_err().starts_with("LOCAL_SOURCE_REMOVAL_QUEUE_RESERVED"));
+        engine.startup_restore = StartupQueueRestore::Ready;
+        assert!(engine.play_uris(vec!["Álbum/faixa.flac".into()], 0).unwrap_err()
+            .starts_with("LOCAL_SOURCE_REMOVAL_QUEUE_RESERVED"));
+        let audio = Mutex::new(engine);
+        let mut engine = audio.lock().unwrap();
+        // Drop must not need AudioState, even when another command owns it.
+        drop(reservation);
+        let reservation = engine.reserve_queue_structure().unwrap();
+        drop(reservation);
+        let (socket, server) = fake_mpd_script(vec![(
+            "command_list_begin\nclear\nadd \"Álbum/faixa.flac\"\nplay 0\ncommand_list_end".into(),
+            Some("OK\n".into()),
+        )]);
+        engine.socket_path = socket;
+        engine.play_uris(vec!["Álbum/faixa.flac".into()], 0).unwrap();
+        assert_eq!(engine.get_queue()[0].uri, "Álbum/faixa.flac");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn destructive_queue_owner_is_required_and_uncertainty_survives_drop() {
+        let mut engine = engine_with_track("Remove/Imagem.CUE/track0001");
+        let mut other = engine_with_track("Keep/one.flac");
+        let mut foreign = other.reserve_queue_structure().unwrap();
+        assert!(engine.begin_reserved_queue_effect(&mut foreign).is_err());
+        assert!(engine
+            .apply_verified_reserved_queue(&foreign, vec![])
+            .is_err());
+        assert_eq!(engine.get_queue().len(), 1);
+        let mut owner = engine.reserve_queue_structure().unwrap();
+        engine.begin_reserved_queue_effect(&mut owner).unwrap();
+        assert!(engine.play_index(0, false).is_err());
+        assert!(!engine.queue_has_logical_resume());
+        drop(owner);
+        assert!(engine.reserve_queue_structure().is_none());
+        assert!(engine.clear_queue().is_err());
+        assert_eq!(engine.get_queue().len(), 1);
+
+        let mut engine = engine_with_track("Keep/one.flac");
+        engine.restored_resume = Some(PlaybackResumeSnapshot {
+            queue_index: 0,
+            elapsed: 17.0,
+            state: PlaybackState::Paused,
+        });
+        assert!(engine.queue_has_logical_resume());
+        let mut owner = engine.reserve_queue_structure().unwrap();
+        engine.begin_reserved_queue_effect(&mut owner).unwrap();
+        engine
+            .apply_verified_reserved_queue(&owner, vec![])
+            .unwrap();
+        owner.release_after_confirmed_completion();
+        drop(owner);
+        assert!(engine.reserve_queue_structure().is_some());
+        assert!(!engine.queue_has_logical_resume());
+    }
+
+    #[test]
+    fn reserved_queue_recovery_rejects_unproven_identity_position_state_and_output_error() {
+        const STATUS: &str =
+            "playlist: 34\nplaylistlength: 1\nstate: pause\nsong: 0\nelapsed: 17\nOK\n";
+        const QUEUE: &str = "file: Remove/Imagem.CUE/track0001\nPos: 0\nId: 171\nOK\n";
+        for fault in ["uri", "elapsed", "state", "error"] {
+            let actual_status = match fault {
+                "elapsed" => STATUS.replace("elapsed: 17", "elapsed: 0"),
+                "state" => STATUS.replace("state: pause", "state: play"),
+                _ => STATUS.to_owned(),
+            };
+            let actual_queue = if fault == "uri" {
+                QUEUE.replace("track0001", "track0002")
+            } else {
+                QUEUE.to_owned()
+            };
+            let mut script = Vec::new();
+            for _ in 0..2 {
+                script.extend([
+                    ("status".into(), Some(actual_status.clone())),
+                    ("playlistinfo".into(), Some(actual_queue.clone())),
+                    ("status".into(), Some(actual_status.clone())),
+                ]);
+            }
+            if fault == "error" {
+                script.push((
+                    "status".into(),
+                    Some("error: output unavailable\nOK\n".into()),
+                ));
+            }
+            let (socket, server) = fake_mpd_script(script);
+            let mut engine = engine_with_track("Remove/Imagem.CUE/track0001");
+            engine.socket_path = socket;
+            let snapshot = MpdPlaybackSnapshot {
+                uris: vec![engine.queue[0].uri.clone()],
+                current_index: Some(0),
+                elapsed: 17.0,
+                state: PlaybackState::Paused,
+                playlist_version: 31,
+            };
+            let mut owner = engine.reserve_queue_structure().unwrap();
+            let effect = engine.begin_reserved_queue_effect(&mut owner).unwrap();
+            assert!(effect
+                .confirm_reserved_queue_restore(engine.get_queue(), &snapshot, false)
+                .is_err());
+            assert_eq!(engine.startup_restore, StartupQueueRestore::Failed);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn removal_queue_structure_accepts_duplicates_cue_and_playback_transitions() {
+        let playlist = "file: Keep/Álbum/a.flac\nPos: 0\nId: 7\nfile: Keep/Álbum/a.flac\nPos: 1\nId: 8\nfile: Keep/Imagem.CUE/track0001\nPos: 2\nId: 9\nOK\n";
+        let mut captures = Vec::new();
+        for (before, after) in [("play", "pause"), ("pause", "stop"), ("stop", "play")] {
+            let (socket, server) = fake_mpd_script(vec![
+                ("status".into(), Some(queue_status_response(31, 3, AudioEngine::parse_playback_state(before).unwrap(), Some(0), Some(12.0)))),
+                ("playlistinfo".into(), Some(playlist.into())),
+                ("status".into(), Some(queue_status_response(31, 3, AudioEngine::parse_playback_state(after).unwrap(), Some(2), Some(0.0)))),
+            ]);
+            captures.push(AudioEngine::capture_mpd_queue_structure(&socket).unwrap());
+            server.join().unwrap();
+        }
+        assert_eq!(captures[0], captures[1]);
+        assert_eq!(captures[1], captures[2]);
+        assert_eq!(captures[0].entries.iter().map(|entry| (entry.pos, entry.id)).collect::<Vec<_>>(),
+            [(0, 7), (1, 8), (2, 9)]);
+    }
+
+    #[test]
+    fn queue_structure_reservation_keeps_playback_controls_available() {
+        let mut engine = engine_with_two_tracks();
+        let uris = engine.get_queue().iter().map(|track| track.uri.clone()).collect::<Vec<_>>();
+        let reservation = engine.reserve_queue_structure().unwrap();
+        let (socket, server) = fake_mpd_script(vec![
+            ("play 1".into(), Some("OK\n".into())),
+            ("next".into(), Some("OK\n".into())),
+            ("previous".into(), Some("OK\n".into())),
+            ("seekcur 4.0".into(), Some("OK\n".into())),
+            ("status".into(), Some("state: play\nOK\n".into())),
+            ("pause 1".into(), Some("OK\n".into())),
+            ("status".into(), Some("state: pause\nOK\n".into())),
+            ("pause 0".into(), Some("OK\n".into())),
+            ("status".into(), Some("state: play\nOK\n".into())),
+        ]);
+        engine.socket_path = socket;
+        engine.play_index(1, false).unwrap();
+        engine.next(false).unwrap();
+        engine.previous(false).unwrap();
+        engine.seek(4.0, false).unwrap();
+        engine.pause().unwrap();
+        engine.play(false).unwrap();
+        assert_eq!(engine.playback_state().unwrap(), PlaybackState::Playing);
+        assert_eq!(engine.get_queue().iter().map(|track| track.uri.clone()).collect::<Vec<_>>(), uris);
+        assert!(engine.clear_queue().unwrap_err().starts_with("LOCAL_SOURCE_REMOVAL_QUEUE_RESERVED"));
+        drop(reservation);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn removal_queue_structure_rejects_ambiguous_identity_and_query_errors_safely() {
+        for response in [
+            "file: Keep/a.flac\nPos: 0\n", "file: Keep/a.flac\nId: 7\n",
+            "file: Keep/a.flac\nPos: 1\nId: 7\n",
+            "file: Keep/a.flac\nPos: 0\nPos: 0\nId: 7\n",
+            "file: Keep/a.flac\nPos: 0\nId: 7\nId: 7\n",
+            "file: Keep/a.flac\nPos: 0\nId: 7\nfile: Keep/b.flac\nPos: 1\nId: 7\n",
+            "Pos: 0\nId: 7\nfile: Keep/a.flac\n", "file: Keep/a.flac\nPos: -1\nId: 7\n",
+        ] {
+            let lines = response.lines().map(str::to_string).collect::<Vec<_>>();
+            assert_eq!(AudioEngine::parse_mpd_queue_entries(&lines), Err(MpdQueueStructureError::Invalid));
+        }
+        let status = queue_status_response(31, 1, PlaybackState::Playing, Some(0), Some(1.0));
+        let (socket, server) = fake_mpd_script(vec![
+            ("status".into(), Some(status)),
+            ("playlistinfo".into(), Some("file: Keep/a.flac\nPos: 0\nId: 7\nOK\n".into())),
+            ("status".into(), Some(queue_status_response(32, 1, PlaybackState::Playing, Some(0), Some(2.0)))),
+        ]);
+        assert_eq!(AudioEngine::capture_mpd_queue_structure(&socket), Err(MpdQueueStructureError::Changed));
+        server.join().unwrap();
+        for response in [Some("ACK [5@0] {status} https://secret.invalid/?token=PRIVATE\n".into()), None] {
+            let (socket, server) = fake_mpd_script(vec![("status".into(), response)]);
+            let error = AudioEngine::capture_mpd_queue_structure(&socket).unwrap_err();
+            assert_eq!(error, MpdQueueStructureError::QueryFailed);
+            assert!(!error.to_string().contains("PRIVATE"));
+            server.join().unwrap();
+        }
+        assert_eq!(AudioEngine::capture_mpd_queue_structure("/no-test-mpd"), Err(MpdQueueStructureError::QueryFailed));
+    }
+
+    #[test]
+    fn playback_error_classification_requires_known_output_context() {
+        for (message, expected) in [
+            (
+                "Failed to open ALSA device \"hw:0\": Device or resource busy",
+                PlaybackDiagnostic::OutputBusy,
+            ),
+            (
+                "Failed to open ALSA device \"hw:0\": No such device",
+                PlaybackDiagnostic::OutputUnavailable,
+            ),
+            (
+                "Failed to open ALSA device \"hw:0\": No such device or address",
+                PlaybackDiagnostic::OutputUnavailable,
+            ),
+            (
+                "Failed to open ALSA device \"hw:0\": No such file or directory",
+                PlaybackDiagnostic::OutputUnavailable,
+            ),
+            (
+                "All audio outputs are disabled",
+                PlaybackDiagnostic::OutputUnavailable,
+            ),
+            (
+                "Failed to decode file: Device or resource busy",
+                PlaybackDiagnostic::PlaybackError,
+            ),
+            (
+                "Failed to open ALSA device \"hw:0\": Invalid argument",
+                PlaybackDiagnostic::PlaybackError,
+            ),
+            ("Unknown failure", PlaybackDiagnostic::PlaybackError),
+        ] {
+            assert_eq!(PlaybackDiagnostic::from_mpd_error(message), expected);
+        }
+    }
+
+    #[test]
+    fn playback_error_after_accepted_play_is_reported_then_cleared() {
+        let (socket, server) = fake_mpd_script(vec![
+            ("status".into(), Some("state: stop\nOK\n".into())),
+            ("play".into(), Some("OK\n".into())),
+            ("status".into(), Some("state: pause\nsong: 0\nelapsed: 16\nerror: Failed to open \"Sonante Output\" (alsa); Failed to open ALSA device \"hw:0\": Device or resource busy\nOK\n".into())),
+            ("currentsong".into(), Some("Pos: 0\nOK\n".into())),
+            ("status".into(), Some("state: play\nsong: 0\nelapsed: 17\nOK\n".into())),
+            ("currentsong".into(), Some("Pos: 0\nOK\n".into())),
+        ]);
+        let mut engine = engine_with_track("local/faixa.flac");
+        engine.socket_path = socket;
+        let queue_before = serde_json::to_string(&engine.queue).unwrap();
+        engine.play(false).unwrap();
+        let failed = engine.get_status().unwrap();
+        assert_eq!(failed.state, "pause");
+        assert_eq!(failed.elapsed, 16.0);
+        assert_eq!(failed.playback_error, Some(PlaybackDiagnostic::OutputBusy));
+        let resumed = engine.get_status().unwrap();
+        assert_eq!(resumed.state, "play");
+        assert_eq!(resumed.elapsed, 17.0);
+        assert_eq!(resumed.playback_error, None);
+        assert_eq!(serde_json::to_string(&engine.queue).unwrap(), queue_before);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn playback_error_is_safe_in_play_pause_and_stop_for_local_and_plex() {
+        for state in ["play", "pause", "stop"] {
+            for plex in [false, true] {
+                let (socket, server) = fake_mpd_script(vec![
+                    ("status".into(), Some(format!("state: {state}\nsong: 0\nelapsed: 16\nerror: Failed to decode /private/Álbum secreto.flac https://user:password@example.invalid/file?X-Plex-Token=SECRET\nOK\n"))),
+                    ("currentsong".into(), Some("Pos: 0\nOK\n".into())),
+                ]);
+                let mut engine = engine_with_track("local/faixa.flac");
+                if plex {
+                    engine.queue = vec![plex_track()];
+                }
+                engine.socket_path = socket;
+                let status = engine.get_status().unwrap();
+                assert_eq!(status.state, state);
+                assert_eq!(status.elapsed, 16.0);
+                assert_eq!(
+                    status.playback_error,
+                    Some(PlaybackDiagnostic::PlaybackError)
+                );
+                assert_eq!(
+                    status.current_media,
+                    engine.current_media_for_queue_index(Some(0))
+                );
+                let json = serde_json::to_string(&status).unwrap();
+                for sensitive in [
+                    "/private/",
+                    "Álbum secreto",
+                    "https://",
+                    "password",
+                    "X-Plex-Token",
+                    "SECRET",
+                ] {
+                    assert!(!json.contains(sensitive));
+                    assert!(!format!("{:?}", status.playback_error).contains(sensitive));
+                }
+                server.join().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn playback_error_survives_neutral_stop_and_logical_resume_and_mpris() {
+        for logical_resume in [false, true] {
+            let (socket, server) = fake_mpd_script(vec![
+                (
+                    "status".into(),
+                    Some("state: stop\nerror: All audio outputs are disabled\nOK\n".into()),
+                ),
+                (
+                    "status".into(),
+                    Some("state: stop\nerror: All audio outputs are disabled\nOK\n".into()),
+                ),
+                ("status".into(), Some("state: stop\nOK\n".into())),
+            ]);
+            let mut engine = engine_with_track("local/faixa.flac");
+            engine.socket_path = socket;
+            if logical_resume {
+                engine.restored_resume = Some(PlaybackResumeSnapshot {
+                    queue_index: 0,
+                    elapsed: 16.0,
+                    state: PlaybackState::Paused,
+                });
+            }
+            let status = engine.get_status().unwrap();
+            assert_eq!(status.state, if logical_resume { "pause" } else { "stop" });
+            assert_eq!(
+                status.playback_error,
+                Some(PlaybackDiagnostic::OutputUnavailable)
+            );
+            let mpris = engine.get_mpris_status().unwrap();
+            assert_eq!(mpris.state, "stop");
+            assert_eq!(mpris.playback_error, status.playback_error);
+            assert_eq!(engine.get_status().unwrap().playback_error, None);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn playback_error_codes_never_serialize_raw_output_messages() {
+        for suffix in [
+            "Device or resource busy",
+            "No such device",
+            "Unexpected failure",
+        ] {
+            let raw = format!("Failed to open ALSA device \"/private/SECRET https://user:password@example.invalid/?X-Plex-Token=SECRET\": {suffix}");
+            let diagnostic = PlaybackDiagnostic::from_mpd_error(&raw);
+            let code = match diagnostic {
+                PlaybackDiagnostic::OutputBusy => "output_busy",
+                PlaybackDiagnostic::OutputUnavailable => "output_unavailable",
+                PlaybackDiagnostic::PlaybackError => "playback_error",
+            };
+            assert_eq!(
+                serde_json::to_string(&diagnostic).unwrap(),
+                format!("{{\"code\":\"{code}\"}}")
+            );
+        }
+    }
+
+    #[test]
+    fn playback_error_does_not_convert_mpd_ack_to_success() {
+        let (socket, server) = fake_mpd_script(vec![(
+            "status".into(),
+            Some("ACK [5@0] {status} simulated failure\n".into()),
+        )]);
+        let mut engine = engine_with_track("local/faixa.flac");
+        engine.socket_path = socket;
+        assert!(engine.get_status().is_err());
+        server.join().unwrap();
     }
 
     fn plex_track() -> TrackMetadata {
@@ -4784,7 +8670,7 @@ mod tests {
     fn startup_restore_sends_only_clear_add_and_unblocks_queue_click() {
         let mut engine = engine_with_track("Álbum/uma \\\"faixa\\\".flac");
         engine.startup_restore = StartupQueueRestore::Pending;
-        assert!(engine.play_index(0).is_err());
+        assert!(engine.play_index(0, false).is_err());
         let uri = engine.queue[0].uri.clone();
         let expected = engine.device_switch_queue_restore_commands(None, &[uri.clone()]).unwrap();
         let (socket, server) = fake_startup_restore_mpd(expected);
@@ -4803,7 +8689,7 @@ mod tests {
         assert!(engine.restore_startup_queue(&["local/faixa.flac".into()]).is_err());
         assert_eq!(engine.startup_restore, StartupQueueRestore::Failed);
         assert_eq!(engine.queue.len(), 1);
-        assert!(engine.play_index(0).is_err());
+        assert!(engine.play_index(0, false).is_err());
         server.join().unwrap();
     }
 
@@ -4885,9 +8771,9 @@ mod tests {
         let mut engine = engine_with_track("local/faixa.flac");
         engine.socket_path = socket;
         engine.restored_resume = Some(PlaybackResumeSnapshot { queue_index: 0, elapsed: 201.4, state: PlaybackState::Paused });
-        engine.toggle_play_pause().unwrap();
+        engine.toggle_play_pause(false).unwrap();
         assert!(engine.restored_resume.is_none());
-        engine.play_index(0).unwrap();
+        engine.play_index(0, false).unwrap();
         server.join().unwrap();
     }
 
@@ -4924,14 +8810,14 @@ mod tests {
         let mut engine = engine_with_track("local/faixa.flac");
         engine.socket_path = socket;
         engine.restored_resume = Some(PlaybackResumeSnapshot { queue_index: 0, elapsed: 9.0, state: PlaybackState::Playing });
-        assert!(engine.toggle_play_pause().is_ok());
+        assert!(engine.toggle_play_pause(false).is_ok());
         assert!(engine.restored_resume.is_none());
         server.join().unwrap();
 
         let (socket, server) = fake_album_mpd(vec![("play 0", "OK\n"), ("seekcur 9.0", "ACK [5@0] {seekcur} failure\n")]);
         engine.socket_path = socket;
         engine.restored_resume = Some(PlaybackResumeSnapshot { queue_index: 0, elapsed: 9.0, state: PlaybackState::Paused });
-        assert!(engine.toggle_play_pause().is_err());
+        assert!(engine.toggle_play_pause(false).is_err());
         assert!(engine.restored_resume.is_none());
         server.join().unwrap();
     }
@@ -4949,7 +8835,7 @@ mod tests {
         engine.socket_path = socket;
         engine.restored_resume = Some(PlaybackResumeSnapshot { queue_index: 0, elapsed: 63.0, state: PlaybackState::Playing });
         engine.seek(180.0, true).unwrap();
-        engine.toggle_play_pause().unwrap();
+        engine.toggle_play_pause(false).unwrap();
         assert!(engine.restored_resume.is_none());
         engine.seek(181.0, false).unwrap();
         server.join().unwrap();
@@ -4980,6 +8866,195 @@ mod tests {
         assert!(engine.seek(120.0, false).is_err());
         assert!(engine.restored_resume.is_none());
         server.join().unwrap();
+    }
+
+    #[test]
+    fn direct_queue_index_sends_only_play_and_preserves_queue() {
+        for track in [
+            engine_with_track("local/Álbum com espaço/terceira.flac").queue[0].clone(),
+            plex_track(),
+        ] {
+            let (socket, server) = fake_album_mpd(vec![("play 2", "OK\n")]);
+            let mut engine = engine_with_track("local/primeira.flac");
+            engine.socket_path = socket;
+            engine.queue = vec![engine.queue[0].clone(), engine.queue[0].clone(), track];
+            engine.restored_resume = Some(PlaybackResumeSnapshot {
+                queue_index: 0,
+                elapsed: 9.0,
+                state: PlaybackState::Paused,
+            });
+            let queue = engine.queue.clone();
+
+            engine.play_index(2, false).unwrap();
+
+            assert_eq!(engine.queue, queue);
+            assert!(engine.restored_resume.is_none());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn shared_queue_index_with_progress_does_not_recover() {
+        for track in [
+            engine_with_track("local/Álbum com espaço/terceira.flac").queue[0].clone(),
+            plex_track(),
+        ] {
+            let (result, cursor) = shared_queue_index_script(
+                vec![
+                    ("play 2", Some("OK\n")),
+                    ("status", Some("state: play\nelapsed: 0.10\nOK\n")),
+                    ("status", Some("state: play\nelapsed: 0.19\nOK\n")),
+                ],
+                track,
+            );
+            result.unwrap();
+            assert!(cursor.is_none());
+        }
+    }
+
+    #[test]
+    fn shared_queue_index_stall_recovers_once_without_replaying_or_seeking() {
+        for track in [
+            engine_with_track("local/Álbum com espaço/terceira.flac").queue[0].clone(),
+            plex_track(),
+        ] {
+            let (result, cursor) = shared_queue_index_script(
+                vec![
+                    ("play 2", Some("OK\n")),
+                    ("status", Some("state: play\nelapsed: 0.0\nOK\n")),
+                    ("status", Some("state: play\nelapsed: 0.0\nOK\n")),
+                    ("pause 1", Some("OK\n")),
+                    ("pause 0", Some("OK\n")),
+                    ("status", Some("state: play\nelapsed: 0.10\nOK\n")),
+                    ("status", Some("state: play\nelapsed: 0.19\nOK\n")),
+                ],
+                track,
+            );
+            result.unwrap();
+            assert!(cursor.is_none());
+        }
+    }
+
+    #[test]
+    fn shared_queue_index_persistent_stall_is_an_error_after_one_recovery() {
+        let (result, cursor) = shared_queue_index_script(
+            vec![
+                ("play 2", Some("OK\n")),
+                ("status", Some("state: play\nelapsed: 0.0\nOK\n")),
+                ("status", Some("state: play\nelapsed: 0.0\nOK\n")),
+                ("pause 1", Some("OK\n")),
+                ("pause 0", Some("OK\n")),
+                ("status", Some("state: play\nelapsed: 0.0\nOK\n")),
+                ("status", Some("state: play\nelapsed: 0.0\nOK\n")),
+            ],
+            plex_track(),
+        );
+        assert!(result.unwrap_err().contains("permaneceu congelada"));
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn shared_queue_index_propagates_ack_and_eof_at_each_step() {
+        let script = [
+            ("play 2", Some("OK\n")),
+            ("status", Some("state: play\nelapsed: 0.0\nOK\n")),
+            ("status", Some("state: play\nelapsed: 0.0\nOK\n")),
+            ("pause 1", Some("OK\n")),
+            ("pause 0", Some("OK\n")),
+            ("status", Some("state: play\nelapsed: 0.10\nOK\n")),
+            ("status", Some("state: play\nelapsed: 0.19\nOK\n")),
+        ];
+        for fail_at in 0..script.len() {
+            for failure in [Some("ACK [5@0] {test} simulated failure\n"), None] {
+                let mut responses = script[..=fail_at].to_vec();
+                responses[fail_at].1 = failure;
+                let (result, cursor) = shared_queue_index_script(responses, plex_track());
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains(if failure.is_some() {
+                        "ACK"
+                    } else {
+                        "Conexão MPD encerrada"
+                    }),
+                    "step {fail_at}: {error}"
+                );
+                // An accepted selection invalidates the old resume cursor even
+                // if verification fails; a play without a confirmed OK preserves it.
+                assert_eq!(cursor.is_some(), fail_at == 0);
+                if let Some(cursor) = cursor {
+                    assert_eq!(cursor.queue_index, 0);
+                    assert_eq!(cursor.elapsed, 9.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_queue_index_invalid_progress_never_recovers() {
+        for response in [
+            "state: stop\nOK\n",
+            "state: pause\nelapsed: 0.0\nOK\n",
+            "state: play\nelapsed: NaN\nOK\n",
+        ] {
+            let (result, cursor) = shared_queue_index_script(
+                vec![
+                    ("play 2", Some("OK\n")),
+                    ("status", Some("state: play\nelapsed: 0.0\nOK\n")),
+                    ("status", Some(response)),
+                ],
+                plex_track(),
+            );
+            assert!(result.is_err());
+            assert!(cursor.is_none());
+        }
+    }
+
+    #[test]
+    fn shared_queue_index_rejects_unready_or_invalid_selection_before_io() {
+        let mut engine = engine_with_track("local/faixa.flac");
+        engine.socket_path = "/socket/must-not-be-used".into();
+        for (state, expected) in [
+            (StartupQueueRestore::Pending, "ainda está sendo restaurada"),
+            (StartupQueueRestore::Failed, "não pôde ser restaurada"),
+        ] {
+            engine.startup_restore = state;
+            assert!(engine.play_index(0, true).unwrap_err().contains(expected));
+        }
+        engine.startup_restore = StartupQueueRestore::Ready;
+        assert!(engine
+            .play_index(usize::MAX, true)
+            .unwrap_err()
+            .contains("Índice fora da fila"));
+        engine.queue.clear();
+        assert!(engine
+            .play_index(0, true)
+            .unwrap_err()
+            .contains("Índice fora da fila"));
+    }
+
+    fn shared_queue_index_script(
+        script: Vec<(&'static str, Option<&'static str>)>,
+        track: TrackMetadata,
+    ) -> (Result<(), String>, Option<PlaybackResumeSnapshot>) {
+        let (socket, server) = fake_mpd_script(
+            script
+                .into_iter()
+                .map(|(command, response)| (command.to_string(), response.map(str::to_string)))
+                .collect(),
+        );
+        let mut engine = engine_with_track("local/primeira.flac");
+        engine.socket_path = socket;
+        engine.queue = vec![engine.queue[0].clone(), engine.queue[0].clone(), track];
+        engine.restored_resume = Some(PlaybackResumeSnapshot {
+            queue_index: 0,
+            elapsed: 9.0,
+            state: PlaybackState::Paused,
+        });
+        let queue = engine.queue.clone();
+        let result = engine.play_index(2, true);
+        assert_eq!(engine.queue, queue);
+        server.join().unwrap();
+        (result, engine.restored_resume)
     }
 
     #[test]
@@ -5329,7 +9404,7 @@ mod tests {
             match command {
                 "next" => engine.next(false).unwrap(),
                 "previous" => engine.previous(false).unwrap(),
-                _ => engine.play_index(0).unwrap(),
+                _ => engine.play_index(0, false).unwrap(),
             }
             assert!(engine.restored_resume.is_none());
             server.join().unwrap();
@@ -5367,6 +9442,7 @@ mod tests {
             queue: vec![track],
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
+            queue_structure_reserved: Arc::new(AtomicU8::new(0)),
         };
 
         assert_eq!(
@@ -5415,6 +9491,7 @@ mod tests {
             queue: vec![track],
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
+            queue_structure_reserved: Arc::new(AtomicU8::new(0)),
         };
         let status = PlaybackStatus {
             state: "play".to_string(),
@@ -5429,6 +9506,7 @@ mod tests {
             plex_image: None,
             volume: VolumeStatus::from_mpd(100),
             is_updating: false,
+            playback_error: None,
         };
 
         let json = serde_json::to_string(&status).unwrap();
@@ -5450,6 +9528,7 @@ mod tests {
             queue: vec![track],
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
+            queue_structure_reserved: Arc::new(AtomicU8::new(0)),
         };
 
         assert!(matches!(
@@ -5515,6 +9594,423 @@ mod tests {
     }
 
     #[test]
+    fn device_switch_rejects_same_length_queue_replaced_during_uri_resolution() {
+        let audio = Arc::new(Mutex::new(engine_with_track("original.flac")));
+        let captured = audio.lock().unwrap().capture_device_switch_queue().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let resolver = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            continue_rx.recv().unwrap();
+            let uris = captured
+                .tracks()
+                .iter()
+                .map(|track| track.uri.clone())
+                .collect::<Vec<_>>();
+            captured.bind_resolved_uris(uris).unwrap()
+        });
+        started_rx.recv().unwrap();
+        audio.lock().unwrap().queue = engine_with_track("replacement.flac").get_queue();
+        continue_tx.send(()).unwrap();
+        let resolved = resolver.join().unwrap();
+        assert!(audio
+            .lock()
+            .unwrap()
+            .prepare_reserved_device_switch(&resolved)
+            .unwrap_err()
+            .snapshot
+            .is_none());
+        let mut commands = Vec::new();
+        let result = audio
+            .lock()
+            .unwrap()
+            .restore_after_reserved_device_switch_with(
+                None,
+                &resolved,
+                &mut |command| {
+                    commands.push(command.to_string());
+                    Ok(Vec::new())
+                },
+                &mut |_| {},
+            );
+        assert!(
+            result.is_err(),
+            "A same-length replacement must invalidate resolved URIs"
+        );
+        assert!(commands.is_empty(), "Refusal must precede MPD effects");
+    }
+
+    #[test]
+    fn device_switch_rejects_changed_length_or_identity_before_mpd_io() {
+        for change in 0..3 {
+            let mut engine = engine_with_two_tracks();
+            let captured = engine.capture_device_switch_queue().unwrap();
+            let uris = captured
+                .tracks()
+                .iter()
+                .map(|track| track.uri.clone())
+                .collect();
+            let resolved = captured.bind_resolved_uris(uris).unwrap();
+            match change {
+                0 => {
+                    engine.queue.pop();
+                }
+                1 => {
+                    engine.queue.push(engine.queue[0].clone());
+                }
+                _ => {
+                    engine.queue.swap(0, 1);
+                }
+            }
+            let error = engine
+                .prepare_reserved_device_switch(&resolved)
+                .unwrap_err();
+            assert!(error.snapshot.is_none());
+            assert!(engine
+                .restore_after_reserved_device_switch_with(
+                    None,
+                    &resolved,
+                    &mut |_| panic!("stale queue must not reach MPD"),
+                    &mut |_| {},
+                )
+                .is_err());
+            assert!(engine.reserve_queue_structure().is_none());
+            drop(resolved);
+            assert!(engine.reserve_queue_structure().is_some());
+        }
+    }
+
+    #[test]
+    fn device_switch_binding_failure_releases_without_changing_queue() {
+        for uris in [vec![], vec!["".into()], vec!["bad\nuri".into()]] {
+            let mut engine = engine_with_track("valid.flac");
+            let before = engine.get_queue();
+            let captured = engine.capture_device_switch_queue().unwrap();
+            assert!(captured.bind_resolved_uris(uris).is_err());
+            assert_eq!(engine.get_queue(), before);
+            assert!(engine.reserve_queue_structure().is_some());
+        }
+        let mut engine = engine_with_track("valid.flac");
+        let captured = engine.capture_device_switch_queue().unwrap();
+        let resolved = captured
+            .bind_resolved_uris(vec!["valid.flac".into()])
+            .unwrap();
+        let foreign = engine_with_track("valid.flac");
+        assert!(foreign
+            .restore_after_reserved_device_switch_with(
+                None,
+                &resolved,
+                &mut |_| panic!("foreign owner must not reach MPD"),
+                &mut |_| {},
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn device_switch_reserved_restore_preserves_play_pause_stop_and_duplicate_cue() {
+        for state in [
+            PlaybackState::Playing,
+            PlaybackState::Paused,
+            PlaybackState::Stopped,
+        ] {
+            let mut engine = engine_with_track("Álbum/imagem.CUE/track0001");
+            engine.queue.push(engine.queue[0].clone());
+            let before = engine.get_queue();
+            let captured = engine.capture_device_switch_queue().unwrap();
+            let resolved = captured
+                .bind_resolved_uris(vec![before[0].uri.clone(); 2])
+                .unwrap();
+            let mpd_state = match state {
+                PlaybackState::Playing => "play",
+                PlaybackState::Paused => "pause",
+                PlaybackState::Stopped => "stop",
+            };
+            let mut script = vec![(
+                "status".into(),
+                Some(format!("state: {mpd_state}\nsong: 1\nelapsed: 9\nOK\n")),
+            )];
+            if state != PlaybackState::Stopped {
+                script.push(("stop".into(), Some("OK\n".into())));
+            }
+            let selection = if state == PlaybackState::Stopped {
+                ""
+            } else {
+                "play 1\n"
+            };
+            script.push((format!("command_list_begin\nclear\nadd \"Álbum/imagem.CUE/track0001\"\nadd \"Álbum/imagem.CUE/track0001\"\n{selection}command_list_end"), Some("OK\n".into())));
+            if state != PlaybackState::Stopped {
+                script.extend([
+                    ("seekcur 9.0".into(), Some("OK\n".into())),
+                    ("pause 1".into(), Some("OK\n".into())),
+                ]);
+            }
+            let (socket, server) = fake_mpd_script(script);
+            engine.socket_path = socket;
+            let playback = engine.prepare_reserved_device_switch(&resolved).unwrap();
+            assert_eq!(playback.unwrap().state, state);
+            assert!(engine.clear_queue().is_err());
+            engine
+                .restore_after_reserved_device_switch(playback, &resolved)
+                .unwrap();
+            assert_eq!(engine.get_queue(), before);
+            assert!(engine.reserve_queue_structure().is_none());
+            drop(resolved);
+            assert!(engine.reserve_queue_structure().is_some());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn device_switch_empty_queue_still_holds_and_validates_reservation() {
+        let mut engine = engine_with_track("unused");
+        engine.queue.clear();
+        let captured = engine.capture_device_switch_queue().unwrap();
+        let resolved = captured.bind_resolved_uris(vec![]).unwrap();
+        let (socket, server) =
+            fake_mpd_script(vec![("status".into(), Some("state: stop\nOK\n".into()))]);
+        engine.socket_path = socket;
+        assert!(engine
+            .prepare_reserved_device_switch(&resolved)
+            .unwrap()
+            .is_none());
+        engine
+            .restore_after_reserved_device_switch(None, &resolved)
+            .unwrap();
+        assert!(engine.play_uris(vec!["new.flac".into()], 0).is_err());
+        assert!(engine.reserve_queue_structure().is_none());
+        drop(resolved);
+        assert!(engine.reserve_queue_structure().is_some());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn device_switch_rollback_retains_owner_after_intermediate_mpd_failure() {
+        let mut engine = engine_with_track("valid.flac");
+        let before = engine.get_queue();
+        let captured = engine.capture_device_switch_queue().unwrap();
+        let resolved = captured
+            .bind_resolved_uris(vec!["valid.flac".into()])
+            .unwrap();
+        let playback = Some(DeviceSwitchSnapshot {
+            queue_index: 0,
+            elapsed: 0.0,
+            state: PlaybackState::Paused,
+        });
+        let batch = "command_list_begin\nclear\nadd \"valid.flac\"\nplay 0\ncommand_list_end";
+        let (socket, server) = fake_mpd_script(vec![
+            (batch.into(), Some("ACK [50@0] {add} rejected\n".into())),
+            (batch.into(), Some("OK\n".into())),
+            ("pause 1".into(), Some("OK\n".into())),
+        ]);
+        engine.socket_path = socket;
+        assert!(engine
+            .restore_after_reserved_device_switch(playback, &resolved)
+            .is_err());
+        assert!(engine.clear_queue().is_err());
+        assert!(engine.reserve_queue_structure().is_none());
+        // Rollback is allowed to use the same identity-bound capability.
+        engine
+            .restore_after_reserved_device_switch(playback, &resolved)
+            .unwrap();
+        assert_eq!(engine.get_queue(), before);
+        assert!(engine.reserve_queue_structure().is_none());
+        drop(resolved);
+        assert!(engine.reserve_queue_structure().is_some());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn device_switch_failed_output_start_rolls_back_bound_queue_under_reservation() {
+        for state in [
+            PlaybackState::Playing,
+            PlaybackState::Paused,
+            PlaybackState::Stopped,
+        ] {
+            for rollback_starts in [true, false] {
+                let mut engine = engine_with_track("valid.flac");
+                let before = engine.get_queue();
+                let captured = engine.capture_device_switch_queue().unwrap();
+                let resolved = captured
+                    .bind_resolved_uris(vec!["valid.flac".into()])
+                    .unwrap();
+                let mpd_state = match state {
+                    PlaybackState::Playing => "play",
+                    PlaybackState::Paused => "pause",
+                    PlaybackState::Stopped => "stop",
+                };
+                let mut script = vec![(
+                    "status".into(),
+                    Some(format!("state: {mpd_state}\nsong: 0\nelapsed: 0\nOK\n")),
+                )];
+                if state != PlaybackState::Stopped {
+                    script.push(("stop".into(), Some("OK\n".into())));
+                }
+                if rollback_starts {
+                    let selection = if state == PlaybackState::Stopped {
+                        ""
+                    } else {
+                        "play 0\n"
+                    };
+                    script.push((format!("command_list_begin\nclear\nadd \"valid.flac\"\n{selection}command_list_end"), Some("OK\n".into())));
+                    if state != PlaybackState::Stopped {
+                        script.push(("pause 1".into(), Some("OK\n".into())));
+                    }
+                }
+                let (socket, server) = fake_mpd_script(script);
+                engine.socket_path = socket;
+                let playback = engine.prepare_reserved_device_switch(&resolved).unwrap();
+                let audio = Mutex::new(engine);
+                let error = crate::confirm_device_switch_start(
+                    Err("simulated output startup failure".into()),
+                    || {
+                        crate::rollback_audio_switch_with(playback, &resolved, &audio, || {
+                            let mut engine = audio
+                                .try_lock()
+                                .expect("restart must not retain AudioState");
+                            assert!(engine.clear_queue().is_err());
+                            assert!(engine.reserve_queue_structure().is_none());
+                            if rollback_starts {
+                                Ok(())
+                            } else {
+                                Err("simulated rollback startup failure".into())
+                            }
+                        })
+                    },
+                )
+                .unwrap_err();
+                assert!(error.contains("simulated output startup failure"));
+                assert_eq!(
+                    error.ends_with("Estado anterior restaurado."),
+                    rollback_starts
+                );
+                assert_eq!(error.contains("Rollback também falhou"), !rollback_starts);
+                let mut engine = audio.lock().unwrap();
+                assert_eq!(engine.get_queue(), before);
+                assert!(engine.reserve_queue_structure().is_none());
+                drop(resolved);
+                assert!(engine.reserve_queue_structure().is_some());
+                server.join().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn device_switch_resolution_failure_releases_owner_before_preparation() {
+        let mut engine = engine_with_track("");
+        engine.queue[0] = plex_track();
+        let before = engine.get_queue();
+        let audio = Mutex::new(engine);
+        let client = crate::plex::PlexClient::from_config(&crate::config::AppConfig::default());
+        assert!(
+            tauri::async_runtime::block_on(crate::resolve_device_switch_queue(&audio, &client))
+                .is_err()
+        );
+        let mut engine = audio.lock().unwrap();
+        assert_eq!(engine.get_queue(), before);
+        assert!(engine.reserve_queue_structure().is_some());
+    }
+
+    #[test]
+    fn device_switch_delayed_plex_resolution_keeps_audio_available_and_shutdown_serialized() {
+        use std::net::TcpListener;
+        use std::sync::mpsc::channel;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = crate::config::AppConfig {
+            plex_url: format!("http://{}", listener.local_addr().unwrap()),
+            plex_token: "FIXTURE_TOKEN".into(),
+            plex_server_id: Some("server-1".into()),
+            ..crate::config::AppConfig::default()
+        };
+        let client = crate::plex::PlexClient::playback_client_for_test(&config);
+        let (reading_tx, reading_rx) = channel();
+        let (response_tx, response_rx) = channel();
+        let server = thread::spawn(move || {
+            for request in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with(if request == 0 {
+                    "GET /identity "
+                } else {
+                    "GET /library/sections "
+                }));
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                if request == 0 {
+                    reading_tx.send(()).unwrap();
+                    response_rx.recv().unwrap();
+                }
+                let body = if request == 0 {
+                    r#"{"MediaContainer":{"machineIdentifier":"server-1"}}"#
+                } else {
+                    r#"{"MediaContainer":{}}"#
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        let mut engine = engine_with_track("");
+        engine.queue[0] = plex_track();
+        let audio = Arc::new(Mutex::new(engine));
+        let transactions = Arc::new(crate::ConfigTransactionState::new());
+        let worker_audio = Arc::clone(&audio);
+        let worker_transactions = Arc::clone(&transactions);
+        let (resolved_tx, resolved_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let worker = thread::spawn(move || {
+            let _transaction = worker_transactions.begin().unwrap();
+            let resolved = tauri::async_runtime::block_on(crate::resolve_device_switch_queue(
+                &worker_audio,
+                &client,
+            ))
+            .unwrap();
+            resolved_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(resolved);
+        });
+        reading_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        {
+            let mut engine = audio
+                .try_lock()
+                .expect("Plex I/O must not retain AudioState");
+            assert_eq!(
+                engine.get_queue()[0].media_locator,
+                plex_track().media_locator
+            );
+            assert!(engine.clear_queue().is_err());
+            assert!(engine
+                .play_tracks(vec![plex_track()], vec!["other.flac".into()], 0)
+                .is_err());
+            assert!(engine.play_uris(vec!["other.flac".into()], 0).is_err());
+        }
+        transactions.request_shutdown();
+        assert!(transactions.begin().is_err());
+        let shutdown_transactions = Arc::clone(&transactions);
+        let (shutdown_tx, shutdown_rx) = channel();
+        let shutdown = thread::spawn(move || {
+            let _shutdown = shutdown_transactions.wait_for_active_transaction();
+            shutdown_tx.send(()).unwrap();
+        });
+        assert!(shutdown_rx.try_recv().is_err());
+        response_tx.send(()).unwrap();
+        resolved_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(audio.lock().unwrap().reserve_queue_structure().is_none());
+        assert!(shutdown_rx.try_recv().is_err());
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        shutdown_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        shutdown.join().unwrap();
+        server.join().unwrap();
+        assert!(audio.lock().unwrap().reserve_queue_structure().is_some());
+    }
+
+    #[test]
     fn queue_restore_uses_fresh_uri_without_mutating_stable_plex_queue() {
         let engine = AudioEngine {
             socket_path: String::new(),
@@ -5522,6 +10018,7 @@ mod tests {
             queue: vec![plex_track()],
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
+            queue_structure_reserved: Arc::new(AtomicU8::new(0)),
         };
         let first = engine
             .device_switch_queue_restore_commands(
@@ -5816,6 +10313,7 @@ mod tests {
             queue: Vec::new(),
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
+            queue_structure_reserved: Arc::new(AtomicU8::new(0)),
         };
         assert!(engine.restore_after_device_switch(None, &[]).is_ok());
     }
