@@ -71,7 +71,7 @@ function wizard(overrides = {}) {
   new Function("require", "exports", js)(id => { assert.ok(id in dependencies, `Unexpected import ${id}`); return dependencies[id]; }, exports);
   let disposed = false;
   const f = { calls, timers, tree: null,
-    render() { cursor = 0; f.tree = exports.WelcomeWizard({ initialConfig: overrides.config ?? base, devices: overrides.devices ?? devices, onFinish(config) { calls.finished.push(config); } }); effects.splice(0).forEach(run => run()); return f.tree; },
+    render() { cursor = 0; f.tree = exports.WelcomeWizard({ initialConfig: overrides.config ?? base, devices: overrides.devices ?? devices, onCancel: overrides.onCancel, onSaveAccepted: overrides.onSaveAccepted, onFinish(config) { calls.finished.push(config); } }); effects.splice(0).forEach(run => run()); return f.tree; },
     async tick() { const callback = [...timers.values()][0]; assert.ok(callback, "existing PIN timer is active"); await callback(); await flush(); f.render(); },
     dispose() { if (disposed) return; disposed = true; slots.forEach(slot => slot?.cleanup?.()); globalThis.window = previousWindow; globalThis.clearInterval = previousClear; },
   };
@@ -319,4 +319,26 @@ test("retained configuration is reviewed truthfully and an incomplete saved Plex
   assert.match(text(incomplete.tree), /wizard.plexNotReady/);
   assert.equal(button(incomplete, "wizard.start").props.disabled, true);
   await button(incomplete, "wizard.start").props.onClick(); assert.equal(incomplete.calls.saves.length, 0);
+});
+
+
+test("reopened collection wizard prefills existing sources, cancel/reopen is read-only and accepted saves use the existing monitor",async()=>{
+  const existing={...connected,first_run:false,local_folders:["/fixture/existing"]};
+  const before=JSON.stringify(existing);let cancelled=0;
+  for(let i=0;i<2;i++){
+    const f=wizard({config:existing,onCancel(){cancelled++;}});
+    assert.equal(sourceButton(f,"local").props["aria-pressed"],true);assert.equal(sourceButton(f,"plex").props["aria-pressed"],true);
+    next(f);assert.match(text(f.tree),/fixture\/existing/);
+    await button(f,"settings.addFolder").props.onClick();f.render();assert.match(text(f.tree),/fixture\/local/);
+    button(f,"settings.cancel").props.onClick();assert.equal(cancelled,i+1);assert.equal(f.calls.saves.length,0);assert.equal(f.calls.finished.length,0);assert.equal(f.calls.servers,0);assert.equal(f.calls.reads.length,0);
+    f.dispose();assert.equal(JSON.stringify(existing),before);
+  }
+  const onlyPlex=wizard({config:{...connected,first_run:false,local_folders:[]},onCancel(){}});
+  assert.equal(sourceButton(onlyPlex,"local").props["aria-pressed"],false);assert.equal(sourceButton(onlyPlex,"plex").props["aria-pressed"],true);
+  next(onlyPlex);next(onlyPlex);await button(onlyPlex,"wizard.start").props.onClick();
+  assert.equal(onlyPlex.calls.finished.length,1);assert.equal(onlyPlex.calls.finished[0].plex_token,connected.plex_token);assert.deepEqual(onlyPlex.calls.finished[0].local_folders,[]);assert.equal(onlyPlex.calls.finished[0].audio_output_type,connected.audio_output_type);onlyPlex.dispose();
+  const operation={id:"fixture-operation",phase:"preparing"};let accepted;
+  const f=wizard({config:{...base,first_run:false},onCancel(){},save:async()=>({status:"accepted",operation}),onSaveAccepted(value){accepted=value;}});
+  next(f);await button(f,"settings.addFolder").props.onClick();f.render();next(f);
+  await button(f,"wizard.start").props.onClick();assert.equal(accepted,operation);assert.equal(f.calls.finished.length,0);assert.equal(f.calls.saves[0].first_run,false);f.dispose();
 });

@@ -2,10 +2,15 @@ import type { LocalAlbum } from "../types/local";
 import type { PlexAlbum } from "../types/plex";
 import { deriveLocalArtists, localArtistIdentity } from "./localArtistNavigation.ts";
 import { derivePlexArtists, plexArtistIdentity } from "./plexArtistNavigation.ts";
-import { deriveAlbumGenres, filterAlbumsByGenre } from "./albumGenres.ts";
+import { genreComparisonKey } from "./albumGenres.ts";
+import { deriveExploreGenres, exploreGenreNames } from "./exploreGenres.ts";
 import { exploreDiagnosticAlias, exploreDiagnosticText, logExploreDiagnostic } from "./frontendDiagnostics.ts";
 import { groupExplorePresentation, explorePresentationArtistKey as artistKey } from "./explorePresentation.ts";
 
+import { eligibleExploreThemes, themeCandidates, shuffleExploreSections } from "./exploreThemes.ts";
+import type { ExploreThemeShelf } from "./exploreThemes.ts";
+
+export type ExploreShelfId = "albums" | "decade" | "genre" | "artists" | "genres";
 export const EXPLORE_PAGE_SIZE = 6;
 export const EXPLORE_SUGGESTION_COUNT = 10;
 export type ExploreArtistGroup = { kind: "artist"; key: string; name: string; source: "local" | "plex"; artistId: string; ratingKey?: string; albumCount?: number; libraryId?: string; libraryTitle?: string };
@@ -15,6 +20,7 @@ interface ExploreSlice { group: ExploreGroup; entries: readonly ExploreEntry[]; 
 interface ExploreSnapshot {
   preparing: boolean; selected: ExploreEntry[]; artists: ExploreArtistGroup[]; genres: ExploreGenreGroup[];
   slice: ExploreSlice | null; sliceInvalidated: boolean; revision: number;
+  themes: ExploreThemeShelf[]; sectionOrder: ExploreShelfId[]; resets: Partial<Record<ExploreShelfId, number>>;
 }
 
 // Reuse the browser identities and genre validation; names never link Local to Plex.
@@ -26,9 +32,9 @@ export function deriveExploreGroups(context: ExploreContext) {
       key: JSON.stringify(["artist", "plex", context.plex.serverId, catalog.libraryId, artist.id]), artistId: artist.id, name: artist.name,
       ratingKey: artist.ratingKey, albumCount: artist.albumCount, libraryId: catalog.libraryId, libraryTitle: catalog.albums[0]?.library_title }))),
   ];
-  const localGenres = deriveAlbumGenres(context.local.albums), plexGenres = deriveAlbumGenres(context.plex.albums);
+  const localGenres = deriveExploreGenres(context.local.albums), plexGenres = deriveExploreGenres(context.plex.albums);
   const localValues = new Set(localGenres.map(genre => genre.value)), plexValues = new Set(plexGenres.map(genre => genre.value));
-  const genres: ExploreGenreGroup[] = deriveAlbumGenres([...context.local.albums, ...context.plex.albums]).map(genre => ({
+  const genres: ExploreGenreGroup[] = deriveExploreGenres([...context.local.albums, ...context.plex.albums]).map(genre => ({
     kind: "genre", key: JSON.stringify(["genre", genre.value]), name: genre.label, value: genre.value,
     sources: [...(localValues.has(genre.value) ? ["local" as const] : []), ...(plexValues.has(genre.value) ? ["plex" as const] : [])],
   }));
@@ -108,25 +114,61 @@ export function pickExploreSuggestions(pool: readonly ExploreEntry[], retained: 
 
 // Inventory and groups are rebuilt only when catalog arrays or the Plex scope change.
 // Visibility/availability invalidate interaction tokens without reshuffling retained identities.
-export function createExploreSession(random = Math.random) {
+export function createExploreSession(random = Math.random, now = () => new Date()) {
   let context: ExploreContext | null = null, active = true, desiredActive = true;
   let availableInventory: ExploreEntry[] = [];
+  let genreCounts = new Map<string, number>(), genreDistinctCounts = new Map<string, number>();
+  let genreSets = new Map<string, Set<string>>();
   let inventory: ExploreEntry[] = [], byKey = new Map<string, ExploreEntry>();
   let groups = { artists: [] as ExploreArtistGroup[], genres: [] as ExploreGenreGroup[] };
-  let state: ExploreSnapshot = { preparing: true, selected: [], artists: [], genres: [], slice: null, sliceInvalidated: false, revision: 0 };
+  let state: ExploreSnapshot = { preparing: true, selected: [], artists: [], genres: [], slice: null, sliceInvalidated: false, revision: 0, themes: [], sectionOrder: ["albums", "artists", "genres"], resets: {} };
+  const artistAlbums = new Map<string, ExploreEntry>();
   const listeners = new Set<() => void>();
   const publish = (patch: Partial<ExploreSnapshot>, notify = true) => {
-    state = { ...state, ...patch, revision: state.revision + 1 }; if (notify) listeners.forEach(fn => fn());
+    state = { ...state, ...patch, revision: state.revision + 1 };
+    for (const key of artistAlbums.keys()) if (!state.artists.some(group => group.key === key)) artistAlbums.delete(key);
+    if (notify) listeners.forEach(fn => fn());
   };
   // byKey already proves membership; avoid rescanning each library for every album.
   const usable = (entry: ExploreEntry) => !!context && byKey.get(entry.key) === entry && entryContextCurrent(context, entry);
   const groupAvailable = (group: ExploreGroup) => !!context && (group.kind === "artist"
-    ? context[group.source].state === "ready" && (group.source === "local" || plexCatalogs(context).some(catalog => catalog.libraryId === group.libraryId)) : group.sources.some(source => context![source].state === "ready"));
+    ? context[group.source].state === "ready" && (group.source === "local" || plexCatalogs(context).some(catalog => catalog.libraryId === group.libraryId)) : (genreDistinctCounts.get(group.value) ?? 0) >= 5);
   const pool = () => availableInventory;
   const matchesGroup = (entry: ExploreEntry, group: ExploreGroup) => group.kind === "genre"
-    ? filterAlbumsByGenre([entry.album], group.value).length > 0
+    ? genreSets.get(entry.key)?.has(group.value) === true
     : entry.source === group.source && (entry.source === "local" ? localArtistIdentity(entry.album.artist)
       : entry.libraryId === group.libraryId ? plexArtistIdentity(entry.album) : null) === group.artistId;
+  const renewSelection = (available: readonly ExploreEntry[], previous: readonly ExploreEntry[]) => {
+    const oldKeys = new Set(previous.map(entry => entry.key));
+    const groups = groupExplorePresentation(available, previous);
+    const alternatives = groups.filter(group => !group.members.some(entry => oldKeys.has(entry.key))).map(group => group.candidate);
+    const seed = alternatives.length ? [alternatives[Math.floor(random() * alternatives.length)]] : [];
+    let selected = pickExploreSuggestions(alternatives.length >= EXPLORE_SUGGESTION_COUNT ? alternatives : available, seed, random);
+    if (selected.length > 1 && selected.every((entry, i) => entry.key === previous[i]?.key)) selected = [...selected.slice(1), selected[0]];
+    return selected;
+  };
+  let themesPool: readonly ExploreEntry[] | null = null, themesYear = 0;
+  let eligibleThemes = [] as ReturnType<typeof eligibleExploreThemes>;
+  const chooseThemes = () => {
+    const year = now().getFullYear();
+    if (themesPool !== pool() || themesYear !== year) { themesPool = pool(); themesYear = year; eligibleThemes = eligibleExploreThemes(pool(), year); }
+    const eligible = eligibleThemes;
+    return (["decade", "genre"] as const).flatMap(id => {
+      const options = eligible.filter(theme => theme.id === id);
+      if (!options.length) return [];
+      const theme = options[Math.floor(random() * options.length)];
+      const previous = state.themes.find(old => old.id === theme.id && old.value === theme.value);
+      const candidates = themeCandidates(pool(), theme, year);
+      return [{ ...theme, selected: previous ? renewSelection(candidates, previous.selected) : pickExploreSuggestions(candidates, [], random) }];
+    });
+  };
+  const sectionOrder = (themes: readonly ExploreThemeShelf[]) => shuffleExploreSections<ExploreShelfId>(["albums", "artists", "genres", ...themes.map(theme => theme.id)], random);
+  const renewGroups = <T extends ExploreGroup>(all: readonly T[], selected: readonly T[]) => {
+    const availableGroups = all.filter(groupAvailable), alternatives = availableGroups.filter(group => !selected.some(old => old.key === group.key));
+    let renewed = sampleGroups(availableGroups, alternatives.length ? [alternatives[Math.floor(random() * alternatives.length)]] : [], random);
+    if (renewed.length > 1 && renewed.every((group, index) => group.key === selected[index]?.key)) renewed = [...renewed.slice(1), renewed[0]];
+    return renewed;
+  };
   const pageEntries = () => state.slice?.entries.slice(state.slice.page * EXPLORE_PAGE_SIZE, (state.slice.page + 1) * EXPLORE_PAGE_SIZE) ?? [];
   const diagnose = (event: "context" | "visibility" | "renew" | "slice" | "page" | "shelves", inventoryChanged = false) => logExploreDiagnostic(() => {
     const countSources = (items: readonly ExploreEntry[]) => ({ local: items.filter(e => e.source === "local").length, plex: items.filter(e => e.source === "plex").length });
@@ -171,8 +213,17 @@ export function createExploreSession(random = Math.random) {
       if (inventoryChanged) {
         inventory = entries(next); byKey = new Map(inventory.map(entry => [entry.key, entry]));
         groups = deriveExploreGroups(next);
+        genreSets = new Map(inventory.map(entry => [entry.key, new Set(exploreGenreNames(entry.album).map(genreComparisonKey))]));
       }
       availableInventory = inventory.filter(usable);
+      if (inventoryChanged || oldContext?.local.state !== next.local.state || oldContext?.plex.state !== next.plex.state) {
+        const members = new Map<string, ExploreEntry[]>();
+        for (const entry of availableInventory) for (const genre of genreSets.get(entry.key) ?? []) {
+          if (!members.has(genre)) members.set(genre, []); members.get(genre)!.push(entry);
+        }
+        genreCounts = new Map([...members].map(([value, entries]) => [value, entries.length]));
+        genreDistinctCounts = new Map([...members].map(([value, entries]) => [value, groupExplorePresentation(entries).length]));
+      }
       const additionOnly = !!oldContext && oldContext.local.albums === next.local.albums && oldContext.local.state === next.local.state
         && oldContext.plex.identity === next.plex.identity && oldContext.plex.serverId === next.plex.serverId
         && (inventory.length > previousInventory.length || plexCatalogs(next).length > plexCatalogs(oldContext).length) && previousInventory.every(old => {
@@ -197,17 +248,28 @@ export function createExploreSession(random = Math.random) {
         if (old.kind === "artist" && old.source === "plex" && oldContext?.plex.identity !== next.plex.identity) return [];
         const current = all.find(group => group.key === old.key); return current && groupAvailable(current) ? [current] : [];
       });
-      // Local's first confirmed snapshot settles the initial selection. Plex may continue
-      // loading: ready Local must never wait for the aggregate to finish.
-      const preparing = state.preparing && (next.local.state === "loading"
-        || next.local.state !== "ready" && next.plex.state !== "ready" && (next.plex.state === "loading" || next.plex.loading === true));
+      // The first ready source settles the initial selection. Neither source waits
+      // for an unconfigured, unavailable or still-loading counterpart.
+      const preparing = state.preparing && next.local.state !== "ready" && next.plex.state !== "ready"
+        && (next.local.state === "loading" || next.plex.state === "loading" || next.plex.loading === true);
       const first = !preparing && (state.preparing || !state.selected.length && available.length > 0);
       const artists = retainGroups(state.artists, groups.artists), genres = retainGroups(state.genres, groups.genres);
       const retainedKeys = new Set(retained.map(entry => entry.key));
       const retainedGroupCount = groupExplorePresentation(available, retained)
         .filter(group => group.members.some(entry => retainedKeys.has(entry.key))).length;
       const invalidated = retainedGroupCount < state.selected.length;
-      publish({ preparing,
+      const themes = preparing ? [] : first ? chooseThemes() : state.themes.flatMap(theme => {
+        const candidates = themeCandidates(available, theme, now().getFullYear());
+        if (groupExplorePresentation(candidates).length < EXPLORE_SUGGESTION_COUNT) return [];
+        const kept = theme.selected.flatMap(old => {
+          if (old.source === "plex" && old.identity !== next.plex.identity) return [];
+          const current = byKey.get(old.key); return current && usable(current) && candidates.includes(current) ? [current] : [];
+        });
+        const keys = new Set(kept.map(entry => entry.key));
+        const validCount = groupExplorePresentation(candidates, kept).filter(group => group.members.some(entry => keys.has(entry.key))).length;
+        return [{ ...theme, selected: validCount < theme.selected.length ? pickExploreSuggestions(candidates, kept, random, true) : kept }];
+      });
+      publish({ preparing, themes, ...(first ? { sectionOrder: sectionOrder(themes) } : {}),
         selected: preparing ? [] : first || invalidated ? pickExploreSuggestions(available, retained, random, !first) : retained,
         artists: preparing ? [] : first || artists.length < state.artists.length ? sampleGroups(artistPool, artists, random) : artists,
         genres: preparing ? [] : first || genres.length < state.genres.length ? sampleGroups(genrePool, genres, random) : genres,
@@ -216,19 +278,41 @@ export function createExploreSession(random = Math.random) {
     },
     renew() {
       if (!active || !context || state.preparing) return;
-      const available = groupExplorePresentation(pool(), state.selected).map(group => group.candidate);
-      const unselected = available.filter(entry => !state.selected.some(old => old.key === entry.key));
-      const seed = unselected.length ? [unselected[Math.floor(random() * unselected.length)]] : [];
-      let next = pickExploreSuggestions(available, seed, random);
-      if (next.length > 1 && next.map(e => e.key).join() === state.selected.map(e => e.key).join()) next = [...next.slice(1), next[0]];
-      const renewGroups = <T extends ExploreGroup>(all: readonly T[], selected: readonly T[]) => {
-        const availableGroups = all.filter(groupAvailable), alternatives = availableGroups.filter(group => !selected.some(old => old.key === group.key));
-        let renewed = sampleGroups(availableGroups, alternatives.length ? [alternatives[Math.floor(random() * alternatives.length)]] : [], random);
-        if (renewed.length > 1 && renewed.every((group, index) => group.key === selected[index]?.key)) renewed = [...renewed.slice(1), renewed[0]];
-        return renewed;
-      };
-      publish({ selected: next, artists: renewGroups(groups.artists, state.artists), genres: renewGroups(groups.genres, state.genres) });
+      const themes = chooseThemes();
+      publish({ selected: renewSelection(pool(), state.selected), themes, sectionOrder: sectionOrder(themes),
+        resets: Object.fromEntries((["albums", "decade", "genre", "artists", "genres"] as const).map(id => [id, (state.resets[id] ?? 0) + 1])),
+        artists: renewGroups(groups.artists, state.artists), genres: renewGroups(groups.genres, state.genres) });
       diagnose("renew");
+    },
+    renewShelf(id: ExploreShelfId) {
+      if (!active || !context || state.preparing) return;
+      const reset = { resets: { ...state.resets, [id]: (state.resets[id] ?? 0) + 1 } };
+      if (id === "albums") publish({ ...reset, selected: renewSelection(pool(), state.selected) });
+      else if (id === "artists") publish({ ...reset, artists: renewGroups(groups.artists, state.artists) });
+      else if (id === "genres") publish({ ...reset, genres: renewGroups(groups.genres, state.genres) });
+      else {
+        const theme = state.themes.find(theme => theme.id === id); if (!theme) return;
+        const candidates = themeCandidates(pool(), theme, now().getFullYear());
+        if (groupExplorePresentation(candidates).length < EXPLORE_SUGGESTION_COUNT) return;
+        publish({ ...reset, themes: state.themes.map(old => old === theme ? { ...theme, selected: renewSelection(candidates, theme.selected) } : old) });
+      }
+      diagnose("renew");
+    },
+    canUseShelf(entry: ExploreEntry, revision: number, id: "decade" | "genre") {
+      return active && revision === state.revision && usable(entry) && !!state.themes.find(theme => theme.id === id)?.selected.includes(entry);
+    },
+    genreAlbumCount(group: ExploreGenreGroup) { return genreCounts.get(group.value) ?? 0; },
+    artistAlbum(group: ExploreArtistGroup, cached: (entry: ExploreEntry) => boolean = () => false) {
+      if (!groupAvailable(group)) return undefined;
+      const old = artistAlbums.get(group.key), current = old ? byKey.get(old.key) : undefined;
+      if (current && usable(current) && matchesGroup(current, group) && (old?.source !== "plex" || old.identity === context?.plex.identity)) {
+        artistAlbums.set(group.key, current); return current;
+      }
+      // Inspect metadata/cache only; resolve at most this one chosen candidate per card.
+      const candidates = pool().filter(entry => matchesGroup(entry, group));
+      const chosen = candidates.find(cached) ?? candidates[0];
+      if (chosen) artistAlbums.set(group.key, chosen); else artistAlbums.delete(group.key);
+      return chosen;
     },
     canUse(entry: ExploreEntry, revision: number) { return active && revision === state.revision && usable(entry) && state.selected.includes(entry); },
     canUseSlice(entry: ExploreEntry, revision: number) { return active && revision === state.revision && usable(entry) && pageEntries().includes(entry); },

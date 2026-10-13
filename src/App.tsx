@@ -328,6 +328,12 @@ PlexAlbumCard.displayName = "PlexAlbumCard";
 export function App() {
   const { t } = useTranslation();
   const localCatalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
+  const [showCollectionWizard, setShowCollectionWizard] = useState(false);
+  const collectionWizardWasOpen = useRef(false);
+  useEffect(() => {
+    if (!showCollectionWizard && collectionWizardWasOpen.current) document.getElementById("explore-configure-collection")?.focus();
+    collectionWizardWasOpen.current = showCollectionWizard;
+  }, [showCollectionWizard]);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [mediaSource, setMediaSource] = useState<MainSection | null>(null);
@@ -1472,7 +1478,12 @@ export function App() {
         {centralSection === "explore" ? (
           <div className="contents">
             <div className={exploreDetail ? "hidden" : "contents"}>
-              <ExploreView portraits={artistPortraits} context={exploreContext} active={!exploreDetail && !playerTarget} libraryTitle={null}
+              <ExploreView portraits={artistPortraits} context={exploreContext} active={!exploreDetail && !playerTarget && !showCollectionWizard} libraryTitle={null}
+                configurationReady={config !== null} onConfigure={() => setShowCollectionWizard(true)}
+                canRetryLocal={isPlaybackAvailable && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy}
+                retryLocal={() => { if (isPlaybackAvailable && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy) localAlbumCatalog.requestRefresh(); }}
+                onlineArtworkEnabled={config?.online_artwork_enabled ?? false}
+                artworkBlocked={!isPlaybackAvailable || artworkReadBlocked(playbackStatus.is_updating, localCatalog)}
                 plexProgress={{ loading: isPlexConnected && (loadingLibraries || aggregateLoading), failedLibraries: aggregateFailures,
                   discoveryFailed: plexLibrariesError, complete: aggregateComplete }}
                 retryPlex={() => { if (plexLibrariesError) setPlexDiscoveryAttempt(attempt => attempt + 1); else plexCatalog.retryFailures(); }}
@@ -1483,7 +1494,7 @@ export function App() {
               subview={exploreLocalSubview} onSubviewChange={setExploreLocalSubview}
               albumNavigationAvailable={exploreEntryCurrent(exploreDetail)} onAlbumNavigationBack={closeExploreAlbum}
               catalogRefreshRevision={localCatalogRevision} isPlaybackAvailable={isPlaybackAvailable} isLibraryUpdating={playbackStatus.is_updating}
-              onlineArtworkEnabled={false} configuredLocalFolders={config?.local_folders ?? []} />}
+              onlineArtworkEnabled={config?.online_artwork_enabled ?? false} configuredLocalFolders={config?.local_folders ?? []} />}
             {exploreDetail?.source === "plex" && (exploreEntryCurrent(exploreDetail)
               ? <AlbumView key={exploreDetail.key} album={exploreDetail.album} onBack={closeExploreAlbum}
                   onToggleFavorite={refreshPlexFavorites} isPlaybackAvailable={isPlaybackAvailable} />
@@ -2240,6 +2251,11 @@ export function App() {
         status={playbackStatus}
         isPlaybackAvailable={isPlaybackAvailable}
       />
+
+      {showCollectionWizard && <WelcomeWizard initialConfig={config} devices={devices}
+        onCancel={() => setShowCollectionWizard(false)}
+        onSaveAccepted={operation => { configSaveMonitorRef.current?.accepted(operation); setShowCollectionWizard(false); }}
+        onFinish={newConfig => { setConfig(newConfig); setLocalCatalogRevision(revision => revision + 1); setShowCollectionWizard(false); }} />}
 
       {showSettings && (
         <SettingsModal

@@ -1,38 +1,69 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { ArrowLeft, Compass, RefreshCw, UserRound, ChevronLeft, ChevronRight } from "lucide-react";
+import { ArrowLeft, Compass, RefreshCw, UserRound, ChevronLeft, ChevronRight, Guitar, Piano, Mic2, Radio, Headphones, Music2, Disc3, AudioLines, ListMusic } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createExploreSession, exploreOriginName, EXPLORE_PAGE_SIZE, EXPLORE_SUGGESTION_COUNT } from "../utils/explore";
+import { exploreGenreCardStyle, assignExploreGenreColors, assignExploreGenreIcons } from "../utils/exploreGenreCards";
 import { albumShelfEdges, albumShelfLayout, albumShelfTarget } from "../utils/exploreAlbumShelf";
-import type { ExploreArtistGroup, ExploreContext, ExploreEntry } from "../utils/explore";
+import type { ExploreArtistGroup, ExploreContext, ExploreEntry, ExploreShelfId } from "../utils/explore";
 import { artistPortraitInitials } from "../utils/plexArtistPortraits";
 import type { ArtistPortraitResult, PlexArtistPortraitCache } from "../utils/plexArtistPortraits";
 import { localArtworkResolver } from "../utils/localArtworkSession";
 import { PlexImage } from "./PlexImage";
 import { AlbumArtworkPlaceholder } from "./AlbumArtworkPlaceholder";
 
-export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => boolean; revision: number; active: boolean; onOpen: () => void }> = ({ entry, current, active, onOpen }) => {
+const genreIcons = { guitar: Guitar, piano: Piano, mic: Mic2, radio: Radio, headphones: Headphones, music: Music2, disc: Disc3, audio: AudioLines, playlist: ListMusic };
+
+export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => boolean; revision: number; active: boolean;
+  onlineArtworkEnabled?: boolean; artworkBlocked?: boolean; artworkOnly?: boolean; fallback?: React.ReactNode; onOpen: () => void }> = ({ entry, current, active, onlineArtworkEnabled = false, artworkBlocked = false, artworkOnly = false, fallback, onOpen }) => {
   const { t } = useTranslation();
-  const [cover, setCover] = useState<string | null>(null);
+  const [cover, setCover] = useState<string | null>(() => entry.source === "local" ? localArtworkResolver.get(entry.album.id) : null);
+  const [phase, setPhase] = useState<"idle" | "loading" | "ready" | "missing" | "error">("idle");
+  const [visible, setVisible] = useState(() => typeof IntersectionObserver === "undefined");
+  const cardNode = useRef<HTMLElement | null>(null);
   const live = useRef(current); live.current = current;
+  const flags = useRef({ active, onlineArtworkEnabled, artworkBlocked });
+  flags.current = { active, onlineArtworkEnabled, artworkBlocked };
   const origin = `${t(`explore.sources.${entry.source}`)} · ${exploreOriginName(entry) ?? t("explore.unknownOrigin")}`;
   useEffect(() => {
-    if (entry.source !== "local" || !active || !live.current()) return;
-    let mounted = true;
-    const valid = () => live.current();
+    if (!active || typeof IntersectionObserver === "undefined" || !cardNode.current) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(item => item.isIntersecting)) { setVisible(true); observer.disconnect(); }
+    }, { rootMargin: "150px" });
+    observer.observe(cardNode.current);
+    return () => observer.disconnect();
+  }, [entry.key, active]);
+  useEffect(() => {
+    if (entry.source !== "local") return;
     const cached = localArtworkResolver.get(entry.album.id);
-    setCover(cached);
-    if (cached) return;
-    void localArtworkResolver.resolveLocalOnly(entry.album, () => !mounted || !valid()).then(value => {
-      if (mounted && valid()) setCover(value);
-    }).catch(() => { /* Artwork failure leaves a placeholder, not a catalog failure. */ });
+    setCover(cached); setPhase(cached ? "ready" : "idle");
+    return localArtworkResolver.subscribe(entry.album.id, value => {
+      if (flags.current.active && live.current()) { setCover(value); setPhase("ready"); }
+    });
+  }, [entry.album, entry.source]);
+  useEffect(() => {
+    if (entry.source !== "local" || !active || !visible || artworkBlocked || !live.current()) return;
+    let mounted = true;
+    const interested = () => mounted && flags.current.active && !flags.current.artworkBlocked && live.current();
+    const cached = localArtworkResolver.get(entry.album.id);
+    if (cached) { setCover(cached); setPhase("ready"); return; }
+    setPhase("loading");
+    let deferred = false;
+    void localArtworkResolver.resolve(entry.album, () => flags.current.onlineArtworkEnabled,
+      () => flags.current.artworkBlocked, next => { deferred = next === "deferred"; }, interested).then(value => {
+      if (interested()) { setCover(value); setPhase(value ? "ready" : deferred ? "idle" : "missing"); }
+    }).catch(() => {
+      if (interested()) setPhase("error"); // Retry on a later activation, never per render or polling.
+    });
     return () => { mounted = false; };
-  }, [entry.album, entry.source, active]);
-  return <button type="button" onClick={() => { if (live.current()) onOpen(); }} disabled={!active}
+  }, [entry.album, entry.source, active, visible, onlineArtworkEnabled, artworkBlocked]);
+  const artwork = <div aria-busy={entry.source === "local" && phase === "loading"} className="aspect-square overflow-hidden rounded-lg bg-[#202020]">
+      {entry.source === "plex" && entry.album.thumb && active ? <PlexImage cacheScope={artworkOnly && typeof entry.identity === "object" && entry.identity !== null ? entry.identity : undefined} image={entry.album.thumb} alt="" className="h-full w-full object-cover" fallback={fallback ?? <AlbumArtworkPlaceholder />} />
+        : cover ? <img src={cover} alt="" className="h-full w-full object-cover" onError={() => { setCover(null); setPhase("error"); }} /> : fallback ?? <AlbumArtworkPlaceholder />}
+    </div>;
+  if (artworkOnly) return <div ref={cardNode as React.Ref<HTMLDivElement>} className="h-full w-full">{artwork}</div>;
+  return <button ref={cardNode as React.Ref<HTMLButtonElement>} type="button" onClick={() => { if (live.current()) onOpen(); }} disabled={!active}
     className="w-full min-w-0 rounded-xl p-2 text-left hover:bg-[#222222] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-60">
-    <div className="aspect-square overflow-hidden rounded-lg bg-[#202020]">
-      {entry.source === "plex" && entry.album.thumb && active ? <PlexImage image={entry.album.thumb} alt="" className="h-full w-full object-cover" fallback={<AlbumArtworkPlaceholder />} />
-        : cover ? <img src={cover} alt="" className="h-full w-full object-cover" /> : <AlbumArtworkPlaceholder />}
-    </div>
+    {artwork}
     <p className="mt-2 truncate text-sm font-semibold text-white" title={entry.album.title}>{entry.album.title || t("explore.untitled")}</p>
     <p className="truncate text-xs text-[#AAAAAA]" title={entry.album.artist}>{entry.album.artist || t("explore.artistNotProvided")}</p>
     <p className="mt-1 truncate text-[11px] text-[#777777]" title={origin}>{origin}</p>
@@ -40,7 +71,7 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
 };
 
 export const ExploreArtistPortrait: React.FC<{ group: ExploreArtistGroup; identity: unknown; serverId: string;
-  active: boolean; cache?: PlexArtistPortraitCache }> = ({ group, identity, serverId, active, cache }) => {
+  active: boolean; cache?: PlexArtistPortraitCache; album?: ExploreEntry; currentAlbum?: () => boolean; onlineArtworkEnabled?: boolean; artworkBlocked?: boolean }> = ({ group, identity, serverId, active, cache, album, currentAlbum, onlineArtworkEnabled, artworkBlocked }) => {
   const [resolved, setResolved] = useState<{ identity: unknown; serverId: string; ratingKey: string; result: ArtistPortraitResult } | null>(null);
   const ratingKey = group.source === "plex" ? group.ratingKey : undefined;
   useEffect(() => {
@@ -54,13 +85,98 @@ export const ExploreArtistPortrait: React.FC<{ group: ExploreArtistGroup; identi
     ? cache.peek(identity, serverId, ratingKey) ?? (resolved && resolved.identity === identity && resolved.serverId === serverId
       && resolved.ratingKey === ratingKey ? resolved.result : null) : null;
   const initials = artistPortraitInitials(group.name);
-  const fallback = <span aria-hidden="true" className="flex h-full w-full items-center justify-center text-3xl font-medium text-[#AAAAAA]">
+  const initialsFallback = <span aria-hidden="true" className="flex h-full w-full items-center justify-center text-3xl font-medium text-[#AAAAAA]">
     {initials ?? <UserRound size={44} strokeWidth={1.25} />}
   </span>;
-  return <div className="mx-auto h-32 w-32 shrink-0 overflow-hidden rounded-full border border-[#333333] bg-[#202020]">
+  const fallback = album && currentAlbum ? <ExploreAlbumCard artworkOnly fallback={initialsFallback} entry={album} revision={0} active={active}
+    current={currentAlbum} onlineArtworkEnabled={onlineArtworkEnabled} artworkBlocked={artworkBlocked} onOpen={() => {}} />
+    : <div className="h-full w-full rounded-full border border-[#333333] bg-[#202020]">{initialsFallback}</div>;
+  return <div className="mx-auto h-32 w-32 shrink-0">
     {result?.status === "ready" ? <PlexImage image={result.image} cacheScope={typeof identity === "object" && identity !== null ? identity : undefined}
-      alt="" className="h-full w-full object-cover" fallback={fallback} /> : fallback}
+      alt="" className="h-32 w-32 rounded-full border border-[#333333] object-cover" fallback={fallback} /> : fallback}
   </div>;
+};
+
+export const ExploreAlbumShelf: React.FC<{ id: string; title: string; cards: React.ReactElement[]; active: boolean;
+  waiting: boolean; resetRevision: number; positions: Record<string, number>; onRenew: () => void }> = ({ id, title, cards, active, waiting, resetRevision, positions, onRenew }) => {
+  const { t } = useTranslation();
+  const shelfNode = useRef<HTMLDivElement | null>(null);
+  const shelfPosition = useRef(positions[id] ?? 0);
+  const restoringShelf = useRef(true);
+  const shelfActive = useRef(active); shelfActive.current = active;
+  const shelfReset = resetRevision;
+  const lastReset = useRef(resetRevision);
+  const shelfCount = waiting ? EXPLORE_SUGGESTION_COUNT : cards.length;
+  const [shelfLayout, setShelfLayout] = useState(() => albumShelfLayout(0, shelfCount));
+  const [shelfEdges, setShelfEdges] = useState({ previous: false, next: false });
+  const updateShelfEdges = (node: HTMLDivElement) => {
+    const next = albumShelfEdges(node.clientWidth, node.scrollWidth, node.scrollLeft);
+    setShelfEdges(old => old.previous === next.previous && old.next === next.next ? old : next);
+  };
+  useLayoutEffect(() => {
+    const node = shelfNode.current;
+    if (!node || !active) return;
+    const measure = () => {
+      if (node.clientWidth <= 0) return; // Hidden details must not overwrite the saved position.
+      const next = albumShelfLayout(node.clientWidth, shelfCount);
+      setShelfLayout(old => old.viewportWidth === next.viewportWidth && old.cardWidth === next.cardWidth && old.visibleCount === next.visibleCount ? old : next);
+      updateShelfEdges(node);
+    };
+    const scroll = () => {
+      if (!shelfActive.current || node.clientWidth <= 0 || restoringShelf.current) return;
+      shelfPosition.current = node.scrollLeft; positions[id] = node.scrollLeft; updateShelfEdges(node);
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(node); node.addEventListener("scroll", scroll, { passive: true }); measure();
+    return () => { restoringShelf.current = true; observer.disconnect(); node.removeEventListener("scroll", scroll); };
+  }, [active, shelfCount]);
+  useLayoutEffect(() => {
+    const node = shelfNode.current;
+    if (!node || !active || node.clientWidth <= 0 || shelfLayout.viewportWidth !== node.clientWidth) return;
+    restoringShelf.current = true;
+    if (lastReset.current !== resetRevision) { shelfPosition.current = 0; positions[id] = 0; lastReset.current = resetRevision; }
+    const left = Math.max(0, Math.min(shelfPosition.current, node.scrollWidth - node.clientWidth));
+    node.scrollTo({ left, behavior: "auto" }); shelfPosition.current = left; positions[id] = left;
+    updateShelfEdges(node); restoringShelf.current = false;
+  }, [active, shelfLayout, shelfCount, shelfReset]);
+  const scrollShelf = (direction: -1 | 1 | "first" | "last") => {
+    const node = shelfNode.current;
+    if (!node || !active || waiting || node.clientWidth <= 0 || node.scrollWidth <= node.clientWidth + 1) return;
+    const left = albumShelfTarget(node.clientWidth, node.scrollWidth, node.scrollLeft, shelfLayout, direction);
+    node.scrollTo({ left, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  };
+  return <section>
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="text-lg font-bold text-white">{title}</h2>
+            <div className="flex shrink-0 gap-2">
+              <button type="button" disabled={!active || waiting || !cards.length} onClick={onRenew} aria-label={t("explore.renewSection", { title })} title={t("explore.renewSectionHint")} className="rounded-full p-2 text-[#AAAAAA] hover:bg-[#222222] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-30"><RefreshCw size={16} /></button>
+              <button type="button" aria-controls={id} aria-label={t("explore.previousSuggestions")} title={t("explore.previousSuggestions")}
+                disabled={!active || waiting || !shelfEdges.previous} onClick={() => scrollShelf(-1)}
+                className="rounded-full p-2 text-[#AAAAAA] hover:bg-[#222222] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-30"><ChevronLeft size={18} /></button>
+              <button type="button" aria-controls={id} aria-label={t("explore.nextSuggestions")} title={t("explore.nextSuggestions")}
+                disabled={!active || waiting || !shelfEdges.next} onClick={() => scrollShelf(1)}
+                className="rounded-full p-2 text-[#AAAAAA] hover:bg-[#222222] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-30"><ChevronRight size={18} /></button>
+            </div>
+          </div>
+          <div className="relative mt-3">
+            <div ref={shelfNode} id={id} role="region" aria-label={title} aria-busy={waiting} tabIndex={0}
+              onKeyDown={event => {
+                if (event.target !== event.currentTarget || event.defaultPrevented || (!shelfEdges.previous && !shelfEdges.next) || !active || waiting) return;
+                const directions = { ArrowLeft: -1, ArrowRight: 1, Home: "first", End: "last" } as const;
+                const direction = directions[event.key as keyof typeof directions];
+                if (direction !== undefined) { event.preventDefault(); scrollShelf(direction); }
+              }}
+              className="explore-album-shelf grid grid-flow-col gap-6 overflow-x-auto overscroll-x-contain snap-x snap-mandatory py-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+              style={{ gridAutoColumns: `${shelfLayout.cardWidth}px` }}>
+              {waiting ? Array.from({ length: EXPLORE_SUGGESTION_COUNT }, (_, index) => <div key={index} aria-hidden="true" className="min-w-0 snap-start rounded-xl p-2">
+                <div className="aspect-square rounded-lg bg-[#202020]" /><div className="mt-2 h-5 rounded bg-[#202020]" />
+                <div className="mt-1 h-4 w-2/3 rounded bg-[#202020]" /><div className="mt-1 h-4 w-1/2 rounded bg-[#202020]" />
+              </div>) : cards.map(card => <div key={card.key} className="min-w-0 snap-start">{card}</div>)}
+            </div>
+            {waiting && <p role="status" className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-[#AAAAAA]">{t("explore.creatingSuggestions")}</p>}
+          </div>
+          {!waiting && !cards.length && <p role="status" className="mt-4 text-xs text-[#999999]">{t("explore.noSuggestions")}</p>}
+        </section>;
 };
 
 interface Props {
@@ -73,83 +189,68 @@ interface Props {
   plexProgress?: { loading: boolean; failedLibraries: readonly string[]; discoveryFailed: boolean; complete: boolean };
   retryPlex?: () => void;
   portraits?: PlexArtistPortraitCache;
+  onlineArtworkEnabled?: boolean;
+  artworkBlocked?: boolean;
+  configurationReady?: boolean;
+  onConfigure?: () => void;
+  retryLocal?: () => void;
+  canRetryLocal?: boolean;
 }
-export const ExploreView: React.FC<Props> = ({ context, active, libraryTitle, ensureLocal, isCurrent, onOpen, plexProgress, retryPlex, portraits }) => {
+export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isCurrent, onOpen, plexProgress, retryPlex, portraits, onlineArtworkEnabled = false, artworkBlocked = false, configurationReady = true, onConfigure, retryLocal, canRetryLocal = true }) => {
   const { t } = useTranslation();
   const session = useMemo(() => createExploreSession(), []);
-  session.syncContext(context, active, false);
+  session.syncContext(configurationReady ? context : { ...context, local: { ...context.local, state: "loading" }, plex: { ...context.plex, state: "loading" } }, active, false);
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
   const ensure = useRef(ensureLocal); ensure.current = ensureLocal;
   useEffect(() => { session.activate(); return () => session.close(); }, [session]);
-  useEffect(() => { if (active) ensure.current(); }, [active, context.local.state]);
+  useEffect(() => { if (active && configurationReady && context.local.state !== "not_configured") ensure.current(); }, [active, configurationReady, context.local.state]);
   const slice = state.slice;
   const selected = slice ? session.sliceEntries() : session.visibleEntries();
   const artists = session.visibleArtists(), genres = session.visibleGenres();
-  const shelfNode = useRef<HTMLDivElement | null>(null);
-  const shelfPosition = useRef(0);
-  const restoringShelf = useRef(true);
-  const shelfActive = useRef(active); shelfActive.current = active;
-  const [shelfReset, setShelfReset] = useState(0);
-  const shelfCount = state.preparing ? EXPLORE_SUGGESTION_COUNT : session.visibleEntries().length;
-  const [shelfLayout, setShelfLayout] = useState(() => albumShelfLayout(0, shelfCount));
-  const [shelfEdges, setShelfEdges] = useState({ previous: false, next: false });
-  const updateShelfEdges = (node: HTMLDivElement) => {
-    const next = albumShelfEdges(node.clientWidth, node.scrollWidth, node.scrollLeft);
-    setShelfEdges(old => old.previous === next.previous && old.next === next.next ? old : next);
-  };
-  useLayoutEffect(() => {
-    const node = shelfNode.current;
-    if (!node || !active || slice) return;
-    const measure = () => {
-      if (node.clientWidth <= 0) return; // Hidden details must not overwrite the saved position.
-      const next = albumShelfLayout(node.clientWidth, shelfCount);
-      setShelfLayout(old => old.viewportWidth === next.viewportWidth && old.cardWidth === next.cardWidth && old.visibleCount === next.visibleCount ? old : next);
-      updateShelfEdges(node);
-    };
-    const scroll = () => {
-      if (!shelfActive.current || node.clientWidth <= 0 || restoringShelf.current) return;
-      shelfPosition.current = node.scrollLeft; updateShelfEdges(node);
-    };
-    const observer = new ResizeObserver(measure);
-    observer.observe(node); node.addEventListener("scroll", scroll, { passive: true }); measure();
-    return () => { restoringShelf.current = true; observer.disconnect(); node.removeEventListener("scroll", scroll); };
-  }, [active, !!slice, shelfCount]);
-  useLayoutEffect(() => {
-    const node = shelfNode.current;
-    if (!node || !active || slice || node.clientWidth <= 0 || shelfLayout.viewportWidth !== node.clientWidth) return;
-    restoringShelf.current = true;
-    const left = Math.max(0, Math.min(shelfPosition.current, node.scrollWidth - node.clientWidth));
-    node.scrollTo({ left, behavior: "auto" }); shelfPosition.current = left;
-    updateShelfEdges(node); restoringShelf.current = false;
-  }, [active, !!slice, shelfLayout, shelfCount, shelfReset]);
-  const scrollShelf = (direction: -1 | 1 | "first" | "last") => {
-    const node = shelfNode.current;
-    if (!node || !active || state.preparing || node.clientWidth <= 0 || node.scrollWidth <= node.clientWidth + 1) return;
-    const left = albumShelfTarget(node.clientWidth, node.scrollWidth, node.scrollLeft, shelfLayout, direction);
-    node.scrollTo({ left, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
-  };
+  const genreColors = assignExploreGenreColors(genres.map(group => group.value));
+  const assignedGenreIcons = assignExploreGenreIcons(genres.map(group => group.value));
+  const waiting = state.preparing || !selected.length && (context.local.state === "loading" || context.plex.state === "loading" || context.plex.loading === true);
+  const shelfPositions = useRef<Record<string, number>>({});
   const renew = () => {
     const before = session.getSnapshot(); session.renew();
-    if (session.getSnapshot() !== before) { shelfPosition.current = 0; setShelfReset(old => old + 1); }
+    if (session.getSnapshot() !== before) Object.keys(shelfPositions.current).forEach(id => { shelfPositions.current[id] = 0; });
   };
+  const renewShelf = (id: ExploreShelfId) => {
+    const before = session.getSnapshot(); session.renewShelf(id);
+    if (session.getSnapshot() !== before) shelfPositions.current[`explore-${id === "albums" ? "album" : id}-shelf`] = 0;
+  };
+  // Online enrichment is confined to suggested albums; slices may reuse the same cache.
   const albumCards = selected.map(entry => <ExploreAlbumCard key={entry.key} entry={entry}
-    revision={state.revision} active={active} current={() => (slice ? session.canUseSlice(entry, state.revision) : session.canUse(entry, state.revision)) && isCurrent(entry)}
+    revision={state.revision} active={active} onlineArtworkEnabled={!slice && onlineArtworkEnabled} artworkBlocked={artworkBlocked} current={() => (slice ? session.canUseSlice(entry, state.revision) : session.canUse(entry, state.revision)) && isCurrent(entry)}
     onOpen={() => { if ((slice ? session.canUseSlice(entry, state.revision) : session.canUse(entry, state.revision)) && isCurrent(entry)) onOpen(entry); }} />);
   const albumGrid = <div className="mt-3 grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">{albumCards}</div>;
-  const groupButtonClass = "min-w-0 rounded-lg bg-[#1A1A1A] px-4 py-3 text-left hover:bg-[#222222] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40";
+  const configured = (["local", "plex"] as const).filter(source => context[source].state !== "not_configured");
+  const scope = t(configured.length === 2 ? "explore.aggregateScope" : configured[0] === "local" ? "explore.localScope" : "explore.plexScope");
+  const configureButton = onConfigure && <button id="explore-configure-collection" type="button" disabled={!active} onClick={onConfigure}
+    className="mt-6 rounded-lg bg-[#E5A00D] px-5 py-3 text-sm font-semibold text-black hover:bg-[#F5B01D] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:opacity-40">{t("explore.configureCollection")}</button>;
+  if (!configurationReady) return <main className="flex min-h-0 flex-1 items-center justify-center bg-[#121212] p-8"><p role="status" className="text-sm text-[#AAAAAA]">{t("explore.creatingSuggestions")}</p></main>;
+  if (!configured.length) return <main className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-y-auto bg-[#121212] p-8">
+    <div className="max-w-lg text-center">
+      <div aria-hidden="true" className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full border border-[#E5A00D]/20 bg-[#E5A00D]/10 text-[#E5A00D]"><Compass size={36} strokeWidth={1.5} /></div>
+      <h1 className="text-2xl font-bold leading-snug text-white">{t("explore.collectionStartTitle")}</h1>
+      <p className="mt-4 text-sm leading-relaxed text-[#AAAAAA]">{t("explore.collectionStartText")}</p>
+      {configureButton}
+    </div>
+  </main>;
+  const unavailable = configured.some(source => context[source].state === "unavailable");
   return <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[#121212] select-none">
     <header className="flex flex-wrap items-center justify-between gap-4 border-b border-[#222222] px-8 pt-8 pb-4">
       <div className="min-w-0">
         <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-white"><Compass size={22} className="shrink-0 text-[#E5A00D]" />{t("explore.title")}</h1>
-        <p className="mt-1 text-xs text-[#888888]">{plexProgress ? t("explore.aggregateScope") : t("explore.scope", { library: libraryTitle ?? t("explore.noLibrary") })}</p>
+        <p className="mt-1 text-xs text-[#888888]">{scope}</p>
       </div>
-      {!slice && <button type="button" disabled={!active || state.preparing || session.candidateCount() < 2} onClick={renew}
+      {!slice && (waiting || selected.length > 0) && <button type="button" disabled={!active || waiting || session.candidateCount() < 2} onClick={renew}
         title={t("explore.renewHint")} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">
         <RefreshCw size={14} />{t("explore.renew")}
       </button>}
     </header>
     <div className="min-h-0 flex-1 overflow-y-auto px-8 py-5">
-      <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-[#999999]">{(["local", "plex"] as const).filter(source => context[source].state !== "ready").map(source => <p key={source}
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-[#999999]">{(["local", "plex"] as const).filter(source => context[source].state !== "ready" && context[source].state !== "not_configured").map(source => <p key={source}
         role={context[source].state === "unavailable" ? "alert" : "status"}>
         {t(`explore.sources.${source}`)}: {t(`explore.states.${context[source].state}`)}
       </p>)}</div>
@@ -160,8 +261,13 @@ export const ExploreView: React.FC<Props> = ({ context, active, libraryTitle, en
         {(plexProgress.discoveryFailed || plexProgress.failedLibraries.length > 0) && <button type="button" disabled={!active} onClick={retryPlex}
           className="rounded px-2 py-1 text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">{t("explore.retryLibraries")}</button>}
       </div>}
+      {context.local.state === "unavailable" && retryLocal && <button type="button" disabled={!active || !canRetryLocal} onClick={retryLocal}
+        className="mt-2 rounded px-2 py-1 text-xs text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">{t("explore.retryLocal")}</button>}
       {state.sliceInvalidated && <p role="status" className="mt-3 text-xs text-[#999999]">{t("explore.sliceInvalidated")}</p>}
-      {slice ? <section className="mt-4">
+      {!slice && !waiting && !selected.length ? <section className="flex min-h-64 flex-col items-center justify-center py-12 text-center">
+        <p role={unavailable ? "alert" : "status"} className="max-w-md text-sm text-[#AAAAAA]">{t(unavailable ? "explore.collectionUnavailable" : "explore.collectionEmpty")}</p>
+        {configureButton}
+      </section> : slice ? <section className="mt-4">
         <button type="button" disabled={!active} onClick={() => session.leaveSlice(state.revision)} className="mb-4 flex items-center gap-2 rounded px-1 py-1 text-xs text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D]">
           <ArrowLeft size={16} />{t("explore.backToShelves")}
         </button>
@@ -175,64 +281,58 @@ export const ExploreView: React.FC<Props> = ({ context, active, libraryTitle, en
           <span>{t("explore.page", { current: slice.page + 1, total: Math.ceil(slice.entries.length / EXPLORE_PAGE_SIZE) })}</span>
           <button type="button" disabled={!active || (slice.page + 1) * EXPLORE_PAGE_SIZE >= slice.entries.length} onClick={() => session.setPage(slice.page + 1, state.revision)} className="rounded px-2 py-1 hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">{t("explore.nextPage")}</button>
         </nav>}
-      </section> : <div className="space-y-8 pt-4">
-        <section>
-          <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-bold text-white">{t("explore.shelf")}</h2>
-            <div className="flex shrink-0 gap-2">
-              <button type="button" aria-controls="explore-album-shelf" aria-label={t("explore.previousSuggestions")} title={t("explore.previousSuggestions")}
-                disabled={!active || state.preparing || !shelfEdges.previous} onClick={() => scrollShelf(-1)}
-                className="rounded-full p-2 text-[#AAAAAA] hover:bg-[#222222] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-30"><ChevronLeft size={18} /></button>
-              <button type="button" aria-controls="explore-album-shelf" aria-label={t("explore.nextSuggestions")} title={t("explore.nextSuggestions")}
-                disabled={!active || state.preparing || !shelfEdges.next} onClick={() => scrollShelf(1)}
-                className="rounded-full p-2 text-[#AAAAAA] hover:bg-[#222222] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-30"><ChevronRight size={18} /></button>
-            </div>
-          </div>
-          <div className="relative mt-3">
-            <div ref={shelfNode} id="explore-album-shelf" role="region" aria-label={t("explore.shelf")} aria-busy={state.preparing} tabIndex={0}
-              onKeyDown={event => {
-                if (event.target !== event.currentTarget || event.defaultPrevented || (!shelfEdges.previous && !shelfEdges.next) || !active || state.preparing) return;
-                const directions = { ArrowLeft: -1, ArrowRight: 1, Home: "first", End: "last" } as const;
-                const direction = directions[event.key as keyof typeof directions];
-                if (direction !== undefined) { event.preventDefault(); scrollShelf(direction); }
-              }}
-              className="grid grid-flow-col gap-6 overflow-x-auto overscroll-x-contain snap-x snap-mandatory py-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
-              style={{ gridAutoColumns: `${shelfLayout.cardWidth}px` }}>
-              {state.preparing ? Array.from({ length: EXPLORE_SUGGESTION_COUNT }, (_, index) => <div key={index} aria-hidden="true" className="min-w-0 snap-start rounded-xl p-2">
-                <div className="aspect-square rounded-lg bg-[#202020]" /><div className="mt-2 h-5 rounded bg-[#202020]" />
-                <div className="mt-1 h-4 w-2/3 rounded bg-[#202020]" /><div className="mt-1 h-4 w-1/2 rounded bg-[#202020]" />
-              </div>) : albumCards.map(card => <div key={card.key} className="min-w-0 snap-start">{card}</div>)}
-            </div>
-            {state.preparing && <p role="status" className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-[#AAAAAA]">{t("explore.creatingSuggestions")}</p>}
-          </div>
-          {!state.preparing && !selected.length && <p role="status" className="mt-4 text-xs text-[#999999]">{t("explore.noSuggestions")}</p>}
-        </section>
-        <section>
-          <h2 className="text-lg font-bold text-white">{t("explore.artists")}</h2>
-          <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-6">{state.preparing
+      </section> : <div className="space-y-8 pt-4">{[
+        <ExploreAlbumShelf key="albums" id="explore-album-shelf" title={t("explore.shelf")} cards={albumCards}
+          active={active && !slice} waiting={waiting} positions={shelfPositions.current} resetRevision={state.resets.albums ?? 0} onRenew={() => renewShelf("albums")} />,
+        state.themes.map(theme => <ExploreAlbumShelf key={theme.id} id={`explore-${theme.id}-shelf`}
+          title={theme.id === "genre" ? t("explore.genreTheme", { genre: theme.label }) : t(theme.current ? "explore.currentDecade" : "explore.pastDecade", { decade: theme.value })}
+          cards={theme.selected.map(entry => <ExploreAlbumCard key={entry.key} entry={entry} revision={state.revision} active={active}
+            onlineArtworkEnabled={onlineArtworkEnabled} artworkBlocked={artworkBlocked}
+            current={() => session.canUseShelf(entry, state.revision, theme.id) && isCurrent(entry)}
+            onOpen={() => { if (session.canUseShelf(entry, state.revision, theme.id) && isCurrent(entry)) onOpen(entry); }} />)}
+          active={active && !slice} waiting={false} positions={shelfPositions.current} resetRevision={state.resets[theme.id] ?? 0} onRenew={() => renewShelf(theme.id)} />),
+        <section key="artists">
+          <div className="flex items-center justify-between gap-4"><h2 className="text-lg font-bold text-white">{t("explore.artists")}</h2><button type="button" disabled={!active || waiting || !artists.length} onClick={() => renewShelf("artists")} aria-label={t("explore.renewSection", { title: t("explore.artists") })} className="rounded-full p-2 text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-30"><RefreshCw size={16} /></button></div>
+          <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-6">{waiting
             ? Array.from({ length: 4 }, (_, index) => <div key={index} aria-hidden="true" className="rounded-xl bg-[#1A1A1A] px-4 py-5">
               <div className="mx-auto h-32 w-32 rounded-full bg-[#202020]" /><div className="mt-4 h-5 rounded bg-[#202020]" /><div className="mt-1 h-4 rounded bg-[#202020]" />
             </div>) : artists.map(group => {
               const origin = `${t(`explore.sources.${group.source}`)}${group.libraryTitle ? ` · ${group.libraryTitle}` : ""}${group.albumCount !== undefined ? ` · ${t("explore.sliceCount", { count: group.albumCount })}` : ""}`;
+              const artistAlbum = session.artistAlbum(group, entry => entry.source === "local" ? !!localArtworkResolver.get(entry.album.id) : !!entry.album.thumb);
               return <button key={group.key} type="button" disabled={!active} aria-label={`${group.name} · ${origin}`}
                 onClick={() => session.openSlice(group, state.revision)}
                 className="min-w-0 rounded-xl bg-[#1A1A1A] px-4 py-5 text-center hover:bg-[#222222] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">
-                <ExploreArtistPortrait group={group} identity={context.plex.identity} serverId={context.plex.serverId} active={active} cache={portraits} />
+                <ExploreArtistPortrait album={artistAlbum}
+                  currentAlbum={() => !!artistAlbum && session.validDetail(artistAlbum) && isCurrent(artistAlbum)}
+                  onlineArtworkEnabled={onlineArtworkEnabled} artworkBlocked={artworkBlocked} group={group} identity={context.plex.identity} serverId={context.plex.serverId} active={active} cache={portraits} />
                 <p className="mt-4 truncate text-sm font-semibold text-white" title={group.name}>{group.name}</p>
                 <p className="mt-1 truncate text-[11px] text-[#888888]" title={origin}>{origin}</p>
               </button>;
             })}</div>
-          {!state.preparing && !artists.length && <p className="mt-3 text-xs text-[#888888]">{t("explore.noArtists")}</p>}
-        </section>
-        <section>
-          <h2 className="text-lg font-bold text-white">{t("explore.genres")}</h2>
-          <div className="mt-3 grid max-w-3xl grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">{state.preparing ? Array.from({ length: 4 }, (_, index) => <div key={index} aria-hidden="true" className="h-16 rounded-lg bg-[#1A1A1A]" />) : genres.map(group => <button key={group.key} type="button" disabled={!active}
-            onClick={() => session.openSlice(group, state.revision)} className={groupButtonClass}>
-            <p className="truncate text-sm font-semibold text-white" title={group.name}>{group.name}</p>
-            <p className="mt-1 text-[11px] text-[#888888]">{group.sources.map(source => t(`explore.sources.${source}`)).join(" / ")}</p>
-          </button>)}</div>
-          {!state.preparing && !genres.length && <p className="mt-3 text-xs text-[#888888]">{t("explore.noGenres")}</p>}
-        </section>
+          {!waiting && !artists.length && <p className="mt-3 text-xs text-[#888888]">{t("explore.noArtists")}</p>}
+        </section>,
+        <section key="genres">
+          <div className="flex items-center justify-between gap-4"><h2 className="text-lg font-bold text-white">{t("explore.genres")}</h2><button type="button" disabled={!active || waiting || !genres.length} onClick={() => renewShelf("genres")} aria-label={t("explore.renewSection", { title: t("explore.genres") })} className="rounded-full p-2 text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-30"><RefreshCw size={16} /></button></div>
+          <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(min(190px,100%),1fr))] gap-4">{waiting
+            ? Array.from({ length: 4 }, (_, index) => <div key={index} aria-hidden="true" className="h-40 rounded-xl bg-[#1A1A1A]" />)
+            : genres.map(group => {
+              const style = exploreGenreCardStyle(group.value), Icon = genreIcons[assignedGenreIcons[group.value] ?? style.icon];
+              const count = t("explore.sliceCount", { count: session.genreAlbumCount(group) });
+              const origin = group.sources.filter(source => context[source].state === "ready").map(source => t(`explore.sources.${source}`)).join(" / ");
+              return <button key={group.key} type="button" disabled={!active} aria-label={`${group.name} · ${count} · ${origin}`}
+                onClick={() => session.openSlice(group, state.revision)}
+                style={{ backgroundColor: genreColors[group.value] ?? style.background, backgroundImage: "linear-gradient(135deg, rgba(255,255,255,0.06), transparent 70%)" }}
+                className="relative flex h-40 min-w-0 flex-col justify-between overflow-hidden rounded-xl p-5 text-left text-white transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E5A00D] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212] disabled:opacity-60">
+                <Icon aria-hidden="true" size={56} strokeWidth={1.4} className="pointer-events-none absolute right-4 bottom-4 opacity-20" />
+                <p className="relative line-clamp-2 break-words text-xl font-bold leading-tight [overflow-wrap:anywhere]" title={group.name}>{group.name}</p>
+                <div className="relative min-w-0 pr-16 text-[#F3EDE7]">
+                  <p className="text-xs font-medium">{count}</p>
+                  <p className="mt-1 truncate text-[11px]" title={origin}>{origin}</p>
+                </div>
+              </button>;
+            })}</div>
+          {!waiting && !genres.length && <p className="mt-3 text-xs text-[#888888]">{t("explore.noGenres")}</p>}
+        </section>].flat().sort((a, b) => state.sectionOrder.indexOf(String(a.key) as ExploreShelfId) - state.sectionOrder.indexOf(String(b.key) as ExploreShelfId))}
       </div>}
     </div>
   </main>;

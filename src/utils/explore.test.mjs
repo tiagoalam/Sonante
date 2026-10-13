@@ -6,6 +6,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import i18next from "i18next";
 import { createExploreSession, deriveExploreGroups, EXPLORE_PAGE_SIZE, EXPLORE_SUGGESTION_COUNT, exploreEntryIsCurrent } from "./explore.ts";
+import { exploreGenreCardStyle } from "./exploreGenreCards.ts";
 import { PlexArtistPortraitCache } from "./plexArtistPortraits.ts";
 import { LocalAlbumCatalog } from "./localAlbumCatalog.ts";
 import { LocalArtworkResolver } from "./localArtwork.ts";
@@ -34,7 +35,7 @@ test("opt-in Explore snapshots distinguish inventory, sampling and slices withou
     assert.deepEqual(s.getSnapshot(), control.getSnapshot());
     assert.deepEqual(logs[0].albums.received, { local: 15, plex: 3 });
     assert.deepEqual(logs[0].albums.eligible, logs[0].albums.received);
-    assert.equal(logs[0].albums.selected.local + logs[0].albums.selected.plex, 2);
+    assert.equal(logs[0].albums.selected.local + logs[0].albums.selected.plex, 5);
     assert.deepEqual(logs[0].artists, { derived: 2, eligible: 2, sampled: 2, visible: 2 });
     assert.deepEqual(Object.values(logs[0].localRoots.received).sort((a,b)=>a-b), [5, 10]);
     for (let i=0;i<20;i++) s.syncContext({ local: { ...c.local }, plex: { ...c.plex } }, true);
@@ -49,10 +50,10 @@ test("opt-in Explore snapshots distinguish inventory, sampling and slices withou
     assert.notEqual(logs.at(-1).plexLibrary, library); assert.equal(logs.at(-1).slice, null);
     s.syncContext({ ...c, local: { ...c.local, state: "unavailable" } }, true);
     assert.equal(logs.at(-1).albums.eligible.local, 0); assert.equal(logs.at(-1).albums.visible.local, 0);
-    const diverse = context(10);
-    [...diverse.local.albums, ...diverse.plex.albums].forEach((a, i) => { a.genres = [`Genre ${i}`]; });
-    s.syncContext(diverse, true);
-    assert.equal(logs.at(-1).artists.derived, 20); assert.equal(logs.at(-1).artists.sampled, 4);
+    const diverse = context(50);
+    [...diverse.local.albums, ...diverse.plex.albums].forEach((a, i) => { a.genres = [`Genre ${i % 20}`]; });
+    s.syncContext(diverse, true); s.renew();
+    assert.equal(logs.at(-1).artists.derived, 100); assert.equal(logs.at(-1).artists.sampled, 4);
     assert.equal(logs.at(-1).genres.derived, 20); assert.equal(logs.at(-1).genres.sampled, 4);
     assert.doesNotMatch(JSON.stringify(logs), /private|secret|https:|folder_path|rating_key|source_id/);
   } finally { console.info = old; }
@@ -86,7 +87,7 @@ test("selection is stable under rerenders/detail return; renewal is in memory an
 
 test("initial provisional Local data waits for its confirmed response; later sources preserve every published card", () => {
   const c = context(), s = createExploreSession(() => 0.5);
-  const provisional = { ...c, local: { albums: [local("provisional")], state: "loading" } };
+  const provisional = { ...c, local: { albums: [local("provisional")], state: "loading" }, plex: { ...c.plex, state: "loading" } };
   s.syncContext(provisional, true);
   assert.equal(s.getSnapshot().preparing, true); assert.deepEqual(s.visibleEntries(), []);
   assert.deepEqual(s.visibleArtists(), []); assert.deepEqual(s.visibleGenres(), []);
@@ -187,7 +188,7 @@ for (const language of ["pt-BR", "en"]) {
 const hooksUrl = dataModule(`import React from ${JSON.stringify(import.meta.resolve("react"))}; export default React;
  ${["useState", "useRef", "useMemo", "useEffect", "useLayoutEffect", "useSyncExternalStore"].map(name => `export const ${name} = (...args) => globalThis.__exploreHost.${name}(...args);`).join("\n")}`);
 const translationUrl = dataModule('export const useTranslation = () => ({t: (...args) => globalThis.__exploreTranslation.t(...args)});');
-const artworkUrl = dataModule('export const localArtworkResolver = { get: id => globalThis.__exploreCached?.(id) ?? null, resolveLocalOnly: (...args) => globalThis.__exploreCover(...args) };');
+const artworkUrl = dataModule('export const localArtworkResolver = { get: id => globalThis.__exploreResolver?.get(id) ?? globalThis.__exploreCached?.(id) ?? null, subscribe: (id, fn) => globalThis.__exploreResolver?.subscribe(id, fn) ?? (() => {}), resolve: (album, online, blocked, phase, interested) => globalThis.__exploreResolver ? globalThis.__exploreResolver.resolve(album, online, blocked, phase, interested) : globalThis.__exploreCover(album, () => blocked() || !interested()) };');
 const plexImageUrl = dataModule('export const PlexImage = () => null;');
 const placeholderUrl = dataModule('export const AlbumArtworkPlaceholder = () => null;');
 const componentUrl = dataModule(compile(source("../components/ExploreView.tsx"))
@@ -195,14 +196,15 @@ const componentUrl = dataModule(compile(source("../components/ExploreView.tsx"))
   .replace(/from "(react\/jsx-runtime|lucide-react)"/g, (_, name) => `from ${JSON.stringify(import.meta.resolve(name))}`)
   .replace('from "react-i18next"', `from ${JSON.stringify(translationUrl)}`)
   .replace('from "../utils/plexArtistPortraits"', `from ${JSON.stringify(new URL("./plexArtistPortraits.ts", import.meta.url).href)}`)
+  .replace('from "../utils/exploreGenreCards"', `from ${JSON.stringify(new URL("./exploreGenreCards.ts", import.meta.url).href)}`)
   .replace('from "../utils/exploreAlbumShelf"', `from ${JSON.stringify(new URL("./exploreAlbumShelf.ts", import.meta.url).href)}`)
   .replace('from "../utils/explore"', `from ${JSON.stringify(new URL("./explore.ts", import.meta.url).href)}`)
   .replace('from "../utils/localArtworkSession"', `from ${JSON.stringify(artworkUrl)}`)
   .replace('from "./PlexImage"', `from ${JSON.stringify(plexImageUrl)}`)
   .replace('from "./AlbumArtworkPlaceholder"', `from ${JSON.stringify(placeholderUrl)}`));
-const { ExploreView, ExploreAlbumCard, ExploreArtistPortrait } = await import(componentUrl);
+const { ExploreView, ExploreAlbumCard, ExploreArtistPortrait, ExploreAlbumShelf } = await import(componentUrl);
 function host(Component, props) {
-  let cursor = 0; const slots = [], effects = [];
+  let cursor = 0; const slots = [], effects = [], children = new Map();
   const h = {
     useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = typeof initial === "function" ? initial() : initial; return [slots[i], v => slots[i] = typeof v === "function" ? v(slots[i]) : v]; },
     useRef(initial) { return slots[cursor++] ??= { current: initial }; },
@@ -210,8 +212,23 @@ function host(Component, props) {
     useEffect(fn,deps) { const i = cursor++, old = slots[i]; if (!old || deps.some((v,j)=>v!==old.deps[j])) effects.push(()=>{old?.cleanup?.();slots[i]={deps,cleanup:fn()};}); },
     useLayoutEffect(fn,deps) { h.useEffect(fn,deps); },
     useSyncExternalStore(_,get) { return get(); },
-    render(next=props) { props=next;cursor=0;globalThis.__exploreHost=h;return Component(props); },
-    effects() { effects.splice(0).forEach(fn=>fn()); }, close() {slots.forEach(s=>s?.cleanup?.());},slots,
+    render(next=props) {
+      props=next;cursor=0;globalThis.__exploreHost=h;const tree=Component(props);
+      const used=new Set();
+      const expand=node=>{
+        if(Array.isArray(node))return node.map(expand);
+        if(!React.isValidElement(node))return node;
+        if(node.type===ExploreAlbumShelf){
+          const id=node.props.id;used.add(id);let child=children.get(id);
+          if(!child){child=host(ExploreAlbumShelf,node.props);children.set(id,child);}return child.render(node.props);
+        }
+        return React.cloneElement(node,{},expand(node.props.children));
+      };
+      const result=Component===ExploreView?expand(tree):tree;
+      if(Component===ExploreView)for(const [id,child]of children)if(!used.has(id)){child.close();children.delete(id);}
+      return result;
+    },
+    effects() { effects.splice(0).forEach(fn=>fn());children.forEach(child=>child.effects()); }, close() {slots.forEach(s=>s?.cleanup?.());children.forEach(child=>child.close());},slots,
   }; return h;
 }
 function nodes(tree,predicate) { if(Array.isArray(tree))return tree.flatMap(n=>nodes(n,predicate));if(!tree||typeof tree!=="object")return[];return[...(predicate(tree)?[tree]:[]),...nodes(tree.props?.children,predicate)]; }
@@ -231,14 +248,11 @@ test("real Explore shelf shows independent source states and selected library, w
     globalThis.__exploreTranslation=translations[language];const c=context();c.local.state=phase;
     const h=host(ExploreView,{context:c,active:true,libraryTitle:"Selected library",ensureLocal(){},isCurrent:()=>true,onOpen(){}});
     const tree=h.render(),markup=renderToStaticMarkup(shallowMarkup(tree));
-    if(phase === "ready") assert.ok(!markup.includes(translations[language].t("explore.states.ready")));
+    if(phase === "ready" || phase === "not_configured") assert.ok(!markup.includes(translations[language].t(`explore.states.${phase}`)));
     else assert.ok(markup.includes(translations[language].t(`explore.states.${phase}`)));
-    assert.ok(markup.includes("Selected library"));
-    if (phase === "loading") {
-      assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,0);
-      assert.ok(markup.includes(translations[language].t("explore.creatingSuggestions")));
-      assert.ok(!markup.includes(translations[language].t("explore.noSuggestions")));
-    } else assert.ok(nodes(tree,n=>n.type===ExploreAlbumCard).some(n=>n.props.entry.source==="plex"));h.close();
+    assert.ok(markup.includes(translations[language].t(phase === "not_configured" ? "explore.plexScope" : "explore.aggregateScope")));
+    assert.ok(nodes(tree,n=>n.type===ExploreAlbumCard).some(n=>n.props.entry.source==="plex"));
+    assert.ok(!markup.includes(translations[language].t("explore.creatingSuggestions")));h.close();
   }
 });
 
@@ -332,7 +346,7 @@ test("App's actual open/back handlers reject stale identities and keep last-sect
   const close=new Function("document","setExploreDetail",`return (${expression("closeExploreAlbum")});`)({querySelector:()=>null},e=>changes.push(e));close();assert.equal(changes.at(-1),null);
   assert.match(appSource,/ExploreView portraits=\{artistPortraits\} context=\{exploreContext\}/);assert.match(appSource,/initialAlbumId=\{exploreDetail\.album\.id\}/);
   assert.match(appSource,/album=\{exploreDetail\.album\} onBack=\{closeExploreAlbum\}/);
-  assert.match(appSource,/onlineArtworkEnabled=\{false\}/);
+  assert.match(appSource,/onlineArtworkEnabled=\{config\?\.online_artwork_enabled \?\? false\}/);
   assert.match(appSource,/subview=\{exploreLocalSubview\} onSubviewChange=\{setExploreLocalSubview\}/);
   const guardedClose=new Function("document","setExploreDetail",`return (${expression("closeExploreAlbum")});`)({querySelector:()=>({})},e=>changes.push(e));
   const count=changes.length;guardedClose();assert.equal(changes.length,count);
@@ -378,19 +392,19 @@ test("artist groups preserve Local/Plex origins, Plex rating identities and scop
 test("genres reuse validated normalization, filter both sources and never remove untagged albums from shelves", () => {
   const c=context(0);
   c.local.albums=[{...local("one"),genres:[" ROCK  ","rock"," ","bad\u0000genre"]},local("absent"),{...local("empty"),genres:[]}];
-  c.plex.albums=[{...plex("one"),genres:["Rock","Jazz"]}];
+  c.plex.albums=[{...plex("one","Other artist"),genres:["Rock","Jazz"]},...Array.from({length:3},(_,i)=>({...plex(`extra-${i}`),genres:["Rock"]}))];
   const groups=deriveExploreGroups(c);assert.deepEqual(groups.genres.map(g=>g.value),["jazz","rock"]);
   const rock=groups.genres.find(g=>g.value==="rock");assert.deepEqual(rock.sources,["local","plex"]);
-  const s=createExploreSession(()=>0.4);s.syncContext(c,true);assert.equal(s.getSnapshot().selected.length,3);
+  const s=createExploreSession(()=>0.4);s.syncContext(c,true);assert.equal(s.getSnapshot().selected.length,7);
   assert.ok(s.visibleEntries().some(e=>e.source==="local"&&e.album.id==="absent"));
   s.openSlice(s.getSnapshot().genres.find(g=>g.value==="rock"),s.getSnapshot().revision);
-  const filtered=s.getSnapshot().slice.entries;assert.equal(filtered.length,2);
-  assert.equal(new Set(filtered.map(e=>e.key)).size,2);assert.deepEqual(filtered.map(e=>e.source),["local","plex"]);
+  const filtered=s.getSnapshot().slice.entries;assert.equal(filtered.length,5);
+  assert.equal(new Set(filtered.map(e=>e.key)).size,5);assert.deepEqual(filtered.map(e=>e.source),["local","plex","plex","plex","plex"]);
   assert.ok(filtered.every(e=>e.album.title==="Same title"));
 });
 
 test("group derivation and all shelves stay stable through telemetry and detail return; renewal only samples cached inventory", () => {
-  const c=context(10);let genreReads=0;
+  const c=context(20);let genreReads=0;
   [...c.local.albums,...c.plex.albums].forEach((a,i)=>Object.defineProperty(a,"genres",{get(){genreReads++;return [`Genre ${i%8}`];}}));
   const s=createExploreSession(()=>0.4);s.syncContext(c,true);const initial=s.getSnapshot(),reads=genreReads;
   for(let i=0;i<30;i++){s.syncContext({local:{...c.local},plex:{...c.plex}},true);s.candidateCount();s.visibleArtists();s.visibleGenres();}
@@ -421,7 +435,7 @@ test("slice membership has its own page guard, never relaxes shelf canUse and re
 
 test("catalog/scope/availability changes invalidate slices, old group buttons, result clicks and page commands", () => {
   for(const cause of ["local","plex","credential","server","library","unavailable","source"]){
-    const c=context(0);c.local.albums=[{...local("one"),genres:["Rock"]}];c.plex.albums=[{...plex("one"),genres:["Rock"]}];
+    const c=context(0);c.local.albums=[{...local("one"),genres:["Rock"]},...Array.from({length:3},(_,i)=>({...local(`extra-${i}`),genres:["Rock"]}))];c.plex.albums=[{...plex("one","Plex artist"),genres:["Rock"]}];
     const s=createExploreSession(()=>0.5);s.syncContext(c,true);const group=s.getSnapshot().genres[0],groupRevision=s.getSnapshot().revision;
     s.openSlice(group,groupRevision);const old=s.getSnapshot(),entry=s.sliceEntries()[0];assert.equal(s.canUseSlice(entry,old.revision),true);
     let next=c;
@@ -439,7 +453,7 @@ test("catalog/scope/availability changes invalidate slices, old group buttons, r
 });
 
 function catalogWithSlices(){
-  const c=context(0);c.local.albums=Array.from({length:15},(_,i)=>({...local(`L${i}`,"Artist"),genres:["Rock"]}));
+  const c=context(0);c.local.albums=Array.from({length:15},(_,i)=>({...local(`L${i}`,"Artist"),title:i<4?`Other title ${i}`:"Same title",genres:["Rock"]}));
   c.plex.albums=Array.from({length:3},(_,i)=>({...plex(`P${i}`,"Artist"),artist_rating_key:"100",genres:["rock"]}));return c;
 }
 const namedButton=(tree,name)=>nodes(tree,n=>n.type==="button"&&(React.Children.toArray(n.props.children).includes(name)||nodes(n,c=>c.type==="p"&&c.props.children===name).length))[0];
@@ -487,8 +501,8 @@ test("real aggregate shelf opens another library without browser navigation and 
   for (const language of ["pt-BR", "en"]) {
     globalThis.__exploreTranslation=translations[language];const t=translations[language].t.bind(translations[language]);
     const c=context(0);c.local.state="empty";
-    const a=Array.from({length:7},(_,i)=>({...plex(`A${i}`,"One artist"),artist_rating_key:"100",genres:["Rock"],library_id:"1",library_title:"One"}));
-    const b=Array.from({length:7},(_,i)=>({...plex(`B${i}`,"Other artist"),artist_rating_key:"200",genres:["Rock"],library_id:"2",library_title:"Two"}));
+    const a=Array.from({length:7},(_,i)=>({...plex(`A${i}`,"One artist"),title:`Album A${i}`,artist_rating_key:"100",genres:["Rock"],library_id:"1",library_title:"One"}));
+    const b=Array.from({length:7},(_,i)=>({...plex(`B${i}`,"Other artist"),title:`Album B${i}`,artist_rating_key:"200",genres:["Rock"],library_id:"2",library_title:"Two"}));
     c.plex={...c.plex,albums:[...a,...b],libraryId:"",catalogs:[{libraryId:"1",albums:a},{libraryId:"2",albums:b}],completeness:"partial",loading:true};
     const live={current:{context:c,visible:true}},opened=[],selectedLibrary={key:"1"};let retries=0;
     const current=new Function("exploreLive","exploreEntryIsCurrent",`return (${expression("exploreEntryCurrent")});`)(live,exploreEntryIsCurrent);
@@ -513,7 +527,7 @@ test("real aggregate shelf opens another library without browser navigation and 
 test("actual shelf transitions from preparation to definitive cards, with late load and detail return preserving entries", () => {
   for (const language of ["pt-BR", "en"]) {
     globalThis.__exploreTranslation = translations[language]; const c = context();
-    const props = { context: { ...c, local: { ...c.local, state: "loading" } }, active: true, libraryTitle: null, ensureLocal(){}, isCurrent:()=>true, onOpen(){} };
+    const props = { context: { ...c, local: { ...c.local, state: "loading" }, plex: { ...c.plex, state: "loading" } }, active: true, libraryTitle: null, ensureLocal(){}, isCurrent:()=>true, onOpen(){} };
     const h = host(ExploreView, props); let tree = h.render(); h.effects();
     assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,0);
     assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(translations[language].t("explore.creatingSuggestions")));
@@ -667,4 +681,256 @@ test("horizontal reservation and short inventory retain all cards, with no synth
   const ready={...c,local:{albums:[local("one"),local("two")],state:"ready"},plex:{...c.plex,state:"empty"}};
   tree=h.render({...props,context:ready});assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,2);
   assert.equal(nodes(tree,n=>n.props?.id==="explore-album-shelf")[0].props.children.length,2);h.close();
+});
+
+
+test("Explore Local covers share the existing resolver, distinguish missing/failure and retry only on activation", async () => {
+  globalThis.__exploreTranslation=translations.en;
+  const c=context(1),s=createExploreSession(()=>0.5);s.syncContext(c,true);
+  const entry=s.visibleEntries().find(e=>e.source==="local");let localReads=0,onlineReads=0,outcome="success";
+  const pending=deferred();
+  const resolver=new LocalArtworkResolver(async()=>{localReads++;return null;},async()=>{
+    onlineReads++;if(outcome==="error")throw Error("synthetic failure");if(outcome==="missing")return null;return pending.promise;
+  });resolver.setContext(false,c.local.albums);globalThis.__exploreResolver=resolver;
+  const props={entry,revision:s.getSnapshot().revision,active:true,onlineArtworkEnabled:true,current:()=>s.validDetail(entry),onOpen(){}};
+  const a=host(ExploreAlbumCard,props),b=host(ExploreAlbumCard,props);
+  try {
+    a.render();a.effects();b.render();b.effects();await flush();assert.equal(localReads,1);assert.equal(onlineReads,1);
+    assert.equal(a.slots[1],"loading");const before=s.getSnapshot();
+    a.render({...props,active:false});a.effects();
+    pending.resolve("data:image/png;base64,synthetic");await flush();
+    assert.equal(a.slots[0],null,"hidden consumer cannot present late success");assert.equal(b.slots[0],"data:image/png;base64,synthetic","another active consumer keeps the shared query valid");
+    a.render(props);a.effects();
+    assert.equal(a.slots[0],"data:image/png;base64,synthetic");assert.equal(b.slots[0],a.slots[0]);assert.equal(a.slots[1],"ready");assert.equal(s.getSnapshot(),before);
+    for(let i=0;i<10;i++){a.render();a.effects();}assert.equal(onlineReads,1);
+  } finally {a.close();b.close();delete globalThis.__exploreResolver;}
+  for(const initial of ["missing","error"]){
+    let requests=0,fail=initial==="error";
+    const r=new LocalArtworkResolver(async()=>null,async()=>{requests++;if(fail)throw Error("transient");return null;});r.setContext(false,c.local.albums);globalThis.__exploreResolver=r;
+    const h=host(ExploreAlbumCard,props);
+    try {
+      h.render();h.effects();await flush();assert.equal(h.slots[1],initial);assert.equal(r.get(entry.album.id),null);
+      for(let i=0;i<10;i++){h.render();h.effects();}assert.equal(requests,1);
+      fail=false;h.render({...props,active:false});h.effects();h.render(props);h.effects();await flush();
+      assert.equal(requests,2);assert.equal(h.slots[1],"missing");
+    }finally{h.close();delete globalThis.__exploreResolver;}
+  }
+});
+
+test("Explore cover preference and visibility gates prevent online I/O and obsolete consumers cannot publish", async()=>{
+  globalThis.__exploreTranslation=translations.en;
+  const c=context(1),s=createExploreSession(()=>0.5);s.syncContext(c,true);const entry=s.visibleEntries().find(e=>e.source==="local");
+  const previous=globalThis.IntersectionObserver;let intersect,localReads=0,onlineReads=0;
+  globalThis.IntersectionObserver=class{constructor(callback){intersect=callback;}observe(){}disconnect(){}};
+  const r=new LocalArtworkResolver(async()=>{localReads++;return null;},async()=>{onlineReads++;return "online";});r.setContext(false,c.local.albums);globalThis.__exploreResolver=r;
+  const props={entry,revision:s.getSnapshot().revision,active:true,onlineArtworkEnabled:false,current:()=>s.validDetail(entry),onOpen(){}};
+  const h=host(ExploreAlbumCard,props);
+  try {
+    let tree=h.render();tree.props.ref.current={};h.effects();await flush();assert.equal(localReads,0);
+    intersect([{isIntersecting:true}]);h.render();h.effects();await flush();assert.equal(localReads,1);assert.equal(onlineReads,0);assert.equal(h.slots[1],"missing");
+    h.render({...props,onlineArtworkEnabled:true});h.effects();await flush();assert.equal(onlineReads,1);assert.equal(h.slots[0],"online");
+    const image=nodes(h.render(),n=>n.type==="img")[0];image.props.onError();assert.equal(nodes(h.render(),n=>n.type==="img").length,0);
+  }finally{h.close();globalThis.IntersectionObserver=previous;delete globalThis.__exploreResolver;}
+  const pending=deferred();let allowed=true;
+  const stale=new LocalArtworkResolver(async()=>null,()=>pending.promise);stale.setContext(false,c.local.albums);globalThis.__exploreResolver=stale;
+  const old=host(ExploreAlbumCard,{...props,onlineArtworkEnabled:true,current:()=>allowed});
+  try{old.render();old.effects();await flush();allowed=false;pending.resolve("obsolete");await flush();assert.equal(old.slots[0],null);assert.equal(stale.get(entry.album.id),null);}
+  finally{old.close();delete globalThis.__exploreResolver;}
+});
+
+test("a cover published by another existing consumer reaches a mounted Explore card without resampling",async()=>{
+  globalThis.__exploreTranslation=translations.en;const c=context(1),s=createExploreSession(()=>0.5);s.syncContext(c,true);
+  const entry=s.visibleEntries().find(e=>e.source==="local"),r=new LocalArtworkResolver(async()=>null,async()=>"shared");
+  globalThis.__exploreResolver=r;const h=host(ExploreAlbumCard,{entry,revision:s.getSnapshot().revision,active:true,artworkBlocked:true,current:()=>s.validDetail(entry),onOpen(){}});
+  try{h.render();h.effects();const before=s.getSnapshot();await r.resolve(entry.album,true,false);assert.equal(h.slots[0],"shared");assert.equal(s.getSnapshot(),before);}
+  finally{h.close();delete globalThis.__exploreResolver;}
+});
+
+
+test("initial configuration waits before onboarding, and source configuration is independent of catalog contents or previous setup",()=>{
+  for(const language of ["pt-BR","en"]){
+    globalThis.__exploreTranslation=translations[language];const t=translations[language].t.bind(translations[language]);
+    const c=context(0);c.local.state="not_configured";c.plex.state="not_configured";
+    let configured=0,reads=0;const props={context:c,active:true,configurationReady:false,onConfigure(){configured++;},ensureLocal(){reads++;},isCurrent:()=>true,onOpen(){}};
+    const h=host(ExploreView,props);let tree=h.render();h.effects();
+    assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(t("explore.creatingSuggestions")));assert.equal(namedButton(tree,t("explore.configureCollection")),undefined);assert.equal(reads,0);
+    tree=h.render({...props,configurationReady:true});h.effects();
+    assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(t("explore.collectionStartTitle")));assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,0);
+    assert.equal(namedButton(tree,t("explore.renew")),undefined);assert.equal(nodes(tree,n=>n.props?.["aria-controls"]==="explore-album-shelf").length,0);
+    namedButton(tree,t("explore.configureCollection")).props.onClick();assert.equal(configured,1);assert.equal(reads,0);
+    const ready={...c,local:{albums:[local("first")],state:"ready"}};
+    tree=h.render({...props,configurationReady:true,context:ready});h.effects();assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,1);
+    assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(t("explore.localScope")));assert.equal(h.slots[0].value.getSnapshot().preparing,false);h.close();
+  }
+  // The actual App bootstrap blocks all screens until both persisted config and section have loaded.
+  let bootstrap;const visit=n=>{if(ts.isIfStatement(n)&&n.expression.getText(appAst)==="!config || mediaSource === null")bootstrap=n.expression.getText(appAst);ts.forEachChild(n,visit);};visit(appAst);assert.ok(bootstrap);
+  const check=new Function("config","mediaSource",`return (${bootstrap});`);
+  assert.equal(check(null,"explore"),true);assert.equal(check({first_run:false,local_folders:[],plex_token:""},"explore"),false);
+});
+
+test("Local-only, Plex-only and a healthy source alongside failure publish without waiting for unconfigured sources",()=>{
+  for(const sourceName of ["local","plex"])for(const otherState of ["not_configured","unavailable","loading"]){
+    const c=context(5),other=sourceName==="local"?"plex":"local";c[other]={...c[other],albums:[],state:otherState};
+    const s=createExploreSession(()=>0.5);s.syncContext(c,true);assert.equal(s.getSnapshot().preparing,false);assert.equal(s.visibleEntries().length,5);
+    assert.ok(s.visibleEntries().every(e=>e.source===sourceName));const before=s.visibleEntries().map(e=>e.key);
+    s.syncContext(c,false);s.syncContext(c,true);assert.deepEqual(s.visibleEntries().map(e=>e.key),before);
+    globalThis.__exploreTranslation=translations.en;const h=host(ExploreView,{context:c,active:true,ensureLocal(){},isCurrent:()=>true,onOpen(){},onConfigure(){}});
+    const tree=h.render();assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,5);
+    assert.ok(!renderToStaticMarkup(shallowMarkup(tree)).includes(translations.en.t("explore.collectionStartTitle")));
+    assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(translations.en.t(otherState==="not_configured"?`explore.${sourceName}Scope`:"explore.aggregateScope")));h.close();
+  }
+});
+
+test("configured empty or failed sources retain configuration actions and useful retries, with loading distinct from empty",()=>{
+  globalThis.__exploreTranslation=translations.en;const t=translations.en.t.bind(translations.en);
+  for(const phase of ["empty","unavailable","loading"]){
+    const c=context(0);c.local.state=phase;c.plex.state="not_configured";let retry=0,configure=0;
+    const props={context:c,active:true,ensureLocal(){},isCurrent:()=>true,onOpen(){},onConfigure(){configure++;},retryLocal(){retry++;}};
+    const h=host(ExploreView,props);let tree=h.render();const markup=renderToStaticMarkup(shallowMarkup(tree));
+    assert.ok(!markup.includes(t("explore.collectionStartTitle")));
+    if(phase==="loading"){assert.ok(markup.includes(t("explore.creatingSuggestions")));assert.ok(!markup.includes(t("explore.collectionEmpty")));}
+    else {assert.ok(markup.includes(t(phase==="empty"?"explore.collectionEmpty":"explore.collectionUnavailable")));assert.equal(nodes(tree,n=>n.props?.id==="explore-album-shelf").length,0);assert.equal(namedButton(tree,t("explore.renew")),undefined);namedButton(tree,t("explore.configureCollection")).props.onClick();assert.equal(configure,1);}
+    if(phase==="unavailable"){namedButton(tree,t("explore.retryLocal")).props.onClick();assert.equal(retry,1);tree=h.render({...props,canRetryLocal:false});assert.equal(namedButton(tree,t("explore.retryLocal")).props.disabled,true);}
+    h.close();
+  }
+});
+
+
+test("App reopens the existing wizard as an overlay; cancel only closes it, completion updates config and accepted saves await the monitor",()=>{
+  let wizardNode,exploreNode;
+  const visit=n=>{if(ts.isJsxSelfClosingElement(n)){
+    const tag=n.tagName.getText(appAst);if(tag==="WelcomeWizard"&&n.attributes.properties.some(p=>p.name?.getText(appAst)==="onCancel"))wizardNode=n;
+    if(tag==="ExploreView")exploreNode=n;
+  }ts.forEachChild(n,visit);};visit(appAst);assert.ok(wizardNode);assert.ok(exploreNode);
+  const attr=(node,name)=>node.attributes.properties.find(p=>p.name?.getText(appAst)===name)?.initializer?.expression?.getText(appAst);
+  const config={first_run:false,local_folders:[],plex_token:""},events=[];let opened=false,revision=4;
+  const scope={config,setShowCollectionWizard:v=>{opened=v;events.push(["open",v]);},setConfig:v=>events.push(["config",v]),setLocalCatalogRevision:fn=>{revision=fn(revision);},configSaveMonitorRef:{current:{accepted:op=>events.push(["accepted",op])}}};
+  const run=(node,name)=>new Function(...Object.keys(scope),`${compile("const extracted = " + attr(node,name))}; return extracted;`)(...Object.values(scope));
+  assert.equal(new Function("config",`return (${attr(wizardNode,"initialConfig")});`)(config),config);
+  run(exploreNode,"onConfigure")();assert.equal(opened,true);run(wizardNode,"onCancel")();assert.equal(opened,false);assert.deepEqual(events,[["open",true],["open",false]]);
+  run(exploreNode,"onConfigure")();const next={...config,local_folders:["/fixture/first"]};run(wizardNode,"onFinish")(next);assert.equal(opened,false);assert.equal(revision,5);assert.ok(events.some(e=>e[0]==="config"&&e[1]===next));
+  const count=events.filter(e=>e[0]==="config").length,operation={id:"fixture-operation",phase:"preparing"};run(wizardNode,"onSaveAccepted")(operation);
+  assert.equal(events.filter(e=>e[0]==="config").length,count);assert.ok(events.some(e=>e[0]==="accepted"&&e[1]===operation));assert.equal(config.local_folders.length,0);
+});
+
+test("three native shelves retain independent positions, reset only the renewed shelf and survive artist detail return",()=>{
+  globalThis.__exploreTranslation=translations.en;const previous={window:globalThis.window,ResizeObserver:globalThis.ResizeObserver};
+  globalThis.window={matchMedia:()=>({matches:true})};globalThis.ResizeObserver=class{constructor(fn){this.fn=fn;}observe(node){node.resize=this.fn;}disconnect(){}};
+  const c=context(0);c.local.albums=Array.from({length:30},(_,i)=>({...local(`theme-${i}`),title:`Album ${i}`,year:"1995",genres:["Jazz"]}));
+  const props={context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){}};
+  const h=host(ExploreView,props),tracks=new Map();let tree,current=props;
+  const render=(next=current)=>{current=next;for(let i=0;i<3;i++){
+    tree=h.render(current);
+    for(const viewport of nodes(tree,n=>n.props?.id?.startsWith("explore-")&&n.props.role==="region")){
+      const id=viewport.props.id;let node=tracks.get(id);
+      if(!node){const listeners=new Map();node={clientWidth:600,scrollLeft:0,cardWidth:190,count:10,moves:[],
+        get scrollWidth(){return this.count*this.cardWidth+(this.count-1)*24;},
+        addEventListener(event,fn){listeners.set(event,fn);},removeEventListener(event,fn){if(listeners.get(event)===fn)listeners.delete(event);},
+        scrollTo(options){this.moves.push(options);this.scrollLeft=Math.max(0,Math.min(options.left,this.scrollWidth-this.clientWidth));listeners.get("scroll")?.();}};tracks.set(id,node);}
+      viewport.props.ref.current=node;node.cardWidth=parseFloat(viewport.props.style.gridAutoColumns);node.count=viewport.props.children.length;
+    }h.effects();
+  }return tree;};
+  const arrow=id=>nodes(tree,n=>n.type==="button"&&n.props["aria-controls"]===id&&n.props["aria-label"]===translations.en.t("explore.nextSuggestions"))[0];
+  const lefts=()=>[...tracks].map(([id,node])=>[id,node.scrollLeft]);
+  try{
+    render();assert.equal(tracks.size,3);const initial=h.slots[0].value.getSnapshot();
+    for(const id of tracks.keys()){arrow(id).props.onClick();render();assert.ok(tracks.get(id).scrollLeft>0);}
+    const positions=lefts(),moves=[...tracks.values()].map(n=>n.moves.length);
+    render();assert.deepEqual(lefts(),positions);assert.deepEqual([...tracks.values()].map(n=>n.moves.length),moves);assert.equal(h.slots[0].value.getSnapshot(),initial);
+    const refresh=nodes(tree,n=>n.type==="button"&&n.props["aria-label"]===translations.en.t("explore.renewSection",{title:translations.en.t("explore.genreTheme",{genre:"Jazz"})}))[0];
+    refresh.props.onClick();render();assert.equal(tracks.get("explore-genre-shelf").scrollLeft,0);
+    assert.equal(tracks.get("explore-decade-shelf").scrollLeft,positions.find(([id])=>id==="explore-decade-shelf")[1]);assert.equal(tracks.get("explore-album-shelf").scrollLeft,positions.find(([id])=>id==="explore-album-shelf")[1]);
+    const kept=lefts();h.render({...current,active:false});h.effects();render();assert.deepEqual(lefts(),kept);
+    const s=h.slots[0].value;s.openSlice(s.getSnapshot().artists[0],s.getSnapshot().revision);render();assert.equal(nodes(tree,n=>n.props.role==="region").length,0);
+    s.leaveSlice(s.getSnapshot().revision);render();assert.deepEqual(lefts(),kept);
+    namedButton(tree,translations.en.t("explore.renew")).props.onClick();render();assert.ok([...tracks.values()].every(n=>n.scrollLeft===0));
+  }finally{h.close();Object.assign(globalThis,previous);}
+});
+
+test("artist imagery uses one associated album, retains initials on absence and replaces only the image when portrait arrives",async()=>{
+  globalThis.__exploreTranslation=translations.en;
+  const c=context(1);c.plex.albums[0].artist_rating_key="exact-artist";const s=createExploreSession(()=>0.5);s.syncContext(c,true);
+  const group=s.getSnapshot().artists.find(g=>g.source==="local"),entry=s.artistAlbum(group);
+  let reads=0;const r=new LocalArtworkResolver(async()=>{reads++;return null;},async()=>assert.fail("online disabled"));r.setContext(false,c.local.albums);globalThis.__exploreResolver=r;
+  const props={group,identity:c.plex.identity,serverId:"server",active:true,album:entry,currentAlbum:()=>s.validDetail(entry),onlineArtworkEnabled:false};
+  const portrait=host(ExploreArtistPortrait,props);let card;
+  try{
+    const fallback=nodes(portrait.render(),n=>n.type===ExploreAlbumCard)[0];assert.equal(fallback.props.entry,entry);assert.equal(fallback.props.artworkOnly,true);
+    card=host(ExploreAlbumCard,fallback.props);let tree=card.render();card.effects();await flush();tree=card.render();
+    assert.equal(reads,1);assert.equal(nodes(tree,n=>n.type==="button").length,0);assert.equal(nodes(tree,n=>n.type==="img").length,0);assert.ok(nodes(tree,n=>n.type==="span").length);
+    for(let i=0;i<5;i++){card.render();card.effects();}assert.equal(reads,1);
+  }finally{portrait.close();card?.close();delete globalThis.__exploreResolver;}
+  const plexGroup=s.getSnapshot().artists.find(g=>g.source==="plex");
+  const pending=deferred(),cache=new PlexArtistPortraitCache(()=>pending.promise);cache.setContext(c.plex.identity,"server");const associated=s.artistAlbum(plexGroup);
+  const photo=host(ExploreArtistPortrait,{group:plexGroup,identity:c.plex.identity,serverId:"server",active:true,cache,album:associated,currentAlbum:()=>s.validDetail(associated)});
+  try{
+    const before=s.getSnapshot();let tree=photo.render();photo.effects();await flush();assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard)[0].props.entry,associated);
+    pending.resolve({server_id:"server",path:"/library/metadata/exact-artist/thumb/1"});await flush();tree=photo.render();
+    assert.equal(nodes(tree,n=>n.props?.image)[0].props.image.path,"/library/metadata/exact-artist/thumb/1");assert.equal(s.getSnapshot(),before);assert.equal(s.artistAlbum(plexGroup),associated);
+  }finally{photo.close();cache.invalidate();}
+});
+
+
+test("colored navigation genre cards show the count/source of the actual slice, including availability changes",()=>{
+  for(const language of ["pt-BR","en"]){
+    globalThis.__exploreTranslation=translations[language];const t=translations[language].t.bind(translations[language]);
+    const c=context(1);c.local.albums[0].genres=["Jazz"," jazz ","Unknown"];c.plex.albums[0].genres=["Jazz","Desconhecido"];c.plex.albums.push(...Array.from({length:4},(_,i)=>({...plex(`extra-${i}`),genres:["Jazz"]})));
+    const props={context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){}};
+    const h=host(ExploreView,props);let tree=h.render();const button=namedButton(tree,"Jazz");assert.ok(button);
+    assert.equal(button.props["aria-label"],`Jazz · ${t("explore.sliceCount",{count:6})} · ${t("explore.sources.local")} / ${t("explore.sources.plex")}`);
+    assert.equal(namedButton(tree,"Unknown"),undefined);assert.equal(namedButton(tree,"Desconhecido"),undefined);
+    button.props.onClick();tree=h.render();assert.equal(h.slots[0].value.getSnapshot().slice.entries.length,6);assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,6);
+    const s=h.slots[0].value;s.leaveSlice(s.getSnapshot().revision);
+    tree=h.render({...props,context:{...c,local:{...c.local,state:"unavailable"}}});const current=namedButton(tree,"Jazz");
+    assert.equal(current.props["aria-label"],`Jazz · ${t("explore.sliceCount",{count:5})} · ${t("explore.sources.plex")}`);
+    current.props.onClick();h.render();assert.equal(s.getSnapshot().slice.entries.length,5);assert.equal(s.getSnapshot().slice.entries[0].source,"plex");h.close();
+  }
+});
+
+
+test("displayed genre collisions stay distinct through renders, detail return and later source arrivals",()=>{
+  globalThis.__exploreTranslation=translations.en;
+  const names=["Jazz","Rock","Blues","Pop","Samba","Reggae","Country","Soul","Funk","Ambient","Classical","Electronic"];
+  const pair=names.flatMap((a,i)=>names.slice(i+1).filter(b=>exploreGenreCardStyle(a).background===exploreGenreCardStyle(b).background).map(b=>[a,b]))[0];assert.ok(pair);
+  const selected=[...pair,"Hip Hop","R&B"],c=context(0);c.plex.state="not_configured";
+  c.local.albums=selected.flatMap((genre,i)=>Array.from({length:5},(_,j)=>({...local(`${i}-${j}`),genres:[genre]})));
+  const props={context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){}},h=host(ExploreView,props);
+  const cards=tree=>nodes(tree,n=>n.type==="button"&&n.props.style?.backgroundColor);
+  const colors=tree=>Object.fromEntries(cards(tree).map(n=>[nodes(n,p=>p.type==="p"&&p.props.title===p.props.children)[0].props.children,n.props.style.backgroundColor]));
+  const icons=tree=>Object.fromEntries(cards(tree).map(n=>[nodes(n,p=>p.type==="p"&&p.props.title===p.props.children)[0].props.children,nodes(n,p=>p.props["aria-hidden"]==="true")[0].type]));
+  try{
+    let tree=h.render();h.effects();const before=colors(tree);assert.equal(Object.keys(before).length,4);assert.equal(new Set(Object.values(before)).size,4);
+    const beforeIcons=icons(tree);assert.equal(new Set(Object.values(beforeIcons)).size,4);
+    for(let i=0;i<5;i++){tree=h.render();h.effects();assert.deepEqual(colors(tree),before);assert.deepEqual(icons(tree),beforeIcons);}
+    h.render({...props,active:false});h.effects();tree=h.render(props);h.effects();assert.deepEqual(colors(tree),before);assert.deepEqual(icons(tree),beforeIcons);
+    const copies=c.local.albums.slice(0,2).map(a=>({rating_key:a.id,title:a.title,artist:a.artist,genres:a.genres}));
+    tree=h.render({...props,context:{...c,plex:{...c.plex,state:"ready",albums:copies}}});h.effects();assert.deepEqual(colors(tree),before);assert.deepEqual(icons(tree),beforeIcons);
+  }finally{h.close();}
+});
+
+test("Rock variants open the same real navigation slice and name the album theme Rock in both languages",()=>{
+  for(const language of ["pt-BR","en"]){
+    globalThis.__exploreTranslation=translations[language];const c=context(0),variants=["Rock","Rock & Roll","Rock and Roll"];
+    c.local.albums=Array.from({length:10},(_,i)=>({...local(`family-${i}`),genres:[variants[i%3],"Rock & Roll"]}));
+    c.plex.albums=c.local.albums.map(a=>({...plex(a.id,a.artist),genres:["Rock and Roll"]}));
+    const h=host(ExploreView,{context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){}});
+    try{
+      let tree=h.render();const button=namedButton(tree,"Rock");assert.ok(button);
+      assert.equal(namedButton(tree,"Rock & Roll"),undefined);assert.equal(namedButton(tree,"Rock and Roll"),undefined);
+      assert.ok(nodes(tree,n=>n.type==="h2"&&n.props.children===translations[language].t("explore.genreTheme",{genre:"Rock"})).length);
+      button.props.onClick();tree=h.render();const slice=h.slots[0].value.getSnapshot().slice;
+      assert.equal(slice.entries.length,20);assert.equal(new Set(slice.entries.map(e=>e.key)).size,20);
+      assert.deepEqual(slice.entries.map(e=>e.album),[...c.local.albums,...c.plex.albums]);assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,6);
+    }finally{h.close();}
+  }
+});
+
+test("the decade shelf title uses four digits in both languages",()=>{
+  for(const language of ["pt-BR","en"]){
+    globalThis.__exploreTranslation=translations[language];const c=context(0);c.plex.state="not_configured";
+    c.local.albums=Array.from({length:12},(_,i)=>({...local(`decade-${i}`),year:"2015"}));
+    const h=host(ExploreView,{context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){}});
+    const tree=h.render(),title=translations[language].t("explore.pastDecade",{decade:2010});
+    assert.ok(nodes(tree,n=>n.type==="h2"&&n.props.children===title).length);assert.equal(nodes(tree,n=>n.type==="h2"&&n.props.children===translations[language].t("explore.pastDecade",{decade:"10"})).length,0);h.close();
+  }
 });
