@@ -26,7 +26,7 @@ import { PlayerBar } from "./components/PlayerBar";
 import { AlbumView } from "./components/AlbumView";
 import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
-import { LocalBrowserView, localAlbumCatalog } from "./components/LocalBrowserView";
+import { LocalBrowserView, localAlbumCatalog, type LocalSubview } from "./components/LocalBrowserView";
 import { localCatalogActivity } from "./utils/localAlbumCatalog";
 import { localArtworkEnrichment, localArtworkResolver } from "./utils/localArtworkSession";
 import { artworkReadBlocked } from "./utils/localArtwork";
@@ -327,6 +327,10 @@ export function App() {
   const [mediaSource, setMediaSource] = useState<MainSection | null>(null);
   const [playerNavigation, setPlayerNavigation] = useState<PlayerNavigationSession | null>(null);
   const playerTarget = playerNavigation?.target ?? null;
+  const [localSubview, setLocalSubview] = useState<LocalSubview>("browser");
+  const [playerLocalSubview, setPlayerLocalSubview] = useState<{ revision: number; view: LocalSubview } | null>(null);
+  const playerSubview = playerLocalSubview?.revision === playerNavigation?.revision ? playerLocalSubview?.view ?? "browser" : "browser";
+  const changePlayerLocalSubview = (view: LocalSubview) => setPlayerLocalSubview({ revision: playerNavigation?.revision ?? 0, view });
   const playerReturnSection = playerNavigation?.returnSection ?? null;
   const setPlayerTarget = (target: PlayerNavigationTarget | null) => {
     setPlayerNavigation(previous => previous && target ? { ...previous, target, revision: previous.revision + 1 } : null);
@@ -836,6 +840,8 @@ export function App() {
       }
 
       if (e.key === "Escape") {
+        // The Local dialog owns Escape, including draft/result confirmations and Apply guards.
+        if (document.querySelector("[data-local-tag-dialog-open]")) return;
         playerNavigationRequests.invalidate();
         if (showAbout) {
           setShowAbout(false);
@@ -1134,6 +1140,17 @@ export function App() {
     setSearchResults(null);
   };
 
+  const navigateLocalSubview = (view: LocalSubview) => {
+    if (playerTarget?.kind === "local") {
+      changePlayerLocalSubview(view);
+      return;
+    }
+    setLocalSubview(view);
+    if (!playerTarget && centralSection === "local") return;
+    resetAllNavigation();
+    mainSectionPreference.navigate("local");
+  };
+
   const handlePlexLibraryChange = (libraryKey: string) => {
     const library = libraries.find((item) => item.key === libraryKey);
     if (!library || library.key === selectedLibrary?.key) return;
@@ -1298,10 +1315,7 @@ export function App() {
                   icon={Folder}
                   label={t("sidebar.local")}
                   active={mediaSource === "local"}
-                  onClick={() => {
-                    resetAllNavigation();
-                    mainSectionPreference.navigate("local");
-                  }}
+                  onClick={() => navigateLocalSubview("browser")}
                   trailing={!isPlaybackAvailable ? (
                     <span
                       className="flex items-center text-[#C9A45D]"
@@ -1383,6 +1397,7 @@ export function App() {
           />
         ) : centralSection === "local" ? (
           <LocalBrowserView
+            subview={localSubview} onSubviewChange={setLocalSubview}
             initialArtist={localSelectedArtist}
             onClearInitialArtist={() => setLocalSelectedArtist(null)}
             importPreview={importPreview}
@@ -2006,6 +2021,7 @@ export function App() {
             {playerTarget.kind === "local" ? (
               <LocalBrowserView
                 key={`${playerNavigation?.revision}:${playerTarget.view}:${playerTarget.albumId}`}
+                subview={playerSubview} onSubviewChange={changePlayerLocalSubview}
                 playerTarget={playerTarget}
                 onPlayerNavigationBack={closePlayerNavigation}
                 catalogRefreshRevision={localCatalogRevision}

@@ -8,6 +8,11 @@ export interface LocalItem {
   duration?: number;
 }
 
+export interface LocalAlbumTagPresence {
+  evaluated_track_count: number;
+  missing: { album: number; artist: number; album_artist: number; date: number; genre: number };
+}
+
 export interface LocalAlbum {
   id: string;
   title: string;
@@ -18,6 +23,7 @@ export interface LocalAlbum {
   source_id?: string | null;
   track_count: number;
   discs: LocalAlbumDisc[];
+  tag_presence?: LocalAlbumTagPresence | null;
 }
 
 export interface LocalAlbumDisc {

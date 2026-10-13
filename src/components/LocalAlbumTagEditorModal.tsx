@@ -3,6 +3,10 @@ import { AlertTriangle, Eye, LoaderCircle, RotateCcw, Undo2, X } from "lucide-re
 import { useTranslation } from "react-i18next";
 
 import { localTagsService } from "../services/localTags";
+import { applyOnlineMetadataValues } from "../utils/onlineMetadataTransfer";
+import type { MetadataTransferRequest } from "../utils/onlineMetadataTransfer";
+import { OnlineAlbumMetadataPanel } from "./OnlineAlbumMetadataPanel";
+import type { DoctorReviewContext } from "../utils/libraryDoctorReview";
 import type {
   LocalAlbumTagBatchPreflightErrorCode,
   LocalAlbumTagBatchPreflightRequest,
@@ -34,6 +38,7 @@ interface Props {
   isAvailable: () => boolean;
   onClose: () => void;
   onBatchFinished?: (result: LocalAlbumTagBatchResult | null) => void;
+  reviewContext?: DoctorReviewContext | null;
 }
 
 function backendErrorCode(cause: unknown): LocalAlbumTagBatchPreflightErrorCode | null {
@@ -43,8 +48,9 @@ function backendErrorCode(cause: unknown): LocalAlbumTagBatchPreflightErrorCode 
     : null;
 }
 
-export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName, available, catalogVersion, isAvailable, onClose, onBatchFinished }) => {
+export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName, available, catalogVersion, isAvailable, onClose, onBatchFinished, reviewContext }) => {
   const { t } = useTranslation();
+  const review = reviewContext?.albumId === albumId ? reviewContext : null;
   const [draft, setDraft] = useState<LocalAlbumTagEditorDraft | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloading, setReloading] = useState(false);
@@ -161,6 +167,23 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [analysis?.dirty, previewing, applying, result, applyIssue, t]);
+
+  const editorRevision = guard.version();
+  const metadataAvailable = () => guard.version() === editorRevision && snapshotCurrent && !mustReload
+    && !loading && !reloading && !previewing && !applying && !applyInFlight.current && !consumed.current && isAvailable();
+  const transferMetadata = (request: MetadataTransferRequest): boolean => {
+    if (!metadataAvailable() || !request.isCurrent() || !draft || analysis?.blocked
+      || request.albumId !== albumId || request.catalogVersion !== catalogVersion || request.inspection !== draft.inspection
+      || request.draft !== draft || request.editorRevision !== guard.version()) return false;
+    const next = applyOnlineMetadataValues(draft, request.values);
+    if (!next) return false;
+    guard.invalidate();
+    previewRef.current = null;
+    setPreview(null);
+    setDraft(current => current === request.draft ? next : current);
+    setMessage(null);
+    return true;
+  };
 
   const changeField = (field: typeof localAlbumTagFields[number], value: string) => {
     if (applyInFlight.current || consumed.current) return;
@@ -323,6 +346,11 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
           </button>
         </header>
 
+        {review && <p id="local-album-tag-doctor-context" role="note"
+          className="mx-5 mt-4 rounded-lg border border-sky-400/25 bg-sky-400/10 px-3 py-2 text-xs text-sky-100">
+          {t("libraryDoctor.review.context", { finding: t(`libraryDoctor.codes.${review.code}`) })}
+        </p>}
+
         {draft && mustReload && !applying && !result && !applyIssue && (
           <p role="status" className="mx-5 mt-4 text-xs text-amber-200">
             {t(snapshotCurrent ? "albumTagEditor.stale" : "albumTagEditor.unavailable")}
@@ -377,13 +405,14 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                   const state = fieldDraft.summary.state;
                   const disabled = Boolean(applying || consumed.current || analysis?.blocked || !snapshotCurrent || reloading);
                   return (
-                    <div key={field} className="space-y-1.5">
+                    <div key={field} className={`space-y-1.5 ${review?.field === field ? "rounded-lg bg-sky-400/10 p-2 ring-1 ring-sky-400/40" : ""}`}>
                       <label htmlFor={`local-album-tag-${field}`} className="text-xs text-[#BBBBBB]">
                         {t(`tagEditor.fields.${field}`)}
                       </label>
                       <input
                         id={`local-album-tag-${field}`}
-                        autoFocus={index === 0}
+                        autoFocus={review ? review.field === field : index === 0}
+                        aria-describedby={review?.field === field ? "local-album-tag-doctor-context" : undefined}
                         type="text"
                         value={fieldDraft.value}
                         placeholder={state === "mixed"
@@ -417,6 +446,11 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                   );
                 })}
               </div>
+
+              <OnlineAlbumMetadataPanel albumId={albumId} catalogVersion={catalogVersion} inspection={draft.inspection}
+                available={snapshotCurrent && !mustReload && !loading && !reloading && !previewing && !applying && !consumed.current}
+                draft={draft} editorRevision={editorRevision} transferAvailable={!analysis?.blocked && metadataAvailable()}
+                isAvailable={metadataAvailable} onTransfer={transferMetadata} />
 
               {result && (
                 <section aria-label={t("albumTagEditor.resultTitle")} className="mt-5 rounded-xl border border-[#333333] p-4 text-xs text-[#CCCCCC]">

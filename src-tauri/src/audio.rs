@@ -256,6 +256,42 @@ pub struct LocalItem {
     pub duration: Option<f64>,
 }
 
+/// Presence of raw values in accepted MPD index rows, not a physical/semantic inspection.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct LocalAlbumMissingTags {
+    pub album: usize,
+    pub artist: usize,
+    pub album_artist: usize,
+    pub date: usize,
+    pub genre: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct LocalAlbumTagPresence {
+    pub evaluated_track_count: usize,
+    pub missing: LocalAlbumMissingTags,
+}
+
+impl LocalAlbumTagPresence {
+    fn observe(&mut self, present: [bool; 5]) {
+        self.evaluated_track_count += 1;
+        self.missing.album += usize::from(!present[0]);
+        self.missing.artist += usize::from(!present[1]);
+        self.missing.album_artist += usize::from(!present[2]);
+        self.missing.date += usize::from(!present[3]);
+        self.missing.genre += usize::from(!present[4]);
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.evaluated_track_count += other.evaluated_track_count;
+        self.missing.album += other.missing.album;
+        self.missing.artist += other.missing.artist;
+        self.missing.album_artist += other.missing.album_artist;
+        self.missing.date += other.missing.date;
+        self.missing.genre += other.missing.genre;
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LocalAlbum {
     pub id: String,
@@ -268,6 +304,8 @@ pub struct LocalAlbum {
     pub source_id: Option<String>,
     pub track_count: usize,
     pub discs: Vec<LocalAlbumDisc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_presence: Option<LocalAlbumTagPresence>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -976,6 +1014,7 @@ struct AlbumCollector {
     year: Option<String>,
     genres: Vec<String>,
     track_count: usize,
+    tag_presence: LocalAlbumTagPresence,
     folder_path: String,
     track_uris: Vec<String>,
     tracks: Vec<(String, LocalItem)>,
@@ -1017,6 +1056,7 @@ impl AlbumCollector {
             crate::catalog_genres::add_genre(&mut self.genres, genre);
         }
         self.track_count += other.track_count;
+        self.tag_presence.merge(&other.tag_presence);
         self.track_uris.extend(other.track_uris);
         self.tracks.extend(other.tracks);
         for other_disc in other.discs {
@@ -1063,6 +1103,7 @@ impl AlbumCollector {
             crate::catalog_genres::add_genre(&mut self.genres, genre);
         }
         self.track_count += other.track_count;
+        self.tag_presence.merge(&other.tag_presence);
         self.track_uris.extend(other.track_uris);
         self.tracks.extend(other.tracks);
         if self.year.is_none() {
@@ -1565,6 +1606,8 @@ impl AudioEngine {
                     source_id,
                     track_count: col.track_count,
                     discs: col.discs,
+                    tag_presence: (col.tag_presence.evaluated_track_count == col.track_count)
+                        .then_some(col.tag_presence),
                 }
             })
             .collect();
@@ -1644,6 +1687,7 @@ impl AudioEngine {
         let mut cur_date = None;
         let mut cur_genres = Vec::new();
         let mut cur_duration = None;
+        let mut cur_presence = [false; 5];
 
         let commit_track = |collection: &mut LocalAlbumCollection,
                             file: &str,
@@ -1653,7 +1697,8 @@ impl AudioEngine {
                             album_artist: Option<String>,
                             date: Option<String>,
                             genres: Vec<String>,
-                            duration: Option<f64>| {
+                            duration: Option<f64>,
+                            present: [bool; 5]| {
             if file.is_empty() || !local_media::is_catalog_track_uri(file) {
                 return;
             }
@@ -1697,6 +1742,7 @@ impl AudioEngine {
                 year: date.clone(),
                 genres: Vec::new(),
                 track_count: 0,
+                tag_presence: LocalAlbumTagPresence::default(),
                 folder_path: physical_folder.clone(),
                 track_uris: Vec::new(),
                 tracks: Vec::new(),
@@ -1710,6 +1756,7 @@ impl AudioEngine {
                 entry.title = title.clone();
             }
             entry.track_count += 1;
+            entry.tag_presence.observe(present);
             entry.track_uris.push(file.to_string());
             entry.tracks.push((
                 disc_path.clone(),
@@ -1768,16 +1815,32 @@ impl AudioEngine {
                             cur_date.take(),
                             std::mem::take(&mut cur_genres),
                             cur_duration.take(),
+                            std::mem::replace(&mut cur_presence, [false; 5]),
                         );
                         cur_file = v.to_string();
                         found += 1;
                     }
                     "Title" if !cur_file.is_empty() => cur_title = Some(v.to_string()),
-                    "Album" if !cur_file.is_empty() => cur_album = Some(v.to_string()),
-                    "Artist" if !cur_file.is_empty() => cur_artist = Some(v.to_string()),
-                    "AlbumArtist" if !cur_file.is_empty() => cur_album_artist = Some(v.to_string()),
-                    "Genre" if !cur_file.is_empty() => crate::catalog_genres::add_genre(&mut cur_genres, v),
-                    "Date" if !cur_file.is_empty() => cur_date = Some(v.chars().take(4).collect::<String>()),
+                    "Album" if !cur_file.is_empty() => {
+                        cur_presence[0] |= !v.trim().is_empty();
+                        cur_album = Some(v.to_string());
+                    }
+                    "Artist" if !cur_file.is_empty() => {
+                        cur_presence[1] |= !v.trim().is_empty();
+                        cur_artist = Some(v.to_string());
+                    }
+                    "AlbumArtist" if !cur_file.is_empty() => {
+                        cur_presence[2] |= !v.trim().is_empty();
+                        cur_album_artist = Some(v.to_string());
+                    }
+                    "Genre" if !cur_file.is_empty() => {
+                        cur_presence[4] |= !v.trim().is_empty();
+                        crate::catalog_genres::add_genre(&mut cur_genres, v);
+                    }
+                    "Date" if !cur_file.is_empty() => {
+                        cur_presence[3] |= !v.trim().is_empty();
+                        cur_date = Some(v.chars().take(4).collect::<String>());
+                    }
                     "duration" | "Time" | "time" | "Duration" if !cur_file.is_empty() => {
                         if cur_duration.is_none() {
                             cur_duration = v.trim().parse::<f64>().ok();
@@ -1798,6 +1861,7 @@ impl AudioEngine {
             cur_date,
             cur_genres,
             cur_duration,
+            cur_presence,
         );
 
         Ok(found)
@@ -10350,4 +10414,107 @@ mod tests {
             .unwrap_err()
             .contains("antes da resposta final"));
     }
+
+    #[test]
+    fn catalog_tag_presence_raw_values_precede_fallback_and_transformations() {
+        let map = AudioEngine::canonical_local_album_collectors(collect_album_pages(vec![album_test_lines(&[
+            "file: Synthetic/Fallback/one.flac",
+            "file: Synthetic/Blank/two.flac", "Album:   ", "Artist: ", "AlbumArtist:   ", "Date:    ", "Genre:   ",
+            "file: Synthetic/Raw/three.flac", "Album: Raw", "Artist: A", "AlbumArtist: A", "Date:     2004", "Genre: bad\nvalue",
+        ])]));
+        let fallback = &map[&album_id("Synthetic/Fallback", "Fallback")];
+        assert_eq!(fallback.title, "Fallback");
+        assert_eq!(fallback.display_artist(), "Artista Desconhecido");
+        assert_eq!(fallback.tag_presence.evaluated_track_count, 1);
+        assert_eq!(fallback.tag_presence.missing, LocalAlbumMissingTags { album: 1, artist: 1, album_artist: 1, date: 1, genre: 1 });
+        let blank = &map[&album_id("Synthetic/Blank", "   ")];
+        assert_eq!(blank.title, "  ");
+        assert_eq!(blank.year.as_deref(), Some("   "));
+        assert_eq!(blank.tag_presence, fallback.tag_presence);
+        let raw = &map[&album_id("Synthetic/Raw", "Raw")];
+        assert_eq!(raw.year.as_deref(), Some("    "));
+        assert!(raw.genres.is_empty());
+        assert_eq!(raw.tag_presence.missing, LocalAlbumMissingTags::default());
+    }
+
+    #[test]
+    fn catalog_tag_presence_counts_each_field_once_per_accepted_track_and_resets_pages() {
+        let collection = collect_album_pages(vec![album_test_lines(&[
+            "file: S/Album/one.flac", "Album: Album", "Album:   ", "Album: Album",
+            "Artist:   ", "Artist: A", "AlbumArtist: A", "Date: 2001-03-04", "Genre: Jazz", "Genre: Rock", "Genre: ",
+        ]), album_test_lines(&[
+            "file: ../rejected.flac", "Album: Album", "Artist: A", "AlbumArtist: A", "Date: 2001", "Genre: Jazz",
+            "file: S/Album/two.flac", "Album: Album", "Artist: ", "Genre:   ",
+        ])]);
+        let map = AudioEngine::canonical_local_album_collectors(collection);
+        let album = &map[&album_id("S/Album", "Album")];
+        assert_eq!(album.track_count, 2);
+        assert_eq!(album.tag_presence.evaluated_track_count, 2);
+        assert_eq!(album.tag_presence.missing, LocalAlbumMissingTags { album: 0, artist: 1, album_artist: 1, date: 1, genre: 1 });
+        assert_eq!(album.genres, ["Jazz", "Rock"]);
+    }
+
+    #[test]
+    fn catalog_tag_presence_adds_title_variants_discs_and_collection_pages() {
+        let mut first = Vec::new();
+        for i in 0..4 {
+            first.extend([format!("file: S/Box/CD1/{i}.flac"), "Album: Box".into(), "Artist: A".into(), "Date: 2001-01-02".into(), "Genre: Jazz".into()]);
+        }
+        let variant = album_test_lines(&["file: S/Box/CD1/five.flac", "Album: Typo", "Artist: A", "AlbumArtist: A", "Genre: Rock"]);
+        let mut second = Vec::new();
+        for i in 0..3 {
+            second.extend([format!("file: S/Box/CD2/{i}.flac"), "Album: Box".into(), "Artist: A".into(), "AlbumArtist: A".into(), "Date: 2002".into()]);
+        }
+        let albums = AudioEngine::finalize_local_album_collection(collect_album_pages(vec![first, variant, second]), &HashSet::from(["S".into()]));
+        assert_eq!(albums.len(), 1);
+        let album = &albums[0];
+        assert_eq!(album.id, album_id("S/Box", "Box"));
+        assert_eq!(album.title, "Box");
+        assert_eq!(album.track_count, 8);
+        assert_eq!(album.discs.iter().map(|disc| disc.track_count).collect::<Vec<_>>(), [5, 3]);
+        assert_eq!(album.year.as_deref(), Some("2001"));
+        assert_eq!(album.genres, ["Jazz", "Rock"]);
+        let evidence = album.tag_presence.as_ref().unwrap();
+        assert_eq!(evidence.evaluated_track_count, 8);
+        assert_eq!(evidence.missing, LocalAlbumMissingTags { album: 0, artist: 0, album_artist: 4, date: 1, genre: 3 });
+    }
+
+    #[test]
+    fn catalog_tag_presence_keeps_only_canonical_physical_or_cue_evidence() {
+        for (physical, cue, split_cue, choose_cue) in [(1, 2, false, true), (2, 3, false, false), (1, 1, false, false), (0, 3, false, true), (2, 0, false, false), (1, 2, true, false)] {
+            let mut physical_page = Vec::new();
+            for i in 0..physical {
+                physical_page.extend([format!("file: S/Album/{i}.flac"), "Album: Album".into(), "Artist: A".into(), "AlbumArtist: A".into(), "Date: 2001".into()]);
+            }
+            let mut cue_page = Vec::new();
+            for i in 0..cue {
+                let sheet = if split_cue { i } else { 0 };
+                cue_page.extend([format!("file: S/Album/image{sheet}.cue/track{:04}", i + 1), "Album: Album".into(), "Genre: CueGenre".into()]);
+            }
+            let albums = AudioEngine::finalize_local_album_collection(collect_album_pages(vec![physical_page, cue_page]), &HashSet::new());
+            let album = &albums[0];
+            let count = if choose_cue { cue } else { physical };
+            assert_eq!(album.track_count, count);
+            let evidence = album.tag_presence.as_ref().unwrap();
+            assert_eq!(evidence.evaluated_track_count, count);
+            assert_eq!(evidence.missing, if choose_cue { LocalAlbumMissingTags { album: 0, artist: cue, album_artist: cue, date: cue, genre: 0 } }
+                else { LocalAlbumMissingTags { album: 0, artist: 0, album_artist: 0, date: 0, genre: physical } });
+            // Existing display union still includes discarded CUE genres; it is not presence evidence.
+            if cue > 0 { assert_eq!(album.genres, ["CueGenre"]); }
+        }
+    }
+
+    #[test]
+    fn catalog_tag_presence_payload_is_optional_and_serializes_raw_missing_counts() {
+        let old = r#"{"id":"legacy","title":"Fallback","artist":"Displayed","year":"2001","folder_path":"S/Album","source_id":null,"track_count":1,"discs":[]}"#;
+        let legacy: LocalAlbum = serde_json::from_str(old).unwrap();
+        assert!(legacy.tag_presence.is_none());
+        assert!(serde_json::to_value(legacy).unwrap().get("tag_presence").is_none());
+        let albums = AudioEngine::finalize_local_album_collection(collect_album_pages(vec![album_test_lines(&["file: S/Fallback/one.flac"])]), &HashSet::new());
+        let json = serde_json::to_value(&albums[0]).unwrap();
+        assert_eq!(json["tag_presence"], serde_json::json!({"evaluated_track_count":1,"missing":{"album":1,"artist":1,"album_artist":1,"date":1,"genre":1}}));
+        let roundtrip: LocalAlbum = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.tag_presence, albums[0].tag_presence);
+    }
+
 }

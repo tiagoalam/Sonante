@@ -176,6 +176,7 @@ const componentJs = ts.transpileModule(componentSource, { compilerOptions: { jsx
   .replace(/from "(react|react\/jsx-runtime|lucide-react)"/g, (_, name) => `from ${JSON.stringify(import.meta.resolve(name))}`)
   .replace('from "react-i18next"', `from ${JSON.stringify(i18nMock)}`)
   .replace('from "../services/libraryDoctor"', `from ${JSON.stringify(serviceUrl)}`)
+  .replace('from "../utils/libraryDoctorReview"', `from ${JSON.stringify(new URL("./libraryDoctorReview.ts", import.meta.url).href)}`)
   .replace('from "../utils/libraryDoctor"', `from ${JSON.stringify(new URL("./libraryDoctor.ts", import.meta.url).href)}`);
 const { LibraryDoctorReportContent, LibraryDoctorModal } = await import(dataModule(componentJs));
 const render = (snapshot, language = "pt-BR") => {

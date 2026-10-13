@@ -2,8 +2,9 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useSyncExternalS
 import { LoaderCircle, RotateCcw, Stethoscope, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { libraryDoctorService } from "../services/libraryDoctor";
-import type { DoctorEvidence, DoctorFindingLevel, LibraryDoctorReport } from "../types/libraryDoctor";
+import type { DoctorEvidence, DoctorFindingCode, DoctorFindingLevel, LibraryDoctorReport } from "../types/libraryDoctor";
 import { createLibraryDoctorSession, doctorCoverageState, doctorFindingGroups, doctorValue, installDoctorDialogFocus } from "../utils/libraryDoctor";
+import { doctorReviewField, doctorReviewRequest, type DoctorReviewContext } from "../utils/libraryDoctorReview";
 
 interface Props {
   albumId: string;
@@ -12,6 +13,7 @@ interface Props {
   catalogVersion: unknown;
   isAvailable: () => boolean;
   onClose: () => void;
+  onReview?: (context: DoctorReviewContext) => boolean;
 }
 
 const levelStyle: Record<DoctorFindingLevel, string> = {
@@ -42,7 +44,11 @@ const EvidenceTable: React.FC<{ evidence: DoctorEvidence[] }> = ({ evidence }) =
   </div>;
 };
 
-export const LibraryDoctorReportContent: React.FC<{ report: LibraryDoctorReport }> = ({ report }) => {
+export const LibraryDoctorReportContent: React.FC<{
+  report: LibraryDoctorReport;
+  canReview?: (code: DoctorFindingCode) => boolean;
+  onReview?: (code: DoctorFindingCode) => void;
+}> = ({ report, canReview, onReview }) => {
   const { t } = useTranslation();
   const coverage = report.coverage;
   const coverageState = doctorCoverageState(report);
@@ -65,6 +71,12 @@ export const LibraryDoctorReportContent: React.FC<{ report: LibraryDoctorReport 
       <div className="space-y-3">{doctorFindingGroups(report).map(group => <section key={group.code} className="rounded-xl border border-[#333333] p-3">
         <h4 className="mb-2 text-sm font-bold">{t(`libraryDoctor.codes.${group.code}`)}</h4>
         <p className="mb-2 break-all font-mono text-[10px] text-[#888888]">{group.code}</p>
+        {onReview && doctorReviewField(group.code) && <button type="button"
+          disabled={!canReview?.(group.code)} onClick={() => onReview(group.code)}
+          title={t("libraryDoctor.review.requirements")}
+          className="mb-3 rounded-lg border border-[#444444] px-3 py-2 text-xs text-[#E5A00D] hover:bg-[#303030] disabled:cursor-not-allowed disabled:opacity-40">
+          {t(doctorReviewField(group.code) === "date" ? "libraryDoctor.review.dates" : "libraryDoctor.review.albumArtist")}
+        </button>}
         {group.findings.map((finding, index) => <details key={index} className="border-t border-[#303030] py-2">
           <summary className="cursor-pointer rounded p-1 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E5A00D]">
             <span className={`mr-2 inline-block rounded px-2 py-1 ${levelStyle[finding.level]}`}>{t(`libraryDoctor.levels.${finding.level}`)}</span>
@@ -89,7 +101,7 @@ export const LibraryDoctorReportContent: React.FC<{ report: LibraryDoctorReport 
   </>;
 };
 
-export const LibraryDoctorModal: React.FC<Props> = ({ albumId, displayName, available, catalogVersion, isAvailable, onClose }) => {
+export const LibraryDoctorModal: React.FC<Props> = ({ albumId, displayName, available, catalogVersion, isAvailable, onClose, onReview }) => {
   const { t } = useTranslation();
   const id = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -102,6 +114,13 @@ export const LibraryDoctorModal: React.FC<Props> = ({ albumId, displayName, avai
   session.syncContext(albumId, catalogVersion, available, false);
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
   const close = useCallback(() => { session.close(); closeRef.current(); }, [session]);
+  const reviewRequest = (code: DoctorFindingCode) => doctorReviewRequest(session.getSnapshot(), code, {
+    albumId, catalogVersion, available: available && availabilityRef.current(), editorOpen: false,
+  });
+  const review = (code: DoctorFindingCode) => {
+    const context = reviewRequest(code);
+    if (context && onReview?.(context)) session.close();
+  };
 
   useEffect(() => {
     session.activate();
@@ -127,7 +146,8 @@ export const LibraryDoctorModal: React.FC<Props> = ({ albumId, displayName, avai
         {(state.phase === "stale" || state.phase === "unavailable") && <p role="status" className="text-sm text-amber-200">{t(state.phase === "stale" ? "libraryDoctor.stale" : "libraryDoctor.unavailable")}</p>}
         {state.inFlight && state.phase !== "loading" && <p role="status" className="text-xs text-[#BBBBBB]">{t("libraryDoctor.pendingDiscard")}</p>}
         {state.error && <p role="alert" className="text-sm text-red-200">{t(`libraryDoctor.errors.${state.error}`)}</p>}
-        {state.report && <LibraryDoctorReportContent report={state.report} />}
+        {state.report && <LibraryDoctorReportContent report={state.report}
+          canReview={code => Boolean(reviewRequest(code))} onReview={onReview ? review : undefined} />}
         <section id={`${id}-limits`} className="rounded-xl bg-[#222222] p-4 text-xs text-[#BBBBBB]">
           <h3 className="mb-2 font-bold text-[#DDDDDD]">{t("libraryDoctor.limitsTitle")}</h3>
           <ul className="list-disc space-y-2 pl-4">

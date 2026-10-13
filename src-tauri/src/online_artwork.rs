@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const USER_AGENT: &str = concat!(
+pub(crate) const USER_AGENT: &str = concat!(
     "Sonante/",
     env!("CARGO_PKG_VERSION"),
     " (https://github.com/tiagoalam/Sonante)"
@@ -412,7 +412,7 @@ fn next_request_at(last: Option<Instant>, now: Instant) -> Instant {
         .map_or(now, |next| next.max(now))
 }
 
-fn wait_for_musicbrainz() -> Result<(), String> {
+pub(crate) fn wait_for_musicbrainz() -> Result<(), String> {
     let limiter = LAST_MUSICBRAINZ_REQUEST.get_or_init(|| Mutex::new(None));
     let mut last = limiter
         .lock()

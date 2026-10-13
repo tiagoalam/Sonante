@@ -18,6 +18,7 @@ mod managed_preparation;
 mod managed_save_intent;
 mod mpris;
 mod online_artwork;
+mod online_metadata;
 mod persistence;
 mod playlists;
 mod plex;
@@ -3375,6 +3376,20 @@ async fn get_local_cover(
 }
 
 #[tauri::command]
+async fn get_online_album_metadata_details(
+    mbid: String,
+) -> Result<online_metadata::ReleaseDetails, online_metadata::SearchError> {
+    online_metadata::lookup(mbid).await
+}
+
+#[tauri::command]
+async fn search_online_album_metadata(
+    request: online_metadata::SearchRequest,
+) -> Result<online_metadata::SearchResult, online_metadata::SearchError> {
+    online_metadata::search(request).await
+}
+
+#[tauri::command]
 async fn get_online_album_cover(
     request: online_artwork::OnlineAlbumCoverRequest,
     config_state: State<'_, ConfigState>,
@@ -4534,6 +4549,8 @@ pub fn run() {
             list_local_directory,
             get_local_album_tracks,
             get_local_album_doctor,
+            search_online_album_metadata,
+            get_online_album_metadata_details,
             resolve_local_library_path,
             get_local_track_tags,
             get_local_album_tag_inspection,

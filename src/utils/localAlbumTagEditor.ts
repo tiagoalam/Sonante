@@ -217,6 +217,7 @@ export function createLocalAlbumTagRequestGuard() {
       }
       return context;
     },
+    version() { return `${context}:${generation}`; },
     invalidate() { generation++; },
     capture() { return { context, generation: ++generation }; },
     isCurrent(token: { context: number; generation: number }) {
