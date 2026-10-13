@@ -123,3 +123,24 @@ export function logError(operation: DiagnosticOperation, error?: unknown): void 
 export function logWarning(operation: DiagnosticOperation, error?: unknown): void {
   report("warn", operation, error);
 }
+
+// Opt-in development snapshots. Never evaluate the builder in a production build.
+export function logExploreDiagnostic(build: () => object): void {
+  if (!import.meta.env?.DEV || import.meta.env.VITE_SONANTE_EXPLORE_DIAGNOSTICS !== "1") return;
+  try {
+    console.info("[Sonante] explore.diagnostic", JSON.stringify(build()));
+  } catch { /* Diagnostics must not affect selection or interaction. */ }
+}
+
+const exploreAliases = { root: new Map<string, string>(), library: new Map<string, string>() };
+export function exploreDiagnosticAlias(kind: keyof typeof exploreAliases, value: string): string {
+  const aliases = exploreAliases[kind];
+  if (!aliases.has(value)) aliases.set(value, `${kind}-${aliases.size + 1}`);
+  return aliases.get(value)!;
+}
+
+// Metadata is untrusted too: omit path/URL/credential-like values entirely.
+export function exploreDiagnosticText(value: string): string {
+  if (/[\\/\u0000-\u001f\u007f]|(?:token|password|credential|secret|authorization)\s*[:=]|[a-z][a-z0-9+.-]*:/iu.test(value)) return "[redacted]";
+  return value.slice(0, 80);
+}

@@ -219,6 +219,7 @@ import React from "react";
 import * as jsx from "react/jsx-runtime";
 import * as icons from "lucide-react";
 import * as editor from "./localAlbumTagEditor.ts";
+import * as transfer from "./onlineMetadataTransfer.ts";
 
 const modalSource = readFileSync(new URL("../components/LocalAlbumTagEditorModal.tsx", import.meta.url), "utf8");
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
@@ -244,6 +245,8 @@ function modalFixture(service = {}, initialProps = {}) {
     react: { ...hooks, default: hooks, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons,
     "react-i18next": { useTranslation: () => ({ t: translate }) },
     "../utils/localAlbumTagEditor": editor,
+    "../utils/onlineMetadataTransfer": transfer,
+    "./OnlineAlbumMetadataPanel": { OnlineAlbumMetadataPanel: () => null },
     "../services/localTags": { localTagsService: {
       getAlbumInspection(id) { calls.inspect.push(id); return service.inspect?.(id) ?? Promise.resolve(physicalInspection()); },
       preflightAlbumBatch(request) { calls.preflight.push(request); return service.preflight?.(request) ?? Promise.resolve(plan()); },

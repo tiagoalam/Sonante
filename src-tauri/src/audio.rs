@@ -302,6 +302,8 @@ pub struct LocalAlbum {
     pub genres: Vec<String>,
     pub folder_path: String,
     pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
     pub track_count: usize,
     pub discs: Vec<LocalAlbumDisc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1604,6 +1606,7 @@ impl AudioEngine {
                     genres: col.genres,
                     folder_path: col.folder_path,
                     source_id,
+                    source_label: None,
                     track_count: col.track_count,
                     discs: col.discs,
                     tag_presence: (col.tag_presence.evaluated_track_count == col.track_count)

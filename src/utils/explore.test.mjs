@@ -5,7 +5,8 @@ import ts from "typescript";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import i18next from "i18next";
-import { createExploreSession } from "./explore.ts";
+import { createExploreSession, deriveExploreGroups, EXPLORE_PAGE_SIZE, EXPLORE_SUGGESTION_COUNT, exploreEntryIsCurrent } from "./explore.ts";
+import { PlexArtistPortraitCache } from "./plexArtistPortraits.ts";
 import { LocalAlbumCatalog } from "./localAlbumCatalog.ts";
 import { LocalArtworkResolver } from "./localArtwork.ts";
 import { visitPlayerTarget } from "./playerNavigation.ts";
@@ -19,12 +20,50 @@ const source = path => readFileSync(new URL(path, import.meta.url), "utf8");
 const dataModule = text => `data:text/javascript;base64,${Buffer.from(text).toString("base64")}`;
 const compile = text => ts.transpileModule(text, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
 
+test("opt-in Explore snapshots distinguish inventory, sampling and slices without repeated-render logs or changing selection", async () => {
+  const helper = dataModule(compile(source("./frontendDiagnostics.ts").replaceAll("import.meta.env", '{"DEV":true,"VITE_SONANTE_EXPLORE_DIAGNOSTICS":"1"}')));
+  const instrumented = await import(dataModule(compile(source("./explore.ts").replace(/from "(\.[^"]+)"/g, (_, path) => `from "${path === "./frontendDiagnostics.ts" ? helper : new URL(path, import.meta.url).href}"`))));
+  const old = console.info, logs = [];
+  console.info = (label, json) => { assert.equal(label, "[Sonante] explore.diagnostic"); logs.push(JSON.parse(json)); };
+  try {
+    const c = catalogWithSlices();
+    c.local.albums.forEach((a, i) => { a.source_id = i < 10 ? "/private/root-one" : "/private/root-two"; });
+    c.local.albums[0].title = "https://private/?token=secret";
+    const s = instrumented.createExploreSession(() => 0.5), control = createExploreSession(() => 0.5);
+    s.syncContext(c, true); control.syncContext(c, true);
+    assert.deepEqual(s.getSnapshot(), control.getSnapshot());
+    assert.deepEqual(logs[0].albums.received, { local: 15, plex: 3 });
+    assert.deepEqual(logs[0].albums.eligible, logs[0].albums.received);
+    assert.equal(logs[0].albums.selected.local + logs[0].albums.selected.plex, 2);
+    assert.deepEqual(logs[0].artists, { derived: 2, eligible: 2, sampled: 2, visible: 2 });
+    assert.deepEqual(Object.values(logs[0].localRoots.received).sort((a,b)=>a-b), [5, 10]);
+    for (let i=0;i<20;i++) s.syncContext({ local: { ...c.local }, plex: { ...c.plex } }, true);
+    assert.equal(logs.length, 1);
+    s.renew(); control.renew(); assert.deepEqual(s.getSnapshot(), control.getSnapshot());
+    s.openSlice(s.getSnapshot().genres[0], s.getSnapshot().revision);
+    assert.deepEqual(logs.at(-1).slice.eligible, { local: 15, plex: 3 });
+    assert.equal(logs.at(-1).slice.pages, 3); assert.equal(logs.at(-1).slice.sample.length, 3);
+    s.setPage(1, s.getSnapshot().revision); assert.equal(logs.at(-1).event, "page");
+    const library = logs[0].plexLibrary;
+    s.syncContext({ ...c, plex: { ...c.plex, libraryId: "private-other-library", identity: {} } }, true);
+    assert.notEqual(logs.at(-1).plexLibrary, library); assert.equal(logs.at(-1).slice, null);
+    s.syncContext({ ...c, local: { ...c.local, state: "unavailable" } }, true);
+    assert.equal(logs.at(-1).albums.eligible.local, 0); assert.equal(logs.at(-1).albums.visible.local, 0);
+    const diverse = context(10);
+    [...diverse.local.albums, ...diverse.plex.albums].forEach((a, i) => { a.genres = [`Genre ${i}`]; });
+    s.syncContext(diverse, true);
+    assert.equal(logs.at(-1).artists.derived, 20); assert.equal(logs.at(-1).artists.sampled, 4);
+    assert.equal(logs.at(-1).genres.derived, 20); assert.equal(logs.at(-1).genres.sampled, 4);
+    assert.doesNotMatch(JSON.stringify(logs), /private|secret|https:|folder_path|rating_key|source_id/);
+  } finally { console.info = old; }
+});
+
 // The actual session uses injected randomness only in these synthetic tests.
-test("six suggestions retain exact homonymous editions, artist diversity and both sources without excluding incomplete metadata", () => {
+test("ten suggestions retain exact homonymous editions, artist diversity and both sources without excluding incomplete metadata", () => {
   const c = context(), session = createExploreSession(() => 0.4); session.syncContext(c, true);
   const selected = session.getSnapshot().selected;
-  assert.equal(selected.length, 6); assert.equal(new Set(selected.map(e => e.album.artist)).size, 6);
-  assert.equal(new Set(selected.map(e => e.source)).size, 2); assert.equal(new Set(selected.map(e => e.key)).size, 6);
+  assert.equal(selected.length, 10); assert.equal(new Set(selected.map(e => e.album.artist)).size, 10);
+  assert.equal(new Set(selected.map(e => e.source)).size, 2); assert.equal(new Set(selected.map(e => e.key)).size, 10);
   for (const entry of selected) assert.ok(c[entry.source].albums.includes(entry.album));
   const sparse = { ...c, local: { state: "ready", albums: [local("a", ""), local("b", "")] }, plex: { ...c.plex, albums: [plex("a", "")] } };
   const s = createExploreSession(() => 0); s.syncContext(sparse, true);
@@ -45,14 +84,59 @@ test("selection is stable under rerenders/detail return; renewal is in memory an
   assert.equal(c.local.albums.length, 8); assert.equal(c.plex.albums.length, 8);
 });
 
-test("pending sources reserve slots; late inventory fills without reshuffling prior identities and errors leave the other source usable", () => {
+test("initial provisional Local data waits for its confirmed response; later sources preserve every published card", () => {
   const c = context(), s = createExploreSession(() => 0.5);
-  s.syncContext({ ...c, local: { albums: [], state: "loading" } }, true); const partial = s.getSnapshot().selected;
-  assert.equal(partial.length, 3); s.syncContext(c, true);
-  assert.equal(s.getSnapshot().selected.length, 6); assert.deepEqual(s.getSnapshot().selected.slice(0, 3), partial);
-  const unavailable = createExploreSession(() => 0.5); unavailable.syncContext({ ...c, local: { ...c.local, state: "unavailable" } }, true);
-  assert.equal(unavailable.visibleEntries().length, 6); unavailable.syncContext(c, true);
-  assert.equal(new Set(unavailable.visibleEntries().map(e => e.source)).size, 2);
+  const provisional = { ...c, local: { albums: [local("provisional")], state: "loading" } };
+  s.syncContext(provisional, true);
+  assert.equal(s.getSnapshot().preparing, true); assert.deepEqual(s.visibleEntries(), []);
+  assert.deepEqual(s.visibleArtists(), []); assert.deepEqual(s.visibleGenres(), []);
+  s.renew(); assert.deepEqual(s.visibleEntries(), []);
+  s.syncContext(c, true);
+  assert.equal(s.getSnapshot().preparing, false); assert.equal(s.visibleEntries().length, 10);
+  assert.ok(s.visibleEntries().every(e => e.album.id !== "provisional"));
+  const unavailable = createExploreSession(() => 0.5);
+  unavailable.syncContext({ ...c, local: { ...c.local, state: "unavailable" } }, true);
+  const first = unavailable.visibleEntries().map(e => e.key);
+  unavailable.syncContext(c, true); assert.deepEqual(unavailable.visibleEntries().map(e => e.key), first);
+  unavailable.renew(); assert.ok(unavailable.visibleEntries().some(e => e.source === "local"));
+});
+
+test("ready Local publishes without waiting for Plex, including pending/failure, empty and invalid contexts", () => {
+  for (const phase of ["loading", "unavailable"]) {
+    const c = context(); c.plex = { ...c.plex, albums: [], state: phase };
+    const s = createExploreSession(() => 0.5); s.syncContext(c, true);
+    assert.equal(s.getSnapshot().preparing, false); assert.equal(s.visibleEntries().length, 8);
+    assert.ok(s.visibleEntries().every(e => e.source === "local"));
+    const before = s.getSnapshot();
+    const next = { ...c, plex: { ...c.plex, albums: context().plex.albums, state: "ready" } };
+    s.syncContext(next, true);
+    assert.deepEqual(s.visibleEntries().map(e => e.key), before.selected.map(e => e.key));
+    assert.deepEqual(s.visibleArtists().map(e => e.key), before.artists.map(e => e.key));
+    s.syncContext(next, false); s.syncContext(next, true);
+    assert.equal(s.getSnapshot().preparing, false);
+    assert.deepEqual(s.visibleEntries().map(e => e.key), before.selected.map(e => e.key));
+    s.renew(); assert.ok(s.visibleEntries().some(e => e.source === "plex"));
+    const old = s.visibleEntries().find(e => e.source === "plex");
+    s.syncContext({ ...next, plex: { ...c.plex, identity: {}, serverId: "other", state: "loading" } }, true);
+    assert.equal(s.validDetail(old), false); assert.ok(s.visibleEntries().every(e => e.source === "local"));
+  }
+  const c = context(0), s = createExploreSession();
+  c.local.state = "empty"; c.plex.state = "loading"; s.syncContext(c, true);
+  assert.equal(s.getSnapshot().preparing, true);
+  s.syncContext({ ...c, plex: { ...c.plex, state: "unavailable", loading: true } }, true);
+  assert.equal(s.getSnapshot().preparing, true, "one failed library does not settle another pending library");
+  s.syncContext({ ...c, plex: { ...c.plex, state: "unavailable", loading: false } }, true);
+  assert.equal(s.getSnapshot().preparing, false); assert.deepEqual(s.visibleEntries(), []);
+  s.syncContext({ ...c, plex: { ...c.plex, state: "empty" } }, true);
+  assert.equal(s.getSnapshot().preparing, false); assert.deepEqual(s.visibleEntries(), []);
+});
+
+test("a short published shelf does not fill or reshuffle on late arrival; renewal sees the expanded catalog", () => {
+  const c = context(2); c.plex = { ...c.plex, albums: [], state: "loading" };
+  const s = createExploreSession(() => 0.5); s.syncContext(c, true); const first = s.visibleEntries().map(e => e.key);
+  const next = { ...c, plex: { ...c.plex, albums: context().plex.albums, state: "ready" } };
+  s.syncContext(next, true); assert.deepEqual(s.visibleEntries().map(e => e.key), first);
+  s.renew(); assert.equal(s.visibleEntries().length, 10);
 });
 
 test("stale click tokens fail across inventory, scope, credential identity, visibility, availability and closure without opening another edition", () => {
@@ -101,20 +185,22 @@ for (const language of ["pt-BR", "en"]) {
   const instance = i18next.createInstance(); await instance.init({ lng: language, resources: { [language]: { translation: JSON.parse(source(`../locales/${language}.json`)) } }, interpolation: { escapeValue: false } }); translations[language] = instance;
 }
 const hooksUrl = dataModule(`import React from ${JSON.stringify(import.meta.resolve("react"))}; export default React;
- ${["useState", "useRef", "useMemo", "useEffect", "useSyncExternalStore"].map(name => `export const ${name} = (...args) => globalThis.__exploreHost.${name}(...args);`).join("\n")}`);
+ ${["useState", "useRef", "useMemo", "useEffect", "useLayoutEffect", "useSyncExternalStore"].map(name => `export const ${name} = (...args) => globalThis.__exploreHost.${name}(...args);`).join("\n")}`);
 const translationUrl = dataModule('export const useTranslation = () => ({t: (...args) => globalThis.__exploreTranslation.t(...args)});');
-const artworkUrl = dataModule('export const localArtworkResolver = { get: () => null, resolveLocalOnly: (...args) => globalThis.__exploreCover(...args) };');
+const artworkUrl = dataModule('export const localArtworkResolver = { get: id => globalThis.__exploreCached?.(id) ?? null, resolveLocalOnly: (...args) => globalThis.__exploreCover(...args) };');
 const plexImageUrl = dataModule('export const PlexImage = () => null;');
 const placeholderUrl = dataModule('export const AlbumArtworkPlaceholder = () => null;');
 const componentUrl = dataModule(compile(source("../components/ExploreView.tsx"))
   .replace('from "react"', `from ${JSON.stringify(hooksUrl)}`)
   .replace(/from "(react\/jsx-runtime|lucide-react)"/g, (_, name) => `from ${JSON.stringify(import.meta.resolve(name))}`)
   .replace('from "react-i18next"', `from ${JSON.stringify(translationUrl)}`)
+  .replace('from "../utils/plexArtistPortraits"', `from ${JSON.stringify(new URL("./plexArtistPortraits.ts", import.meta.url).href)}`)
+  .replace('from "../utils/exploreAlbumShelf"', `from ${JSON.stringify(new URL("./exploreAlbumShelf.ts", import.meta.url).href)}`)
   .replace('from "../utils/explore"', `from ${JSON.stringify(new URL("./explore.ts", import.meta.url).href)}`)
   .replace('from "../utils/localArtworkSession"', `from ${JSON.stringify(artworkUrl)}`)
   .replace('from "./PlexImage"', `from ${JSON.stringify(plexImageUrl)}`)
   .replace('from "./AlbumArtworkPlaceholder"', `from ${JSON.stringify(placeholderUrl)}`));
-const { ExploreView, ExploreAlbumCard } = await import(componentUrl);
+const { ExploreView, ExploreAlbumCard, ExploreArtistPortrait } = await import(componentUrl);
 function host(Component, props) {
   let cursor = 0; const slots = [], effects = [];
   const h = {
@@ -122,6 +208,7 @@ function host(Component, props) {
     useRef(initial) { return slots[cursor++] ??= { current: initial }; },
     useMemo(fn, deps) { const i = cursor++; if (!slots[i] || deps.some((v,j) => v !== slots[i].deps[j])) slots[i] = {deps,value:fn()}; return slots[i].value; },
     useEffect(fn,deps) { const i = cursor++, old = slots[i]; if (!old || deps.some((v,j)=>v!==old.deps[j])) effects.push(()=>{old?.cleanup?.();slots[i]={deps,cleanup:fn()};}); },
+    useLayoutEffect(fn,deps) { h.useEffect(fn,deps); },
     useSyncExternalStore(_,get) { return get(); },
     render(next=props) { props=next;cursor=0;globalThis.__exploreHost=h;return Component(props); },
     effects() { effects.splice(0).forEach(fn=>fn()); }, close() {slots.forEach(s=>s?.cleanup?.());},slots,
@@ -134,6 +221,7 @@ function shallowMarkup(tree) {
     return React.isValidElement(node)&&node.key===null?React.cloneElement(node,{key:index}):node;
   });
   if(!React.isValidElement(tree))return tree;
+  if(tree.type===ExploreArtistPortrait)return React.createElement("div",{key:tree.key});
   if(tree.type===ExploreAlbumCard)return React.createElement("article",{key:tree.key},tree.props.entry.album.title);
   return React.cloneElement(tree,{},shallowMarkup(tree.props.children));
 }
@@ -143,8 +231,14 @@ test("real Explore shelf shows independent source states and selected library, w
     globalThis.__exploreTranslation=translations[language];const c=context();c.local.state=phase;
     const h=host(ExploreView,{context:c,active:true,libraryTitle:"Selected library",ensureLocal(){},isCurrent:()=>true,onOpen(){}});
     const tree=h.render(),markup=renderToStaticMarkup(shallowMarkup(tree));
-    assert.ok(markup.includes(translations[language].t(`explore.states.${phase}`)));assert.ok(markup.includes("Selected library"));
-    assert.ok(nodes(tree,n=>n.type===ExploreAlbumCard).some(n=>n.props.entry.source==="plex"));h.close();
+    if(phase === "ready") assert.ok(!markup.includes(translations[language].t("explore.states.ready")));
+    else assert.ok(markup.includes(translations[language].t(`explore.states.${phase}`)));
+    assert.ok(markup.includes("Selected library"));
+    if (phase === "loading") {
+      assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,0);
+      assert.ok(markup.includes(translations[language].t("explore.creatingSuggestions")));
+      assert.ok(!markup.includes(translations[language].t("explore.noSuggestions")));
+    } else assert.ok(nodes(tree,n=>n.type===ExploreAlbumCard).some(n=>n.props.entry.source==="plex"));h.close();
   }
 });
 
@@ -177,14 +271,23 @@ function expression(name){let out;const visit=n=>{if(ts.isVariableDeclaration(n)
 function effect(fragment){let out;const visit=n=>{if(ts.isCallExpression(n)&&n.expression.getText(appAst)==="useEffect"&&n.arguments[0].getText(appAst).includes(fragment))out=n.arguments[0].getText(appAst);ts.forEachChild(n,visit);};visit(appAst);assert.ok(out,fragment);return compile(`export const extracted=${out};`).replace(/^export const extracted\s*=\s*/,"").replace(/;\s*$/,"");}
 
 test("App source classification distinguishes not configured/loading/empty/error and masks obsolete Plex scope", () => {
-  const localState=new Function("localExploreConfigured","isPlaybackAvailable","playbackStatus","localCatalog",`return (${expression("localExploreState")});`);
+  const classifyLocal=new Function("localExploreConfigured","isPlaybackAvailable","playbackStatus","localCatalog","mpdHealth",`return (${expression("localExploreState")});`);
+  const localState=(configured,available,status,catalog,health={state:available?"available":"unavailable"})=>classifyLocal(configured,available,status,catalog,health);
   const base={loaded:true,loading:false,saveBlocked:false,mpdBusy:false,error:null,albums:[local("one")]};
   assert.equal(localState(false,true,{is_updating:false},base),"not_configured");assert.equal(localState(true,false,{is_updating:false},base),"unavailable");
   assert.equal(localState(true,true,{is_updating:true},base),"unavailable");assert.equal(localState(true,true,{is_updating:false},{...base,loaded:false}),"loading");
   assert.equal(localState(true,true,{is_updating:false},{...base,albums:[]}),"empty");assert.equal(localState(true,true,{is_updating:false},{...base,error:"secret error"}),"unavailable");
-  const plexState=new Function("isPlexConnected","plexLibrariesIdentity","plexConnectionIdentity","loadingLibraries","plexLibrariesError","selectedLibrary","plexAlbumLoad","explorePlexIdentity","albums",`return (${expression("plexExploreState")});`);
-  const conn={},scope={},args=[true,conn,conn,false,false,{key:"library"},{identity:scope,phase:"ready"},scope,[plex("one")]];
-  assert.equal(plexState(...args),"ready");for(const [index,value,expected]of[[0,false,"not_configured"],[1,{},"loading"],[4,true,"unavailable"],[5,null,"not_configured"],[6,{identity:{},phase:"ready"},"loading"],[6,{identity:scope,phase:"error"},"unavailable"],[8,[],"empty"]]){const changed=[...args];changed[index]=value;assert.equal(plexState(...changed),expected);}
+  assert.equal(localState(true,false,{is_updating:false},base,{state:"starting"}),"loading");
+  assert.equal(localState(true,true,{is_updating:false},{...base,loading:true}),"ready", "confirmed catalog remains usable during revalidation");
+  const plexState=new Function("isPlexConnected","aggregateCurrent","plexLibrariesIdentity","plexConnectionIdentity","loadingLibraries","aggregateAlbums","plexLibrariesError","aggregateFailures","aggregateLoading","plexAggregate","libraries",`return (${expression("plexExploreState")});`);
+  const conn={},args=[true,true,conn,conn,false,[plex("one")],false,[],false,{started:true},[{key:"library"}]];
+  assert.equal(plexState(...args),"ready");
+  for(const [index,value,expected]of[[0,false,"not_configured"],[1,false,"loading"],[2,{},"loading"],[4,true,"loading"],[5,[],"empty"]]){const changed=[...args];changed[index]=value;assert.equal(plexState(...changed),expected);}
+  assert.equal(plexState(...args.slice(0,5),[],true,[],false,{started:true},[]),"unavailable");
+  assert.equal(plexState(...args.slice(0,5),[],false,["Failed"],false,{started:true},[]),"unavailable");
+  assert.equal(plexState(...args.slice(0,5),[],false,[],true,{started:true},[]),"loading");
+  assert.equal(plexState(...args.slice(0,5),[plex("one")],false,["Failed"],true,{started:true},[]),"ready");
+
 });
 
 test("existing Plex album query publishes error or data once and drops disposed/generation-obsolete responses without another query", async () => {
@@ -192,13 +295,13 @@ test("existing Plex album query publishes error or data once and drops disposed/
     const calls=[],pending=deferred(),status=[],published=[],identity={},generation={current:0},conn={};
     const setters=["setAlbums","setCollections","setHasCollections","setLoading","setActiveAlbum","setActiveCollection","setActiveArtist","setFallbackPlexArtist","setSelectedPlexDecade","setSelectedPlexYear","setSelectedPlexUnknownYear","setSelectedPlexGenre","setSearchQuery","setSearchResults","setPlexViewMode"];
     const values=setters.map(name=>name==="setAlbums"?v=>published.push(v):()=>{});
-    const run=new Function("selectedLibrary","plexLibrariesIdentity","plexConnectionIdentity","explorePlexIdentity","plexLibraryRequestGenerationRef","setPlexAlbumLoad","plexService","logError",...setters,`return (${effect("plexService.getAlbums(selectedLibrary.key")});`)(
-      {key:"exact-library"},conn,conn,identity,generation,v=>status.push(v),{getAlbums:(...a)=>{calls.push(a);return pending.promise;},getCollections:()=>Promise.resolve([])},()=>{},...values);
-    const cleanup=run();assert.deepEqual(calls,[["exact-library","added"]]);assert.equal(status[0].phase,"loading");
+    const run=new Function("selectedLibrary","plexLibrariesIdentity","plexConnectionIdentity","explorePlexIdentity","plexLibraryRequestGenerationRef","setPlexAlbumLoad","plexService","plexCatalog","plexAlbumLoad","logError",...setters,`return (${effect("plexCatalog.loadLibrary(selectedLibrary")});`)(
+      {key:"exact-library"},conn,conn,identity,generation,v=>status.push(v),{getCollections:()=>Promise.resolve([])},{loadLibrary:(...a)=>{calls.push(a);return pending.promise;}},null,()=>{},...values);
+    const cleanup=run();assert.deepEqual(calls,[[{key:"exact-library"}]]);assert.equal(status[0].phase,"loading");
     if(scenario==="disposed")cleanup();if(scenario==="generation")generation.current++;
     if(scenario==="error")pending.reject(Error("DO_NOT_EXPOSE"));else pending.resolve([plex("exact")]);await flush();
     assert.equal(calls.length,1);assert.equal(status.at(-1).phase,scenario==="success"?"ready":scenario==="error"?"error":"loading");
-    if(scenario==="success")assert.equal(published.at(-1)[0].rating_key,"exact");else assert.deepEqual(published,[[]]);cleanup();
+    if(scenario==="success")assert.equal(published.at(-1)[0].rating_key,"exact");else assert.deepEqual(published,[]);cleanup();
   }
 });
 
@@ -222,12 +325,12 @@ test("existing Plex discovery captures library failures and discards responses a
 test("App's actual open/back handlers reject stale identities and keep last-section state unchanged", () => {
   const c=context(),s=createExploreSession(()=>0.5);s.syncContext(c,true);const entry=s.getSnapshot().selected[0];
   const live={current:{context:c,visible:true}},changes=[];
-  const current=new Function("exploreLive",`return (${expression("exploreEntryCurrent")});`)(live);
+  const current=new Function("exploreLive","exploreEntryIsCurrent",`return (${expression("exploreEntryCurrent")});`)(live,exploreEntryIsCurrent);
   const open=new Function("exploreLive","exploreEntryCurrent","setExploreDetail","setExploreLocalSubview",`return (${expression("openExploreAlbum")});`)(live,current,e=>changes.push(e),v=>assert.equal(v,"browser"));
   open(entry);assert.equal(changes[0],entry);live.current.visible=false;open(entry);assert.equal(changes.length,1);
   live.current={context:{...c,local:{...c.local,albums:[]},plex:{...c.plex,identity:{}}},visible:true};open(entry);assert.equal(changes.length,1);
   const close=new Function("document","setExploreDetail",`return (${expression("closeExploreAlbum")});`)({querySelector:()=>null},e=>changes.push(e));close();assert.equal(changes.at(-1),null);
-  assert.match(appSource,/ExploreView context=\{exploreContext\}/);assert.match(appSource,/initialAlbumId=\{exploreDetail\.album\.id\}/);
+  assert.match(appSource,/ExploreView portraits=\{artistPortraits\} context=\{exploreContext\}/);assert.match(appSource,/initialAlbumId=\{exploreDetail\.album\.id\}/);
   assert.match(appSource,/album=\{exploreDetail\.album\} onBack=\{closeExploreAlbum\}/);
   assert.match(appSource,/onlineArtworkEnabled=\{false\}/);
   assert.match(appSource,/subview=\{exploreLocalSubview\} onSubviewChange=\{setExploreLocalSubview\}/);
@@ -244,4 +347,324 @@ test("player visits preserve Explore as the return section without replacing its
   s.syncContext(c,true);assert.deepEqual(s.getSnapshot().selected,before);
   assert.match(appSource,/const centralSection = playerReturnSection \?\? mediaSource/);
   assert.match(appSource,/else if \(playerTarget\) \{\s*closePlayerNavigation\(\);\s*\} else if \(exploreDetail\)/);
+});
+
+// Directed increment tests use only synthetic catalog payloads and the existing hook host.
+test("artist groups preserve Local/Plex origins, Plex rating identities and scoped nominal fallback", () => {
+  const c=context(0);
+  c.local.albums=[{...local("one"," Artist "),source_id:"source-one"},{...local("two","artist"),source_id:"source-two"},local("unknown","")];
+  c.plex.albums=[{...plex("edition-one","Artist"),artist_rating_key:"100"},{...plex("edition-two","Artist"),artist_rating_key:"200"},plex("fallback","Artist")];
+  const groups=deriveExploreGroups(c);assert.equal(groups.artists.length,4);
+  assert.equal(new Set(groups.artists.map(group=>group.key)).size,4);
+  const s=createExploreSession(()=>0.5);s.syncContext(c,true);
+  for(const group of s.getSnapshot().artists){
+    s.openSlice(group,s.getSnapshot().revision);const entries=s.getSnapshot().slice.entries;
+    if(group.source==="local"){
+      assert.deepEqual(entries.map(e=>e.album.id),["one","two"]);
+      assert.deepEqual(entries.map(e=>e.album.source_id),["source-one","source-two"]);
+    }else {
+      assert.equal(entries.length,1);assert.equal(entries[0].source,"plex");
+      assert.equal(entries[0].identity,c.plex.identity);
+      const expected={"rating:100":"edition-one","rating:200":"edition-two","name:artist":"fallback"};
+      assert.equal(entries[0].album.rating_key,expected[group.artistId]);
+    }
+    assert.ok(entries.every(e=>c[e.source].albums.includes(e.album)));
+    s.leaveSlice(s.getSnapshot().revision);
+  }
+  const other=deriveExploreGroups({...c,plex:{...c.plex,libraryId:"other"}});
+  assert.notDeepEqual(other.artists.filter(g=>g.source==="plex").map(g=>g.key),groups.artists.filter(g=>g.source==="plex").map(g=>g.key));
+});
+
+test("genres reuse validated normalization, filter both sources and never remove untagged albums from shelves", () => {
+  const c=context(0);
+  c.local.albums=[{...local("one"),genres:[" ROCK  ","rock"," ","bad\u0000genre"]},local("absent"),{...local("empty"),genres:[]}];
+  c.plex.albums=[{...plex("one"),genres:["Rock","Jazz"]}];
+  const groups=deriveExploreGroups(c);assert.deepEqual(groups.genres.map(g=>g.value),["jazz","rock"]);
+  const rock=groups.genres.find(g=>g.value==="rock");assert.deepEqual(rock.sources,["local","plex"]);
+  const s=createExploreSession(()=>0.4);s.syncContext(c,true);assert.equal(s.getSnapshot().selected.length,3);
+  assert.ok(s.visibleEntries().some(e=>e.source==="local"&&e.album.id==="absent"));
+  s.openSlice(s.getSnapshot().genres.find(g=>g.value==="rock"),s.getSnapshot().revision);
+  const filtered=s.getSnapshot().slice.entries;assert.equal(filtered.length,2);
+  assert.equal(new Set(filtered.map(e=>e.key)).size,2);assert.deepEqual(filtered.map(e=>e.source),["local","plex"]);
+  assert.ok(filtered.every(e=>e.album.title==="Same title"));
+});
+
+test("group derivation and all shelves stay stable through telemetry and detail return; renewal only samples cached inventory", () => {
+  const c=context(10);let genreReads=0;
+  [...c.local.albums,...c.plex.albums].forEach((a,i)=>Object.defineProperty(a,"genres",{get(){genreReads++;return [`Genre ${i%8}`];}}));
+  const s=createExploreSession(()=>0.4);s.syncContext(c,true);const initial=s.getSnapshot(),reads=genreReads;
+  for(let i=0;i<30;i++){s.syncContext({local:{...c.local},plex:{...c.plex}},true);s.candidateCount();s.visibleArtists();s.visibleGenres();}
+  assert.equal(s.getSnapshot(),initial);assert.equal(genreReads,reads);
+  s.syncContext(c,false);s.syncContext(c,true);
+  for(const field of ["selected","artists","genres"])assert.deepEqual(s.getSnapshot()[field],initial[field]);
+  assert.equal(genreReads,reads);
+  s.renew();const renewed=s.getSnapshot();
+  for(const field of ["selected","artists","genres"])assert.notDeepEqual(renewed[field].map(x=>x.key),initial[field].map(x=>x.key));
+  assert.equal(genreReads,reads);assert.equal(renewed.selected.length,10);assert.equal(renewed.artists.length,4);assert.equal(renewed.genres.length,4);
+  assert.equal(new Set(renewed.artists.map(g=>g.source)).size,2);
+});
+
+test("slice membership has its own page guard, never relaxes shelf canUse and restores page after detail", () => {
+  const c=context(0);c.local.albums=Array.from({length:19},(_,i)=>({...local(String(i),"One artist"),genres:["One genre"]}));
+  const s=createExploreSession(()=>0.5);s.syncContext(c,true);const initial=s.getSnapshot();
+  s.openSlice(initial.artists[0],initial.revision);s.setPage(1,s.getSnapshot().revision);
+  const before=s.getSnapshot(),page=s.sliceEntries();assert.equal(page.length,EXPLORE_PAGE_SIZE);
+  const outside=page.find(e=>!initial.selected.some(old=>old.key===e.key));assert.ok(outside);
+  assert.equal(s.canUse(outside,before.revision),false);assert.equal(s.canUseSlice(outside,before.revision),true);
+  assert.equal(s.canUseSlice(before.slice.entries[0],before.revision),false);
+  s.syncContext(c,false);assert.equal(s.canUseSlice(outside,before.revision),false);
+  s.syncContext(c,true);assert.equal(s.getSnapshot().slice,before.slice);assert.deepEqual(s.sliceEntries(),page);
+  assert.equal(s.canUseSlice(outside,s.getSnapshot().revision),true);
+  const unchanged=s.getSnapshot();s.setPage(100,unchanged.revision);s.setPage(-1,unchanged.revision);s.setPage(0.5,unchanged.revision);assert.equal(s.getSnapshot(),unchanged);
+  s.leaveSlice(s.getSnapshot().revision);assert.equal(s.getSnapshot().slice,null);assert.deepEqual(s.getSnapshot().selected,initial.selected);
+});
+
+test("catalog/scope/availability changes invalidate slices, old group buttons, result clicks and page commands", () => {
+  for(const cause of ["local","plex","credential","server","library","unavailable","source"]){
+    const c=context(0);c.local.albums=[{...local("one"),genres:["Rock"]}];c.plex.albums=[{...plex("one"),genres:["Rock"]}];
+    const s=createExploreSession(()=>0.5);s.syncContext(c,true);const group=s.getSnapshot().genres[0],groupRevision=s.getSnapshot().revision;
+    s.openSlice(group,groupRevision);const old=s.getSnapshot(),entry=s.sliceEntries()[0];assert.equal(s.canUseSlice(entry,old.revision),true);
+    let next=c;
+    if(cause==="local")next={...c,local:{...c.local,albums:c.local.albums.map(a=>({...a}))}};
+    if(cause==="plex")next={...c,plex:{...c.plex,albums:c.plex.albums.map(a=>({...a}))}};
+    if(cause==="credential")next={...c,plex:{...c.plex,identity:{}}};
+    if(cause==="server")next={...c,plex:{...c.plex,serverId:"other"}};
+    if(cause==="library")next={...c,plex:{...c.plex,libraryId:"other"}};
+    if(cause==="unavailable")next={...c,local:{...c.local,state:"unavailable"}};
+    if(cause==="source")next={...c,local:{...c.local,state:"not_configured"}};
+    s.syncContext(next,true);assert.equal(s.getSnapshot().slice,null,cause);assert.equal(s.getSnapshot().sliceInvalidated,true);
+    assert.equal(s.canUseSlice(entry,old.revision),false);const current=s.getSnapshot();s.openSlice(group,groupRevision);s.setPage(0,old.revision);assert.equal(s.getSnapshot(),current);
+  }
+  const c=context(),s=createExploreSession(()=>0.5);s.syncContext(c,true);const old=s.getSnapshot();s.close();s.openSlice(old.artists[0],old.revision);assert.equal(s.getSnapshot().slice,null);
+});
+
+function catalogWithSlices(){
+  const c=context(0);c.local.albums=Array.from({length:15},(_,i)=>({...local(`L${i}`,"Artist"),genres:["Rock"]}));
+  c.plex.albums=Array.from({length:3},(_,i)=>({...plex(`P${i}`,"Artist"),artist_rating_key:"100",genres:["rock"]}));return c;
+}
+const namedButton=(tree,name)=>nodes(tree,n=>n.type==="button"&&(React.Children.toArray(n.props.children).includes(name)||nodes(n,c=>c.type==="p"&&c.props.children===name).length))[0];
+test("real artist/genre buttons show bounded pages, open exact albums and return to slice then unchanged shelves without catalog or metadata I/O", () => {
+  for(const language of ["pt-BR","en"])for(const kind of ["artist","genre"]){
+    globalThis.__exploreTranslation=translations[language];let ensured=0,covers=0;const opened=[],c=catalogWithSlices(),t=translations[language].t.bind(translations[language]);
+    globalThis.__exploreCover=async()=>{covers++;return null;};
+    const props={context:c,active:true,libraryTitle:"Exact library",ensureLocal(){ensured++;},isCurrent:()=>true,onOpen:e=>opened.push(e)};
+    const h=host(ExploreView,props);let tree=h.render();h.effects();
+    const shelves=nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key);
+    const groupName=kind==="artist"?"Artist":"Rock";
+    const groupButton=kind==="artist"?nodes(tree,n=>n.type==="button"&&nodes(n,p=>p.type==="p"&&p.props.children==="Artist").length&&nodes(n,p=>p.type==="p"&&typeof p.props.children==="string"&&p.props.children.startsWith(t("explore.sources.local")+" · ")).length)[0]:namedButton(tree,groupName);
+    assert.ok(groupButton);groupButton.props.onClick();
+    tree=h.render();h.effects();assert.equal(ensured,1);assert.equal(covers,0);assert.equal(opened.length,0);
+    let cards=nodes(tree,n=>n.type===ExploreAlbumCard);assert.equal(cards.length,6);
+    namedButton(tree,t("explore.nextPage")).props.onClick();tree=h.render();h.effects();cards=nodes(tree,n=>n.type===ExploreAlbumCard);assert.equal(cards.length,6);
+    const page=cards.map(n=>n.props.entry.key),card=host(ExploreAlbumCard,cards[0].props);card.render().props.onClick();assert.equal(opened[0],cards[0].props.entry);
+    h.render({...props,active:false});h.effects();tree=h.render(props);h.effects();
+    assert.deepEqual(nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key),page);
+    namedButton(tree,t("explore.backToShelves")).props.onClick();tree=h.render();h.effects();
+    assert.deepEqual(nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key),shelves);
+    assert.equal(ensured,2,"coordinator called on initial activation and detail return only; never on group/page selection or hide");
+    assert.equal(covers,0,"this host does not mount child artwork effects; selection itself starts no artwork I/O");
+    h.close();card.close();
+  }
+});
+
+test("real slice invalidates delayed cover and obsolete UI controls without reopening or routing another edition", async () => {
+  globalThis.__exploreTranslation=translations.en;const c=catalogWithSlices(),opened=[],pending=deferred();let blocked;
+  globalThis.__exploreCover=(album,guard)=>{blocked=guard;return pending.promise;};
+  const props={context:c,active:true,libraryTitle:"Library",ensureLocal(){},isCurrent:()=>true,onOpen:e=>opened.push(e)};
+  const h=host(ExploreView,props);let tree=h.render();h.effects();
+  const group=nodes(tree,n=>n.type==="button"&&nodes(n,p=>p.type==="p"&&p.props.children==="Artist").length&&nodes(n,p=>p.type==="p"&&typeof p.props.children==="string"&&p.props.children.startsWith(translations.en.t("explore.sources.local")+" · ")).length)[0];
+  group.props.onClick();
+  tree=h.render();h.effects();const back=namedButton(tree,translations.en.t("explore.backToShelves")),next=namedButton(tree,translations.en.t("explore.nextPage"));
+  const node=nodes(tree,n=>n.type===ExploreAlbumCard)[0],card=host(ExploreAlbumCard,node.props),button=card.render();card.effects();assert.equal(blocked(),false);
+  tree=h.render({...props,context:{...c,local:{...c.local,albums:c.local.albums.map(a=>({...a}))}}});h.effects();
+  assert.equal(blocked(),true);pending.resolve("stale");await flush();assert.equal(card.slots[0],null);
+  button.props.onClick();group.props.onClick();next.props.onClick();back.props.onClick();assert.equal(opened.length,0);
+  tree=h.render();assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(translations.en.t("explore.sliceInvalidated")));
+  assert.equal(namedButton(tree,translations.en.t("explore.backToShelves")),undefined);h.close();card.close();
+});
+
+test("real aggregate shelf opens another library without browser navigation and renders translated partial progress/retry", () => {
+  for (const language of ["pt-BR", "en"]) {
+    globalThis.__exploreTranslation=translations[language];const t=translations[language].t.bind(translations[language]);
+    const c=context(0);c.local.state="empty";
+    const a=Array.from({length:7},(_,i)=>({...plex(`A${i}`,"One artist"),artist_rating_key:"100",genres:["Rock"],library_id:"1",library_title:"One"}));
+    const b=Array.from({length:7},(_,i)=>({...plex(`B${i}`,"Other artist"),artist_rating_key:"200",genres:["Rock"],library_id:"2",library_title:"Two"}));
+    c.plex={...c.plex,albums:[...a,...b],libraryId:"",catalogs:[{libraryId:"1",albums:a},{libraryId:"2",albums:b}],completeness:"partial",loading:true};
+    const live={current:{context:c,visible:true}},opened=[],selectedLibrary={key:"1"};let retries=0;
+    const current=new Function("exploreLive","exploreEntryIsCurrent",`return (${expression("exploreEntryCurrent")});`)(live,exploreEntryIsCurrent);
+    const open=new Function("exploreLive","exploreEntryCurrent","setExploreDetail","setExploreLocalSubview",`return (${expression("openExploreAlbum")});`)(live,current,e=>opened.push(e),()=>{});
+    const props={context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:current,onOpen:open,
+      plexProgress:{loading:true,failedLibraries:["Unavailable library"],discoveryFailed:false,complete:false},retryPlex(){retries++;}};
+    const h=host(ExploreView,props);let tree=h.render();h.effects();
+    const text=renderToStaticMarkup(shallowMarkup(tree));assert.ok(text.includes(t("explore.aggregateScope")));
+    assert.ok(text.includes(t("explore.librariesLoading")));assert.ok(text.includes("Unavailable library"));
+    namedButton(tree,t("explore.retryLibraries")).props.onClick();assert.equal(retries,1);
+    const group=namedButton(tree,"Other artist");assert.ok(group);group.props.onClick();tree=h.render();h.effects();
+    const cards=nodes(tree,n=>n.type===ExploreAlbumCard);assert.equal(cards.length,6);assert.ok(cards.every(n=>n.props.entry.libraryId==="2"));
+    const card=host(ExploreAlbumCard,cards[0].props);card.render().props.onClick();assert.equal(opened[0],cards[0].props.entry);
+    assert.equal(opened[0].album.rating_key,cards[0].props.entry.album.rating_key);assert.equal(selectedLibrary.key,"1");
+    namedButton(tree,t("explore.backToShelves")).props.onClick();tree=h.render();namedButton(tree,"Rock").props.onClick();tree=h.render();
+    assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(t("explore.sliceCount",{count:14})));
+    namedButton(tree,t("explore.nextPage")).props.onClick();tree=h.render();assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,6);
+    h.close();card.close();
+  }
+});
+
+test("actual shelf transitions from preparation to definitive cards, with late load and detail return preserving entries", () => {
+  for (const language of ["pt-BR", "en"]) {
+    globalThis.__exploreTranslation = translations[language]; const c = context();
+    const props = { context: { ...c, local: { ...c.local, state: "loading" } }, active: true, libraryTitle: null, ensureLocal(){}, isCurrent:()=>true, onOpen(){} };
+    const h = host(ExploreView, props); let tree = h.render(); h.effects();
+    assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,0);
+    assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(translations[language].t("explore.creatingSuggestions")));
+    const ready = { ...props, context: { ...c, plex: { ...c.plex, albums: [], state: "loading" } } };
+    tree = h.render(ready); h.effects(); const keys = nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key);
+    assert.equal(keys.length,8); assert.ok(!renderToStaticMarkup(shallowMarkup(tree)).includes(translations[language].t("explore.creatingSuggestions")));
+    tree = h.render({ ...ready, context: c }); h.effects();
+    assert.deepEqual(nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key),keys);
+    h.render({ ...ready, context:c, active:false }); tree=h.render({ ...ready,context:c });
+    assert.deepEqual(nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key),keys); h.close();
+  }
+});
+
+test("cards resolve explicit source display names, expose the full caption and use honest fallback without internal IDs/paths", () => {
+  for (const language of ["pt-BR", "en"]) {
+    globalThis.__exploreTranslation=translations[language]; const c=context(),s=createExploreSession(()=>0.5);s.syncContext(c,true);
+    for (const entry of s.visibleEntries().slice(0,2)) {
+      entry.album.source_id="opaque-internal"; entry.album.source_label="Configured Local library"; entry.album.library_title="Configured Plex library";
+      const props={entry,revision:s.getSnapshot().revision,active:true,current:()=>true,onOpen(){}};
+      const h=host(ExploreAlbumCard,props),tree=h.render();
+      const name=entry.source==="local"?entry.album.source_label:entry.album.library_title;
+      const caption=`${translations[language].t(`explore.sources.${entry.source}`)} · ${name}`;
+      assert.ok(nodes(tree,n=>n.type==="p"&&n.props.title===caption).some(n=>n.props.children===caption));
+      if(entry.source==="local")delete entry.album.source_label;else entry.album.library_title=" ";
+      const fallback=`${translations[language].t(`explore.sources.${entry.source}`)} · ${translations[language].t("explore.unknownOrigin")}`;
+      assert.ok(nodes(h.render(),n=>n.type==="p"&&n.props.title===fallback).length);
+      assert.doesNotMatch(renderToStaticMarkup(h.render()),/opaque-internal|Synthetic|undefined/); h.close();
+    }
+  }
+});
+
+test("a loaded Local cover survives a session revision/late library without another artwork request", async () => {
+  globalThis.__exploreTranslation=translations.en;
+  const c=context(),s=createExploreSession(()=>0.5);s.syncContext(c,true);
+  let entry=s.visibleEntries().find(e=>e.source==="local"),revision=s.getSnapshot().revision,reads=0;
+  globalThis.__exploreCover=async()=>{reads++;return "data:image/png;base64,synthetic";};
+  const props={entry,revision,active:true,current:()=>s.canUse(entry,revision),onOpen(){}};
+  const h=host(ExploreAlbumCard,props);h.render();h.effects();await flush();assert.equal(reads,1);
+  const cover=h.slots[0];s.syncContext({...c,plex:{...c.plex,loading:true}},true);revision=s.getSnapshot().revision;
+  entry=s.visibleEntries().find(e=>e.key===entry.key);
+  h.render({...props,entry,revision,current:()=>s.canUse(entry,revision)});h.effects();await flush();
+  assert.equal(h.slots[0],cover);assert.equal(reads,1);
+  globalThis.__exploreCached=()=>cover;
+  s.syncContext({...c,local:{...c.local,albums:c.local.albums.map(a=>({...a}))}},true);
+  revision=s.getSnapshot().revision;entry=s.visibleEntries().find(e=>e.key===entry.key);
+  h.render({...props,entry,revision,current:()=>s.canUse(entry,revision)});h.effects();
+  assert.equal(h.slots[0],cover);assert.equal(reads,1);delete globalThis.__exploreCached;h.close();
+});
+
+
+test("portrait arrival changes only the image; same-name Local stays unassociated and navigation keeps the library/page", async () => {
+  globalThis.__exploreTranslation=translations.en;
+  const c=catalogWithSlices();c.plex.albums.forEach(a=>a.library_title="Other library");
+  const pending=deferred(), calls=[];
+  const cache=new PlexArtistPortraitCache((server,key)=>{calls.push([server,key]);return pending.promise;});
+  cache.setContext(c.plex.identity,c.plex.serverId);
+  const props={context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){},portraits:cache};
+  const h=host(ExploreView,props);let tree=h.render();h.effects();
+  const before=h.slots[0].value.getSnapshot();
+  const portraits=nodes(tree,n=>n.type===ExploreArtistPortrait);
+  assert.equal(portraits.length,2);
+  const plexNode=portraits.find(n=>n.props.group.source==="plex"), localNode=portraits.find(n=>n.props.group.source==="local");
+  const localPhoto=host(ExploreArtistPortrait,localNode.props);localPhoto.render();localPhoto.effects();
+  const photo=host(ExploreArtistPortrait,plexNode.props);let image=photo.render();photo.effects();await flush();
+  assert.deepEqual(calls,[["server","100"]]);assert.equal(nodes(image,n=>n.props?.image).length,0);
+  pending.resolve({server_id:"server",path:"/library/metadata/100/thumb/1"});await flush();
+  image=photo.render();const picture=nodes(image,n=>n.props?.image)[0];
+  assert.equal(picture.props.image.path,"/library/metadata/100/thumb/1");assert.equal(picture.props.cacheScope,c.plex.identity);
+  assert.equal(nodes(localPhoto.render(),n=>n.props?.image).length,0);
+  tree=h.render();assert.equal(h.slots[0].value.getSnapshot(),before);
+  const button=nodes(tree,n=>n.type==="button"&&nodes(n,p=>p.type===ExploreArtistPortrait&&p.props.group.source==="plex").length)[0];
+  button.props.onClick();tree=h.render();assert.equal(h.slots[0].value.getSnapshot().slice.group.libraryId,"library");
+  assert.equal(h.slots[0].value.getSnapshot().slice.entries.length,3);assert.equal(h.slots[0].value.getSnapshot().slice.page,0);
+  assert.equal(calls.length,1);h.close();photo.close();localPhoto.close();cache.invalidate();
+});
+
+test("portrait component discards obsolete artist/auth replies and reuses a cached portrait on return", async () => {
+  globalThis.__exploreTranslation=translations.en;
+  const identity={}, pending=deferred(), calls=[];
+  const cache=new PlexArtistPortraitCache((server,key)=>{calls.push(key);return key==="one"?pending.promise:Promise.resolve({server_id:server,path:`/library/metadata/${key}/thumb/1`});});
+  cache.setContext(identity,"server");
+  const group={kind:"artist",key:"one",source:"plex",artistId:"rating:one",ratingKey:"one",name:"Same name"};
+  const props={group,identity,serverId:"server",active:true,cache};const h=host(ExploreArtistPortrait,props);
+  h.render();h.effects();await flush();
+  const next={...props,group:{...group,key:"two",ratingKey:"two"}};
+  assert.equal(nodes(h.render(next),n=>n.props?.image).length,0);h.effects();await flush();
+  pending.resolve({server_id:"server",path:"/library/metadata/one/thumb/1"});await flush();
+  assert.equal(nodes(h.render(),n=>n.props?.image)[0].props.image.path,"/library/metadata/two/thumb/1");
+  h.render({...next,active:false});h.effects();assert.equal(nodes(h.render(next),n=>n.props?.image).length,1);h.effects();await flush();assert.equal(calls.length,2);
+  const newIdentity={};cache.setContext(newIdentity,"server");
+  assert.equal(nodes(h.render({...next,identity:newIdentity}),n=>n.props?.image).length,0);
+  h.effects();await flush();assert.equal(calls.length,3);h.close();cache.invalidate();
+});
+
+
+test("actual album shelf uses its measured area, bounds arrows/keyboard and preserves position through details and late catalogs", () => {
+  globalThis.__exploreTranslation=translations.en;
+  const previous={window:globalThis.window,ResizeObserver:globalThis.ResizeObserver};
+  let resized,reduce=false;globalThis.window={matchMedia:()=>({matches:reduce})};
+  globalThis.ResizeObserver=class { constructor(callback){resized=callback;} observe(){} disconnect(){} };
+  const c=context(14),listeners=new Map(),moves=[];
+  const node={clientWidth:1000,scrollLeft:0,cardWidth:190,count:10,
+    get scrollWidth(){return this.count*this.cardWidth+(this.count-1)*24;},
+    addEventListener(event,fn){listeners.set(event,fn);},removeEventListener(event,fn){if(listeners.get(event)===fn)listeners.delete(event);},
+    scrollTo(options){moves.push(options);this.scrollLeft=Math.max(0,Math.min(options.left,this.scrollWidth-this.clientWidth));listeners.get("scroll")?.();}};
+  const props={context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){}};
+  const h=host(ExploreView,props);let current=props,tree;
+  const render=(next=current)=>{
+    current=next;
+    for(let i=0;i<3;i++){
+      tree=h.render(current);const viewport=nodes(tree,n=>n.props?.id==="explore-album-shelf")[0];
+      if(viewport){viewport.props.ref.current=node;node.cardWidth=parseFloat(viewport.props.style.gridAutoColumns);node.count=viewport.props.children.length;}
+      h.effects();
+    }
+    return tree;
+  };
+  const arrow=key=>nodes(tree,n=>n.type==="button"&&n.props["aria-label"]===translations.en.t(key))[0];
+  const keys=()=>nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key);
+  try {
+    render();const first=keys(),snapshot=h.slots[0].value.getSnapshot();
+    assert.equal(first.length,10);assert.equal(new Set(first).size,10);assert.equal(node.cardWidth,180.8);
+    assert.equal(arrow("explore.previousSuggestions").props.disabled,true);assert.equal(arrow("explore.nextSuggestions").props.disabled,false);
+    arrow("explore.nextSuggestions").props.onClick();render();const end=node.scrollLeft;
+    assert.equal(end,node.scrollWidth-node.clientWidth);assert.equal(moves.at(-1).behavior,"smooth");
+    assert.equal(arrow("explore.nextSuggestions").props.disabled,true);assert.equal(arrow("explore.previousSuggestions").props.disabled,false);
+    assert.equal(h.slots[0].value.getSnapshot(),snapshot,"scrolling must not sample or invalidate the shelf");
+    const viewport=nodes(tree,n=>n.props?.id==="explore-album-shelf")[0];let prevented=false;
+    viewport.props.onKeyDown({key:"Home",target:node,currentTarget:node,preventDefault(){prevented=true;}});render();assert.equal(prevented,true);assert.equal(node.scrollLeft,0);
+    reduce=true;nodes(tree,n=>n.props?.id==="explore-album-shelf")[0].props.onKeyDown({key:"End",target:node,currentTarget:node,preventDefault(){}});render();
+    assert.equal(node.scrollLeft,end);assert.equal(moves.at(-1).behavior,"auto");
+    const called=moves.length;nodes(tree,n=>n.props?.id==="explore-album-shelf")[0].props.onKeyDown({key:"ArrowLeft",target:{},currentTarget:node,preventDefault(){assert.fail("card key handling must remain native");}});assert.equal(moves.length,called);
+    h.render({...current,active:false});node.clientWidth=0;node.scrollLeft=0;listeners.get("scroll")?.();h.effects();
+    node.clientWidth=1000;render();assert.equal(node.scrollLeft,end);assert.deepEqual(keys(),first);
+    const callsBefore=moves.length;
+    const late={...c,plex:{...c.plex,albums:[...c.plex.albums,plex("late")],loading:true}};
+    render({...props,context:late});assert.equal(node.scrollLeft,end);assert.deepEqual(keys(),first);assert.equal(moves.length,callsBefore,"late catalogs do not reset scroll");
+    node.clientWidth=1600;resized();render();assert.deepEqual(keys(),first);assert.ok(node.scrollLeft<=node.scrollWidth-node.clientWidth);
+    assert.equal(h.slots[0].value.getSnapshot().selected.length,10);
+    namedButton(tree,translations.en.t("explore.renew")).props.onClick();render();assert.equal(node.scrollLeft,0);assert.equal(keys().length,10);
+    node.clientWidth=2200;resized();render();assert.equal(arrow("explore.previousSuggestions").props.disabled,true);assert.equal(arrow("explore.nextSuggestions").props.disabled,true);
+    const before=moves.length;arrow("explore.nextSuggestions").props.onClick();assert.equal(moves.length,before);
+  } finally {h.close();Object.assign(globalThis,previous);}
+});
+
+test("horizontal reservation and short inventory retain all cards, with no synthetic padding or duplicate suggestions", () => {
+  globalThis.__exploreTranslation=translations.en;const c=context(0);c.local={albums:[],state:"loading"};c.plex.state="loading";
+  const props={context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){}};
+  const h=host(ExploreView,props);let tree=h.render();
+  const viewport=nodes(tree,n=>n.props?.id==="explore-album-shelf")[0];assert.equal(viewport.props.children.length,EXPLORE_SUGGESTION_COUNT);
+  assert.equal(viewport.props["aria-busy"],true);assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,0);
+  const ready={...c,local:{albums:[local("one"),local("two")],state:"ready"},plex:{...c.plex,state:"empty"}};
+  tree=h.render({...props,context:ready});assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,2);
+  assert.equal(nodes(tree,n=>n.props?.id==="explore-album-shelf")[0].props.children.length,2);h.close();
 });

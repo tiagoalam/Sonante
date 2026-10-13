@@ -27,6 +27,18 @@ export interface PlexAlbum {
   year?: number;
   genres?: string[];
   thumb?: PlexImageRef;
+  // Session catalog context; rating_key remains the original Plex identity.
+  server_id?: string;
+  library_id?: string;
+  library_title?: string;
+}
+
+export interface PlexAlbumCatalog {
+  server_id: string;
+  library_id: string;
+  completeness: "complete" | "partial" | "unknown";
+  total: number;
+  albums: PlexAlbum[];
 }
 
 export interface PlexCollection {

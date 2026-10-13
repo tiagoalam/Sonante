@@ -29,6 +29,9 @@ import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
 import { ExploreView } from "./components/ExploreView";
 import type { ExploreContext, ExploreEntry, ExploreSourceState } from "./utils/explore";
+import { exploreEntryIsCurrent } from "./utils/explore";
+import { PlexArtistPortraitCache } from "./utils/plexArtistPortraits";
+import { PlexCatalogCoordinator } from "./utils/plexCatalogCoordinator";
 import { LocalBrowserView, localAlbumCatalog, type LocalSubview } from "./components/LocalBrowserView";
 import { localCatalogActivity } from "./utils/localAlbumCatalog";
 import { localArtworkEnrichment, localArtworkResolver } from "./utils/localArtworkSession";
@@ -362,6 +365,20 @@ export function App() {
   const explorePlexIdentity = useMemo(() => ({}), [plexConnectionIdentity, selectedLibrary?.key]);
   const [plexLibrariesIdentity, setPlexLibrariesIdentity] = useState<unknown>(null);
   const [plexLibrariesError, setPlexLibrariesError] = useState(false);
+  const [plexDiscoveryAttempt, setPlexDiscoveryAttempt] = useState(0);
+  const plexCatalog = useMemo(() => new PlexCatalogCoordinator(
+    libraryId => plexService.getAlbums(libraryId, "added"), error => logError("plex.albums-load", error)), []);
+  const artistPortraits = useMemo(() => new PlexArtistPortraitCache(plexService.getArtistPortrait), []);
+  const plexAggregate = useSyncExternalStore(plexCatalog.subscribe, plexCatalog.getSnapshot);
+  useEffect(() => {
+    plexCatalog.setContext(plexConnectionIdentity, config?.plex_server_id ?? "");
+    artistPortraits.setContext(plexConnectionIdentity, config?.plex_server_id ?? "");
+    return () => { plexCatalog.invalidate(plexConnectionIdentity); artistPortraits.invalidate(plexConnectionIdentity); };
+  }, [plexCatalog, plexConnectionIdentity, artistPortraits]);
+  useEffect(() => {
+    if (centralSection === "explore" && plexLibrariesIdentity === plexConnectionIdentity && !loadingLibraries && !plexLibrariesError) plexCatalog.aggregate(libraries);
+  }, [centralSection, plexCatalog, libraries, plexLibrariesIdentity, plexConnectionIdentity, loadingLibraries, plexLibrariesError]);
+
   const [plexAlbumLoad, setPlexAlbumLoad] = useState<{ identity: unknown; phase: "loading" | "ready" | "error" } | null>(null);
   const [plexViewMode, setPlexViewMode] = useState<"albums" | "artists" | "years" | "genres" | "collections">("albums");
   const [hasCollections, setHasCollections] = useState(false);
@@ -472,7 +489,11 @@ export function App() {
   }, []);
 
   // Listagens Plex
-  const [albums, setAlbums] = useState<PlexAlbum[]>([]);
+  const [loadedBrowserAlbums, setAlbums] = useState<PlexAlbum[]>([]);
+  // A retry completed in Explore is immediately visible in the browser too.
+  const albums = plexAggregate.identity === plexConnectionIdentity
+    ? plexAggregate.libraries.find(item => item.library.key === selectedLibrary?.key && item.phase === "complete")?.albums ?? loadedBrowserAlbums
+    : [];
   const [collections, setCollections] = useState<PlexCollection[]>([]);
 
   // Navegação interna Plex
@@ -966,7 +987,7 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [plexConnectionIdentity]);
+  }, [plexConnectionIdentity, plexDiscoveryAttempt]);
 
   // Carregar o catálogo base e as coleções da biblioteca ativa uma única vez.
   useEffect(() => {
@@ -991,13 +1012,14 @@ export function App() {
     setSelectedPlexGenre(null);
     setSearchQuery("");
     setSearchResults(null);
-    setAlbums([]);
+    // Keep valid same-context inventory on failure; never display another scope.
+    if (plexAlbumLoad && plexAlbumLoad.identity !== explorePlexIdentity) setAlbums([]);
     setCollections([]);
     setHasCollections(false);
     setLoading(true);
     setPlexAlbumLoad({ identity: explorePlexIdentity, phase: "loading" });
     void Promise.allSettled([
-      plexService.getAlbums(selectedLibrary.key, "added"),
+      plexCatalog.loadLibrary(selectedLibrary),
       plexService.getCollections(selectedLibrary.key),
     ]).then(([albumResult, collectionResult]) => {
       if (disposed || generation !== plexLibraryRequestGenerationRef.current) return;
@@ -1026,7 +1048,7 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [selectedLibrary, plexLibrariesIdentity, plexConnectionIdentity, explorePlexIdentity]);
+  }, [selectedLibrary, plexLibrariesIdentity, plexConnectionIdentity, explorePlexIdentity, plexCatalog]);
 
   // Busca Plex
   useEffect(() => {
@@ -1199,23 +1221,30 @@ export function App() {
   const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
   const localExploreConfigured = Boolean(config?.local_folders.length);
   const localExploreState: ExploreSourceState = !localExploreConfigured ? "not_configured"
+    : mpdHealth.state === "starting" ? "loading"
     : !isPlaybackAvailable || playbackStatus.is_updating || localCatalog.saveBlocked || localCatalog.mpdBusy || localCatalog.error ? "unavailable"
-    : localCatalog.loading || !localCatalog.loaded ? "loading" : localCatalog.albums.length ? "ready" : "empty";
+    : !localCatalog.loaded ? "loading" : localCatalog.albums.length ? "ready" : "empty";
+  const aggregateCurrent = plexAggregate.identity === plexConnectionIdentity;
+  const aggregateLoading = aggregateCurrent && plexAggregate.libraries.some(item => item.phase === "loading" || item.phase === "queued");
+  const aggregateFailures = aggregateCurrent ? plexAggregate.libraries.filter(item => item.phase === "error").map(item => item.library.title) : [];
+  const aggregateAlbums = aggregateCurrent ? plexAggregate.albums : [];
   const plexExploreState: ExploreSourceState = !isPlexConnected ? "not_configured"
-    : plexLibrariesIdentity !== plexConnectionIdentity || loadingLibraries ? "loading"
-    : plexLibrariesError ? "unavailable" : !selectedLibrary ? "not_configured"
-    : plexAlbumLoad?.identity !== explorePlexIdentity || plexAlbumLoad.phase === "loading" ? "loading"
-    : plexAlbumLoad.phase === "error" ? "unavailable" : albums.length ? "ready" : "empty";
+    : !aggregateCurrent || plexLibrariesIdentity !== plexConnectionIdentity || loadingLibraries ? "loading"
+    : aggregateAlbums.length ? "ready" : plexLibrariesError || aggregateFailures.length ? "unavailable"
+    : aggregateLoading || (!plexAggregate.started && libraries.length > 0) ? "loading" : "empty";
+  const aggregateComplete = aggregateCurrent && !loadingLibraries && !plexLibrariesError && plexAggregate.started
+    && plexAggregate.libraries.length === libraries.length && plexAggregate.libraries.every(item => item.phase === "complete");
   const exploreContext: ExploreContext = {
     local: { albums: localCatalog.albums, state: localExploreState },
-    plex: { albums, state: plexExploreState, identity: explorePlexIdentity, serverId: config?.plex_server_id ?? "", libraryId: selectedLibrary?.key ?? "" },
+    plex: { albums: aggregateAlbums, catalogs: aggregateCurrent ? plexAggregate.catalogs : [], state: plexExploreState,
+      identity: plexConnectionIdentity, serverId: config?.plex_server_id ?? "", libraryId: "", loading: aggregateLoading,
+      completeness: aggregateComplete ? "complete" : aggregateAlbums.length ? "partial" : "unknown" },
   };
   const exploreLive = useRef({ context: exploreContext, visible: false });
   exploreLive.current = { context: exploreContext, visible: centralSection === "explore" && !playerTarget && !exploreDetail };
   const exploreEntryCurrent = (entry: ExploreEntry) => {
     const current = exploreLive.current.context;
-    return entry.source === "local" ? current.local.state === "ready" && entry.version === current.local.albums && current.local.albums.includes(entry.album)
-      : current.plex.state === "ready" && entry.identity === current.plex.identity && entry.version === current.plex.albums && current.plex.albums.includes(entry.album);
+    return exploreEntryIsCurrent(current, entry);
   };
   const openExploreAlbum = (entry: ExploreEntry) => {
     if (!exploreLive.current.visible || !exploreEntryCurrent(entry)) return;
@@ -1443,7 +1472,10 @@ export function App() {
         {centralSection === "explore" ? (
           <div className="contents">
             <div className={exploreDetail ? "hidden" : "contents"}>
-              <ExploreView context={exploreContext} active={!exploreDetail && !playerTarget} libraryTitle={selectedLibrary?.title ?? null}
+              <ExploreView portraits={artistPortraits} context={exploreContext} active={!exploreDetail && !playerTarget} libraryTitle={null}
+                plexProgress={{ loading: isPlexConnected && (loadingLibraries || aggregateLoading), failedLibraries: aggregateFailures,
+                  discoveryFailed: plexLibrariesError, complete: aggregateComplete }}
+                retryPlex={() => { if (plexLibrariesError) setPlexDiscoveryAttempt(attempt => attempt + 1); else plexCatalog.retryFailures(); }}
                 ensureLocal={() => localAlbumCatalog.ensureLoaded(playbackStatus.is_updating, localExploreConfigured && isPlaybackAvailable)}
                 isCurrent={exploreEntryCurrent} onOpen={openExploreAlbum} />
             </div>

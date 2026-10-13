@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
+import { requireCompletePlexCatalog } from "../utils/plexCatalog";
 import type { CurrentMedia } from "../types/audio";
 import type { PlayerPlexNavigation } from "../types/plex";
 
 import {
   PlexLibrary,
   PlexAlbum,
+  PlexAlbumCatalog,
   PlexCollection,
   PlexTrack,
   PlexSearchResults,
@@ -20,13 +22,17 @@ export const plexService = {
     invoke<PlexLibrary[]>("get_plex_libraries"),
 
   getAlbums: (sectionKey: string, sortBy: string): Promise<PlexAlbum[]> =>
-    invoke<PlexAlbum[]>("get_plex_albums", { sectionKey, sortBy }),
+    invoke<PlexAlbumCatalog>("get_plex_albums", { sectionKey, sortBy })
+      .then(catalog => requireCompletePlexCatalog(catalog, sectionKey)),
 
   getCollections: (sectionKey: string): Promise<PlexCollection[]> =>
     invoke<PlexCollection[]>("get_plex_collections", { sectionKey }),
 
   getCollectionAlbums: (ratingKey: string): Promise<PlexAlbum[]> =>
     invoke<PlexAlbum[]>("get_collection_albums", { ratingKey }),
+
+  getArtistPortrait: (serverId: string, ratingKey: string): Promise<PlexImageRef | null> =>
+    invoke<PlexImageRef | null>("get_artist_portrait", { serverId, ratingKey }),
 
   getArtistAlbums: (ratingKey: string): Promise<PlexAlbum[]> =>
     invoke<PlexAlbum[]>("get_artist_albums", { ratingKey }),

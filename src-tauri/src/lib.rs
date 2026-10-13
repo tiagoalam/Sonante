@@ -4138,6 +4138,16 @@ fn rollback_first_run_completion(
     }
 }
 
+// Names come from the same configured/validated virtual roots exposed by the browser.
+// An unresolved source remains unnamed; never fall back to a physical folder path.
+fn label_local_album_sources(albums: &mut [audio::LocalAlbum], sources: &[supervisor::LocalLibrarySource]) {
+    for album in albums {
+        album.source_label = album.source_id.as_ref().and_then(|id| {
+            sources.iter().find(|source| &source.id == id).map(|source| source.label.clone())
+        });
+    }
+}
+
 #[tauri::command]
 async fn get_local_albums(
     state: State<'_, AudioState>,
@@ -4151,11 +4161,11 @@ async fn get_local_albums(
         .local_folders
         .clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let source_ids = MpdSupervisor::local_library_sources(&local_folders)?
-            .into_iter()
-            .map(|source| source.id)
-            .collect();
-        AudioEngine::get_local_albums_at(&socket_path, &source_ids)
+        let sources = MpdSupervisor::local_library_sources(&local_folders)?;
+        let source_ids = sources.iter().map(|source| source.id.clone()).collect();
+        let mut albums = AudioEngine::get_local_albums_at(&socket_path, &source_ids)?;
+        label_local_album_sources(&mut albums, &sources);
+        Ok(albums)
     })
         .await
         .map_err(|e| format!("Falha na tarefa de consulta da biblioteca local: {e}"))?
@@ -4307,7 +4317,7 @@ async fn get_plex_albums(
     section_key: String,
     sort_by: String,
     state: State<'_, PlexState>,
-) -> Result<Vec<PlexAlbum>, String> {
+) -> Result<plex::PlexAlbumCatalog, plex::PlexAlbumCatalogError> {
     let client = state.0.lock().unwrap().clone();
     client.get_albums(&section_key, &sort_by).await
 }
@@ -4328,6 +4338,20 @@ async fn get_collection_albums(
 ) -> Result<Vec<PlexAlbum>, String> {
     let client = state.0.lock().unwrap().clone();
     client.get_collection_albums(&rating_key).await
+}
+
+#[tauri::command]
+async fn get_artist_portrait(
+    server_id: String,
+    rating_key: String,
+    state: State<'_, PlexState>,
+) -> Result<Option<plex::PlexImageRef>, String> {
+    let client = state
+        .0
+        .lock()
+        .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
+        .clone();
+    client.get_artist_portrait(&server_id, &rating_key).await
 }
 
 #[tauri::command]
@@ -4590,6 +4614,7 @@ pub fn run() {
             get_plex_albums,
             get_plex_collections,
             get_collection_albums,
+            get_artist_portrait,
             get_artist_albums,
             get_artist_top_tracks,
             get_album_tracks,
@@ -4660,6 +4685,24 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn local_album_origin_labels_use_only_configured_source_names() {
+        let album = |source: Option<&str>| serde_json::from_value::<audio::LocalAlbum>(serde_json::json!({
+            "id": "album", "title": "Title", "artist": "Artist", "year": null,
+            "folder_path": "/physical/private/folder", "source_id": source,
+            "track_count": 1, "discs": []
+        })).unwrap();
+        let mut albums = vec![album(Some("internal-root")), album(Some("unresolved")), album(None)];
+        let sources = vec![supervisor::LocalLibrarySource { id: "internal-root".into(), label: "Configured library".into() }];
+        label_local_album_sources(&mut albums, &sources);
+        assert_eq!(albums[0].source_label.as_deref(), Some("Configured library"));
+        assert_eq!(albums[1].source_label, None);
+        assert_eq!(albums[2].source_label, None);
+        assert_eq!(albums[0].source_id.as_deref(), Some("internal-root"));
+        label_local_album_sources(&mut albums, &[]);
+        assert!(albums.iter().all(|album| album.source_label.is_none()));
+    }
 
     static NEXT_LOCAL_PATH_TEST_ID: AtomicU64 = AtomicU64::new(0);
 

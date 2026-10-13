@@ -3,8 +3,34 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import ts from "typescript";
 import { logError, logWarning, summarizeDiagnostic } from "./frontendDiagnostics.ts";
+import { exploreDiagnosticAlias, exploreDiagnosticText } from "./frontendDiagnostics.ts";
 
 const secrets = "https://user:password@server/private/song?X-Plex-Token=secret /home/private/music /mnt/private";
+
+test("Explore diagnostics require both development and explicit opt-in, build lazily and tolerate failure", async () => {
+  const source = readFileSync(new URL("./frontendDiagnostics.ts", import.meta.url), "utf8");
+  const old = console.info, calls = []; let built = 0;
+  console.info = (...args) => calls.push(args);
+  try {
+    for (const env of [{ DEV: false, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "1" }, { DEV: true }, { DEV: true, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "0" }, { DEV: true, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "1" }]) {
+      const js = ts.transpileModule(source.replaceAll("import.meta.env", JSON.stringify(env)), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
+      const helper = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
+      helper.logExploreDiagnostic(() => { built++; return { count: 6 }; });
+      assert.doesNotThrow(() => helper.logExploreDiagnostic(() => { throw Error(secrets); }));
+    }
+  } finally { console.info = old; }
+  assert.equal(built, 1); assert.deepEqual(calls, [["[Sonante] explore.diagnostic", '{"count":6}']]);
+});
+
+test("Explore metadata and identifiers omit paths, URLs and credential-like values", () => {
+  for (const value of [secrets, "/mnt/music", "C:\\Music", "token=private", "password:private", "secret=private", "file:private", "bad\nvalue"]) assert.equal(exploreDiagnosticText(value), "[redacted]");
+  assert.equal(exploreDiagnosticText("Brasilidades"), "Brasilidades");
+  assert.equal(exploreDiagnosticText("a".repeat(100)).length, 80);
+  const alias = exploreDiagnosticAlias("root", secrets);
+  assert.match(alias, /^root-\d+$/); assert.equal(exploreDiagnosticAlias("root", secrets), alias);
+  assert.notEqual(exploreDiagnosticAlias("root", "other"), alias);
+  assert.match(exploreDiagnosticAlias("library", secrets), /^library-\d+$/);
+});
 
 test("strings and Error instances retain safe ACK/OS context without secrets", () => {
   for (const error of [`ACK [5@2] {add} ${secrets} (os error 13)`, new Error(`ACK [5@2] {add} ${secrets} (os error 13)`)]) {

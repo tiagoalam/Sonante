@@ -225,7 +225,7 @@ const expression = browser.slice(start + branchStart.length, browser.indexOf(bra
 const layoutJs = ts.transpileModule(`function Layout(props) {
   const {filteredAlbums, visibleImportPreview, emptyCatalogState, scrollContainer} = props;
   const sortedAlbums = filteredAlbums, catalogActivity = "indexing", activeSourceId = null, albumSearch = "", albumSortMode = "album-asc";
-  const albumGridRef = null, favoriteIds = new Set(), catalogConfirmed = false, isPlaybackAvailable = true, onlineArtworkEnabled = false, artworkBlocked = true;
+  const albumGridRef = null, favoriteIds = new Set(), catalogConfirmed = false, isPlaybackAvailable = true, onlineArtworkEnabled = false, artworkBlocked = true, metadataMode = false;
   const handleToggleFavoriteLocal = () => {}, handleSelectAlbum = () => {}, handlePlayEntireAlbum = () => {};
   const localAlbumNavigationResetKey = () => "existing-navigation";
   const t = key => key;

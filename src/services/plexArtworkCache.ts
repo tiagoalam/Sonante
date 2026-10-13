@@ -53,8 +53,15 @@ class ArtworkRequestQueue {
   }
 }
 
-export const plexImageCacheKey = (image: PlexImageRef): string =>
-  `${image.server_id}\u0000${image.path}`;
+// Optional opaque authentication scope: credentials never become cache keys or DOM attributes.
+const imageScopes = new WeakMap<object, number>();
+let nextImageScope = 0;
+export const plexImageCacheKey = (image: PlexImageRef, scope?: object): string => {
+  const key = `${image.server_id}\u0000${image.path}`;
+  if (!scope) return key;
+  if (!imageScopes.has(scope)) imageScopes.set(scope, ++nextImageScope);
+  return `${imageScopes.get(scope)}\u0000${key}`;
+};
 
 export const plexCollectionCacheKey = (serverId: string, ratingKey: string): string =>
   `${serverId}\u0000${ratingKey}`;
@@ -63,22 +70,22 @@ export class PlexImageVisibilityGate {
   private imageKey: string | null = null;
   private visible = false;
 
-  reset(image: PlexImageRef): void {
-    const nextKey = plexImageCacheKey(image);
+  reset(image: PlexImageRef, scope?: object): void {
+    const nextKey = plexImageCacheKey(image, scope);
     if (this.imageKey === nextKey) return;
     this.imageKey = nextKey;
     this.visible = false;
   }
 
-  markVisible(image: PlexImageRef): boolean {
-    this.reset(image);
+  markVisible(image: PlexImageRef, scope?: object): boolean {
+    this.reset(image, scope);
     if (this.visible) return false;
     this.visible = true;
     return true;
   }
 
-  canAcquire(image: PlexImageRef): boolean {
-    return this.imageKey === plexImageCacheKey(image) && this.visible;
+  canAcquire(image: PlexImageRef, scope?: object): boolean {
+    return this.imageKey === plexImageCacheKey(image, scope) && this.visible;
   }
 }
 
@@ -109,13 +116,13 @@ export class PlexArtworkCache {
     this.requestQueue = new ArtworkRequestQueue(maximumConcurrentRequests);
   }
 
-  acquireCached(image: PlexImageRef): PlexArtworkLease | null {
-    const entry = this.entries.get(plexImageCacheKey(image));
-    return entry?.objectUrl && !entry.invalidated ? this.acquire(image) : null;
+  acquireCached(image: PlexImageRef, scope?: object): PlexArtworkLease | null {
+    const entry = this.entries.get(plexImageCacheKey(image, scope));
+    return entry?.objectUrl && !entry.invalidated ? this.acquire(image, scope) : null;
   }
 
-  acquire(image: PlexImageRef): PlexArtworkLease {
-    const key = plexImageCacheKey(image);
+  acquire(image: PlexImageRef, scope?: object): PlexArtworkLease {
+    const key = plexImageCacheKey(image, scope);
     let entry = this.entries.get(key);
     if (!entry) {
       entry = {

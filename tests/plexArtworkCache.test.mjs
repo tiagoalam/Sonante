@@ -47,7 +47,7 @@ test("PlexImage cached remount bypasses the observer and releases its lease on c
   await first.promise;
   first.release();
   const leaseRef = { current: null };
-  const run = new Function("artworkCache", "image", "visibilityGateRef", "setObjectUrl", "setFailed", "leaseRef", "containerRef", "window", "IntersectionObserver", "setVisibleImageKey", "imageKey", "PLEX_IMAGE_ROOT_MARGIN", effect);
+  const run = new Function("artworkCache", "image", "visibilityGateRef", "setObjectUrl", "setFailed", "leaseRef", "containerRef", "window", "IntersectionObserver", "setVisibleImageKey", "imageKey", "PLEX_IMAGE_ROOT_MARGIN", "cacheScope", effect);
   const cleanup = run(cache, image, { current: new PlexImageVisibilityGate() }, url => { presented = url; }, () => {}, leaseRef,
     { current: {} }, {}, () => assert.fail("cached image must not wait for observer"), () => assert.fail("visibility state"), "key", "400px 0px");
   assert.equal(presented, "blob:cached");
@@ -58,7 +58,7 @@ test("PlexImage cached remount bypasses the observer and releases its lease on c
   assert.equal(leaseRef.current, null);
   cache.clearUnused();
   assert.deepEqual(revoked, ["blob:cached"]);
-  assert.match(source, /if \(active && visibilityGateRef\.current\.canAcquire\(image\)\) setObjectUrl\(url\)/);
+  assert.match(source, /if \(active && visibilityGateRef\.current\.canAcquire\(image, cacheScope\)\) setObjectUrl\(url\)/);
 });
 
 test("deduplicates simultaneous image requests and keeps an object URL in use", async () => {
@@ -95,7 +95,7 @@ test("PlexImage ignores late success or failure after the visible image changes"
   const source = readFileSync(new URL("../src/components/PlexImage.tsx", import.meta.url), "utf8");
   const effect = source.match(/  useEffect\(\(\) => \{([\s\S]*?)\n  \}, \[imageKey, visibleImageKey\]\);/)?.[1];
   assert.ok(effect);
-  const run = new Function("visibleImageKey", "imageKey", "visibilityGateRef", "image", "artworkCache", "leaseRef", "setObjectUrl", "setFailed", "onLoadErrorRef", effect);
+  const run = new Function("visibleImageKey", "imageKey", "visibilityGateRef", "image", "artworkCache", "leaseRef", "setObjectUrl", "setFailed", "onLoadErrorRef", "cacheScope", effect);
   for (const outcome of ["success", "failure"]) {
     let finish, presented = null, failed = false, errors = 0;
     const oldImage = { server_id: "server-a", path: "/old" };
@@ -273,4 +273,31 @@ test("visibility gate acquires only after intersection and ignores rerenders", (
   assert.equal(acquisitions, 1);
   if (gate.markVisible(image)) acquisitions += 1;
   assert.equal(acquisitions, 1);
+});
+
+
+test("opaque portrait auth scopes share within a context and isolate cached and delayed bytes across accounts", async () => {
+  const image={server_id:"server",path:"/library/metadata/artist/thumb/1"},a={},b={};let finish,requests=0;
+  const cache=new PlexArtworkCache(()=>{requests++;return requests===1?new Promise(resolve=>{finish=resolve;}):Promise.resolve(new Uint8Array([2]).buffer);},bytes=>`blob:${new Uint8Array(bytes)[0]}`,()=>{});
+  const old=cache.acquire(image,a),shared=cache.acquire(image,a);await nextTurn();assert.equal(requests,1);
+  assert.equal(cache.acquireCached(image,b),null);
+  const next=cache.acquire(image,b);assert.equal(await next.promise,"blob:2");
+  finish(new Uint8Array([1]).buffer);assert.equal(await old.promise,"blob:1");assert.equal(await shared.promise,"blob:1");
+  const visible=cache.acquireCached(image,b);assert.equal(visible.objectUrl,"blob:2");
+  assert.notEqual(plexImageCacheKey(image,a),plexImageCacheKey(image,b));
+  const gate=new PlexImageVisibilityGate();gate.markVisible(image,a);assert.equal(gate.canAcquire(image,b),false);assert.equal(gate.markVisible(image,b),true);
+  for(const lease of [old,shared,next,visible])lease.release();cache.clearUnused();
+});
+
+test("PlexImage drops delayed bytes when only the opaque auth scope changes", async () => {
+  const source=readFileSync(new URL("../src/components/PlexImage.tsx",import.meta.url),"utf8");
+  const effect=source.match(/  useEffect\(\(\) => \{([\s\S]*?)\n  \}, \[imageKey, visibleImageKey\]\);/)?.[1];assert.ok(effect);
+  const run=new Function("visibleImageKey","imageKey","visibilityGateRef","image","artworkCache","leaseRef","setObjectUrl","setFailed","onLoadErrorRef","cacheScope",effect);
+  const image={server_id:"server",path:"/library/metadata/artist/thumb/1"},oldScope={},newScope={};let requests=0,finish,presented=null;
+  const cache=new PlexArtworkCache(()=>++requests===1?new Promise(resolve=>{finish=resolve;}):Promise.resolve(new Uint8Array([2]).buffer),bytes=>`blob:${new Uint8Array(bytes)[0]}`,()=>{});
+  const gate={current:new PlexImageVisibilityGate()},leaseRef={current:null};
+  const start=scope=>run(plexImageCacheKey(image,scope),plexImageCacheKey(image,scope),gate,image,cache,leaseRef,url=>{presented=url;},()=>{}, {current:()=>assert.fail("obsolete error")},scope);
+  gate.current.markVisible(image,oldScope);const oldCleanup=start(oldScope);await nextTurn();
+  gate.current.markVisible(image,newScope);const newCleanup=start(newScope);await nextTurn();assert.equal(presented,"blob:2");
+  finish(new Uint8Array([1]).buffer);await nextTurn();assert.equal(presented,"blob:2");oldCleanup();newCleanup();cache.clearUnused();
 });

@@ -21,6 +21,7 @@ export interface LocalAlbum {
   genres?: string[];
   folder_path: string;
   source_id?: string | null;
+  source_label?: string | null;
   track_count: number;
   discs: LocalAlbumDisc[];
   tag_presence?: LocalAlbumTagPresence | null;
