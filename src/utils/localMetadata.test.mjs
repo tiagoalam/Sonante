@@ -343,3 +343,32 @@ test("presence triage filtering and selecting valid/legacy payloads adds no I/O 
   assert.deepEqual(f.reads, []); assert.equal(get(tree, Editor), undefined); assert.equal(get(tree, Doctor), undefined);
   h.cleanup(); f.h.cleanup();
 });
+
+// Explore reuses the real browser owner; dialogs and physical services remain mocked.
+test("Explore opens the exact Local detail and returns without catalog reload or global artwork enrichment", async () => {
+  const f = fixture({ subview: "browser", initialAlbumId: "B", isPlaybackAvailable: true, onlineArtworkEnabled: false,
+    onAlbumNavigationBack: () => f.callbacks.push("explore-back") });
+  const trackLookups = [];
+  globalThis.__metadataSpaceAudio = async (method, args) => {
+    f.reads.push(method); if (method === "getLocalAlbumTracks") { trackLookups.push(args); return []; } return null;
+  };
+  let tree = await f.settle();
+  assert.equal(nodes(tree, n => n.type === "h1")[0].props.children, "Same title");
+  assert.deepEqual(trackLookups, [["B"]]);
+  assert.ok(f.reads.includes("getLocalAlbumTracks"), "only explicit detail opening reads tracks");
+  assert.ok(!f.reads.includes("getLocalAlbums"));
+  assert.ok(!f.reads.includes("artwork.setCatalog"));
+  const review = nodes(tree, n => n.type === "button" && n.props.title === translations.en.t("localMetadata.review"))[0];
+  assert.ok(review); review.props.onClick(); assert.deepEqual(f.callbacks, ["metadata"]);
+  f.reads.length = 0; tree = await f.settle({ ...f.props, subview: "metadata" });
+  assert.equal(f.metadata(tree).selectedAlbumId, "B"); assert.deepEqual(f.reads, []);
+  f.metadata(tree).onBack(); assert.deepEqual(f.callbacks, ["metadata", "browser"]);
+  tree = await f.settle();
+  const back = nodes(tree, n => n.type === "button" && n.props.title === translations.en.t("localBrowser.back"))[0];
+  assert.ok(back); back.props.onClick(); assert.deepEqual(f.callbacks, ["metadata", "browser", "explore-back"]);
+  f.reads.length = 0;
+  tree = await f.settle({ ...f.props, albumNavigationAvailable: false });
+  assert.ok(nodes(tree, n => n.props.role === "status").some(n => React.Children.toArray(n.props.children).some(c => c?.props?.children === translations.en.t("explore.detailUnavailable"))));
+  assert.deepEqual(f.reads, []);
+  f.h.cleanup();
+});

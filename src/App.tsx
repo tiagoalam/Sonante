@@ -20,12 +20,15 @@ import {
   ListMusic,
   ExternalLink,
   ListPlus,
+  Compass,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlayerBar } from "./components/PlayerBar";
 import { AlbumView } from "./components/AlbumView";
 import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
+import { ExploreView } from "./components/ExploreView";
+import type { ExploreContext, ExploreEntry, ExploreSourceState } from "./utils/explore";
 import { LocalBrowserView, localAlbumCatalog, type LocalSubview } from "./components/LocalBrowserView";
 import { localCatalogActivity } from "./utils/localAlbumCatalog";
 import { localArtworkEnrichment, localArtworkResolver } from "./utils/localArtworkSession";
@@ -327,6 +330,8 @@ export function App() {
   const [mediaSource, setMediaSource] = useState<MainSection | null>(null);
   const [playerNavigation, setPlayerNavigation] = useState<PlayerNavigationSession | null>(null);
   const playerTarget = playerNavigation?.target ?? null;
+  const [exploreDetail, setExploreDetail] = useState<ExploreEntry | null>(null);
+  const [exploreLocalSubview, setExploreLocalSubview] = useState<LocalSubview>("browser");
   const [localSubview, setLocalSubview] = useState<LocalSubview>("browser");
   const [playerLocalSubview, setPlayerLocalSubview] = useState<{ revision: number; view: LocalSubview } | null>(null);
   const playerSubview = playerLocalSubview?.revision === playerNavigation?.revision ? playerLocalSubview?.view ?? "browser" : "browser";
@@ -352,6 +357,12 @@ export function App() {
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
   const [loadingLibraries, setLoadingLibraries] = useState(true);
   const [selectedLibrary, setSelectedLibrary] = useState<PlexLibrary | null>(null);
+  // Opaque identities prevent credential values from reaching cards, errors or persisted navigation.
+  const plexConnectionIdentity = useMemo(() => ({}), [config?.plex_server_id, config?.plex_url, config?.plex_token]);
+  const explorePlexIdentity = useMemo(() => ({}), [plexConnectionIdentity, selectedLibrary?.key]);
+  const [plexLibrariesIdentity, setPlexLibrariesIdentity] = useState<unknown>(null);
+  const [plexLibrariesError, setPlexLibrariesError] = useState(false);
+  const [plexAlbumLoad, setPlexAlbumLoad] = useState<{ identity: unknown; phase: "loading" | "ready" | "error" } | null>(null);
   const [plexViewMode, setPlexViewMode] = useState<"albums" | "artists" | "years" | "genres" | "collections">("albums");
   const [hasCollections, setHasCollections] = useState(false);
   const [plexSortMode, setPlexSortMode] = useState<PlexAlbumSortMode>("added_recent");
@@ -851,6 +862,8 @@ export function App() {
           setShowQueue(false);
         } else if (playerTarget) {
           closePlayerNavigation();
+        } else if (exploreDetail) {
+          closeExploreAlbum();
         } else if (searchQuery) {
           setSearchQuery("");
         } else if (activeEl instanceof HTMLElement) {
@@ -898,7 +911,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showSettings, showAbout, showQueue, searchQuery, playerTarget]);
+  }, [showSettings, showAbout, showQueue, searchQuery, playerTarget, exploreDetail]);
 
   // Carregar ou Limpar Bibliotecas do Plex
   useEffect(() => {
@@ -921,12 +934,16 @@ export function App() {
     }
 
     let disposed = false;
+    setPlexLibrariesError(false);
+    setLibraries([]);
+    setSelectedLibrary(null);
     setLoadingLibraries(true);
     plexService
       .getLibraries()
       .then((libs) => {
         if (disposed) return;
         mainSectionPreference.plexDiscoveryFinished(libs.length > 0);
+        setPlexLibrariesIdentity(plexConnectionIdentity);
         setLibraries(libs);
         if (libs.length > 0) {
           setSelectedLibrary(libs[0]);
@@ -937,6 +954,8 @@ export function App() {
       .catch((err) => {
         if (!disposed) {
           mainSectionPreference.plexDiscoveryFinished(false);
+          setPlexLibrariesIdentity(plexConnectionIdentity);
+          setPlexLibrariesError(true);
           logError("plex.libraries-load", err);
         }
       })
@@ -947,11 +966,11 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [config?.plex_token]);
+  }, [plexConnectionIdentity]);
 
   // Carregar o catálogo base e as coleções da biblioteca ativa uma única vez.
   useEffect(() => {
-    if (!selectedLibrary) {
+    if (!selectedLibrary || plexLibrariesIdentity !== plexConnectionIdentity) {
       setAlbums([]);
       setCollections([]);
       setHasCollections(false);
@@ -976,6 +995,7 @@ export function App() {
     setCollections([]);
     setHasCollections(false);
     setLoading(true);
+    setPlexAlbumLoad({ identity: explorePlexIdentity, phase: "loading" });
     void Promise.allSettled([
       plexService.getAlbums(selectedLibrary.key, "added"),
       plexService.getCollections(selectedLibrary.key),
@@ -983,7 +1003,9 @@ export function App() {
       if (disposed || generation !== plexLibraryRequestGenerationRef.current) return;
       if (albumResult.status === "fulfilled") {
         setAlbums(albumResult.value);
+        setPlexAlbumLoad({ identity: explorePlexIdentity, phase: "ready" });
       } else {
+        setPlexAlbumLoad({ identity: explorePlexIdentity, phase: "error" });
         logError("plex.albums-load", albumResult.reason);
       }
       if (collectionResult.status === "fulfilled") {
@@ -1004,7 +1026,7 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [selectedLibrary]);
+  }, [selectedLibrary, plexLibrariesIdentity, plexConnectionIdentity, explorePlexIdentity]);
 
   // Busca Plex
   useEffect(() => {
@@ -1127,6 +1149,7 @@ export function App() {
     playerNavigationRequests.invalidate();
     setPlayerNavigation(null);
     setPlayerNavigationError(false);
+    setExploreDetail(null);
     setLocalSelectedArtist(null);
     setActiveAlbum(null);
     setActiveCollection(null);
@@ -1174,6 +1197,33 @@ export function App() {
   };
 
   const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
+  const localExploreConfigured = Boolean(config?.local_folders.length);
+  const localExploreState: ExploreSourceState = !localExploreConfigured ? "not_configured"
+    : !isPlaybackAvailable || playbackStatus.is_updating || localCatalog.saveBlocked || localCatalog.mpdBusy || localCatalog.error ? "unavailable"
+    : localCatalog.loading || !localCatalog.loaded ? "loading" : localCatalog.albums.length ? "ready" : "empty";
+  const plexExploreState: ExploreSourceState = !isPlexConnected ? "not_configured"
+    : plexLibrariesIdentity !== plexConnectionIdentity || loadingLibraries ? "loading"
+    : plexLibrariesError ? "unavailable" : !selectedLibrary ? "not_configured"
+    : plexAlbumLoad?.identity !== explorePlexIdentity || plexAlbumLoad.phase === "loading" ? "loading"
+    : plexAlbumLoad.phase === "error" ? "unavailable" : albums.length ? "ready" : "empty";
+  const exploreContext: ExploreContext = {
+    local: { albums: localCatalog.albums, state: localExploreState },
+    plex: { albums, state: plexExploreState, identity: explorePlexIdentity, serverId: config?.plex_server_id ?? "", libraryId: selectedLibrary?.key ?? "" },
+  };
+  const exploreLive = useRef({ context: exploreContext, visible: false });
+  exploreLive.current = { context: exploreContext, visible: centralSection === "explore" && !playerTarget && !exploreDetail };
+  const exploreEntryCurrent = (entry: ExploreEntry) => {
+    const current = exploreLive.current.context;
+    return entry.source === "local" ? current.local.state === "ready" && entry.version === current.local.albums && current.local.albums.includes(entry.album)
+      : current.plex.state === "ready" && entry.identity === current.plex.identity && entry.version === current.plex.albums && current.plex.albums.includes(entry.album);
+  };
+  const openExploreAlbum = (entry: ExploreEntry) => {
+    if (!exploreLive.current.visible || !exploreEntryCurrent(entry)) return;
+    setExploreLocalSubview("browser");
+    setExploreDetail(entry);
+  };
+  const closeExploreAlbum = () => { if (!document.querySelector("[data-local-tag-dialog-open]")) setExploreDetail(null); };
+
   const plexLibraryOptions = useMemo(() => libraries.length > 0
     ? libraries.map((library) => ({ value: library.key, label: library.title }))
     : [{
@@ -1311,6 +1361,8 @@ export function App() {
                 {t("sidebar.musicGroup")}
               </h2>
               <nav aria-label={t("sidebar.musicGroup")} className="space-y-1">
+                <SidebarNavItem icon={Compass} label={t("explore.title")} active={mediaSource === "explore"}
+                  onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("explore"); }} />
                 <SidebarNavItem
                   icon={Folder}
                   label={t("sidebar.local")}
@@ -1388,7 +1440,25 @@ export function App() {
 
         {/* Painel Central */}
         <div className={playerTarget ? "hidden" : "contents"}>
-        {centralSection === "playlists" ? (
+        {centralSection === "explore" ? (
+          <div className="contents">
+            <div className={exploreDetail ? "hidden" : "contents"}>
+              <ExploreView context={exploreContext} active={!exploreDetail && !playerTarget} libraryTitle={selectedLibrary?.title ?? null}
+                ensureLocal={() => localAlbumCatalog.ensureLoaded(playbackStatus.is_updating, localExploreConfigured && isPlaybackAvailable)}
+                isCurrent={exploreEntryCurrent} onOpen={openExploreAlbum} />
+            </div>
+            {exploreDetail?.source === "local" && <LocalBrowserView initialAlbumId={exploreDetail.album.id}
+              subview={exploreLocalSubview} onSubviewChange={setExploreLocalSubview}
+              albumNavigationAvailable={exploreEntryCurrent(exploreDetail)} onAlbumNavigationBack={closeExploreAlbum}
+              catalogRefreshRevision={localCatalogRevision} isPlaybackAvailable={isPlaybackAvailable} isLibraryUpdating={playbackStatus.is_updating}
+              onlineArtworkEnabled={false} configuredLocalFolders={config?.local_folders ?? []} />}
+            {exploreDetail?.source === "plex" && (exploreEntryCurrent(exploreDetail)
+              ? <AlbumView key={exploreDetail.key} album={exploreDetail.album} onBack={closeExploreAlbum}
+                  onToggleFavorite={refreshPlexFavorites} isPlaybackAvailable={isPlaybackAvailable} />
+              : <main className="flex-1 space-y-3 p-6 text-sm text-[#BBBBBB]"><p role="status">{t("explore.detailUnavailable")}</p>
+                  <button type="button" onClick={closeExploreAlbum}>{t("explore.back")}</button></main>)}
+          </div>
+        ) : centralSection === "playlists" ? (
           <PlaylistsView isPlaybackAvailable={isPlaybackAvailable} />
         ) : centralSection === "favorites" ? (
           <FavoritesView

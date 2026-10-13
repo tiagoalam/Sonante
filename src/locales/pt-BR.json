@@ -671,6 +671,30 @@
     "sharedExplanation": "ALSA default segue o roteamento do sistema, que pode envolver PipeWire, PulseAudio ou dmix, com possíveis etapas de mistura e conversão. O endpoint não é medido aqui.",
     "directExplanation": "O endpoint ALSA configurado não utiliza a rota compartilhada default. Esta visualização não confirma PCM aberto, suporte do hardware ao formato ou ausência de processamento. Volume por software e ReplayGain podem modificar PCM."
   },
+  "explore": {
+    "title": "Explorar",
+    "shelf": "Álbuns para ouvir",
+    "scope": "Local e Plex: biblioteca selecionada “{{library}}”, não todas as bibliotecas.",
+    "noLibrary": "nenhuma biblioteca selecionada",
+    "sources": {
+      "local": "Local",
+      "plex": "Plex"
+    },
+    "states": {
+      "ready": "Catálogo disponível",
+      "loading": "Carregando catálogo…",
+      "empty": "Catálogo carregado, sem álbuns",
+      "not_configured": "Fonte ou biblioteca não configurada",
+      "unavailable": "Fonte indisponível; as outras fontes continuam disponíveis"
+    },
+    "renew": "Renovar sugestões",
+    "renewHint": "Até seis álbuns, com variedade de artistas. Renovar muda apenas as sugestões em memória; não atualiza catálogos nem carrega faixas.",
+    "noSuggestions": "Sem sugestões disponíveis neste momento. Confira os estados das fontes acima.",
+    "untitled": "Título não informado",
+    "artistNotProvided": "Artista não informado",
+    "detailUnavailable": "Este álbum ou seu contexto de catálogo não está mais disponível. Nenhuma outra edição foi aberta.",
+    "back": "Voltar a Explorar"
+  },
   "localMetadata": {
     "title": "Metadados",
     "back": "Voltar ao navegador Local",

@@ -671,6 +671,30 @@
     "sharedExplanation": "ALSA default follows system routing, which may involve PipeWire, PulseAudio or dmix, with possible mixing and conversion. The endpoint is not measured here.",
     "directExplanation": "The configured ALSA endpoint bypasses the shared default route. This view does not confirm that the PCM is open, hardware format support, or absence of processing. Software volume and ReplayGain can modify PCM."
   },
+  "explore": {
+    "title": "Explore",
+    "shelf": "Albums to listen to",
+    "scope": "Local and Plex: selected library “{{library}}”, not all libraries.",
+    "noLibrary": "no library selected",
+    "sources": {
+      "local": "Local",
+      "plex": "Plex"
+    },
+    "states": {
+      "ready": "Catalog available",
+      "loading": "Loading catalog…",
+      "empty": "Loaded catalog has no albums",
+      "not_configured": "Source or library not configured",
+      "unavailable": "Source unavailable; other sources remain available"
+    },
+    "renew": "Renew suggestions",
+    "renewHint": "Up to six albums with artist variety. Renew only changes suggestions in memory; it does not refresh catalogs or load tracks.",
+    "noSuggestions": "No suggestions available right now. Check the source states above.",
+    "untitled": "Title not provided",
+    "artistNotProvided": "Artist not provided",
+    "detailUnavailable": "This album or its catalog context is no longer available. No other edition was opened.",
+    "back": "Back to Explore"
+  },
   "localMetadata": {
     "title": "Metadata",
     "back": "Back to Local browser",

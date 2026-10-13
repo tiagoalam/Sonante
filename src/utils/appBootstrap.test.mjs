@@ -28,7 +28,7 @@ test("App gates LocalBrowserView behind initial config and devices", () => {
 });
 
 test("each whitelisted section restores only after config bootstrap without writing", () => {
-  for (const section of ["local", "plex", "favorites", "playlists"]) {
+  for (const section of ["local", "plex", "favorites", "playlists", "explore"]) {
     const state = preference(section);
     assert.deepEqual(state.published, []);
     assert.equal(state.reads(), 0);
@@ -53,7 +53,7 @@ test("invalid or absent preference preserves the existing initial source", () =>
 });
 
 test("first run ignores storage and wizard completion keeps its existing initial choice", () => {
-  for (const saved of ["local", "plex", "favorites", "playlists"]) {
+  for (const saved of ["local", "plex", "favorites", "playlists", "explore"]) {
     for (const plex_token of ["", "fixture-token"]) {
       const state = preference(saved);
       state.controller.navigate("favorites"); // No effective navigation before bootstrap.
@@ -94,18 +94,18 @@ test("saved Plex falls back to Local without a token or if discovery fails", () 
 test("explicit navigation stores only section names and prevents late restore fallback", () => {
   const state = preference("plex");
   state.controller.restore(config);
-  for (const section of ["local", "plex", "favorites", "playlists"]) {
+  for (const section of ["local", "plex", "favorites", "playlists", "explore"]) {
     state.controller.navigate(section);
     assert.equal(state.published.at(-1), section);
     assert.deepEqual(state.writes.at(-1), [MAIN_SECTION_STORAGE_KEY, section]);
   }
   state.controller.plexDiscoveryFinished(false);
-  assert.equal(state.published.at(-1), "playlists");
+  assert.equal(state.published.at(-1), "explore");
   const count = state.writes.length;
   for (const invalid of ["settings", "__proto__", {}, null]) state.controller.navigate(invalid);
   assert.equal(state.writes.length, count);
   state.controller.restore(config); // Remount/restart reads the last effective navigation.
-  assert.equal(state.published.at(-1), "playlists");
+  assert.equal(state.published.at(-1), "explore");
   assert.equal(state.writes.length, count);
 });
 
@@ -140,7 +140,7 @@ test("App persists sidebar and contextual section navigation, never bootstrap or
   assert.doesNotMatch(bootstrap, /\.navigate\(/);
   assert.match(source, /if \(config && config\.first_run\)[\s\S]*?onFinish=[\s\S]*?mainSectionPreference\.finishSetup\(newConfig\)/);
   const sidebar = source.slice(source.indexOf("{/* Barra Lateral */}"), source.indexOf("{/* Painel Central */}"));
-  for (const section of ["local", "plex", "favorites", "playlists"]) assert.ok(sidebar.includes(`mainSectionPreference.navigate("${section}")`));
+  for (const section of ["local", "plex", "favorites", "playlists", "explore"]) assert.ok(sidebar.includes(section === "local" ? 'navigateLocalSubview("browser")' : `mainSectionPreference.navigate("${section}")`));
   const player = source.slice(source.indexOf("<PlayerBar"), source.indexOf("{(configSavePhase || configSaveNotice)"));
   assert.ok(player.includes('onNavigateToArtist={() => navigateFromPlayer("artist")}'));
   assert.ok(player.includes('onNavigateToAlbum={() => navigateFromPlayer("album")}'));

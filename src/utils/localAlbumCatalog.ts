@@ -106,6 +106,15 @@ export class LocalAlbumCatalog {
     this.publish({ error: null, mpdBusy: true });
   }
 
+  ensureLoaded(updating: boolean, available: boolean): void {
+    if (updating) { this.setUpdating(true); return; }
+    if (!available) return;
+    this.setUpdating(false);
+    if (this.state.loaded || this.state.loading || this.state.error
+      || this.state.mpdBusy || this.state.saveBlocked || this.inFlight) return;
+    this.setUpdating(false, true);
+  }
+
   requestRefresh(): void {
     this.generation += 1;
     this.pending = true;
