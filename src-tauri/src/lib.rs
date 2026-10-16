@@ -3805,6 +3805,45 @@ fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+// Resume on every confirmed exit, including early returns after rollback. This
+// guard drops before the Save transaction/queue reservation, after inner locks.
+// Unconfirmed/uncertain exits deliberately leave the capture suspended.
+struct AnalyzerSwitchResume<F: FnMut(&analyzer::AnalyzerOwner) -> Result<(), String>> {
+    capture: Option<analyzer::AnalyzerOwner>,
+    confirmed: bool,
+    resume: F,
+}
+
+impl<F: FnMut(&analyzer::AnalyzerOwner) -> Result<(), String>> AnalyzerSwitchResume<F> {
+    fn new(resume: F) -> Self {
+        Self {
+            capture: None,
+            confirmed: false,
+            resume,
+        }
+    }
+
+    fn after_rollback(&mut self, result: Result<(), String>) -> Result<(), String> {
+        self.confirmed = result.is_ok();
+        result
+    }
+}
+
+impl<F: FnMut(&analyzer::AnalyzerOwner) -> Result<(), String>> Drop for AnalyzerSwitchResume<F> {
+    fn drop(&mut self) {
+        if self.confirmed {
+            if let Some(capture) = &self.capture {
+                if let Err(error) = (self.resume)(capture) {
+                    eprintln!(
+                        "[Analyzer] Output/configuration confirmed, but capture could not resume: {}",
+                        crate::diagnostics::error_summary(&error)
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn save_config(
     new_config: AppConfig,
@@ -3917,7 +3956,17 @@ async fn save_config(
     };
     let mut library_changed_during_start = false;
     let mut playback_snapshot = None;
-    let mut resume_analyzer = false;
+    let mut resume_analyzer = AnalyzerSwitchResume::new(|capture| {
+        let Some(_restart_permit) = transaction_state.try_begin_restart() else {
+            return Ok(());
+        };
+        let mut analyzer = analyzer_state
+            .0
+            .lock()
+            .map_err(|e| format!("Falha ao acessar o analyzer após troca de saída: {e}"))?;
+        analyzer
+            .resume_after_output_switch(capture, &app, || transaction_state.shutdown_requested())
+    });
 
     if finishing_first_run {
         let start_result = sup_state
@@ -3975,22 +4024,20 @@ async fn save_config(
                 ));
             }
         };
-        resume_analyzer = {
+        let (capture, suspend_result) = {
             let mut analyzer = analyzer_state
                 .0
                 .lock()
                 .map_err(|e| format!("Falha ao acessar o analyzer antes da troca: {}", e))?;
-            let was_active = analyzer.is_active();
-            if was_active {
-                if let Err(error) = analyzer.stop(Some(&app)) {
-                    eprintln!(
-                        "[Analyzer] Failed to suspend analyzer before output switch: {}",
-                        crate::diagnostics::error_summary(&error)
-                    );
-                }
-            }
-            was_active
+            analyzer.suspend_for_output_switch(&app)
         };
+        resume_analyzer.capture = capture;
+        if let Err(error) = suspend_result {
+            eprintln!(
+                "[Analyzer] Failed to suspend analyzer before output switch: {}",
+                crate::diagnostics::error_summary(&error)
+            );
+        }
         // 2. Reinicia o MPD com a nova saída (liberando o ALSA)
         let switch_result = match sup_state.0.lock() {
             Ok(mut supervisor) => supervisor.start(&new_config),
@@ -3999,26 +4046,24 @@ async fn save_config(
                     "Falha ao iniciar nova saída: não foi possível acessar o supervisor do MPD: {}",
                     e
                 );
-                let rollback = restore_prepared_playback(
+                let rollback = resume_analyzer.after_rollback(restore_prepared_playback(
                     playback_snapshot,
                     switch_queue.as_ref(),
                     &audio_state,
-                );
+                ));
                 return Err(error_with_rollback(original, rollback));
             }
         };
-        library_changed_during_start = confirm_device_switch_start(
-            switch_result.map(|sync| sync.changed),
-            || {
-                rollback_audio_switch(
+        library_changed_during_start =
+            confirm_device_switch_start(switch_result.map(|sync| sync.changed), || {
+                resume_analyzer.after_rollback(rollback_audio_switch(
                     &current_cfg,
                     playback_snapshot,
                     switch_queue.as_ref(),
                     &sup_state,
                     &audio_state,
-                )
-            },
-        )?;
+                ))
+            })?;
 
         // 3. Restaura fila/faixa/posição quando possível; Playing/Paused terminam pausados e Stopped permanece parado
         let restore_result = match audio_state.0.lock() {
@@ -4034,14 +4079,13 @@ async fn save_config(
             )),
         };
         if let Err(restore_error) = restore_result {
-            let rollback =
-                rollback_audio_switch(
-                    &current_cfg,
-                    playback_snapshot,
-                    switch_queue.as_ref(),
-                    &sup_state,
-                    &audio_state,
-                );
+            let rollback = resume_analyzer.after_rollback(rollback_audio_switch(
+                &current_cfg,
+                playback_snapshot,
+                switch_queue.as_ref(),
+                &sup_state,
+                &audio_state,
+            ));
             return Err(error_with_rollback(
                 format!("Falha ao restaurar reprodução: {}", restore_error),
                 rollback,
@@ -4075,7 +4119,7 @@ async fn save_config(
             Ok(())
         };
         if let Err(library_error) = update_library() {
-            let rollback = rollback_applied_config_change(
+            let rollback = resume_analyzer.after_rollback(rollback_applied_config_change(
                 finishing_first_run,
                 audio_hw_changed,
                 folders_changed,
@@ -4084,7 +4128,7 @@ async fn save_config(
                 switch_queue.as_ref(),
                 &sup_state,
                 &audio_state,
-            );
+            ));
             return Err(error_with_rollback(
                 format!("Falha ao atualizar a biblioteca local: {}", library_error),
                 rollback,
@@ -4096,7 +4140,7 @@ async fn save_config(
         Ok(guard) => guard,
         Err(e) => {
             let original = format!("Falha ao publicar a nova configuração: {}", e);
-            let rollback = rollback_applied_config_change(
+            let rollback = resume_analyzer.after_rollback(rollback_applied_config_change(
                 finishing_first_run,
                 audio_hw_changed,
                 folders_changed,
@@ -4105,7 +4149,7 @@ async fn save_config(
                 switch_queue.as_ref(),
                 &sup_state,
                 &audio_state,
-            );
+            ));
             return Err(error_with_rollback(original, rollback));
         }
     };
@@ -4114,7 +4158,7 @@ async fn save_config(
         Err(e) => {
             drop(config_guard);
             let original = format!("Falha ao atualizar a configuração do Plex: {}", e);
-            let rollback = rollback_applied_config_change(
+            let rollback = resume_analyzer.after_rollback(rollback_applied_config_change(
                 finishing_first_run,
                 audio_hw_changed,
                 folders_changed,
@@ -4123,7 +4167,7 @@ async fn save_config(
                 switch_queue.as_ref(),
                 &sup_state,
                 &audio_state,
-            );
+            ));
             return Err(error_with_rollback(original, rollback));
         }
     };
@@ -4132,17 +4176,18 @@ async fn save_config(
         drop(plex_guard);
         drop(config_guard);
         let error = config_save_failure_with_rollback(save_error, || {
-            rollback_applied_config_change(
-                finishing_first_run,
-                audio_hw_changed,
-                folders_changed,
-                &current_cfg,
-                playback_snapshot,
-                switch_queue.as_ref(),
-                &sup_state,
-                &audio_state,
-            )
-            .map_err(ConfigSaveError::BeforeRename)
+            resume_analyzer
+                .after_rollback(rollback_applied_config_change(
+                    finishing_first_run,
+                    audio_hw_changed,
+                    folders_changed,
+                    &current_cfg,
+                    playback_snapshot,
+                    switch_queue.as_ref(),
+                    &sup_state,
+                    &audio_state,
+                ))
+                .map_err(ConfigSaveError::BeforeRename)
         });
         return Err(config_save_error_message(&error));
     }
@@ -4152,18 +4197,7 @@ async fn save_config(
     drop(plex_guard);
     drop(config_guard);
 
-    if resume_analyzer {
-        if let Ok(mut analyzer) = analyzer_state.0.lock() {
-            if analyzer.owner_is_present(|host| app.get_webview_window(host).is_some()) {
-                if let Err(error) = analyzer.start(app) {
-                    eprintln!(
-                        "[Analyzer] Configuration applied, but analyzer could not resume: {}",
-                        crate::diagnostics::error_summary(&error)
-                    );
-                }
-            }
-        }
-    }
+    resume_analyzer.confirmed = true;
     Ok(config_save_operation::SaveResponse::Completed)
 }
 
