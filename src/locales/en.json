@@ -1082,5 +1082,31 @@
       "durability_failed": "Could not confirm the file operation.",
       "unknown": "Unidentified read failure."
     }
+  },
+  "fileInfo": {
+    "title": "File information",
+    "forTrack": "File information: {{title}}",
+    "close": "Close",
+    "loading": "Reading file header…",
+    "provenance": "Original local file · FLAC STREAMINFO declaration",
+    "format": "Format",
+    "sampleRate": "Sample rate",
+    "bitDepthValue": "{{bits}} bits",
+    "bitDepth": "Bit depth",
+    "channels": "Channels",
+    "unknown": "Not declared",
+    "limits": "Header inspection only, separate from MPD reports and DAC output. Audio integrity, master authenticity, upsampling and bit-perfect playback are not verified.",
+    "errors": {
+      "invalid_local_path": "Invalid local track identity.",
+      "outside_configured_roots": "The track is outside the configured sources.",
+      "file_not_found": "File not found.",
+      "cue_virtual": "Virtual CUE tracks are not supported.",
+      "unsupported_format": "Only native FLAC with a leading FLAC signature is supported.",
+      "corrupt_header": "The FLAC header is truncated or invalid.",
+      "permission_denied": "Permission to read the file was denied.",
+      "unavailable": "The file could not be read.",
+      "stale": "The file or library context changed. Close and request information again.",
+      "busy": "Another file inspection is still running. Close and try again when it finishes."
+    }
   }
 }

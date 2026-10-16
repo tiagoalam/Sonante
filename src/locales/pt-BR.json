@@ -1082,5 +1082,31 @@
       "durability_failed": "Não foi possível confirmar a operação do arquivo.",
       "unknown": "Falha de leitura não identificada."
     }
+  },
+  "fileInfo": {
+    "title": "Informações do arquivo",
+    "forTrack": "Informações do arquivo: {{title}}",
+    "close": "Fechar",
+    "loading": "Lendo cabeçalho do arquivo…",
+    "provenance": "Arquivo Local original · declaração STREAMINFO do FLAC",
+    "format": "Formato",
+    "sampleRate": "Taxa de amostragem",
+    "bitDepthValue": "{{bits}} bits",
+    "bitDepth": "Profundidade de bits",
+    "channels": "Canais",
+    "unknown": "Não declarado",
+    "limits": "Somente inspeção do cabeçalho, separada do formato reportado pelo MPD e da saída do DAC. Não verifica integridade do áudio, autenticidade do master, upsampling ou reprodução bit-perfect.",
+    "errors": {
+      "invalid_local_path": "Identidade da faixa Local inválida.",
+      "outside_configured_roots": "A faixa está fora das fontes configuradas.",
+      "file_not_found": "Arquivo não encontrado.",
+      "cue_virtual": "Faixas virtuais CUE não são suportadas.",
+      "unsupported_format": "Somente FLAC nativo iniciado pela assinatura FLAC é suportado.",
+      "corrupt_header": "O cabeçalho FLAC está truncado ou inválido.",
+      "permission_denied": "Permissão de leitura do arquivo negada.",
+      "unavailable": "Não foi possível ler o arquivo.",
+      "stale": "O arquivo ou contexto da biblioteca mudou. Feche e solicite as informações novamente.",
+      "busy": "Outra inspeção de arquivo ainda está em andamento. Feche e tente novamente após a conclusão."
+    }
   }
 }

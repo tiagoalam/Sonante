@@ -18,6 +18,7 @@ import {
   Heart,
   ListPlus,
   Pencil,
+  Info,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LocalImportPreviewSection } from "./LocalImportPreviewSection";
@@ -70,6 +71,7 @@ import { LocalAlbumTagEditorModal } from "./LocalAlbumTagEditorModal";
 import { LibraryDoctorModal } from "./LibraryDoctorModal";
 import { libraryDoctorAvailable } from "../utils/libraryDoctor";
 import type { DoctorReviewContext } from "../utils/libraryDoctorReview";
+import { LocalFileInfoModal } from "./LocalFileInfoModal";
 import { LocalTagEditorModal } from "./LocalTagEditorModal";
 import type { LocalTrackTags } from "../types/localTags";
 import { createAlbumTracksLoader, type AlbumTracksState } from "../utils/localAlbumTracks";
@@ -303,8 +305,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       && current.albums.some((album) => album.id === albumId);
   };
   const [tagEditorTrack, setTagEditorTrack] = useState<LocalItem | null>(null);
+  const [fileInfoTrack, setFileInfoTrack] = useState<{ track: LocalItem; catalog: ReturnType<typeof localAlbumCatalog.getSnapshot> } | null>(null);
   const tagEditorOpen = useRef(false);
-  tagEditorOpen.current = Boolean(tagEditorAlbum || tagEditorTrack);
+  tagEditorOpen.current = Boolean(tagEditorAlbum || tagEditorTrack || fileInfoTrack);
   const [scrollContainer, setScrollContainer] = useState<HTMLDivElement | null>(null);
 
   const [currentPath, setCurrentPath] = useState<string>("");
@@ -383,7 +386,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     const album = playerAlbum;
     if (!album) {
       // Keep an in-flight batch and its results mounted until the user closes the editor.
-      if (!tagEditorAlbum && !tagEditorTrack && !doctorAlbum && !metadataMode) onPlayerNavigationBack?.();
+      if (!tagEditorAlbum && !tagEditorTrack && !fileInfoTrack && !doctorAlbum && !metadataMode) onPlayerNavigationBack?.();
       return;
     }
     if (!browserReads.current) return;
@@ -391,7 +394,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     setSelectedAlbum(playerTarget.view === "album" ? album : null);
     setSelectedArtist(playerTarget.view === "artist" ? album.artist : null);
     setViewMode(playerTarget.view === "artist" ? "artists" : "albums");
-  }, [playerTarget, playerAlbum, tagEditorAlbum]);
+  }, [playerTarget, playerAlbum, tagEditorAlbum, fileInfoTrack]);
 
   useEffect(() => {
     if (!selectedAlbum || metadataMode || albumLocations?.album === selectedAlbum) return;
@@ -770,12 +773,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     <main className="flex-1 flex flex-col overflow-hidden bg-[#121212] select-none">
       {detailUnavailable && <div role="status" className="space-y-3 p-6 text-sm text-[#BBBBBB]">
         <p>{t("explore.detailUnavailable")}</p>
-        <button type="button" disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum)}
+        <button type="button" disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)}
           onClick={() => onAlbumNavigationBack?.()} className="rounded px-2 py-1 focus-visible:ring-1 focus-visible:ring-[#E5A00D]">{t("explore.back")}</button>
       </div>}
       <div className={metadataMode && !detailUnavailable ? "contents" : "hidden"}>
         <LocalMetadataView catalog={catalog} updating={isLibraryUpdating} selectedAlbumId={metadataAlbumId}
-          dialogsOpen={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum)} onSelectAlbum={selectMetadataAlbum}
+          dialogsOpen={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)} onSelectAlbum={selectMetadataAlbum}
           onDiagnose={diagnoseMetadataAlbum} onReview={openMetadataEditor}
           onBack={() => { if (!tagEditorOpen.current && !doctorAlbum) onSubviewChange?.("browser"); }} />
       </div>
@@ -1029,7 +1032,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   </button>
                   <button
                     type="button"
-                    disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum)}
+                    disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)}
                     onClick={() => {
                       if (!tagEditorOpen.current && !doctorAlbum) {
                         setMetadataAlbumId(selectedAlbum.id);
@@ -1104,6 +1107,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       title={t("playlists.addTrack")}
                     >
                       <ListPlus size={15} />
+                    </button>
+                    <button type="button" onClick={(event) => { event.stopPropagation(); setFileInfoTrack({ track: track, catalog: localAlbumCatalog.getSnapshot() }); }}
+                      title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: track.title || track.name })}
+                      className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]">
+                      <Info size={14} />
                     </button>
                     <button
                       type="button"
@@ -1430,6 +1438,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                           >
                             <ListPlus size={15} />
                           </button>
+                          <button type="button" onClick={(event) => { event.stopPropagation(); setFileInfoTrack({ track: item, catalog: localAlbumCatalog.getSnapshot() }); }}
+                            title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: item.title || item.name })}
+                            className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]">
+                            <Info size={14} />
+                          </button>
                           <button
                             type="button"
                             onClick={(event) => {
@@ -1453,7 +1466,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         )}
       </div>
       </div>
-      {(tagEditorAlbum || tagEditorTrack || doctorAlbum) && <span data-local-tag-dialog-open hidden />}
+      {fileInfoTrack && <LocalFileInfoModal path={fileInfoTrack.track.path}
+        displayName={fileInfoTrack.track.title || fileInfoTrack.track.name}
+        available={catalogConfirmed && localAlbumCatalog.getSnapshot() === fileInfoTrack.catalog}
+        onClose={() => setFileInfoTrack(null)} />}
+      {(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack) && <span data-local-tag-dialog-open hidden />}
       {playlistItems && (
         <PlaylistPickerModal
           items={playlistItems}

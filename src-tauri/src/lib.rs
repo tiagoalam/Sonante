@@ -28,6 +28,7 @@ mod plex;
 mod shared_volume;
 mod supervisor;
 mod tags;
+mod local_file_info;
 
 use audio::{
     list_audio_devices, AudioDevice, AudioEngine, AudioState, DeviceSwitchSnapshot,
@@ -2897,6 +2898,39 @@ async fn resolve_local_library_path(
 }
 
 #[tauri::command]
+async fn get_local_file_info(
+    path: String,
+    config_state: State<'_, ConfigState>,
+) -> Result<local_file_info::LocalFileInfo, local_file_info::InfoError> {
+    use local_file_info::InfoError;
+    let permit = local_file_info::InspectionPermit::acquire()?;
+    let folders = config_state
+        .0
+        .lock()
+        .map_err(|_| InfoError::Unavailable)?
+        .local_folders
+        .clone();
+    let expected_folders = folders.clone();
+    let library = MpdSupervisor::library_dir();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        tags::inspect_local_file_info(&library, &path, &folders)
+    })
+    .await
+    .map_err(|_| InfoError::Unavailable)??;
+    if config_state
+        .0
+        .lock()
+        .map_err(|_| InfoError::Unavailable)?
+        .local_folders
+        != expected_folders
+    {
+        return Err(InfoError::Stale);
+    }
+    Ok(result)
+}
+
+#[tauri::command]
 async fn get_local_track_tags(
     path: String,
     config_state: State<'_, ConfigState>,
@@ -4825,6 +4859,7 @@ pub fn run() {
             get_online_album_metadata_details,
             resolve_local_library_path,
             get_local_track_tags,
+            get_local_file_info,
             get_local_album_tag_inspection,
             preflight_local_album_tag_batch,
             apply_local_album_tag_batch,
