@@ -58,12 +58,17 @@ fn check_local_path_exists_in(
     path_str: &str,
     config: &AppConfig,
 ) -> Result<bool, String> {
-    match crate::local_media::resolve_local_path(
+    let mut diagnostic = crate::diagnostics::DevSpan::new("favorites.local_exists");
+    diagnostic.phase("filesystem.resolve");
+    let result = match crate::local_media::resolve_local_path(
         library_dir,
         path_str,
         &config.local_folders,
     ) {
-        Ok(resolved) => Ok(resolved.physical_path.is_dir()),
+        Ok(resolved) => {
+            diagnostic.phase("filesystem.metadata");
+            Ok(resolved.physical_path.is_dir())
+        }
         Err(
             crate::local_media::LocalPathResolveError::InvalidPath
             | crate::local_media::LocalPathResolveError::SourceNotFound
@@ -73,7 +78,9 @@ fn check_local_path_exists_in(
         Err(error @ crate::local_media::LocalPathResolveError::Unavailable(_)) => {
             Err(error.to_string())
         }
-    }
+    };
+    diagnostic.result(&result);
+    result
 }
 
 impl FavoriteAlbum {

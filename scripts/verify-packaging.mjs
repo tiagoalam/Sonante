@@ -10,9 +10,13 @@ const arch = /^pkgver=(.+)$/m.exec(read("sonante-arch/PKGBUILD"))?.[1];
 for (const version of [lock.version, lock.packages[""].version, tauri.version, cargo, cargoLock, arch]) assert.equal(version, pkg.version);
 if (process.env.RELEASE_TAG) assert.equal(process.env.RELEASE_TAG, `v${pkg.version}`);
 assert.match(read("src/components/AboutModal.tsx"), new RegExp(`v${pkg.version.replaceAll(".", "\\.")}`));
-// Tauri adds GTK 3 and WebKitGTK 4.1 to DEB requirements; inspect the result too.
+// API/SONAME 4.1 alone does not guarantee the WebKit 2.40 APIs used by Tauri/Wry.
 for (const dep of ["mpd", "alsa-utils", "xdg-utils", "xdg-desktop-portal", "libasound2", "libssl3"]) assert.ok(tauri.bundle.linux.deb.depends.includes(dep), dep);
-for (const dep of ["mpd", "alsa-utils", "xdg-utils", "xdg-desktop-portal", "alsa-lib", "webkit2gtk4.1", "openssl-libs"]) assert.ok(tauri.bundle.linux.rpm.depends.includes(dep), dep);
+// Tauri CLI 2.12.0 emits Dependency::any: only RPM's parenthesized rich
+// dependency grammar interprets the comparison in the name field.
+for (const dep of ["mpd", "alsa-utils", "xdg-utils", "xdg-desktop-portal", "alsa-lib", "(webkit2gtk4.1 >= 2.40)", "openssl-libs"]) assert.ok(tauri.bundle.linux.rpm.depends.includes(dep), dep);
+assert.ok(!tauri.bundle.linux.rpm.depends.includes("webkit2gtk4.1 >= 2.40"));
+assert.ok(tauri.bundle.linux.deb.depends.includes("libwebkit2gtk-4.1-0 (>= 2.40)"));
 assert.ok(!tauri.bundle.linux.deb.depends.includes("wireplumber"));
 assert.ok(!tauri.bundle.linux.rpm.depends.includes("wireplumber"));
 assert.deepEqual(tauri.bundle.targets, ["deb", "rpm"]);

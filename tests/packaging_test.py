@@ -14,14 +14,53 @@ spec = importlib.util.spec_from_file_location('rpm_deps', 'scripts/rpm-elf-deps.
 rpm_deps = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rpm_deps)
 
+validator_spec = importlib.util.spec_from_file_location('rpm_inspect', 'scripts/inspect-rpm-requires.py')
+rpm_inspect = importlib.util.module_from_spec(validator_spec)
+validator_spec.loader.exec_module(rpm_inspect)
+
 
 class PackagingTests(unittest.TestCase):
+    def test_tray_indicator_is_optional_and_existing_runtime_is_preserved(self):
+        cfg = json.loads(Path('src-tauri/tauri.conf.json').read_text())
+        for fmt, indicator in [('deb', 'libayatana-appindicator3-1'), ('rpm', 'libappindicator-gtk3')]:
+            with self.subTest(format=fmt):
+                package = cfg['bundle']['linux'][fmt]
+                self.assertEqual(package['recommends'].count(indicator), 1)
+                self.assertNotIn(indicator, package['depends'])
+                self.assertIn('mpd', package['depends'])
+        metadata = subprocess.check_output([
+            'bash', '-c', 'source sonante-arch/PKGBUILD\n'
+            'printf "required:%s\\n" "${depends[@]}" "${makedepends[@]}"\n'
+            'printf "optional:%s\\n" "${optdepends[@]}"',
+        ], text=True)
+        entries = [line.partition(':') for line in metadata.splitlines()]
+        required = [value for kind, _, value in entries if kind == 'required']
+        optional = [value.split(':', 1)[0] for kind, _, value in entries if kind == 'optional']
+        self.assertNotIn('libappindicator', required)
+        self.assertEqual(optional.count('libappindicator'), 1)
+
     def test_versions_and_runtime_contract(self):
         subprocess.run(['node', 'scripts/verify-packaging.mjs'], check=True)
         cfg = json.loads(Path('src-tauri/tauri.conf.json').read_text())
         for fmt in ['deb', 'rpm']:
             self.assertIn('xdg-desktop-portal', cfg['bundle']['linux'][fmt]['depends'])
             self.assertIn('xdg-desktop-portal-gtk', cfg['bundle']['linux'][fmt]['recommends'])
+        self.assertIn('libwebkit2gtk-4.1-0 (>= 2.40)', cfg['bundle']['linux']['deb']['depends'])
+        self.assertIn('(webkit2gtk4.1 >= 2.40)', cfg['bundle']['linux']['rpm']['depends'])
+
+    def test_rpm_webkit_header_structure(self):
+        rpm_inspect.validate('(webkit2gtk4.1 >= 2.40)\t0\t\nmpd\t0\t\n')
+        for row in [
+            'webkit2gtk4.1 >= 2.40\t0\t',  # actual broken Tauri artifact
+            'webkit2gtk4.1\t0\t',
+            '(webkit2gtk4.1 >= 2.38)\t0\t',
+            '(webkit2gtk4.1 >= 2.40)\t12\t2.40',
+            '(webkit2gtk4.1 >= 2.40)\t0\t2.40',
+            '(webkit2gtk4.1 >= 2.40 or other)\t0\t',
+            '',
+        ]:
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                rpm_inspect.validate(row)
 
     def test_gpl_license_and_third_party_notices(self):
         license_bytes = Path('LICENSE').read_bytes()
@@ -104,14 +143,22 @@ class PackagingTests(unittest.TestCase):
             fake = root / 'tools'
             fake.mkdir()
             contents = 'usr/bin/sonante\nusr/share/applications/sonante.desktop\nusr/share/icons/hicolor/icon.png\nusr/share/licenses/sonante/LICENSE\nusr/share/doc/sonante/AUTHORS\nusr/share/doc/sonante/THIRD_PARTY_NOTICES'
-            dependencies = 'mpd alsa-utils xdg-utils xdg-desktop-portal libasound2 libwebkit2gtk-4.1-0 libssl3 alsa-lib webkit2gtk4.1 openssl-libs libssl.so.3()(64bit)'
+            deb_dependencies = 'mpd, alsa-utils, xdg-utils, xdg-desktop-portal, libasound2, libssl3'
+            rpm_dependencies = 'mpd\nalsa-utils\nxdg-utils\nxdg-desktop-portal\nalsa-lib\nopenssl-libs\nlibssl.so.3()(64bit)'
             tool = f'''#!/usr/bin/env python3
-import pathlib, sys
+import os, pathlib, sys
 args = sys.argv[1:]
+mode = os.environ.get('WEBKIT_FIXTURE', 'valid')
+deb_webkit = {{'valid': 'libwebkit2gtk-4.1-0 (>= 2.40)', 'bare': 'libwebkit2gtk-4.1-0', 'old': 'libwebkit2gtk-4.1-0 (>= 2.38)', 'missing': ''}}
+rpm_webkit = {{'valid': '(webkit2gtk4.1 >= 2.40)', 'literal': 'webkit2gtk4.1 >= 2.40', 'bare': 'webkit2gtk4.1', 'old': 'webkit2gtk4.1 >= 2.38', 'missing': ''}}
 if args[0] == '--fsys-tarfile': sys.stdout.buffer.write(pathlib.Path({str(archive)!r}).read_bytes())
 elif args[0] in ('-I', '-c', '-K', '-qip'): pass
 elif args[0] == '-qlp': print({contents!r})
-elif '--requires' in args or 'Depends' in args: print({dependencies!r})
+elif 'Depends' in args: print({deb_dependencies!r} + ', ' + deb_webkit[mode.removeprefix('deb-') if mode.startswith('deb-') else 'valid'])
+elif any('REQUIRENAME' in arg for arg in args):
+    key = mode.removeprefix('rpm-') if mode.startswith('rpm-') else 'valid'
+    if key != 'missing': print(rpm_webkit[key] + '\\t0\\t')
+elif '--requires' in args: print({rpm_dependencies!r} + '\\n' + rpm_webkit[mode.removeprefix('rpm-') if mode.startswith('rpm-') else 'valid'])
 elif 'Version' in args or '%{{VERSION}}' in args: print('0.4.9')
 elif 'Architecture' in args: print('amd64')
 elif '%{{ARCH}}' in args: print('x86_64')
@@ -127,6 +174,13 @@ else: raise SystemExit(2)
             accepted = subprocess.run(['bash', str(inspect), '0.4.9'], cwd=root,
                                       env=env, capture_output=True)
             self.assertEqual(accepted.returncode, 0, accepted.stderr.decode())
+            for fmt in ['deb', 'rpm']:
+                for mode in (['bare', 'old', 'missing', 'literal'] if fmt == 'rpm' else ['bare', 'old', 'missing']):
+                    with self.subTest(format=fmt, requirement=mode):
+                        rejected = subprocess.run(['bash', str(inspect), '0.4.9'], cwd=root,
+                                                  env={**env, 'WEBKIT_FIXTURE': f'{fmt}-{mode}'},
+                                                  capture_output=True)
+                        self.assertNotEqual(rejected.returncode, 0)
             write_archive(b'incomplete license')
             rejected = subprocess.run(['bash', str(inspect), '0.4.9'], cwd=root,
                                       env=env, capture_output=True)

@@ -1,3 +1,4 @@
+import { PlaybackOptionsControls } from "./PlaybackOptionsControls";
 import { SignalPath } from "./SignalPath";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useState, useRef } from "react";
@@ -244,11 +245,11 @@ export const PlayerBar: React.FC<Props> = ({
               : t("player.engineTransitioning")}
           </span>
         )}
-        <div className="flex items-center gap-7">
+        <div data-player-controls className="grid w-full grid-cols-[minmax(0,1fr)_18px_40px_18px_minmax(0,1fr)] items-center gap-1.5">
           <button
             onClick={handlePrevious}
             disabled={!isAvailable}
-            className="text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+            className="col-start-2 justify-self-center text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={t("player.previous")}
           >
             <SkipBack size={18} />
@@ -257,7 +258,7 @@ export const PlayerBar: React.FC<Props> = ({
           <button
             onClick={handlePlayToggle}
             disabled={!isAvailable}
-            className="w-10 h-10 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+            className="col-start-3 w-10 h-10 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={isAvailable && status.state === "play" ? t("player.pause") : t("player.play")}
           >
             {isAvailable && status.state === "play" ? (
@@ -270,11 +271,14 @@ export const PlayerBar: React.FC<Props> = ({
           <button
             onClick={handleNext}
             disabled={!isAvailable}
-            className="text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+            className="col-start-4 justify-self-center text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={t("player.next")}
           >
             <SkipForward size={18} />
           </button>
+          <div className="col-start-5 flex min-w-0 items-center justify-start">
+            <PlaybackOptionsControls options={status.options} disabled={!isAvailable} />
+          </div>
         </div>
 
         {/* Barra de Progresso (Seek) */}

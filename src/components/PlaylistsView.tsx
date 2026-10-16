@@ -26,7 +26,7 @@ import type { Playlist, PlaylistItemAvailability } from "../types/playlist";
 
 type AvailabilityStatus = PlaylistItemAvailability["status"];
 
-export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPlaybackAvailable }) => {
+export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?: number }> = ({ isPlaybackAvailable, refreshKey = 0 }) => {
   const { t, i18n } = useTranslation();
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -70,7 +70,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean }> = ({ isPl
     return () => {
       disposed = true;
     };
-  }, [t]);
+  }, [t, refreshKey]);
 
   useEffect(() => {
     if (!selectedId) {

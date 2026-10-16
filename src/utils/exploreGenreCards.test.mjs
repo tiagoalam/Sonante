@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { EXPLORE_GENRE_PALETTE, exploreGenreCardStyle, assignExploreGenreColors, assignExploreGenreIcons } from "./exploreGenreCards.ts";
 import { createExploreSession } from "./explore.ts";
 import { isExploreGenreName } from "./exploreThemes.ts";
+import { filterLocalAlbumsByScope } from "./localLibraryScope.ts";
 
 test("genre identity alone determines a finite repeated palette after surface normalization",()=>{
   assert.deepEqual(exploreGenreCardStyle("  JAZZ  "),exploreGenreCardStyle("jazz"));
@@ -47,17 +48,34 @@ test("palette maintains readable title/secondary contrast including highlight gr
 
 test("navigation excludes shared placeholders with five groups while keeping the thematic ten-group minimum and counts the actual eligible slice",()=>{
   for(const name of ["Unknown"," DESCONHECIDO ","unknown genre","N/A","", "sem gênero"])assert.equal(isExploreGenreName(name),false);
-  const local={id:"local",title:"Album",artist:"Artist",genres:["Jazz"," JAZZ ","Unknown"],folder_path:"Synthetic",discs:[],track_count:1};
-  const plex={rating_key:"plex",title:"Album",artist:"Artist",genres:["jazz","Desconhecido"]};
-  const c={local:{albums:[local],state:"ready"},plex:{albums:[plex,...Array.from({length:4},(_,i)=>({...plex,rating_key:`other-${i}`,title:`Other album ${i}`,artist:`Other artist ${i}`}))],state:"ready",identity:{},serverId:"server",libraryId:"one"}};
+  const local={id:"local",title:"Album",artist:"Artist",genres:["Jazz"," JAZZ ","Unknown"],source_id:"disk",folder_path:"Synthetic",discs:[],track_count:1};
+  const duplicate={...local,id:"nas-copy",source_id:"nas",genres:["jazz","Desconhecido"]};
+  const albums=[local,duplicate,...Array.from({length:4},(_,i)=>({...local,id:`other-${i}`,title:`Other album ${i}`,artist:`Other artist ${i}`}))],before=JSON.stringify(albums);
+  const c={local:{albums,state:"ready",sourceId:null}};
   const s=createExploreSession(()=>0.4);s.syncContext(c,true);let group=s.getSnapshot().genres[0];
   assert.equal(s.getSnapshot().genres.length,1);assert.equal(group.value,"jazz");assert.equal(s.getSnapshot().themes.length,0);
   assert.equal(s.genreAlbumCount(group),6);s.openSlice(group,s.getSnapshot().revision);assert.equal(s.getSnapshot().slice.entries.length,s.genreAlbumCount(group));
-  const style=exploreGenreCardStyle(group.value),selected=s.getSnapshot().selected;
-  s.leaveSlice(s.getSnapshot().revision);s.renewShelf("genres");assert.equal(s.getSnapshot().selected,selected);assert.deepEqual(exploreGenreCardStyle(s.getSnapshot().genres[0].value),style);
-  s.syncContext({...c,local:{...c.local,state:"unavailable"}},true);group=s.getSnapshot().genres[0];
-  assert.equal(s.genreAlbumCount(group),5);s.openSlice(group,s.getSnapshot().revision);assert.equal(s.getSnapshot().slice.entries.length,5);assert.equal(s.getSnapshot().slice.entries[0].album,plex);
-  assert.deepEqual(exploreGenreCardStyle(group.value),style);
+  assert.deepEqual(s.getSnapshot().slice.entries.map(e=>e.album),albums);assert.equal(new Set(s.getSnapshot().slice.entries.map(e=>e.key)).size,6);
+  assert.equal(s.getSnapshot().selected.length,5,"six Local entries represent five distinct groups");
+  const style=exploreGenreCardStyle(group.value),groupKey=group.key,selected=s.getSnapshot().selected;
+  s.leaveSlice(s.getSnapshot().revision);s.renewShelf("genres");assert.equal(s.getSnapshot().selected,selected);assert.equal(s.getSnapshot().genres[0].key,groupKey);assert.deepEqual(exploreGenreCardStyle(s.getSnapshot().genres[0].value),style);
+  s.syncContext(c,false);s.syncContext(c,true);assert.equal(s.getSnapshot().selected,selected);assert.equal(s.getSnapshot().genres[0].key,groupKey);
+  group=s.getSnapshot().genres[0];s.openSlice(group,s.getSnapshot().revision);const oldEntry=s.getSnapshot().slice.entries[0],oldRevision=s.getSnapshot().revision;
+  s.syncContext({...c,local:{...c.local,state:"unavailable"}},true);
+  assert.equal(s.genreAlbumCount(group),0);assert.deepEqual(s.visibleGenres(),[]);assert.deepEqual(s.visibleEntries(),[]);assert.deepEqual(s.getSnapshot().themes,[]);assert.equal(s.getSnapshot().slice,null);
+  assert.equal(s.validDetail(oldEntry),false);assert.equal(s.canUseSlice(oldEntry,oldRevision),false);
+  const unavailable=s.getSnapshot();s.openSlice(group,unavailable.revision);assert.equal(s.getSnapshot(),unavailable,"unavailable Local must not expose another source or an old slice");
+  s.syncContext({local:{albums:filterLocalAlbumsByScope(albums,"disk",""),state:"ready",sourceId:"disk"}},true);group=s.getSnapshot().genres[0];
+  assert.equal(group.key,groupKey);assert.deepEqual(exploreGenreCardStyle(group.value),style);assert.equal(s.genreAlbumCount(group),5);
+  s.openSlice(group,s.getSnapshot().revision);assert.equal(s.getSnapshot().slice.entries.length,5);assert.ok(s.getSnapshot().slice.entries.every(e=>e.source==="local"&&e.album.source_id==="disk"));
+  const diskEntry=s.getSnapshot().slice.entries[0],diskRevision=s.getSnapshot().revision;
+  const nasAlbums=albums.map(a=>({...a,id:`new-${a.id}`,source_id:"nas"}));
+  s.syncContext({local:{albums:nasAlbums,state:"ready",sourceId:"nas"}},true);
+  assert.equal(s.getSnapshot().slice,null);assert.equal(s.validDetail(diskEntry),false);assert.equal(s.canUseSlice(diskEntry,diskRevision),false);
+  const changed=s.getSnapshot();s.openSlice(group,diskRevision);assert.equal(s.getSnapshot(),changed);
+  group=changed.genres[0];assert.equal(group.key,groupKey);assert.deepEqual(exploreGenreCardStyle(group.value),style);assert.equal(s.genreAlbumCount(group),6);
+  s.openSlice(group,changed.revision);assert.deepEqual(s.getSnapshot().slice.entries.map(e=>e.album),nasAlbums);assert.ok(s.getSnapshot().slice.entries.every(e=>e.source==="local"&&e.album.source_id==="nas"));
+  assert.equal(s.getSnapshot().slice.entries.length,s.genreAlbumCount(group));assert.equal(JSON.stringify(albums),before);
 });
 
 

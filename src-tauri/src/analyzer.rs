@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const LEVEL_EVENT: &str = "now-playing://audio-level";
 pub const STATUS_EVENT: &str = "now-playing://analyzer-status";
-const WINDOW_LABEL: &str = "now-playing";
+
 const SAMPLE_RATE: usize = 48_000;
 const CHANNELS: usize = 2;
 const BYTES_PER_SAMPLE: usize = 2;
@@ -134,12 +134,66 @@ struct AnalyzerStatus {
     reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzerOwner {
+    pub host: String,
+    pub session_id: String,
+    pub generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
+}
+
+#[derive(Default)]
+struct AnalyzerOwnership {
+    owner: Option<AnalyzerOwner>,
+    generation: u64,
+}
+
+pub fn authorized_analyzer_host(host: &str) -> bool {
+    matches!(host, "main" | "now-playing")
+}
+
+impl AnalyzerOwnership {
+    fn claim(&mut self, host: &str, session_id: String) -> AnalyzerOwner {
+        self.generation += 1;
+        let owner = AnalyzerOwner {
+            host: host.into(),
+            session_id,
+            generation: self.generation,
+            lease_id: None,
+        };
+        self.owner = Some(owner.clone());
+        owner
+    }
+    fn clear_if_host(&mut self, host: &str) -> bool {
+        if !self.owner.as_ref().is_some_and(|owner| owner.host == host) {
+            return false;
+        }
+        self.owner = None;
+        true
+    }
+    fn matches(&self, host: &str, session_id: &str, generation: u64) -> bool {
+        self.owner.as_ref().is_some_and(|owner| {
+            owner.host == host && owner.session_id == session_id && owner.generation == generation
+        })
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalyzerEnvelope<T: Serialize + Clone> {
+    owner: AnalyzerOwner,
+    data: T,
+}
+
 pub struct AnalyzerState(pub std::sync::Mutex<AudioAnalyzer>);
 
 pub struct AudioAnalyzer {
     socket_path: String,
     fifo_path: PathBuf,
-    active_session: Option<String>,
+    ownership: AnalyzerOwnership,
+    active_lease: Option<String>,
     controller_stop: Option<Arc<AtomicBool>>,
     reader_stop: Option<Arc<AtomicBool>>,
     reader: Option<JoinHandle<()>>,
@@ -147,11 +201,21 @@ pub struct AudioAnalyzer {
 }
 
 impl AudioAnalyzer {
+    fn observe_phase(&self, phase: &'static str) {
+        crate::diagnostics::now_playing_phase(
+            phase,
+            self.owner_host(),
+            self.ownership.generation,
+            self.active_lease.is_some(),
+        );
+    }
+
     pub fn new(socket_path: String, fifo_path: PathBuf) -> Self {
         Self {
             socket_path,
             fifo_path,
-            active_session: None,
+            ownership: AnalyzerOwnership::default(),
+            active_lease: None,
             controller_stop: None,
             reader_stop: None,
             reader: None,
@@ -159,33 +223,131 @@ impl AudioAnalyzer {
         }
     }
 
-    pub fn start_for_window(&mut self, session_id: String, app: AppHandle) -> Result<(), String> {
-        if self.session_matches(&session_id) {
-            return self.start(app);
+    // Only main can reserve a host (checked at IPC). Reservation invalidates all
+    // old starts/cleanup before the new host receives its generation.
+    pub fn claim_for_host(
+        &mut self,
+        host: &str,
+        session_id: String,
+        app: &AppHandle,
+    ) -> Result<AnalyzerOwner, String> {
+        if !authorized_analyzer_host(host) || session_id.is_empty() || session_id.len() > 128 {
+            return Err("Proprietário do analyzer inválido.".into());
         }
-        if self.active_session.is_some() {
+        self.observe_phase(if host == "main" {
+            "reserve_main_begin"
+        } else {
+            "reserve_detached_begin"
+        });
+        self.stop(Some(app))?;
+        self.active_lease = None;
+        let owner = self.ownership.claim(host, session_id);
+        self.observe_phase("reserved");
+        Ok(owner)
+    }
+
+    pub fn start_for_host(
+        &mut self,
+        host: &str,
+        session_id: &str,
+        generation: u64,
+        lease_id: String,
+        app: AppHandle,
+    ) -> Result<(), String> {
+        if !self.ownership.matches(host, session_id, generation)
+            || lease_id.is_empty()
+            || lease_id.len() > 128
+        {
+            self.observe_phase("start_stale_rejected");
+            return Err("Sessão do analyzer obsoleta ou não autorizada.".into());
+        }
+        self.observe_phase("start_requested");
+        if self.active_lease.as_deref() != Some(&lease_id) {
             self.stop(Some(&app))?;
         }
-        self.start(app)?;
-        self.active_session = Some(session_id);
-        Ok(())
+        self.active_lease = Some(lease_id);
+        self.start(app)
     }
 
-    pub fn stop_for_window(&mut self, session_id: &str, app: &AppHandle) -> Result<(), String> {
-        if !self.session_matches(session_id) {
+    fn capture_matches(
+        &self,
+        host: &str,
+        session_id: &str,
+        generation: u64,
+        lease_id: &str,
+    ) -> bool {
+        self.ownership.matches(host, session_id, generation)
+            && self.active_lease.as_deref() == Some(lease_id)
+    }
+
+    pub fn stop_for_host(
+        &mut self,
+        host: &str,
+        session_id: &str,
+        generation: u64,
+        lease_id: &str,
+        app: &AppHandle,
+    ) -> Result<(), String> {
+        if !self.capture_matches(host, session_id, generation, lease_id) {
+            self.observe_phase("cleanup_stale_ignored");
             return Ok(());
         }
-        self.active_session = None;
-        self.stop(Some(app))
+        self.observe_phase("cleanup_current");
+        let result = self.stop(Some(app));
+        self.active_lease = None;
+        result
     }
 
-    pub fn stop_for_window_close(&mut self, app: &AppHandle) -> Result<(), String> {
-        self.active_session = None;
-        self.stop(Some(app))
+    fn event_owner(&self) -> Option<AnalyzerOwner> {
+        self.ownership.owner.clone().map(|mut owner| {
+            owner.lease_id = self.active_lease.clone();
+            owner
+        })
     }
 
-    fn session_matches(&self, session_id: &str) -> bool {
-        self.active_session.as_deref() == Some(session_id)
+    pub fn stop_for_host_close(&mut self, host: &str, app: &AppHandle) -> Result<(), String> {
+        if self.owner_host() != Some(host) {
+            self.observe_phase("close_old_host_ignored");
+            return Ok(());
+        }
+        self.observe_phase("close_current_host");
+        let result = self.stop(Some(app));
+        self.ownership.clear_if_host(host);
+        self.active_lease = None;
+        result
+    }
+
+    pub fn release_owner(
+        &mut self,
+        session_id: &str,
+        generation: u64,
+        app: &AppHandle,
+    ) -> Result<(), String> {
+        if !self
+            .ownership
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.session_id == session_id && owner.generation == generation)
+        {
+            self.observe_phase("release_stale_ignored");
+            return Ok(());
+        }
+        self.observe_phase("release_current");
+        let result = self.stop(Some(app));
+        self.ownership.owner = None;
+        self.active_lease = None;
+        result
+    }
+
+    pub fn owner_host(&self) -> Option<&str> {
+        self.ownership
+            .owner
+            .as_ref()
+            .map(|owner| owner.host.as_str())
+    }
+
+    pub fn owner_is_present(&self, exists: impl FnOnce(&str) -> bool) -> bool {
+        self.owner_host().is_some_and(exists)
     }
 
     pub fn start(&mut self, app: AppHandle) -> Result<(), String> {
@@ -194,10 +356,14 @@ impl AudioAnalyzer {
             return Ok(());
         }
 
+        let owner = self
+            .event_owner()
+            .ok_or("Analyzer sem proprietário autorizado.")?;
         let fifo = open_fifo_reader(&self.fifo_path).map_err(|error| {
-            analyzer_failed(&app, "fifo_open_failed", &error);
+            analyzer_failed(&app, &owner, "fifo_open_failed", &error);
             error
         })?;
+        self.observe_phase("reader_opened");
         println!("[Analyzer] Existing supervisor-owned FIFO opened for reading; inode preserved.");
         let controller_stop = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::new(AtomicBool::new(false));
@@ -205,6 +371,7 @@ impl AudioAnalyzer {
         let reader_controller_stop = Arc::clone(&controller_stop);
         let reader_app = app.clone();
         let reader_socket_path = self.socket_path.clone();
+        let reader_owner = owner.clone();
         self.reader = Some(thread::spawn(move || {
             read_pcm(
                 fifo,
@@ -212,13 +379,15 @@ impl AudioAnalyzer {
                 reader_controller_stop,
                 reader_app,
                 reader_socket_path,
+                reader_owner,
             );
         }));
         println!("[Analyzer] FIFO reader thread started.");
 
         let socket_path = self.socket_path.clone();
-        if let Err(error) = reconcile_output(&socket_path, &app, &controller_stop) {
-            analyzer_failed(&app, "initial_reconcile_failed", &error);
+        self.observe_phase("initial_reconcile");
+        if let Err(error) = reconcile_output(&socket_path, &app, &controller_stop, &owner) {
+            analyzer_failed(&app, &owner, "initial_reconcile_failed", &error);
             controller_stop.store(true, Ordering::Release);
             reader_stop.store(true, Ordering::Release);
             if let Some(reader) = self.reader.take() {
@@ -230,11 +399,12 @@ impl AudioAnalyzer {
         let controller_thread_stop = Arc::clone(&controller_stop);
         let controller_app = app.clone();
         self.controller = Some(thread::spawn(move || {
-            monitor_player(socket_path, controller_thread_stop, controller_app);
+            monitor_player(socket_path, controller_thread_stop, controller_app, owner);
         }));
         println!("[Analyzer] Player controller thread started.");
         self.controller_stop = Some(controller_stop);
         self.reader_stop = Some(reader_stop);
+        self.observe_phase("capture_started");
         Ok(())
     }
 
@@ -242,18 +412,17 @@ impl AudioAnalyzer {
         self.controller_stop.is_some()
     }
 
-    pub fn has_window_session(&self) -> bool {
-        self.active_session.is_some()
-    }
-
     pub fn stop(&mut self, app: Option<&AppHandle>) -> Result<(), String> {
         let Some(controller_stop) = self.controller_stop.take() else {
             if let Some(app) = app {
-                emit_status(app, false, Some("stopped"));
+                if let Some(owner) = self.event_owner() {
+                    emit_status(app, &owner, false, Some("stopped"));
+                }
             }
             return Ok(());
         };
 
+        self.observe_phase("stop_requested");
         println!("[Analyzer] Stop requested; disabling MPD output before reader cleanup.");
         // Invalida apenas o controller: o reader continua drenando o FIFO até o
         // MPD confirmar o disable.
@@ -264,17 +433,21 @@ impl AudioAnalyzer {
             false,
         );
         if let Some(app) = app {
-            emit_status(app, false, Some("stopped"));
+            if let Some(owner) = self.event_owner() {
+                emit_status(app, &owner, false, Some("stopped"));
+            }
         }
         if let Some(controller) = self.controller.take() {
             let _ = controller.join();
         }
+        self.observe_phase("stop_controller_joined");
         if let Some(reader_stop) = self.reader_stop.take() {
             reader_stop.store(true, Ordering::Release);
         }
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
+        self.observe_phase("stop_reader_joined");
         println!(
             "[Analyzer] Controller and reader cleanup completed; supervisor-owned FIFO preserved."
         );
@@ -337,6 +510,7 @@ fn read_pcm(
     controller_stop: Arc<AtomicBool>,
     app: AppHandle,
     socket_path: String,
+    owner: AnalyzerOwner,
 ) {
     let mut pending = Vec::with_capacity(FRAMES_PER_EVENT * CHANNELS * BYTES_PER_SAMPLE * 2);
     let mut chunk = [0_u8; 8192];
@@ -367,26 +541,32 @@ fn read_pcm(
                     let mut frame = calculate_levels(&pending[..window_bytes]);
                     frame.spectrum = spectrum_analyzer.analyze_pcm(&pending[..window_bytes]);
                     pending.drain(..window_bytes);
-                    if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
-                        match window.emit(LEVEL_EVENT, frame) {
+                    if let Some(window) = app.get_webview_window(&owner.host) {
+                        match window.emit(
+                            LEVEL_EVENT,
+                            AnalyzerEnvelope {
+                                owner: owner.clone(),
+                                data: frame,
+                            },
+                        ) {
                             Ok(()) if !logged_first_frame => {
                                 println!(
                                     "[Analyzer] First RMS/peak/spectrum frame emitted to window '{}'.",
-                                    WINDOW_LABEL
+                                    owner.host
                                 );
                                 logged_first_frame = true;
                             }
                             Ok(()) => {}
                             Err(error) => eprintln!(
                                 "[Analyzer] Failed to emit level frame to window '{}': {}",
-                                WINDOW_LABEL,
+                                owner.host,
                                 crate::diagnostics::error_summary(&error)
                             ),
                         }
                     } else if !logged_first_frame {
                         eprintln!(
                             "[Analyzer] Window '{}' is absent; level frame was not emitted.",
-                            WINDOW_LABEL
+                            owner.host
                         );
                     }
                 }
@@ -411,7 +591,7 @@ fn read_pcm(
                         crate::diagnostics::error_summary(&disable_error)
                     );
                 }
-                emit_status(&app, false, Some("reader_error"));
+                emit_status(&app, &owner, false, Some("reader_error"));
                 break;
             }
         }
@@ -448,46 +628,42 @@ fn calculate_levels(bytes: &[u8]) -> AudioLevelFrame {
     }
 }
 
-fn monitor_player(socket_path: String, stop: Arc<AtomicBool>, app: AppHandle) {
+fn monitor_player(
+    socket_path: String,
+    stop: Arc<AtomicBool>,
+    app: AppHandle,
+    owner: AnalyzerOwner,
+) {
     let mut needs_reconcile = false;
     while !stop.load(Ordering::Acquire) {
         if needs_reconcile {
-            match reconcile_output(&socket_path, &app, &stop) {
+            match reconcile_output(&socket_path, &app, &stop, &owner) {
                 Ok(()) => needs_reconcile = false,
                 Err(_) => {
-                    emit_status(&app, false, Some("mpd_unavailable"));
+                    emit_status(&app, &owner, false, Some("mpd_unavailable"));
                     thread::sleep(Duration::from_millis(100));
                     continue;
                 }
             }
         }
-        match wait_for_player_change(&socket_path) {
-            Ok(true) => {
-                if let Err(error) = set_output_enabled(
-                    &socket_path,
-                    crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME,
-                    false,
-                ) {
-                    eprintln!(
-                        "[Analyzer] Failed to disable output during track change: {}",
-                        crate::diagnostics::error_summary(&error)
-                    );
-                    emit_status(&app, false, Some("output_disable_failed"));
-                    continue;
+        match wait_for_analyzer_change(&socket_path) {
+            Ok(Some(change)) => {
+                if change == AnalyzerChange::Player {
+                    crate::diagnostics::now_playing_seek_controller(&owner.host, owner.generation);
                 }
                 if !stop.load(Ordering::Acquire) {
-                    if let Err(error) = reconcile_output(&socket_path, &app, &stop) {
+                    if let Err(error) = reconcile_output(&socket_path, &app, &stop, &owner) {
                         eprintln!(
                             "[Analyzer] Failed to reevaluate current track: {}",
                             crate::diagnostics::error_summary(&error)
                         );
-                        emit_status(&app, false, Some("reconcile_failed"));
+                        emit_status(&app, &owner, false, Some("reconcile_failed"));
                     }
                 }
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(_) => {
-                emit_status(&app, false, Some("mpd_unavailable"));
+                emit_status(&app, &owner, false, Some("mpd_unavailable"));
                 needs_reconcile = true;
                 thread::sleep(Duration::from_millis(100));
             }
@@ -495,74 +671,230 @@ fn monitor_player(socket_path: String, stop: Arc<AtomicBool>, app: AppHandle) {
     }
 }
 
-fn reconcile_output(socket_path: &str, app: &AppHandle, stop: &AtomicBool) -> Result<(), String> {
-    let incompatibility = current_track_incompatibility(socket_path)?;
-    if stop.load(Ordering::Acquire) || incompatibility.is_some() {
-        set_output_enabled(
-            socket_path,
-            crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME,
-            false,
-        )?;
-        let reason = incompatibility.unwrap_or("stopped");
-        println!(
-            "[Analyzer] Analyzer inactive: current playback is incompatible (reason={}).",
-            reason
-        );
-        emit_status(app, false, Some(reason));
-        return Ok(());
-    }
-    println!("[Analyzer] Current playback classified as PCM-compatible.");
-    set_output_enabled(
-        socket_path,
-        crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME,
-        true,
-    )?;
-    println!("[Analyzer] Output enabled; waiting for PCM bytes.");
-    emit_status(app, true, None);
+fn reconcile_output(
+    socket_path: &str,
+    app: &AppHandle,
+    stop: &AtomicBool,
+    owner: &AnalyzerOwner,
+) -> Result<(), String> {
+    let reason = reconcile_output_with_io(stop, &mut |command| send_command(socket_path, command))?;
+    emit_status(app, owner, reason.is_none(), reason);
     Ok(())
 }
 
-fn emit_status(app: &AppHandle, available: bool, reason: Option<&str>) {
-    if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+// A player event includes seek, pause and tags. Re-read compatibility on every
+// event, but change only an auxiliary output whose actual state is incorrect.
+fn reconcile_output_with_io(
+    stop: &AtomicBool,
+    send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
+) -> Result<Option<&'static str>, String> {
+    let assessment = (|| {
+        if stop.load(Ordering::Acquire) {
+            Ok(Some("stopped"))
+        } else {
+            let status = send("status")?;
+            let song = send("currentsong")?;
+            Ok(playback_incompatibility(&status, &song))
+        }
+    })();
+    let mut reason = assessment.map_err(|error| disable_after_failure(error, stop, send))?;
+    if let Err(error) = ensure_auxiliary_output(reason.is_none(), stop, send) {
+        return Err(if reason.is_none() {
+            disable_after_failure(error, stop, send)
+        } else {
+            error // Do not retry a refused disable or obscure its failure.
+        });
+    }
+    if stop.load(Ordering::Acquire) && reason.is_none() {
+        // Covers stop/reader failure arriving while enable's ACK is in flight.
+        // The old controller is joined before any new owner starts.
+        ensure_auxiliary_output(false, stop, send)?;
+        reason = Some("stopped");
+    }
+    Ok(reason)
+}
+
+fn disable_after_failure(
+    error: String,
+    stop: &AtomicBool,
+    send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
+) -> String {
+    // Fail closed after failed reads/enable, while preserving the original
+    // failure. This is a disable, never another attempt to enable or seek.
+    match ensure_auxiliary_output(false, stop, send) {
+        Ok(()) => error,
+        Err(cleanup) => format!("{}; falha ao desativar analyzer: {}", error, cleanup),
+    }
+}
+
+fn ensure_auxiliary_output(
+    requested: bool,
+    stop: &AtomicBool,
+    send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
+) -> Result<(), String> {
+    let name = crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME;
+    let (id, actual) = auxiliary_output_state(&send("outputs")?, name)?;
+    let desired = requested && !stop.load(Ordering::Acquire);
+    if actual == desired {
+        return Ok(());
+    }
+    crate::diagnostics::now_playing_auxiliary(if desired {
+        "enable_begin"
+    } else {
+        "disable_begin"
+    });
+    let result = send(&format!(
+        "{} {}",
+        if desired {
+            "enableoutput"
+        } else {
+            "disableoutput"
+        },
+        id
+    ));
+    crate::diagnostics::now_playing_auxiliary(match (desired, result.is_ok()) {
+        (true, true) => "enable_accepted",
+        (true, false) => "enable_failed",
+        (false, true) => "disable_accepted",
+        (false, false) => "disable_failed",
+    });
+    result?;
+    let (_, confirmed) = auxiliary_output_state(&send("outputs")?, name)?;
+    if confirmed != desired && !(desired && !confirmed && stop.load(Ordering::Acquire)) {
+        return Err("Estado da saída auxiliar não confirmou a transição aceita pelo MPD.".into());
+    }
+    Ok(())
+}
+
+fn auxiliary_output_state(lines: &[String], name: &str) -> Result<(u32, bool), String> {
+    let mut matches = lines
+        .split(|line| line.starts_with("outputid: "))
+        .skip(1)
+        .zip(
+            lines
+                .iter()
+                .filter_map(|line| line.strip_prefix("outputid: ")),
+        )
+        .filter(|(block, _)| {
+            block
+                .iter()
+                .any(|line| line.strip_prefix("outputname: ") == Some(name))
+        });
+    let (block, id) = matches.next().ok_or("Saída auxiliar MPD não encontrada.")?;
+    if matches.next().is_some() {
+        return Err("Identidade da saída auxiliar MPD ambígua.".into());
+    }
+    let id = id
+        .parse()
+        .map_err(|_| "Identificador inválido da saída auxiliar MPD.")?;
+    if block
+        .iter()
+        .filter(|line| line.starts_with("outputname: "))
+        .count()
+        != 1
+        || lines
+            .iter()
+            .filter_map(|line| line.strip_prefix("outputid: "))
+            .filter(|value| value.parse::<u32>().ok() == Some(id))
+            .count()
+            != 1
+    {
+        return Err("Identidade da saída auxiliar MPD ambígua.".into());
+    }
+    let mut states = block
+        .iter()
+        .filter_map(|line| line.strip_prefix("outputenabled: "));
+    let enabled = match states.next() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => return Err("Estado da saída auxiliar MPD ausente ou inválido.".into()),
+    };
+    if states.next().is_some() {
+        return Err("Estado da saída auxiliar MPD ambíguo.".into());
+    }
+    Ok((id, enabled))
+}
+
+fn emit_status(app: &AppHandle, owner: &AnalyzerOwner, available: bool, reason: Option<&str>) {
+    if let Some(window) = app.get_webview_window(&owner.host) {
         let status = AnalyzerStatus {
             available,
             reason: reason.map(str::to_string),
         };
-        if let Err(error) = window.emit(STATUS_EVENT, status) {
+        if let Err(error) = window.emit(
+            STATUS_EVENT,
+            AnalyzerEnvelope {
+                owner: owner.clone(),
+                data: status,
+            },
+        ) {
             eprintln!(
                 "[Analyzer] Failed to emit status to window '{}': {}",
-                WINDOW_LABEL,
+                owner.host,
                 crate::diagnostics::error_summary(&error)
             );
         }
     } else {
         eprintln!(
             "[Analyzer] Window '{}' is absent; status available={} reason={:?} was not emitted.",
-            WINDOW_LABEL, available, reason
+            owner.host, available, reason
         );
     }
 }
 
-fn analyzer_failed(app: &AppHandle, reason: &str, error: &str) {
+fn analyzer_failed(app: &AppHandle, owner: &AnalyzerOwner, reason: &str, error: &str) {
     eprintln!(
         "[Analyzer] Analyzer inactive: reason={}: {}",
         reason,
         crate::diagnostics::error_summary(&error)
     );
-    emit_status(app, false, Some(reason));
+    emit_status(app, owner, false, Some(reason));
 }
 
-fn current_track_incompatibility(socket_path: &str) -> Result<Option<&'static str>, String> {
-    let status = send_command(socket_path, "status")?;
-    let current_song = send_command(socket_path, "currentsong")?;
-    Ok(dsd_or_dop_reason(&status, &current_song))
+fn unique_value<'a>(lines: &'a [String], prefix: &str) -> Option<&'a str> {
+    let mut values = lines.iter().filter_map(|line| line.strip_prefix(prefix));
+    let value = values.next()?;
+    (values.next().is_none() && !value.is_empty()).then_some(value)
+}
+
+fn playback_incompatibility(status: &[String], song: &[String]) -> Option<&'static str> {
+    if let Some(reason) = dsd_or_dop_reason(status, song) {
+        return Some(reason);
+    }
+    if unique_value(status, "state: ") == Some("stop") {
+        return Some("stopped");
+    }
+    // Do not mistake missing/contradictory metadata for evidence of PCM. IDs
+    // also detect a real track change between the two separate MPD queries.
+    let status_id = unique_value(status, "songid: ").and_then(|id| id.parse::<u32>().ok());
+    let song_id = unique_value(song, "Id: ").and_then(|id| id.parse::<u32>().ok());
+    if !matches!(unique_value(status, "state: "), Some("play" | "pause"))
+        || status_id.is_none()
+        || status_id != song_id
+        || unique_value(song, "file: ").is_none()
+        || status.iter().any(|line| line.starts_with("error: "))
+        || !unique_value(status, "audio: ").is_some_and(is_pcm_format)
+    {
+        return Some("reconcile_failed");
+    }
+    None
+}
+
+fn is_pcm_format(value: &str) -> bool {
+    let fields: Vec<_> = value.split(':').collect();
+    fields.len() == 3
+        && fields[0].parse::<u32>().is_ok_and(|rate| rate > 0)
+        && matches!(fields[1], "8" | "16" | "24" | "32" | "f")
+        && fields[2].parse::<u8>().is_ok_and(|channels| channels > 0)
 }
 
 fn dsd_or_dop_reason(status: &[String], current_song: &[String]) -> Option<&'static str> {
-    let format_is_dsd = status.iter().any(|line| {
-        line.strip_prefix("audio: ")
-            .is_some_and(|value| value.to_ascii_lowercase().contains("dsd"))
-    });
+    let format_is_dsd = status
+        .iter()
+        .any(|line| line.strip_prefix("audio: ").is_some_and(is_dsd_or_dop))
+        || current_song
+            .iter()
+            .any(|line| line.strip_prefix("Format: ").is_some_and(is_dsd_or_dop));
     let file_is_dsd = current_song.iter().any(|line| {
         line.strip_prefix("file: ").is_some_and(|value| {
             let clean = value.split(['?', '#']).next().unwrap_or(value);
@@ -585,17 +917,66 @@ fn dsd_or_dop_reason(status: &[String], current_song: &[String]) -> Option<&'sta
     }
 }
 
-fn wait_for_player_change(socket_path: &str) -> Result<bool, String> {
-    let response =
-        send_command_with_timeout(socket_path, "idle player", Duration::from_millis(500));
+fn is_dsd_or_dop(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.contains("dsd") || value.contains("dop")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AnalyzerChange {
+    Player,
+    Output,
+}
+
+fn analyzer_change(lines: &[String]) -> Option<AnalyzerChange> {
+    if lines.iter().any(|line| line == "changed: player") {
+        Some(AnalyzerChange::Player)
+    } else if lines.iter().any(|line| line == "changed: output") {
+        Some(AnalyzerChange::Output)
+    } else {
+        None
+    }
+}
+
+fn wait_for_analyzer_change(socket_path: &str) -> Result<Option<AnalyzerChange>, String> {
+    let response = send_command_with_timeout(
+        socket_path,
+        "idle player output",
+        Duration::from_millis(500),
+    );
     match response {
-        Ok(lines) => Ok(lines.iter().any(|line| line == "changed: player")),
-        Err(error) if error.contains("temporariamente indisponível") => Ok(false),
+        Ok(lines) => Ok(analyzer_change(&lines)),
+        Err(error) if error.contains("temporariamente indisponível") => Ok(None),
         Err(error) => Err(error),
     }
 }
 
 pub fn set_output_enabled(socket_path: &str, name: &str, enabled: bool) -> Result<(), String> {
+    let observed = name == crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME;
+    if observed {
+        crate::diagnostics::now_playing_auxiliary(if enabled {
+            "enable_begin"
+        } else {
+            "disable_begin"
+        });
+    }
+    let result = set_output_enabled_with_protocol(socket_path, name, enabled);
+    if observed {
+        crate::diagnostics::now_playing_auxiliary(match (enabled, result.is_ok()) {
+            (true, true) => "enable_accepted",
+            (true, false) => "enable_failed",
+            (false, true) => "disable_accepted",
+            (false, false) => "disable_failed",
+        });
+    }
+    result
+}
+
+fn set_output_enabled_with_protocol(
+    socket_path: &str,
+    name: &str,
+    enabled: bool,
+) -> Result<(), String> {
     let outputs = send_command(socket_path, "outputs")?;
     let output_id = find_output_id(&outputs, name)
         .ok_or_else(|| format!("Output MPD '{}' não encontrado.", name))?;
@@ -693,14 +1074,489 @@ mod tests {
 
     static NEXT_FIFO_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
+    struct ReconcileIo {
+        status: Vec<String>,
+        song: Vec<String>,
+        enabled: bool,
+        commands: Vec<String>,
+        fail: Option<&'static str>,
+        ignore_enable: bool,
+    }
+
+    impl ReconcileIo {
+        fn pcm(enabled: bool) -> Self {
+            Self {
+                status: vec![
+                    "state: play".into(),
+                    "songid: 42".into(),
+                    "song: 0".into(),
+                    "audio: 44100:16:2".into(),
+                    "elapsed: 192.976".into(),
+                    "duration: 445.215".into(),
+                ],
+                song: vec!["file: fixture/track.flac".into(), "Id: 42".into()],
+                enabled,
+                commands: Vec::new(),
+                fail: None,
+                ignore_enable: false,
+            }
+        }
+
+        fn send(&mut self, command: &str) -> Result<Vec<String>, String> {
+            self.commands.push(command.into());
+            if self.fail == Some(command) {
+                self.fail = None;
+                return Err("ACK [5@0] {fixture} injected failure".into());
+            }
+            match command {
+                "status" => Ok(self.status.clone()),
+                "currentsong" => Ok(self.song.clone()),
+                "outputs" => Ok(vec![
+                    "outputid: 7".into(),
+                    "outputname: Sonante Output".into(),
+                    "outputenabled: 1".into(),
+                    "outputid: 12".into(),
+                    "outputname: Sonante Analyzer".into(),
+                    format!("outputenabled: {}", u8::from(self.enabled)),
+                ]),
+                "enableoutput 12" => {
+                    self.enabled = !self.ignore_enable;
+                    Ok(vec![])
+                }
+                "disableoutput 12" => {
+                    self.enabled = false;
+                    Ok(vec![])
+                }
+                other => panic!("Unexpected transport or primary-output command: {other}"),
+            }
+        }
+
+        fn reconcile(&mut self, stop: &AtomicBool) -> Result<Option<&'static str>, String> {
+            reconcile_output_with_io(stop, &mut |command| self.send(command))
+        }
+
+        fn transitions(&self) -> Vec<&str> {
+            self.commands
+                .iter()
+                .filter(|command| command.ends_with("output 12"))
+                .map(String::as_str)
+                .collect()
+        }
+    }
+
     #[test]
-    fn window_sessions_do_not_match_stale_cleanup_and_inactive_stop_is_idempotent() {
-        let mut analyzer = AudioAnalyzer::new("/missing/mpd.socket".into(), "/missing/analyzer.pcm".into());
-        analyzer.active_session = Some("new-window".into());
-        assert!(!analyzer.session_matches("old-window"));
-        assert!(analyzer.session_matches("new-window"));
+    fn observed_seek_events_and_frozen_tail_do_not_cycle_compatible_auxiliary_output() {
+        let stop = AtomicBool::new(false);
+        let mut io = ReconcileIo::pcm(false);
+        assert_eq!(io.reconcile(&stop).unwrap(), None);
+        // Seek 1 occurred before analyzer reservation. These are the received
+        // seek 2-5 samples, with synthetic PCM format/IDs (absent from that log).
+        // Repeated player events deliberately include pause-recovery/tag events.
+        // They test output reconciliation, not audible or sustained progress.
+        for samples in [
+            &[198.982, 198.982, 199.788, 200.103, 200.847, 201.853][..],
+            &[35.073, 35.157, 35.482][..],
+            &[97.573, 97.657, 97.982, 97.982][..],
+            &[210.573, 210.657, 210.982, 210.982][..],
+        ] {
+            for elapsed in samples {
+                io.status[4] = format!("elapsed: {elapsed:.3}");
+                let snapshot = (io.status.clone(), io.song.clone());
+                assert_eq!(
+                    analyzer_change(&["changed: player".into()]),
+                    Some(AnalyzerChange::Player)
+                );
+                assert_eq!(io.reconcile(&stop).unwrap(), None);
+                assert_eq!((io.status.clone(), io.song.clone()), snapshot);
+            }
+        }
+        assert!(io.enabled);
+        assert_eq!(io.status[4], "elapsed: 210.982");
+        assert_eq!(io.transitions(), ["enableoutput 12"]);
+    }
+
+    #[test]
+    fn pause_resume_tags_and_new_compatible_pcm_do_not_cycle_output() {
+        let stop = AtomicBool::new(false);
+        let mut io = ReconcileIo::pcm(true);
+        for state in ["pause", "play", "pause", "play"] {
+            io.status[0] = format!("state: {state}");
+            assert_eq!(io.reconcile(&stop).unwrap(), None);
+        }
+        io.song.push("Title: synthetic changed tag".into());
+        assert_eq!(io.reconcile(&stop).unwrap(), None);
+        io.status[1] = "songid: 43".into();
+        io.status[3] = "audio: 192000:24:2".into();
+        io.song = vec![
+            "file: https://fixture.invalid/stream".into(),
+            "Id: 43".into(),
+        ];
+        assert_eq!(io.reconcile(&stop).unwrap(), None);
+        assert!(io.transitions().is_empty());
+    }
+
+    #[test]
+    fn real_pcm_dsd_dop_and_stopped_changes_apply_only_needed_transitions() {
+        let stop = AtomicBool::new(false);
+        let mut io = ReconcileIo::pcm(true);
+        io.status[3] = "audio: dsd64:2".into();
+        assert_eq!(
+            io.reconcile(&stop).unwrap(),
+            Some("current_audio_format_is_dsd")
+        );
+        assert_eq!(
+            io.reconcile(&stop).unwrap(),
+            Some("current_audio_format_is_dsd")
+        );
+        io.status[3] = "audio: 48000:24:2".into();
+        io.song[0] = "file: fixture/track.DSF?redacted".into();
+        assert_eq!(io.reconcile(&stop).unwrap(), Some("current_file_is_dsd"));
+        io.song[0] = "file: fixture/track.flac".into();
+        assert_eq!(io.reconcile(&stop).unwrap(), None);
+        io.song.push("Format: DoP:2".into());
+        assert_eq!(
+            io.reconcile(&stop).unwrap(),
+            Some("current_audio_format_is_dsd")
+        );
+        io.song.pop();
+        assert_eq!(io.reconcile(&stop).unwrap(), None);
+        io.status[0] = "state: stop".into();
+        assert_eq!(io.reconcile(&stop).unwrap(), Some("stopped"));
+        assert_eq!(io.reconcile(&stop).unwrap(), Some("stopped"));
+        assert_eq!(
+            io.transitions(),
+            [
+                "disableoutput 12",
+                "enableoutput 12",
+                "disableoutput 12",
+                "enableoutput 12",
+                "disableoutput 12"
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_malformed_or_incoherent_metadata_is_not_assumed_pcm() {
+        let stop = AtomicBool::new(false);
+        for field in [
+            "audio",
+            "state",
+            "songid",
+            "file",
+            "Id",
+            "mismatch",
+            "invalid",
+            "error",
+            "duplicate",
+        ] {
+            let mut io = ReconcileIo::pcm(true);
+            match field {
+                "audio" | "state" | "songid" => io
+                    .status
+                    .retain(|line| !line.starts_with(&format!("{field}: "))),
+                "file" | "Id" => io
+                    .song
+                    .retain(|line| !line.starts_with(&format!("{field}: "))),
+                "mismatch" => io.song[1] = "Id: 99".into(),
+                "invalid" => io.status[3] = "audio: 48000:*:2".into(),
+                "error" => io.status.push("error: synthetic playback failure".into()),
+                "duplicate" => io.status.push("audio: 96000:24:2".into()),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                io.reconcile(&stop).unwrap(),
+                Some("reconcile_failed"),
+                "{field}"
+            );
+            assert_eq!(io.reconcile(&stop).unwrap(), Some("reconcile_failed"));
+            assert!(!io.enabled);
+            assert_eq!(io.transitions(), ["disableoutput 12"]);
+        }
+        for format in ["44100:16:2", "192000:24:2", "48000:f:2"] {
+            assert!(is_pcm_format(format));
+        }
+        for format in [
+            "",
+            "dsd64:2",
+            "48000:dop:2",
+            "0:16:2",
+            "48000:16:0",
+            "48000:16:2:1",
+        ] {
+            assert!(!is_pcm_format(format));
+        }
+    }
+
+    #[test]
+    fn external_output_changes_are_reconciled_by_actual_state_and_name() {
+        let stop = AtomicBool::new(false);
+        let mut io = ReconcileIo::pcm(true);
+        assert_eq!(io.reconcile(&stop).unwrap(), None);
+        assert_eq!(
+            analyzer_change(&["changed: output".into()]),
+            Some(AnalyzerChange::Output)
+        );
+        io.enabled = false;
+        assert_eq!(io.reconcile(&stop).unwrap(), None);
+        assert_eq!(io.reconcile(&stop).unwrap(), None); // our own output event
+        io.status[3] = "audio: dsd128:2".into();
+        io.enabled = true; // external enable while incompatible
+        assert_eq!(
+            io.reconcile(&stop).unwrap(),
+            Some("current_audio_format_is_dsd")
+        );
+        assert_eq!(io.transitions(), ["enableoutput 12", "disableoutput 12"]);
+        assert_eq!(analyzer_change(&["changed: mixer".into()]), None);
+    }
+
+    #[test]
+    fn read_and_enable_failures_fail_closed_without_retrying_enable_or_transport() {
+        let stop = AtomicBool::new(false);
+        for command in ["status", "currentsong", "outputs"] {
+            let mut io = ReconcileIo::pcm(true);
+            io.fail = Some(command);
+            let error = io.reconcile(&stop).unwrap_err();
+            assert!(error.contains("ACK [5@0]"));
+            assert!(!io.enabled);
+            assert_eq!(io.transitions(), ["disableoutput 12"]);
+        }
+        let mut io = ReconcileIo::pcm(false);
+        io.fail = Some("enableoutput 12");
+        assert!(io.reconcile(&stop).unwrap_err().contains("ACK [5@0]"));
+        assert!(!io.enabled);
+        assert_eq!(io.transitions(), ["enableoutput 12"]);
+        io.ignore_enable = true;
+        assert!(io.reconcile(&stop).unwrap_err().contains("não confirmou"));
+        assert!(!io.enabled);
+    }
+
+    #[test]
+    fn refused_disable_remains_explicit_and_is_not_retried_as_success() {
+        let stop = AtomicBool::new(false);
+        let mut io = ReconcileIo::pcm(true);
+        io.status[3] = "audio: dsd64:2".into();
+        io.fail = Some("disableoutput 12");
+        assert!(io.reconcile(&stop).unwrap_err().contains("ACK [5@0]"));
+        assert!(io.enabled);
+        assert_eq!(io.transitions(), ["disableoutput 12"]);
+    }
+
+    #[test]
+    fn failure_to_confirm_enable_disables_it_and_preserves_transport_failure() {
+        let stop = AtomicBool::new(false);
+        let mut io = ReconcileIo::pcm(false);
+        let mut output_reads = 0;
+        let error = reconcile_output_with_io(&stop, &mut |command| {
+            if command == "outputs" {
+                output_reads += 1;
+                if output_reads == 2 {
+                    return Err("EOF before confirmation fixture".into());
+                }
+            }
+            io.send(command)
+        })
+        .unwrap_err();
+        assert!(error.contains("EOF before confirmation"));
+        assert!(!io.enabled);
+        assert_eq!(io.transitions(), ["enableoutput 12", "disableoutput 12"]);
+    }
+
+    #[test]
+    fn persistent_unavailable_or_ambiguous_output_does_not_issue_guessed_commands() {
+        let stop = AtomicBool::new(false);
+        for unavailable in [true, false] {
+            let mut io = ReconcileIo::pcm(true);
+            let error = reconcile_output_with_io(&stop, &mut |command| {
+                if command == "outputs" {
+                    if unavailable {
+                        return Err("timeout fixture".into());
+                    }
+                    return Ok(vec![
+                        "outputid: 7".into(),
+                        "outputname: Sonante Output".into(),
+                        "outputenabled: 1".into(),
+                    ]);
+                }
+                io.send(command)
+            })
+            .unwrap_err();
+            assert!(error.contains("falha ao desativar analyzer"));
+            assert!(io.transitions().is_empty());
+        }
+    }
+
+    #[test]
+    fn concurrent_stop_disable_is_not_mistaken_for_failed_enable_confirmation() {
+        let stop = AtomicBool::new(false);
+        let mut io = ReconcileIo::pcm(false);
+        let result = reconcile_output_with_io(&stop, &mut |command| {
+            let result = io.send(command);
+            if command == "enableoutput 12" {
+                // Model the explicit stop's disable completing before the
+                // controller reads back its in-flight enable acknowledgement.
+                stop.store(true, Ordering::Release);
+                io.send("disableoutput 12").unwrap();
+            }
+            result
+        })
+        .unwrap();
+        assert_eq!(result, Some("stopped"));
+        assert!(!io.enabled);
+        assert_eq!(io.transitions(), ["enableoutput 12", "disableoutput 12"]);
+    }
+
+    #[test]
+    fn malformed_output_identity_or_state_never_targets_primary_output() {
+        let base: Vec<String> = [
+            "outputid: 12",
+            "outputname: Sonante Analyzer",
+            "outputenabled: 1",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let name = crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME;
+        assert_eq!(auxiliary_output_state(&base, name).unwrap(), (12, true));
+        let mut variants = vec![vec![], base[..2].to_vec()];
+        let mut invalid = base.clone();
+        invalid[2] = "outputenabled: unknown".into();
+        variants.push(invalid);
+        let mut duplicate = base.clone();
+        duplicate.extend(base.clone());
+        variants.push(duplicate);
+        let mut duplicate = base.clone();
+        duplicate.push("outputenabled: 0".into());
+        variants.push(duplicate);
+        let mut collision = base.clone();
+        collision.extend([
+            "outputid: 12".into(),
+            "outputname: Sonante Output".into(),
+            "outputenabled: 1".into(),
+        ]);
+        variants.push(collision);
+        for lines in variants {
+            assert!(auxiliary_output_state(&lines, name).is_err());
+        }
+    }
+
+    #[test]
+    fn shutdown_during_reads_or_enable_ack_cannot_leave_old_controller_enabled() {
+        for stage in ["status", "currentsong", "outputs", "enableoutput 12"] {
+            let stop = AtomicBool::new(false);
+            let mut io = ReconcileIo::pcm(false);
+            let result = reconcile_output_with_io(&stop, &mut |command| {
+                let result = io.send(command);
+                if command == stage {
+                    stop.store(true, Ordering::Release);
+                }
+                result
+            })
+            .unwrap();
+            assert_eq!(result, Some("stopped"));
+            assert!(!io.enabled, "{stage}");
+            if stage == "enableoutput 12" {
+                assert_eq!(io.transitions(), ["enableoutput 12", "disableoutput 12"]);
+            } else {
+                assert!(io.transitions().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_keeps_explicit_disable_and_new_lease_rejects_stale_cleanup() {
+        let mut analyzer = AudioAnalyzer::new("/missing/socket".into(), "/missing/fifo".into());
+        let old = analyzer
+            .ownership
+            .claim("now-playing", "old-session".into());
+        analyzer.active_lease = Some("old-lease".into());
+        let old_stop = AtomicBool::new(true);
+        let mut io = ReconcileIo::pcm(true);
+        assert_eq!(io.reconcile(&old_stop).unwrap(), Some("stopped"));
+        assert!(!io.enabled);
+        let new = analyzer.ownership.claim("main", "new-session".into());
+        analyzer.active_lease = Some("new-lease".into());
+        let new_stop = AtomicBool::new(false);
+        assert_eq!(io.reconcile(&new_stop).unwrap(), None);
+        assert!(!analyzer.capture_matches(&old.host, &old.session_id, old.generation, "old-lease"));
+        assert!(!analyzer.capture_matches(&new.host, &new.session_id, new.generation, "old-lease"));
+        assert!(!analyzer.ownership.clear_if_host("now-playing"));
+        assert!(analyzer.capture_matches(&new.host, &new.session_id, new.generation, "new-lease"));
+        assert_eq!(io.reconcile(&new_stop).unwrap(), None);
+        assert_eq!(io.transitions(), ["disableoutput 12", "enableoutput 12"]);
+    }
+
+    #[test]
+    fn host_generations_reject_old_start_cleanup_and_close() {
+        let mut ownership = AnalyzerOwnership::default();
+        let old = ownership.claim("now-playing", "old".into());
+        let new = ownership.claim("main", "new".into());
+        assert!(!ownership.matches(&old.host, &old.session_id, old.generation));
+        assert!(ownership.matches(&new.host, &new.session_id, new.generation));
+        assert!(!ownership.matches("now-playing", &new.session_id, new.generation));
+        let replay = ownership.claim("main", "new".into());
+        assert!(!ownership.matches(&new.host, &new.session_id, new.generation));
+        assert!(ownership.matches(&replay.host, &replay.session_id, replay.generation));
+        assert!(!ownership.clear_if_host("now-playing"));
+        assert!(ownership.matches(&replay.host, &replay.session_id, replay.generation));
+        assert!(ownership.clear_if_host("main"));
+        assert!(ownership.owner.is_none());
+        assert!(authorized_analyzer_host("main"));
+        assert!(authorized_analyzer_host("now-playing"));
+        assert!(!authorized_analyzer_host("settings"));
+    }
+
+    #[test]
+    fn closing_old_host_cannot_clear_new_owner_and_inactive_stop_is_idempotent() {
+        let mut analyzer =
+            AudioAnalyzer::new("/missing/mpd.socket".into(), "/missing/analyzer.pcm".into());
+        analyzer.ownership.claim("main", "new-window".into());
+        assert_ne!(analyzer.owner_host(), Some("now-playing"));
+        assert_eq!(analyzer.owner_host(), Some("main"));
         analyzer.stop(None).unwrap();
         analyzer.stop(None).unwrap();
+        assert_eq!(analyzer.owner_host(), Some("main"));
+    }
+
+    #[test]
+    fn configuration_resume_follows_retained_owner_and_revocation() {
+        let mut analyzer =
+            AudioAnalyzer::new("/missing/mpd.socket".into(), "/missing/analyzer.pcm".into());
+        analyzer.ownership.claim("main", "embedded".into());
+        analyzer.stop(None).unwrap();
+        assert!(analyzer.owner_is_present(|host| host == "main"));
+        assert!(!analyzer.owner_is_present(|host| host == "now-playing"));
+        assert!(!analyzer.ownership.clear_if_host("now-playing"));
+        assert!(analyzer.owner_is_present(|host| host == "main"));
+        analyzer.ownership.clear_if_host("main");
+        assert!(!analyzer.owner_is_present(|_| true));
+    }
+
+    #[test]
+    fn strict_mode_capture_lease_rejects_old_cleanup_and_tags_events() {
+        let mut analyzer =
+            AudioAnalyzer::new("/missing/mpd.socket".into(), "/missing/analyzer.pcm".into());
+        let owner = analyzer.ownership.claim("main", "same-session".into());
+        analyzer.active_lease = Some("new-cycle".into());
+        assert!(!analyzer.capture_matches(
+            "main",
+            &owner.session_id,
+            owner.generation,
+            "old-cycle"
+        ));
+        assert!(analyzer.capture_matches("main", &owner.session_id, owner.generation, "new-cycle"));
+        let target = analyzer.event_owner().unwrap();
+        assert_eq!(target.host, "main");
+        assert_eq!(target.lease_id.as_deref(), Some("new-cycle"));
+        let payload = serde_json::to_value(AnalyzerEnvelope {
+            owner: target,
+            data: AnalyzerStatus {
+                available: false,
+                reason: Some("stopped".into()),
+            },
+        })
+        .unwrap();
+        assert_eq!(payload["owner"]["leaseId"], "new-cycle");
+        assert_eq!(payload["owner"]["generation"], owner.generation);
     }
 
     fn pcm(samples: &[(i16, i16)]) -> Vec<u8> {

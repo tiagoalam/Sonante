@@ -1,0 +1,64 @@
+{
+  "MediaContainer": {
+    "librarySectionID": 7,
+    "Hub": [
+      {
+        "hubIdentifier": "music.recent.artist.7",
+        "context": "hub.music.recent.artist",
+        "type": "album",
+        "title": "Synthetic server row artist",
+        "key": "/library/sections/7/all?type=9&artist.id=501&opaque=SyntheticFilter",
+        "Metadata": [
+          {
+            "type": "album",
+            "ratingKey": "101",
+            "title": "Synthetic album",
+            "parentRatingKey": "501",
+            "parentTitle": "Synthetic Artist A",
+            "parentThumb": "/library/metadata/501/thumb/1",
+            "thumb": "/library/metadata/101/thumb/1",
+            "librarySectionID": 7
+          }
+        ]
+      },
+      {
+        "hubIdentifier": "music.recent.label.7",
+        "context": "hub.music.recent.label",
+        "type": "album",
+        "title": "Synthetic server row label",
+        "key": "/library/sections/7/all?type=9&label=SyntheticLabel",
+        "Metadata": [
+          {
+            "type": "album",
+            "ratingKey": "102",
+            "title": "Synthetic album",
+            "parentRatingKey": "502",
+            "parentTitle": "Synthetic Artist B",
+            "parentThumb": "/library/metadata/502/thumb/1",
+            "thumb": "/library/metadata/101/thumb/1",
+            "librarySectionID": 7
+          }
+        ]
+      },
+      {
+        "hubIdentifier": "music.recent.genre.7",
+        "context": "hub.music.recent.genre",
+        "type": "album",
+        "title": "Synthetic server row genre",
+        "key": "/library/sections/7/all?type=9&genre=SyntheticGenre",
+        "Metadata": [
+          {
+            "type": "album",
+            "ratingKey": "103",
+            "title": "Synthetic album",
+            "parentRatingKey": "503",
+            "parentTitle": "Synthetic Artist B",
+            "parentThumb": "/library/metadata/503/thumb/1",
+            "thumb": "/library/metadata/101/thumb/1",
+            "librarySectionID": 7
+          }
+        ]
+      }
+    ]
+  }
+}

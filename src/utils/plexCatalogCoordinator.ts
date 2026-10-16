@@ -8,10 +8,7 @@ export interface PlexLibraryCatalog {
 export interface PlexCatalogSnapshot {
   identity: unknown;
   serverId: string;
-  started: boolean;
   libraries: readonly PlexLibraryCatalog[];
-  albums: PlexAlbum[];
-  catalogs: readonly { libraryId: string; albums: PlexAlbum[] }[];
 }
 interface Request {
   library: PlexLibrary;
@@ -21,9 +18,9 @@ interface Request {
   reject: (error: unknown) => void;
 }
 
-// Session memory only. Browser and Explore use this same queue and inventory.
+// Session memory only. The traditional Plex browser reuses confirmed per-library inventory.
 export class PlexCatalogCoordinator {
-  private state: PlexCatalogSnapshot = { identity: null, serverId: "", started: false, libraries: [], albums: [], catalogs: [] };
+  private state: PlexCatalogSnapshot = { identity: null, serverId: "", libraries: [] };
   private generation = 0;
   private active = 0;
   private requests = new Map<string, Request>();
@@ -50,16 +47,12 @@ export class PlexCatalogCoordinator {
     this.requests.clear(); this.queue = [];
     // Running requests keep their slots until they actually finish. New contexts
     // cannot exceed the two-request budget while obsolete IPC is still settling.
-    this.state = { identity: null, serverId: "", started: false, libraries: [], albums: [], catalogs: [] };
+    this.state = { identity: null, serverId: "", libraries: [] };
     this.emit();
   }
   private emit(): void { this.listeners.forEach(listener => listener()); }
   private publish(libraries: readonly PlexLibraryCatalog[]): void {
-    const complete = libraries.filter(item => item.phase === "complete");
-    const unchanged = complete.length === this.state.catalogs.length && complete.every((item, i) => item.library.key === this.state.catalogs[i].libraryId && item.albums === this.state.catalogs[i].albums);
-    this.state = { ...this.state, libraries,
-      catalogs: unchanged ? this.state.catalogs : complete.map(item => ({ libraryId: item.library.key, albums: item.albums })),
-      albums: unchanged ? this.state.albums : complete.flatMap(item => item.albums) };
+    this.state = { ...this.state, libraries };
     this.emit();
   }
   loadLibrary(library: PlexLibrary, retry = false): Promise<PlexAlbum[]> {
@@ -75,14 +68,6 @@ export class PlexCatalogCoordinator {
     const record: PlexLibraryCatalog = { library, phase: "queued", albums: [] };
     this.publish(existing ? this.state.libraries.map(item => item.library.key === library.key ? record : item) : [...this.state.libraries, record]);
     this.queue.push(request); this.pump(); return promise;
-  }
-  aggregate(libraries: readonly PlexLibrary[]): void {
-    if (this.state.identity === null) return;
-    if (!this.state.started) { this.state = { ...this.state, started: true }; this.emit(); }
-    for (const library of libraries) void this.loadLibrary(library).catch(() => {});
-  }
-  retryFailures(): void {
-    for (const item of this.state.libraries.filter(item => item.phase === "error")) void this.loadLibrary(item.library, true).catch(() => {});
   }
   private pump(): void {
     while (this.active < 2 && this.queue.length) {

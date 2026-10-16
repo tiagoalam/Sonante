@@ -1768,6 +1768,41 @@ pub(crate) mod mirror {
         Ok(roots)
     }
 
+    pub(crate) const NEW_SOURCE_OVERLAP: &str = "LOCAL_SOURCE_NEW_OVERLAP";
+
+    // Save-only admission. Do not apply this policy to loading/resolving existing
+    // sources: old overlaps must remain readable with their existing IDs.
+    pub(crate) fn validate_new_source_overlaps(
+        previous: &[PathBuf],
+        proposed: &[PathBuf],
+    ) -> Result<(), String> {
+        fn pairs(roots: &[PathBuf]) -> HashSet<(PathBuf, PathBuf)> {
+            let mut result = HashSet::new();
+            for (index, first) in roots.iter().enumerate() {
+                for second in &roots[index + 1..] {
+                    if first != second {
+                        if first.starts_with(second) {
+                            result.insert((second.clone(), first.clone()));
+                        } else if second.starts_with(first) {
+                            result.insert((first.clone(), second.clone()));
+                        }
+                    }
+                }
+            }
+            result
+        }
+        let proposed_pairs = pairs(&canonical_configured_roots(proposed)?);
+        if proposed_pairs.is_empty() {
+            return Ok(());
+        }
+        let previous_pairs = pairs(&canonical_configured_roots(previous)?);
+        if proposed_pairs.is_subset(&previous_pairs) {
+            Ok(())
+        } else {
+            Err(NEW_SOURCE_OVERLAP.to_string())
+        }
+    }
+
     fn allocate_source_ids(
         roots: &[PathBuf],
         existing: &BTreeMap<String, PathBuf>,
@@ -1873,7 +1908,7 @@ pub(crate) mod mirror {
             publish_link(staging, source_id, file)?;
         }
         for cue in &source.cues {
-            if cue_targets(cue, &source.root, &source.playable).is_ok() {
+            if cue_targets(cue, &source.root, &source.playable)? == CueDisposition::Publish {
                 let relative = cue
                     .strip_prefix(&source.root)
                     .map_err(|_| "CUE escapou da root durante publicação.".to_string())?
@@ -1903,18 +1938,33 @@ pub(crate) mod mirror {
             .map_err(|error| format!("Falha ao publicar symlink filtrado: {error}"))
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CueDisposition {
+        Publish,
+        Excluded,
+    }
+
     fn cue_targets(
         cue: &Path,
         root: &Path,
         playable: &HashSet<PathBuf>,
-    ) -> Result<Vec<PathBuf>, String> {
+    ) -> Result<CueDisposition, String> {
+        cue_targets_with_reader(cue, root, playable, |path| fs::read(path))
+    }
+
+    fn cue_targets_with_reader(
+        cue: &Path,
+        root: &Path,
+        playable: &HashSet<PathBuf>,
+        read: impl FnOnce(&Path) -> std::io::Result<Vec<u8>>,
+    ) -> Result<CueDisposition, String> {
+        // This CUE was selected by scan_source. Loss of access is operational,
+        // not a content exclusion. The reader seam keeps I/O failures testable.
         validate_publishable_file(cue)?;
-        let mut bytes = Vec::new();
-        fs::File::open(cue)
-            .and_then(|mut file| file.read_to_end(&mut bytes))
-            .map_err(|error| format!("Falha ao ler CUE: {error}"))?;
-        let text =
-            std::str::from_utf8(&bytes).map_err(|_| "CUE não é UTF-8 válido.".to_string())?;
+        let bytes = read(cue).map_err(|error| format!("Falha ao ler CUE: {error}"))?;
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return Ok(CueDisposition::Excluded);
+        };
         let mut targets = Vec::new();
         for line in text.lines() {
             let trimmed = line.trim_start();
@@ -1924,7 +1974,7 @@ pub(crate) mod mirror {
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"FILE"))
             {
                 if trimmed.len() == 4 || !trimmed.as_bytes()[4].is_ascii_whitespace() {
-                    return Err("Diretiva FILE não reconhecida com segurança.".to_string());
+                    return Ok(CueDisposition::Excluded);
                 }
             }
             let mut keyword_end = 0;
@@ -1937,7 +1987,9 @@ pub(crate) mod mirror {
             if keyword_end == 0 || !trimmed[..keyword_end].eq_ignore_ascii_case("FILE") {
                 continue;
             }
-            let reference = parse_cue_file_reference(trimmed[keyword_end..].trim())?;
+            let Ok(reference) = parse_cue_file_reference(trimmed[keyword_end..].trim()) else {
+                return Ok(CueDisposition::Excluded);
+            };
             let relative = Path::new(&reference);
             if relative.is_absolute()
                 || reference.contains("://")
@@ -1949,27 +2001,31 @@ pub(crate) mod mirror {
                     .components()
                     .any(|component| !matches!(component, Component::Normal(_)))
             {
-                return Err("CUE contém referência FILE insegura.".to_string());
+                return Ok(CueDisposition::Excluded);
             }
             let parent = cue
                 .parent()
                 .ok_or_else(|| "CUE sem diretório pai.".to_string())?;
             let target = parent.join(relative);
-            validate_publishable_file(&target)?;
-            if classify_path(&target) != LocalMediaClass::PlayableAudio {
-                return Err("CUE referencia formato fora da allowlist de áudio.".to_string());
+            // Missing/unselected references were never promised by the scan.
+            // A selected target that disappears must instead fail validation.
+            if classify_path(&target) != LocalMediaClass::PlayableAudio
+                || !playable.contains(&target)
+            {
+                return Ok(CueDisposition::Excluded);
             }
+            validate_publishable_file(&target)?;
             let canonical = fs::canonicalize(&target)
                 .map_err(|error| format!("Falha ao resolver target CUE: {error}"))?;
-            if !canonical.starts_with(root) || canonical != target || !playable.contains(&target) {
-                return Err("CUE referencia target fora da root ou do mirror.".to_string());
+            if !canonical.starts_with(root) || canonical != target {
+                return Ok(CueDisposition::Excluded);
             }
             targets.push(target);
         }
         if targets.is_empty() {
-            return Err("CUE não contém referência FILE reconhecível.".to_string());
+            return Ok(CueDisposition::Excluded);
         }
-        Ok(targets)
+        Ok(CueDisposition::Publish)
     }
 
     fn parse_cue_file_reference(value: &str) -> Result<String, String> {
@@ -4261,6 +4317,419 @@ pub(crate) mod mirror {
         }
 
         #[test]
+        fn overlap_admission_orders_aliases_and_sibling_boundaries() {
+            let fixture = Fixture::new("overlap-admission");
+            let parent = fixture.path("musicas");
+            let child = parent.join("reggae");
+            let sibling = parent.join("reggae-extra");
+            fs::create_dir_all(&child).unwrap();
+            fs::create_dir_all(&sibling).unwrap();
+            let alias = fixture.path("alias");
+            symlink(&child, &alias).unwrap();
+            for previous in [vec![], vec![child.clone()], vec![parent.clone()]] {
+                for next in [
+                    vec![parent.clone(), child.clone()],
+                    vec![child.clone(), parent.clone()],
+                ] {
+                    assert_eq!(
+                        validate_new_source_overlaps(&previous, &next),
+                        Err(NEW_SOURCE_OVERLAP.into())
+                    );
+                }
+            }
+            assert!(
+                validate_new_source_overlaps(&[], &[child.clone(), child.clone(), alias.clone()]).is_ok()
+            );
+            assert!(validate_new_source_overlaps(&[child.clone()], &[alias, sibling]).is_ok());
+            assert!(!fixture.path("library.next").exists());
+            assert!(!fixture.path("library").exists());
+        }
+
+        #[test]
+        fn overlap_admission_grandfathers_pairs_but_not_new_conflicts() {
+            let fixture = Fixture::new("old-overlap");
+            let parent = fixture.path("musicas");
+            let child = parent.join("reggae");
+            let deeper = child.join("dub");
+            let disjoint = fixture.path("separate");
+            fs::create_dir_all(&deeper).unwrap();
+            fs::create_dir_all(&disjoint).unwrap();
+            let previous = vec![parent.clone(), child.clone()];
+            assert!(validate_new_source_overlaps(&previous, &[child.clone(), parent.clone()]).is_ok());
+            assert!(
+                validate_new_source_overlaps(&previous, &[parent.clone(), child.clone(), disjoint]).is_ok()
+            );
+            assert!(validate_new_source_overlaps(&previous, std::slice::from_ref(&parent)).is_ok());
+            assert!(validate_new_source_overlaps(&previous, std::slice::from_ref(&child)).is_ok());
+            // Equal/fewer conflict counts do not excuse a different new pair.
+            assert_eq!(
+                validate_new_source_overlaps(&previous, &[parent.clone(), deeper.clone()]),
+                Err(NEW_SOURCE_OVERLAP.into())
+            );
+            assert_eq!(
+                validate_new_source_overlaps(&previous, &[parent, child, deeper]),
+                Err(NEW_SOURCE_OVERLAP.into())
+            );
+        }
+
+        // Diagnostic fixtures only: current acceptance is characterized here,
+        // not endorsed as a future overlap policy. No MPD process is started.
+        #[test]
+        fn local_index_diagnostic_sequential_overlap_and_reference_loss() {
+            use crate::audio::{AudioEngine, MediaLocator, MpdQueueEntry, MpdQueueStructure};
+            use crate::playlists::{NewPlaylistItem, PlaylistItemMetadata, PlaylistStore};
+            for child_first in [true, false] {
+                let fixture = Fixture::new(if child_first {
+                    "child-parent"
+                } else {
+                    "parent-child"
+                });
+                let parent = fixture.path("dados/musicas");
+                let child = parent.join("reggae");
+                let track = child.join("Artista Único/Álbum sem ordem/01 faixa.flac");
+                write(&track, b"inert fixture, not decoded");
+                for index in 0..2048 {
+                    write(
+                        &parent.join(format!(
+                            "outros/Grupo {}/Disco {}/faixa {}.mp3",
+                            index % 17,
+                            index % 13,
+                            index
+                        )),
+                        b"fixture",
+                    );
+                }
+                write(&parent.join("outros/ignored.prg"), b"ignored");
+                let (initial, added, old_uri, other_uri) = if child_first {
+                    (
+                        &child,
+                        &parent,
+                        "reggae/Artista Único/Álbum sem ordem/01 faixa.flac",
+                        "musicas/reggae/Artista Único/Álbum sem ordem/01 faixa.flac",
+                    )
+                } else {
+                    (
+                        &parent,
+                        &child,
+                        "musicas/reggae/Artista Único/Álbum sem ordem/01 faixa.flac",
+                        "reggae/Artista Único/Álbum sem ordem/01 faixa.flac",
+                    )
+                };
+                let live = build_generation(
+                    &fixture,
+                    "library",
+                    &fixture.path("missing"),
+                    std::slice::from_ref(initial),
+                    "initial",
+                );
+                let old_manifest = read_manifest(&live).unwrap();
+                // Replacing the source in one Save is not a URI migration:
+                // Settings refuses an added source without a targeted-safe plan.
+                let replacement = expect_prepared(prepare_managed_generation(
+                    &live,
+                    &fixture.path("library.next"),
+                    std::slice::from_ref(added),
+                    "replace",
+                ));
+                assert_eq!(
+                    plan_added_sources_refresh(&live, &replacement).unwrap(),
+                    None
+                );
+                let previous = crate::local_media::resolve_local_sources(
+                    &live,
+                    &[initial.to_string_lossy().into_owned()],
+                )
+                .unwrap();
+                assert_eq!(
+                    crate::added_source_save_needs_targeted_refresh(
+                        &previous,
+                        &replacement,
+                        &ManagedRefreshPlan::Full,
+                    ),
+                    Err(crate::ADDED_SOURCE_FULL_RESCAN_REQUIRED)
+                );
+                cleanup_prepared_managed_generation(&replacement).unwrap();
+                let roots = vec![initial.clone(), added.clone()];
+                let prepared = expect_prepared(prepare_managed_generation(
+                    &live,
+                    &fixture.path("library.next"),
+                    &roots,
+                    "overlap",
+                ));
+                assert_eq!(prepared.manifest.sources.len(), 2);
+                for (id, root) in &old_manifest.sources {
+                    assert_eq!(prepared.manifest.sources.get(id), Some(root));
+                }
+                let plan = plan_added_sources_refresh(&live, &prepared)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    plan,
+                    ManagedRefreshPlan::Targeted {
+                        directories: vec![if child_first { "musicas" } else { "reggae" }.into()],
+                        changed_files: if child_first { 2049 } else { 1 },
+                    }
+                );
+                let previous = crate::local_media::resolve_local_sources(
+                    &live,
+                    &[initial.to_string_lossy().into_owned()],
+                )
+                .unwrap();
+                assert_eq!(
+                    crate::added_source_save_needs_targeted_refresh(&previous, &prepared, &plan),
+                    Ok(true)
+                );
+                let publication =
+                    publish_targeted_added_sources_generation(&live, &prepared, &plan).unwrap();
+                publication.cleanup_previous().unwrap();
+                let folders = roots
+                    .iter()
+                    .map(|root| root.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                let old = crate::local_media::resolve_local_path(&live, old_uri, &folders).unwrap();
+                let other = crate::local_media::resolve_local_path(&live, other_uri, &folders).unwrap();
+                assert_eq!(old.physical_path, other.physical_path);
+                assert_eq!(
+                    fs::metadata(live.join(old_uri)).unwrap().ino(),
+                    fs::metadata(live.join(other_uri)).unwrap().ino()
+                );
+                assert_ne!(old.source_id, other.source_id);
+                let records = vec![format!("file: {old_uri}"), format!("file: {other_uri}")];
+                let audit = AudioEngine::audit_raw_local_catalog(&records).unwrap();
+                assert!(audit.is_clean());
+                assert_eq!(audit.total_files, 2); // syntactically valid distinct URIs, one physical file
+
+                let store = PlaylistStore::new(fixture.path("playlists.json"));
+                let playlist = store
+                    .create_with_items(
+                        "Overlap fixture",
+                        vec![NewPlaylistItem {
+                            media_locator: MediaLocator::Local {
+                                uri: old_uri.into(),
+                            },
+                            metadata: PlaylistItemMetadata {
+                                title: "Track".into(),
+                                artist: "Artist".into(),
+                                album: "Album".into(),
+                                duration: None,
+                            },
+                        }],
+                    )
+                    .unwrap();
+                let playlist_before = fs::read(fixture.path("playlists.json")).unwrap();
+                let removal = expect_prepared(prepare_managed_generation(
+                    &live,
+                    &fixture.path("library.next"),
+                    std::slice::from_ref(added),
+                    "remove-original",
+                ));
+                let removal_plan = plan_removed_sources_refresh(&live, &removal)
+                    .unwrap()
+                    .unwrap();
+                let queue = MpdQueueStructure {
+                    entries: vec![MpdQueueEntry {
+                        uri: old_uri.into(),
+                        pos: 0,
+                        id: 7,
+                    }],
+                    playlist_version: 1,
+                };
+                assert!(crate::queue_references_removed_sources(
+                    &removal_plan,
+                    &[],
+                    &queue
+                ));
+                let publication = publish_prepared_managed_generation(&live, &removal).unwrap();
+                publication.cleanup_previous().unwrap();
+                let folders = vec![added.to_string_lossy().into_owned()];
+                assert_eq!(
+                    crate::local_media::resolve_local_path(&live, old_uri, &folders),
+                    Err(crate::local_media::LocalPathResolveError::SourceNotFound)
+                );
+                assert!(crate::local_media::resolve_local_path(&live, other_uri, &folders).is_ok());
+                // Favorites resolve an album directory through this same resolver.
+                assert_eq!(
+                    crate::local_media::resolve_local_path(
+                        &live,
+                        old_uri.rsplit_once('/').unwrap().0,
+                        &folders
+                    ),
+                    Err(crate::local_media::LocalPathResolveError::SourceNotFound)
+                );
+                assert_eq!(store.get(&playlist.id).unwrap(), playlist);
+                assert_eq!(
+                    fs::read(fixture.path("playlists.json")).unwrap(),
+                    playlist_before
+                );
+                assert_eq!(fs::read(&track).unwrap(), b"inert fixture, not decoded");
+            }
+        }
+
+        #[test]
+        fn local_index_diagnostic_equal_alias_and_sibling_prefixes() {
+            let fixture = Fixture::new("aliases-siblings");
+            let child = fixture.path("musicas/reggae");
+            let sibling = fixture.path("musicas/reggae-extra");
+            write(&child.join("song.flac"), b"one");
+            write(&sibling.join("song.flac"), b"two");
+            let alias = fixture.path("alias");
+            symlink(&child, &alias).unwrap();
+            let live = build_generation(
+                &fixture,
+                "library",
+                &fixture.path("missing"),
+                std::slice::from_ref(&child),
+                "initial",
+            );
+            assert!(matches!(
+                prepare_managed_generation(
+                    &live,
+                    &fixture.path("library.next"),
+                    &[child.clone(), child.clone(), alias.clone()],
+                    "alias"
+                ),
+                Ok(ManagedGenerationPreparation::Unchanged)
+            ));
+            assert!(!fixture.path("library.next").exists());
+            let prepared = expect_prepared(prepare_managed_generation(
+                &live,
+                &fixture.path("library.next"),
+                &[child.clone(), alias, sibling.clone()],
+                "siblings",
+            ));
+            assert_eq!(prepared.manifest.sources.len(), 2);
+            assert!(!child.starts_with(&sibling) && !sibling.starts_with(&child));
+            assert_link(
+                &prepared.staging_path.join("reggae/song.flac"),
+                &child.join("song.flac"),
+            );
+            assert_link(
+                &prepared.staging_path.join("reggae-extra/song.flac"),
+                &sibling.join("song.flac"),
+            );
+            cleanup_prepared_managed_generation(&prepared).unwrap();
+        }
+
+        #[test]
+        fn local_index_diagnostic_nested_read_denial_preserves_live_and_allows_retry() {
+            use std::sync::Arc;
+            let fixture = Fixture::new("read-denial");
+            let parent = fixture.path("musicas");
+            let child = parent.join("reggae");
+            let denied = parent.join("Unreadable");
+            write(&child.join("song.flac"), b"old");
+            write(&denied.join("song.flac"), b"unreadable");
+            let live = build_generation(
+                &fixture,
+                "library",
+                &fixture.path("missing"),
+                std::slice::from_ref(&child),
+                "initial",
+            );
+            let before = managed_generation_snapshot(&live).unwrap();
+            let mode = fs::metadata(&denied).unwrap().permissions().mode();
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+            let read_denied = fs::read_dir(&denied).is_err();
+            let coordinator = Arc::new(crate::config_save_operation::Coordinator::new());
+            let (_, operation) = coordinator.reserve().unwrap();
+            let result = prepare_managed_generation(
+                &live,
+                &fixture.path("library.next"),
+                &[child.clone(), parent.clone()],
+                "denied",
+            );
+            fs::set_permissions(&denied, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                read_denied,
+                "fixture requires directory permissions to be enforced"
+            );
+            let error = result.unwrap_err();
+            assert!(error.contains("Falha ao listar diretório"));
+            assert_eq!(managed_generation_snapshot(&live).unwrap(), before);
+            assert!(!fixture.path("library.next").exists());
+            operation.finish(Err(error), false); // pre-intent error is Failed, not Uncertain
+            assert_eq!(
+                coordinator.snapshot().unwrap().unwrap().phase,
+                crate::config_save_operation::Phase::Failed
+            );
+            let (_, retry) = coordinator.reserve().unwrap();
+            let prepared = expect_prepared(prepare_managed_generation(
+                &live,
+                &fixture.path("library.next"),
+                &[child, parent],
+                "retry",
+            ));
+            cleanup_prepared_managed_generation(&prepared).unwrap();
+            retry.finish(Ok(()), false);
+            assert_eq!(managed_generation_snapshot(&live).unwrap(), before);
+        }
+
+        #[test]
+        fn local_index_diagnostic_file_disappears_after_scan_cleanup_and_retry() {
+            let fixture = Fixture::new("file-read-race");
+            let parent = fixture.path("musicas");
+            let child = parent.join("reggae");
+            let added = parent.join("other/new.flac");
+            write(&child.join("old.flac"), b"old");
+            write(&added, b"new");
+            let live = build_generation(
+                &fixture,
+                "library",
+                &fixture.path("missing"),
+                std::slice::from_ref(&child),
+                "initial",
+            );
+            let before = managed_generation_snapshot(&live).unwrap();
+            let staging = fixture.path("library.next");
+            let roots = [child, parent];
+            let error = build_filtered_staging_with_hook(&staging, &live, &roots, "raced", || {
+                fs::remove_file(&added).unwrap();
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(error.contains("Arquivo selecionado indisponível"));
+            assert!(!staging.exists());
+            assert_eq!(managed_generation_snapshot(&live).unwrap(), before);
+            write(&added, b"new");
+            let prepared = expect_prepared(prepare_managed_generation(&live, &staging, &roots, "retry"));
+            cleanup_prepared_managed_generation(&prepared).unwrap();
+            assert_eq!(managed_generation_snapshot(&live).unwrap(), before);
+        }
+
+        #[test]
+        fn local_index_diagnostic_unreadable_file_and_cue_are_not_directory_failures() {
+            let fixture = Fixture::new("unreadable-files");
+            let music = fixture.path("Music");
+            let audio = music.join("track.flac");
+            let cue = music.join("image.cue");
+            write(&audio, b"fixture");
+            write(&cue, b"FILE \"track.flac\" WAVE\nTRACK 01 AUDIO\n");
+            let mode = fs::metadata(&audio).unwrap().permissions().mode();
+            fs::set_permissions(&audio, fs::Permissions::from_mode(0o000)).unwrap();
+            fs::set_permissions(&cue, fs::Permissions::from_mode(0o000)).unwrap();
+            let audio_read = fs::read(&audio);
+            let cue_read = fs::read(&cue);
+            let result = fixture.build(std::slice::from_ref(&music));
+            fs::set_permissions(&audio, fs::Permissions::from_mode(mode)).unwrap();
+            fs::set_permissions(&cue, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                audio_read.is_err() && cue_read.is_err(),
+                "fixture needs enforced file permissions"
+            );
+            assert!(result.unwrap_err().starts_with("Falha ao ler CUE:"));
+            assert!(!fixture.path("library.next").exists());
+            // Restored access permits a clean retry; audio byte decoding remains
+            // outside the builder's contract.
+            let built = fixture.build(std::slice::from_ref(&music)).unwrap();
+            assert_link(&built.staging_path.join("Music/track.flac"), &audio);
+            assert_link(&built.staging_path.join("Music/image.cue"), &cue);
+            assert!(crate::audio::AudioEngine::audit_raw_local_catalog(&[])
+                .unwrap()
+                .is_clean());
+            cleanup_prepared_managed_generation(&built).unwrap();
+        }
+
+        #[test]
         fn legacy_mapping_preserves_ids_ignores_stale_links_and_rejects_ambiguity() {
             let fixture = Fixture::new("legacy");
             let first = fixture.path("one/Music");
@@ -4550,6 +5019,184 @@ pub(crate) mod mirror {
             ] {
                 assert!(!source.join(ignored).exists());
             }
+        }
+
+        // Regression: selected CUE and audio loss are both operational failures.
+        #[test]
+        fn local_index_gap_regression_selected_cue_or_audio_loss_aborts_and_retries() {
+            for removed in ["album.cue", "track.flac"] {
+                let fixture = Fixture::new("index-gap-race");
+                let old = fixture.path("Old");
+                let added = fixture.path("Added");
+                write(&old.join("old.flac"), b"old fixture");
+                write(&added.join("track.flac"), b"inert audio fixture");
+                let cue = b"FILE \"track.flac\" WAVE\n TRACK 01 AUDIO\n  INDEX 01 00:00:00\n";
+                write(&added.join("album.cue"), cue);
+                let live = build_generation(
+                    &fixture,
+                    "library",
+                    &fixture.path("missing"),
+                    std::slice::from_ref(&old),
+                    "previous",
+                );
+                let before = managed_generation_snapshot(&live).unwrap();
+                let staging = fixture.path("library.next");
+                let roots = [old, added.clone()];
+                let result =
+                    build_filtered_staging_with_hook(&staging, &live, &roots, "raced", || {
+                        fs::remove_file(added.join(removed)).unwrap();
+                        Ok(())
+                    });
+                assert!(result
+                    .unwrap_err()
+                    .contains("Arquivo selecionado indisponível"));
+                assert!(!staging.exists());
+                assert_eq!(managed_generation_snapshot(&live).unwrap(), before);
+                write(
+                    &added.join(removed),
+                    if removed == "album.cue" {
+                        cue
+                    } else {
+                        b"restored fixture"
+                    },
+                );
+                let retried = build_filtered_staging(&staging, &live, &roots, "retry").unwrap();
+                assert_link(&staging.join("Added/album.cue"), &added.join("album.cue"));
+                assert_link(&staging.join("Added/track.flac"), &added.join("track.flac"));
+                cleanup_prepared_managed_generation(&retried).unwrap();
+                assert_eq!(managed_generation_snapshot(&live).unwrap(), before);
+            }
+        }
+
+        #[test]
+        fn local_index_gap_diagnostic_allowlist_and_cue_safety_are_not_decoding() {
+            let fixture = Fixture::new("index-gap-candidates");
+            let root = fixture.path("Music");
+            write(&root.join("empty.flac"), b"");
+            write(&root.join("inert.opus"), b"not an audio stream");
+            write(&root.join("auxiliary.txt"), b"auxiliary");
+            // Safe FILE syntax alone does not establish a playable CUE track.
+            write(&root.join("file-only.cue"), b"FILE \"empty.flac\" WAVE\n");
+            write(&root.join("invalid-encoding.cue"), b"\xff\xfe");
+            let source = scan_source(&root).unwrap();
+            assert_eq!(
+                cue_targets(&root.join("file-only.cue"), &root, &source.playable).unwrap(),
+                CueDisposition::Publish
+            );
+            assert_eq!(
+                cue_targets(&root.join("invalid-encoding.cue"), &root, &source.playable).unwrap(),
+                CueDisposition::Excluded
+            );
+            let built = fixture.build(std::slice::from_ref(&root)).unwrap();
+            for name in ["empty.flac", "inert.opus", "file-only.cue"] {
+                assert_link(
+                    &built.staging_path.join("Music").join(name),
+                    &root.join(name),
+                );
+            }
+            for name in ["auxiliary.txt", "invalid-encoding.cue"] {
+                assert!(!built.staging_path.join("Music").join(name).exists());
+            }
+            // No decoder or MPD is involved: this establishes mirror admission only.
+            cleanup_prepared_managed_generation(&built).unwrap();
+        }
+
+        #[test]
+        fn cue_read_io_failures_abort_owned_staging_and_allow_retry() {
+            for kind in [
+                std::io::ErrorKind::PermissionDenied,
+                std::io::ErrorKind::Other,
+            ] {
+                let fixture = Fixture::new("cue-read-injected");
+                let old = fixture.path("Old");
+                let added = fixture.path("Added");
+                write(&old.join("old.flac"), b"old");
+                write(&added.join("track.flac"), b"inert fixture");
+                let cue = added.join("album.cue");
+                write(
+                    &cue,
+                    b"FILE \"track.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+                );
+                let live = build_generation(
+                    &fixture,
+                    "library",
+                    &fixture.path("missing"),
+                    std::slice::from_ref(&old),
+                    "previous",
+                );
+                let before = managed_generation_snapshot(&live).unwrap();
+                let selected = scan_source(&added).unwrap();
+                let staging = fixture.path("library.next");
+                let roots = [old, added.clone()];
+                let coordinator =
+                    std::sync::Arc::new(crate::config_save_operation::Coordinator::new());
+                let (_, operation) = coordinator.reserve().unwrap();
+                // The existing pre-publication seam injects a failure from the
+                // production CUE reader/checker; permissions need not be enforced.
+                let error = build_filtered_staging_with_hook(
+                    &staging,
+                    &live,
+                    &roots,
+                    "read-failed",
+                    || {
+                        cue_targets_with_reader(&cue, &added, &selected.playable, |_| {
+                            Err(std::io::Error::new(kind, "injected CUE read failure"))
+                        })?;
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+                assert!(error.starts_with("Falha ao ler CUE:"));
+                operation.finish(Err(error), false);
+                assert_eq!(
+                    coordinator.snapshot().unwrap().unwrap().phase,
+                    crate::config_save_operation::Phase::Failed
+                );
+                assert!(!staging.exists());
+                assert_eq!(managed_generation_snapshot(&live).unwrap(), before);
+                let (_, retry) = coordinator.reserve().unwrap();
+                let retried = build_filtered_staging(&staging, &live, &roots, "retry").unwrap();
+                assert_link(&staging.join("Added/album.cue"), &cue);
+                cleanup_prepared_managed_generation(&retried).unwrap();
+                retry.finish(Ok(()), false);
+                assert_eq!(managed_generation_snapshot(&live).unwrap(), before);
+            }
+        }
+
+        #[test]
+        fn cue_inventory_distinguishes_unselected_references_from_selected_target_loss() {
+            let fixture = Fixture::new("cue-selected-target");
+            let root = fixture.path("Music");
+            let target = root.join("track.flac");
+            let cue = root.join("album.cue");
+            write(&target, b"inert fixture");
+            write(&cue, b"FILE \"track.flac\" WAVE\nTRACK 01 AUDIO\n");
+            let selected = scan_source(&root).unwrap();
+            assert_eq!(
+                cue_targets(&cue, &root, &selected.playable).unwrap(),
+                CueDisposition::Publish
+            );
+            fs::remove_file(&target).unwrap();
+            assert!(cue_targets(&cue, &root, &selected.playable).is_err());
+            // This reference was absent at scan time: expected exclusion, not I/O.
+            assert_eq!(
+                cue_targets(&cue, &root, &HashSet::new()).unwrap(),
+                CueDisposition::Excluded
+            );
+            let outside = fixture.path("outside.flac");
+            write(&outside, b"outside");
+            symlink(&outside, &target).unwrap();
+            assert!(cue_targets(&cue, &root, &selected.playable).is_err());
+            assert_eq!(
+                cue_targets(&cue, &root, &HashSet::new()).unwrap(),
+                CueDisposition::Excluded
+            );
+            fs::remove_file(&target).unwrap();
+            write(&target, b"restored");
+            assert_eq!(
+                cue_targets(&cue, &root, &selected.playable).unwrap(),
+                CueDisposition::Publish
+            );
         }
 
         #[test]

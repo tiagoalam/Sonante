@@ -159,6 +159,7 @@ function navigationFixture() {
     ...state, activeGenre: state.selectedGenre, activePlexGenre: state.selectedPlexGenre,
     initialAlbumId: undefined, playerTarget: null, playerNavigationRequests: { invalidate() {} },
     plexLibraryRequestGenerationRef: { current: 1 }, plexSearchRequestGenerationRef: { current: 1 },
+    setDiscoverPages() {}, plexDiscover: { cancelArtist() {} },
     libraries: [{ key: "one" }, { key: "two" }],
     onClearInitialArtist() {}, onPlayerNavigationBack() {}, setAlbumLocations() {}, setAlbumCover() {},
     setAlbums() {}, setCollections() {}, setHasCollections() {}, setLoading() {},

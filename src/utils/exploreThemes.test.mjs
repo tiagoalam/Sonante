@@ -5,9 +5,7 @@ import { createExploreSession } from "./explore.ts";
 import { groupExplorePresentation } from "./explorePresentation.ts";
 
 const local = (id, year = "1995", genre = "Jazz") => ({ id, title: `Album ${id}`, artist: `Artist ${id}`, year, genres: [genre], folder_path: `Synthetic/${id}`, discs: [], track_count: 1 });
-const plex = album => ({ rating_key: album.id, title: album.title, artist: album.artist, year: Number(String(album.year).slice(0,4)), genres: album.genres, artist_rating_key: album.artist });
-const context = (albums, source = "both") => ({ local: { albums: source === "plex" ? [] : albums, state: source === "plex" ? "not_configured" : "ready" },
-  plex: { albums: source === "local" ? [] : albums.map(plex), state: source === "local" ? "not_configured" : "ready", identity: {}, serverId: "server", libraryId: "one" } });
+const context = albums => ({ local: { albums, state: "ready" } });
 const entries = albums => albums.map(album => ({ key: album.id, source: "local", album, version: albums }));
 const now = () => new Date("2026-07-01T12:00:00Z");
 const keys = items => items.map(entry => entry.key);
@@ -21,7 +19,7 @@ test("theme years require explicit real nonfuture metadata; the current decade f
   assert.equal(eligibleExploreThemes(entries(albums),2041).find(t=>t.id==="decade").current,false);
 });
 
-test("eligibility counts ten presentation groups, never Local/Plex copies, and excludes only genre placeholders",()=>{
+test("eligibility counts ten presentation groups, never Local copies, and excludes only genre placeholders",()=>{
   const nine=Array.from({length:9},(_,i)=>local(String(i)));
   const duplicates=entries([...nine,...nine.map(a=>({...a,id:`copy-${a.id}`}))]);
   assert.deepEqual(eligibleExploreThemes(duplicates,2026),[]);
@@ -33,15 +31,15 @@ test("eligibility counts ten presentation groups, never Local/Plex copies, and e
   assert.deepEqual(eligibleExploreThemes(entries(punctuation),2026).filter(t=>t.id==="genre"),[{id:"genre",value:"jazz",label:"Jazz"},{id:"genre",value:"rock",label:"Rock"}]);
 });
 
-test("both thematic shelves work for isolated sources, retain original items and prefer eligible Local copies",()=>{
+test("both thematic shelves retain exact Local items",()=>{
   const albums=Array.from({length:14},(_,i)=>local(String(i)));
-  for(const source of ["local","plex","both"]){
+  for(const source of ["local"]){
     const c=context(albums,source),s=createExploreSession(()=>0.3,now);s.syncContext(c,true);
     assert.equal(s.getSnapshot().themes.length,2);
     for(const theme of s.getSnapshot().themes){
       assert.equal(theme.selected.length,10);assert.equal(groupExplorePresentation(theme.selected).length,10);
       assert.ok(theme.selected.every(e=>c[e.source].albums.includes(e.album)));
-      assert.ok(theme.selected.every(e=>e.source===(source==="plex"?"plex":"local")));
+      assert.ok(theme.selected.every(e=>e.source==="local"));
       assert.ok(theme.selected.every(e=>s.canUseShelf(e,s.getSnapshot().revision,theme.id)));
     }
   }
@@ -64,23 +62,22 @@ test("general renewal may change themes/order; rerenders, detail return and cata
   const first=s.getSnapshot();assert.equal(first.themes.find(t=>t.id==="decade").value,1990);
   for(let i=0;i<8;i++)s.syncContext(c,true);assert.equal(s.getSnapshot(),first);
   s.syncContext(c,false);s.syncContext(c,true);assert.deepEqual(s.getSnapshot().themes,first.themes);assert.deepEqual(s.getSnapshot().sectionOrder,first.sectionOrder);
-  const next={...c,plex:{...c.plex,state:"ready",albums:Array.from({length:12},(_,i)=>plex(local(`late-${i}`,"2025","Soul")))}};
+  const next={local:{state:"ready",albums:[...albums,...Array.from({length:12},(_,i)=>local(`late-${i}`,"2025","Soul"))]}};
   s.syncContext(next,true);assert.deepEqual(s.getSnapshot().themes.map(t=>keys(t.selected)),first.themes.map(t=>keys(t.selected)));assert.deepEqual(s.getSnapshot().sectionOrder,first.sectionOrder);
   draw=0.99;s.renew();const renewed=s.getSnapshot();assert.equal(renewed.themes.find(t=>t.id==="decade").value,2020);assert.equal(renewed.themes.find(t=>t.id==="decade").current,true);
   assert.notDeepEqual(renewed.sectionOrder,first.sectionOrder);assert.ok(Object.values(renewed.resets).every(n=>n===1));
-  const old=renewed.themes.find(t=>t.id==="decade").selected[0];s.syncContext({...next,plex:{...next.plex,identity:{},state:"unavailable"}},true);
+  const old=renewed.themes.find(t=>t.id==="decade").selected[0];s.syncContext({...next,local:{...next.local,state:"unavailable"}},true);
   assert.equal(s.canUseShelf(old,renewed.revision,"decade"),false);assert.equal(s.getSnapshot().themes.some(t=>t.id==="decade"),false);
 });
 
 test("artist album fallback follows group identity and stays with one chosen item despite cache/catalog arrivals",()=>{
   const albums=[local("a"),local("b")];albums[1].artist=albums[0].artist;
   const c=context(albums),s=createExploreSession(()=>0,now);s.syncContext(c,true);
-  const localGroup=s.getSnapshot().artists.find(g=>g.source==="local"),plexGroup=s.getSnapshot().artists.find(g=>g.source==="plex");
+  const localGroup=s.getSnapshot().artists.find(g=>g.source==="local");
   const cached=entry=>entry.source==="local"&&entry.album.id==="b";
   const chosen=s.artistAlbum(localGroup,cached);assert.equal(chosen.album.id,"b");assert.equal(chosen.source,"local");
   assert.equal(s.artistAlbum(localGroup,()=>true),chosen);
-  const other=s.artistAlbum(plexGroup);assert.equal(other.source,"plex");assert.ok(other.album.artist_rating_key);
-  s.syncContext({...c,plex:{...c.plex,albums:[...c.plex.albums,plex(local("new"))]}},true);
+  s.syncContext({...c,local:{...c.local,albums:[...c.local.albums,local("new")]}},true);
   assert.equal(s.artistAlbum(localGroup).album,chosen.album);
   s.syncContext({...c,local:{...c.local,state:"unavailable"}},true);assert.equal(s.artistAlbum(localGroup),undefined);
 });

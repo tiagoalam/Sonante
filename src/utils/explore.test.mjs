@@ -7,7 +7,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import i18next from "i18next";
 import { createExploreSession, deriveExploreGroups, EXPLORE_PAGE_SIZE, EXPLORE_SUGGESTION_COUNT, exploreEntryIsCurrent } from "./explore.ts";
 import { exploreGenreCardStyle } from "./exploreGenreCards.ts";
-import { PlexArtistPortraitCache } from "./plexArtistPortraits.ts";
+import { localLibrarySourceOptions, validLocalLibrarySourceSelection, filterLocalAlbumsByScope } from "./localLibraryScope.ts";
+import { createLocalAlbumPlayback } from "./localAlbumPlayback.ts";
 import { LocalAlbumCatalog } from "./localAlbumCatalog.ts";
 import { LocalArtworkResolver } from "./localArtwork.ts";
 import { visitPlayerTarget } from "./playerNavigation.ts";
@@ -21,60 +22,6 @@ const source = path => readFileSync(new URL(path, import.meta.url), "utf8");
 const dataModule = text => `data:text/javascript;base64,${Buffer.from(text).toString("base64")}`;
 const compile = text => ts.transpileModule(text, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
 
-test("opt-in Explore snapshots distinguish inventory, sampling and slices without repeated-render logs or changing selection", async () => {
-  const helper = dataModule(compile(source("./frontendDiagnostics.ts").replaceAll("import.meta.env", '{"DEV":true,"VITE_SONANTE_EXPLORE_DIAGNOSTICS":"1"}')));
-  const instrumented = await import(dataModule(compile(source("./explore.ts").replace(/from "(\.[^"]+)"/g, (_, path) => `from "${path === "./frontendDiagnostics.ts" ? helper : new URL(path, import.meta.url).href}"`))));
-  const old = console.info, logs = [];
-  console.info = (label, json) => { assert.equal(label, "[Sonante] explore.diagnostic"); logs.push(JSON.parse(json)); };
-  try {
-    const c = catalogWithSlices();
-    c.local.albums.forEach((a, i) => { a.source_id = i < 10 ? "/private/root-one" : "/private/root-two"; });
-    c.local.albums[0].title = "https://private/?token=secret";
-    const s = instrumented.createExploreSession(() => 0.5), control = createExploreSession(() => 0.5);
-    s.syncContext(c, true); control.syncContext(c, true);
-    assert.deepEqual(s.getSnapshot(), control.getSnapshot());
-    assert.deepEqual(logs[0].albums.received, { local: 15, plex: 3 });
-    assert.deepEqual(logs[0].albums.eligible, logs[0].albums.received);
-    assert.equal(logs[0].albums.selected.local + logs[0].albums.selected.plex, 5);
-    assert.deepEqual(logs[0].artists, { derived: 2, eligible: 2, sampled: 2, visible: 2 });
-    assert.deepEqual(Object.values(logs[0].localRoots.received).sort((a,b)=>a-b), [5, 10]);
-    for (let i=0;i<20;i++) s.syncContext({ local: { ...c.local }, plex: { ...c.plex } }, true);
-    assert.equal(logs.length, 1);
-    s.renew(); control.renew(); assert.deepEqual(s.getSnapshot(), control.getSnapshot());
-    s.openSlice(s.getSnapshot().genres[0], s.getSnapshot().revision);
-    assert.deepEqual(logs.at(-1).slice.eligible, { local: 15, plex: 3 });
-    assert.equal(logs.at(-1).slice.pages, 3); assert.equal(logs.at(-1).slice.sample.length, 3);
-    s.setPage(1, s.getSnapshot().revision); assert.equal(logs.at(-1).event, "page");
-    const library = logs[0].plexLibrary;
-    s.syncContext({ ...c, plex: { ...c.plex, libraryId: "private-other-library", identity: {} } }, true);
-    assert.notEqual(logs.at(-1).plexLibrary, library); assert.equal(logs.at(-1).slice, null);
-    s.syncContext({ ...c, local: { ...c.local, state: "unavailable" } }, true);
-    assert.equal(logs.at(-1).albums.eligible.local, 0); assert.equal(logs.at(-1).albums.visible.local, 0);
-    const diverse = context(50);
-    [...diverse.local.albums, ...diverse.plex.albums].forEach((a, i) => { a.genres = [`Genre ${i % 20}`]; });
-    s.syncContext(diverse, true); s.renew();
-    assert.equal(logs.at(-1).artists.derived, 100); assert.equal(logs.at(-1).artists.sampled, 4);
-    assert.equal(logs.at(-1).genres.derived, 20); assert.equal(logs.at(-1).genres.sampled, 4);
-    assert.doesNotMatch(JSON.stringify(logs), /private|secret|https:|folder_path|rating_key|source_id/);
-  } finally { console.info = old; }
-});
-
-// The actual session uses injected randomness only in these synthetic tests.
-test("ten suggestions retain exact homonymous editions, artist diversity and both sources without excluding incomplete metadata", () => {
-  const c = context(), session = createExploreSession(() => 0.4); session.syncContext(c, true);
-  const selected = session.getSnapshot().selected;
-  assert.equal(selected.length, 10); assert.equal(new Set(selected.map(e => e.album.artist)).size, 10);
-  assert.equal(new Set(selected.map(e => e.source)).size, 2); assert.equal(new Set(selected.map(e => e.key)).size, 10);
-  for (const entry of selected) assert.ok(c[entry.source].albums.includes(entry.album));
-  const sparse = { ...c, local: { state: "ready", albums: [local("a", ""), local("b", "")] }, plex: { ...c.plex, albums: [plex("a", "")] } };
-  const s = createExploreSession(() => 0); s.syncContext(sparse, true);
-  assert.equal(s.getSnapshot().selected.length, 3); assert.equal(new Set(s.getSnapshot().selected.map(e => e.key)).size, 3);
-  const repeated = context(); repeated.local.albums.forEach(a => a.artist = "Repeated");
-  const r = createExploreSession(() => 0.3); r.syncContext(repeated, true);
-  assert.ok(r.getSnapshot().selected.some(e => e.source === "local"));
-  assert.ok(r.getSnapshot().selected.filter(e => e.source === "plex").length >= 4, "diverse artists take priority after both sources are represented");
-});
-
 test("selection is stable under rerenders/detail return; renewal is in memory and changes selection when alternatives exist", () => {
   const c = context(), s = createExploreSession(() => 0.5); s.syncContext(c, true); const before = s.getSnapshot();
   for (let i = 0; i < 20; i++) s.syncContext({ local: { ...c.local }, plex: { ...c.plex } }, true);
@@ -83,78 +30,6 @@ test("selection is stable under rerenders/detail return; renewal is in memory an
   s.syncContext(c, true); assert.deepEqual(s.getSnapshot().selected.map(e => e.key), before.selected.map(e => e.key));
   s.renew(); assert.notDeepEqual(s.getSnapshot().selected.map(e => e.key), before.selected.map(e => e.key));
   assert.equal(c.local.albums.length, 8); assert.equal(c.plex.albums.length, 8);
-});
-
-test("initial provisional Local data waits for its confirmed response; later sources preserve every published card", () => {
-  const c = context(), s = createExploreSession(() => 0.5);
-  const provisional = { ...c, local: { albums: [local("provisional")], state: "loading" }, plex: { ...c.plex, state: "loading" } };
-  s.syncContext(provisional, true);
-  assert.equal(s.getSnapshot().preparing, true); assert.deepEqual(s.visibleEntries(), []);
-  assert.deepEqual(s.visibleArtists(), []); assert.deepEqual(s.visibleGenres(), []);
-  s.renew(); assert.deepEqual(s.visibleEntries(), []);
-  s.syncContext(c, true);
-  assert.equal(s.getSnapshot().preparing, false); assert.equal(s.visibleEntries().length, 10);
-  assert.ok(s.visibleEntries().every(e => e.album.id !== "provisional"));
-  const unavailable = createExploreSession(() => 0.5);
-  unavailable.syncContext({ ...c, local: { ...c.local, state: "unavailable" } }, true);
-  const first = unavailable.visibleEntries().map(e => e.key);
-  unavailable.syncContext(c, true); assert.deepEqual(unavailable.visibleEntries().map(e => e.key), first);
-  unavailable.renew(); assert.ok(unavailable.visibleEntries().some(e => e.source === "local"));
-});
-
-test("ready Local publishes without waiting for Plex, including pending/failure, empty and invalid contexts", () => {
-  for (const phase of ["loading", "unavailable"]) {
-    const c = context(); c.plex = { ...c.plex, albums: [], state: phase };
-    const s = createExploreSession(() => 0.5); s.syncContext(c, true);
-    assert.equal(s.getSnapshot().preparing, false); assert.equal(s.visibleEntries().length, 8);
-    assert.ok(s.visibleEntries().every(e => e.source === "local"));
-    const before = s.getSnapshot();
-    const next = { ...c, plex: { ...c.plex, albums: context().plex.albums, state: "ready" } };
-    s.syncContext(next, true);
-    assert.deepEqual(s.visibleEntries().map(e => e.key), before.selected.map(e => e.key));
-    assert.deepEqual(s.visibleArtists().map(e => e.key), before.artists.map(e => e.key));
-    s.syncContext(next, false); s.syncContext(next, true);
-    assert.equal(s.getSnapshot().preparing, false);
-    assert.deepEqual(s.visibleEntries().map(e => e.key), before.selected.map(e => e.key));
-    s.renew(); assert.ok(s.visibleEntries().some(e => e.source === "plex"));
-    const old = s.visibleEntries().find(e => e.source === "plex");
-    s.syncContext({ ...next, plex: { ...c.plex, identity: {}, serverId: "other", state: "loading" } }, true);
-    assert.equal(s.validDetail(old), false); assert.ok(s.visibleEntries().every(e => e.source === "local"));
-  }
-  const c = context(0), s = createExploreSession();
-  c.local.state = "empty"; c.plex.state = "loading"; s.syncContext(c, true);
-  assert.equal(s.getSnapshot().preparing, true);
-  s.syncContext({ ...c, plex: { ...c.plex, state: "unavailable", loading: true } }, true);
-  assert.equal(s.getSnapshot().preparing, true, "one failed library does not settle another pending library");
-  s.syncContext({ ...c, plex: { ...c.plex, state: "unavailable", loading: false } }, true);
-  assert.equal(s.getSnapshot().preparing, false); assert.deepEqual(s.visibleEntries(), []);
-  s.syncContext({ ...c, plex: { ...c.plex, state: "empty" } }, true);
-  assert.equal(s.getSnapshot().preparing, false); assert.deepEqual(s.visibleEntries(), []);
-});
-
-test("a short published shelf does not fill or reshuffle on late arrival; renewal sees the expanded catalog", () => {
-  const c = context(2); c.plex = { ...c.plex, albums: [], state: "loading" };
-  const s = createExploreSession(() => 0.5); s.syncContext(c, true); const first = s.visibleEntries().map(e => e.key);
-  const next = { ...c, plex: { ...c.plex, albums: context().plex.albums, state: "ready" } };
-  s.syncContext(next, true); assert.deepEqual(s.visibleEntries().map(e => e.key), first);
-  s.renew(); assert.equal(s.visibleEntries().length, 10);
-});
-
-test("stale click tokens fail across inventory, scope, credential identity, visibility, availability and closure without opening another edition", () => {
-  for (const cause of ["localVersion", "plexVersion", "identity", "library", "visibility", "availability", "close"]) {
-    const c = context(), s = createExploreSession(() => 0.5); s.syncContext(c, true);
-    const old = s.getSnapshot(), entry = old.selected.find(e => e.source === (cause === "localVersion" ? "local" : "plex"));
-    assert.equal(s.canUse(entry, old.revision), true);
-    let next = c;
-    if (cause === "localVersion") next = { ...c, local: { ...c.local, albums: c.local.albums.map(a => ({ ...a })) } };
-    if (cause === "plexVersion") next = { ...c, plex: { ...c.plex, albums: c.plex.albums.map(a => ({ ...a })) } };
-    if (cause === "identity") next = { ...c, plex: { ...c.plex, identity: {}, serverId: "other-server" } };
-    if (cause === "library") next = { ...c, plex: { ...c.plex, identity: {}, libraryId: "other-library" } };
-    if (cause === "availability") next = { ...c, plex: { ...c.plex, state: "unavailable" } };
-    s.syncContext(next, cause !== "visibility"); if (cause === "close") s.close();
-    assert.equal(s.canUse(entry, old.revision), false, cause);
-    if (["localVersion", "plexVersion", "identity", "library", "availability"].includes(cause)) assert.equal(s.validDetail(entry), false, cause);
-  }
 });
 
 test("shared Local coordinator initializes once and blocks loading under update, save, error or MPD unavailability", async () => {
@@ -190,19 +65,23 @@ const hooksUrl = dataModule(`import React from ${JSON.stringify(import.meta.reso
 const translationUrl = dataModule('export const useTranslation = () => ({t: (...args) => globalThis.__exploreTranslation.t(...args)});');
 const artworkUrl = dataModule('export const localArtworkResolver = { get: id => globalThis.__exploreResolver?.get(id) ?? globalThis.__exploreCached?.(id) ?? null, subscribe: (id, fn) => globalThis.__exploreResolver?.subscribe(id, fn) ?? (() => {}), resolve: (album, online, blocked, phase, interested) => globalThis.__exploreResolver ? globalThis.__exploreResolver.resolve(album, online, blocked, phase, interested) : globalThis.__exploreCover(album, () => blocked() || !interested()) };');
 const plexImageUrl = dataModule('export const PlexImage = () => null;');
+const genreSliceUrl = dataModule('export const ExploreGenreSlice = () => null;');
 const placeholderUrl = dataModule('export const AlbumArtworkPlaceholder = () => null;');
 const componentUrl = dataModule(compile(source("../components/ExploreView.tsx"))
   .replace('from "react"', `from ${JSON.stringify(hooksUrl)}`)
   .replace(/from "(react\/jsx-runtime|lucide-react)"/g, (_, name) => `from ${JSON.stringify(import.meta.resolve(name))}`)
   .replace('from "react-i18next"', `from ${JSON.stringify(translationUrl)}`)
-  .replace('from "../utils/plexArtistPortraits"', `from ${JSON.stringify(new URL("./plexArtistPortraits.ts", import.meta.url).href)}`)
+  .replace('from "../utils/frontendDiagnostics"', `from ${JSON.stringify(new URL("./frontendDiagnostics.ts", import.meta.url).href)}`)
+  .replace('from "../utils/artistInitials"', `from ${JSON.stringify(new URL("./artistInitials.ts", import.meta.url).href)}`)
   .replace('from "../utils/exploreGenreCards"', `from ${JSON.stringify(new URL("./exploreGenreCards.ts", import.meta.url).href)}`)
   .replace('from "../utils/exploreAlbumShelf"', `from ${JSON.stringify(new URL("./exploreAlbumShelf.ts", import.meta.url).href)}`)
   .replace('from "../utils/explore"', `from ${JSON.stringify(new URL("./explore.ts", import.meta.url).href)}`)
   .replace('from "../utils/localArtworkSession"', `from ${JSON.stringify(artworkUrl)}`)
   .replace('from "./PlexImage"', `from ${JSON.stringify(plexImageUrl)}`)
+  .replace('from "./ExploreGenreSlice"', `from ${JSON.stringify(genreSliceUrl)}`)
   .replace('from "./AlbumArtworkPlaceholder"', `from ${JSON.stringify(placeholderUrl)}`));
-const { ExploreView, ExploreAlbumCard, ExploreArtistPortrait, ExploreAlbumShelf } = await import(componentUrl);
+const { ExploreGenreSlice } = await import(genreSliceUrl);
+const { ExploreView, ExploreAlbumCard, ExploreArtistArtwork: ExploreArtistPortrait, ExploreAlbumShelf } = await import(componentUrl);
 function host(Component, props) {
   let cursor = 0; const slots = [], effects = [], children = new Map();
   const h = {
@@ -238,29 +117,17 @@ function shallowMarkup(tree) {
     return React.isValidElement(node)&&node.key===null?React.cloneElement(node,{key:index}):node;
   });
   if(!React.isValidElement(tree))return tree;
+  if(tree.type===ExploreGenreSlice)return React.createElement("div",{key:tree.key});
   if(tree.type===ExploreArtistPortrait)return React.createElement("div",{key:tree.key});
   if(tree.type===ExploreAlbumCard)return React.createElement("article",{key:tree.key},tree.props.entry.album.title);
   return React.cloneElement(tree,{},shallowMarkup(tree.props.children));
 }
 
-test("real Explore shelf shows independent source states and selected library, without exposing errors or credentials", () => {
-  for(const language of ["pt-BR","en"])for(const phase of ["loading","empty","not_configured","unavailable","ready"]){
-    globalThis.__exploreTranslation=translations[language];const c=context();c.local.state=phase;
-    const h=host(ExploreView,{context:c,active:true,libraryTitle:"Selected library",ensureLocal(){},isCurrent:()=>true,onOpen(){}});
-    const tree=h.render(),markup=renderToStaticMarkup(shallowMarkup(tree));
-    if(phase === "ready" || phase === "not_configured") assert.ok(!markup.includes(translations[language].t(`explore.states.${phase}`)));
-    else assert.ok(markup.includes(translations[language].t(`explore.states.${phase}`)));
-    assert.ok(markup.includes(translations[language].t(phase === "not_configured" ? "explore.plexScope" : "explore.aggregateScope")));
-    assert.ok(nodes(tree,n=>n.type===ExploreAlbumCard).some(n=>n.props.entry.source==="plex"));
-    assert.ok(!markup.includes(translations[language].t("explore.creatingSuggestions")));h.close();
-  }
-});
-
 test("actual shelf card opens its exact entry, returns to the same selection, renews without queries and rejects stale handlers", () => {
   globalThis.__exploreTranslation=translations.en;const c=context(),opened=[];
   const props={context:c,active:true,libraryTitle:"Selected",ensureLocal(){},isCurrent:()=>true,onOpen:e=>opened.push(e)};
   const h=host(ExploreView,props);let tree=h.render();const before=nodes(tree,n=>n.type===ExploreAlbumCard),entry=before[0];
-  const card=host(ExploreAlbumCard,entry.props);const button=card.render();button.props.onClick();assert.equal(opened[0],entry.props.entry);
+  const card=host(ExploreAlbumCard,entry.props);const button=nodes(card.render(),n=>n.type==="button")[0];button.props.onClick();assert.equal(opened[0],entry.props.entry);
   h.render({...props,active:false});button.props.onClick();assert.equal(opened.length,1);
   tree=h.render(props);assert.deepEqual(nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key),before.map(n=>n.props.entry.key));
   const renew=nodes(tree,n=>n.type==="button")[0];renew.props.onClick();tree=h.render();assert.notDeepEqual(nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key),before.map(n=>n.props.entry.key));
@@ -284,33 +151,13 @@ const appSource=source("../App.tsx"),appAst=ts.createSourceFile("App.tsx",appSou
 function expression(name){let out;const visit=n=>{if(ts.isVariableDeclaration(n)&&n.name.getText(appAst)===name)out=n.initializer.getText(appAst);ts.forEachChild(n,visit);};visit(appAst);assert.ok(out,name);return compile(`export const extracted=${out};`).replace(/^export const extracted\s*=\s*/,"").replace(/;\s*$/,"");}
 function effect(fragment){let out;const visit=n=>{if(ts.isCallExpression(n)&&n.expression.getText(appAst)==="useEffect"&&n.arguments[0].getText(appAst).includes(fragment))out=n.arguments[0].getText(appAst);ts.forEachChild(n,visit);};visit(appAst);assert.ok(out,fragment);return compile(`export const extracted=${out};`).replace(/^export const extracted\s*=\s*/,"").replace(/;\s*$/,"");}
 
-test("App source classification distinguishes not configured/loading/empty/error and masks obsolete Plex scope", () => {
-  const classifyLocal=new Function("localExploreConfigured","isPlaybackAvailable","playbackStatus","localCatalog","mpdHealth",`return (${expression("localExploreState")});`);
-  const localState=(configured,available,status,catalog,health={state:available?"available":"unavailable"})=>classifyLocal(configured,available,status,catalog,health);
-  const base={loaded:true,loading:false,saveBlocked:false,mpdBusy:false,error:null,albums:[local("one")]};
-  assert.equal(localState(false,true,{is_updating:false},base),"not_configured");assert.equal(localState(true,false,{is_updating:false},base),"unavailable");
-  assert.equal(localState(true,true,{is_updating:true},base),"unavailable");assert.equal(localState(true,true,{is_updating:false},{...base,loaded:false}),"loading");
-  assert.equal(localState(true,true,{is_updating:false},{...base,albums:[]}),"empty");assert.equal(localState(true,true,{is_updating:false},{...base,error:"secret error"}),"unavailable");
-  assert.equal(localState(true,false,{is_updating:false},base,{state:"starting"}),"loading");
-  assert.equal(localState(true,true,{is_updating:false},{...base,loading:true}),"ready", "confirmed catalog remains usable during revalidation");
-  const plexState=new Function("isPlexConnected","aggregateCurrent","plexLibrariesIdentity","plexConnectionIdentity","loadingLibraries","aggregateAlbums","plexLibrariesError","aggregateFailures","aggregateLoading","plexAggregate","libraries",`return (${expression("plexExploreState")});`);
-  const conn={},args=[true,true,conn,conn,false,[plex("one")],false,[],false,{started:true},[{key:"library"}]];
-  assert.equal(plexState(...args),"ready");
-  for(const [index,value,expected]of[[0,false,"not_configured"],[1,false,"loading"],[2,{},"loading"],[4,true,"loading"],[5,[],"empty"]]){const changed=[...args];changed[index]=value;assert.equal(plexState(...changed),expected);}
-  assert.equal(plexState(...args.slice(0,5),[],true,[],false,{started:true},[]),"unavailable");
-  assert.equal(plexState(...args.slice(0,5),[],false,["Failed"],false,{started:true},[]),"unavailable");
-  assert.equal(plexState(...args.slice(0,5),[],false,[],true,{started:true},[]),"loading");
-  assert.equal(plexState(...args.slice(0,5),[plex("one")],false,["Failed"],true,{started:true},[]),"ready");
-
-});
-
 test("existing Plex album query publishes error or data once and drops disposed/generation-obsolete responses without another query", async () => {
   for(const scenario of ["success","error","disposed","generation"]){
     const calls=[],pending=deferred(),status=[],published=[],identity={},generation={current:0},conn={};
     const setters=["setAlbums","setCollections","setHasCollections","setLoading","setActiveAlbum","setActiveCollection","setActiveArtist","setFallbackPlexArtist","setSelectedPlexDecade","setSelectedPlexYear","setSelectedPlexUnknownYear","setSelectedPlexGenre","setSearchQuery","setSearchResults","setPlexViewMode"];
     const values=setters.map(name=>name==="setAlbums"?v=>published.push(v):()=>{});
-    const run=new Function("selectedLibrary","plexLibrariesIdentity","plexConnectionIdentity","explorePlexIdentity","plexLibraryRequestGenerationRef","setPlexAlbumLoad","plexService","plexCatalog","plexAlbumLoad","logError",...setters,`return (${effect("plexCatalog.loadLibrary(selectedLibrary")});`)(
-      {key:"exact-library"},conn,conn,identity,generation,v=>status.push(v),{getCollections:()=>Promise.resolve([])},{loadLibrary:(...a)=>{calls.push(a);return pending.promise;}},null,()=>{},...values);
+    const run=new Function("centralSection","plexArea","selectedLibrary","plexLibrariesIdentity","plexConnectionIdentity","plexBrowserIdentity","plexLibraryRequestGenerationRef","setPlexAlbumLoad","plexService","plexCatalog","plexAlbumLoad","logError",...setters,`return (${effect("plexCatalog.loadLibrary(selectedLibrary")});`)(
+      "plex","library",{key:"exact-library"},conn,conn,identity,generation,v=>status.push(v),{getCollections:()=>Promise.resolve([])},{loadLibrary:(...a)=>{calls.push(a);return pending.promise;}},null,()=>{},...values);
     const cleanup=run();assert.deepEqual(calls,[[{key:"exact-library"}]]);assert.equal(status[0].phase,"loading");
     if(scenario==="disposed")cleanup();if(scenario==="generation")generation.current++;
     if(scenario==="error")pending.reject(Error("DO_NOT_EXPOSE"));else pending.resolve([plex("exact")]);await flush();
@@ -336,20 +183,21 @@ test("existing Plex discovery captures library failures and discards responses a
   }
 });
 
-test("App's actual open/back handlers reject stale identities and keep last-section state unchanged", () => {
-  const c=context(),s=createExploreSession(()=>0.5);s.syncContext(c,true);const entry=s.getSnapshot().selected[0];
-  const live={current:{context:c,visible:true}},changes=[];
-  const current=new Function("exploreLive","exploreEntryIsCurrent",`return (${expression("exploreEntryCurrent")});`)(live,exploreEntryIsCurrent);
-  const open=new Function("exploreLive","exploreEntryCurrent","setExploreDetail","setExploreLocalSubview",`return (${expression("openExploreAlbum")});`)(live,current,e=>changes.push(e),v=>assert.equal(v,"browser"));
-  open(entry);assert.equal(changes[0],entry);live.current.visible=false;open(entry);assert.equal(changes.length,1);
-  live.current={context:{...c,local:{...c.local,albums:[]},plex:{...c.plex,identity:{}}},visible:true};open(entry);assert.equal(changes.length,1);
-  const close=new Function("document","setExploreDetail",`return (${expression("closeExploreAlbum")});`)({querySelector:()=>null},e=>changes.push(e));close();assert.equal(changes.at(-1),null);
-  assert.match(appSource,/ExploreView portraits=\{artistPortraits\} context=\{exploreContext\}/);assert.match(appSource,/initialAlbumId=\{exploreDetail\.album\.id\}/);
-  assert.match(appSource,/album=\{exploreDetail\.album\} onBack=\{closeExploreAlbum\}/);
-  assert.match(appSource,/onlineArtworkEnabled=\{config\?\.online_artwork_enabled \?\? false\}/);
-  assert.match(appSource,/subview=\{exploreLocalSubview\} onSubviewChange=\{setExploreLocalSubview\}/);
-  const guardedClose=new Function("document","setExploreDetail",`return (${expression("closeExploreAlbum")});`)({querySelector:()=>({})},e=>changes.push(e));
-  const count=changes.length;guardedClose();assert.equal(changes.length,count);
+test("App's actual Local open/back handlers preserve focused card and reject stale context",()=>{
+ const c=context(),session=createExploreSession(()=>0.5);session.syncContext(c,true);const entry=session.visibleEntries()[0];
+ const live={current:{context:c,visible:true}},changes=[],focus=[];class Element{focus(options){focus.push(options);}}
+ const card=new Element(),returnRef={current:null};const document={activeElement:card,querySelector:()=>null};
+ const current=new Function("exploreLive","exploreEntryIsCurrent",`return (${expression("exploreEntryCurrent")});`)(live,exploreEntryIsCurrent);
+ const open=new Function("exploreLive","exploreEntryCurrent","setExploreDetail","setExploreLocalSubview","exploreDetailReturnRef","document","HTMLElement",`return (${expression("openExploreAlbum")});`)(live,current,e=>changes.push(e),()=>{},returnRef,document,Element);
+ open(entry);assert.equal(changes[0],entry);assert.equal(returnRef.current,card);
+ live.current.visible=false;open(entry);assert.equal(changes.length,1);
+ live.current={context:{local:{albums:[],state:"ready"}},visible:true};open(entry);assert.equal(changes.length,1);
+ const close=new Function("document","setExploreDetail","requestAnimationFrame","exploreDetailReturnRef",`return (${expression("closeExploreAlbum")});`)(document,e=>changes.push(e),fn=>fn(),returnRef);
+ close();assert.equal(changes.at(-1),null);assert.deepEqual(focus,[{preventScroll:true}]);
+ document.querySelector=()=>({});const n=changes.length;close();assert.equal(changes.length,n);
+ assert.match(appSource,/ExploreView context=\{exploreContext\}/);assert.match(appSource,/initialAlbumId=\{exploreDetail\.album\.id\}/);
+ assert.match(appSource,/subview=\{exploreLocalSubview\} onSubviewChange=\{setExploreLocalSubview\}/);
+ assert.doesNotMatch(appSource,/exploreDetail\?\.source === "plex"/);
 });
 
 test("player visits preserve Explore as the return section without replacing its shelf or anchored detail", () => {
@@ -361,61 +209,6 @@ test("player visits preserve Explore as the return section without replacing its
   s.syncContext(c,true);assert.deepEqual(s.getSnapshot().selected,before);
   assert.match(appSource,/const centralSection = playerReturnSection \?\? mediaSource/);
   assert.match(appSource,/else if \(playerTarget\) \{\s*closePlayerNavigation\(\);\s*\} else if \(exploreDetail\)/);
-});
-
-// Directed increment tests use only synthetic catalog payloads and the existing hook host.
-test("artist groups preserve Local/Plex origins, Plex rating identities and scoped nominal fallback", () => {
-  const c=context(0);
-  c.local.albums=[{...local("one"," Artist "),source_id:"source-one"},{...local("two","artist"),source_id:"source-two"},local("unknown","")];
-  c.plex.albums=[{...plex("edition-one","Artist"),artist_rating_key:"100"},{...plex("edition-two","Artist"),artist_rating_key:"200"},plex("fallback","Artist")];
-  const groups=deriveExploreGroups(c);assert.equal(groups.artists.length,4);
-  assert.equal(new Set(groups.artists.map(group=>group.key)).size,4);
-  const s=createExploreSession(()=>0.5);s.syncContext(c,true);
-  for(const group of s.getSnapshot().artists){
-    s.openSlice(group,s.getSnapshot().revision);const entries=s.getSnapshot().slice.entries;
-    if(group.source==="local"){
-      assert.deepEqual(entries.map(e=>e.album.id),["one","two"]);
-      assert.deepEqual(entries.map(e=>e.album.source_id),["source-one","source-two"]);
-    }else {
-      assert.equal(entries.length,1);assert.equal(entries[0].source,"plex");
-      assert.equal(entries[0].identity,c.plex.identity);
-      const expected={"rating:100":"edition-one","rating:200":"edition-two","name:artist":"fallback"};
-      assert.equal(entries[0].album.rating_key,expected[group.artistId]);
-    }
-    assert.ok(entries.every(e=>c[e.source].albums.includes(e.album)));
-    s.leaveSlice(s.getSnapshot().revision);
-  }
-  const other=deriveExploreGroups({...c,plex:{...c.plex,libraryId:"other"}});
-  assert.notDeepEqual(other.artists.filter(g=>g.source==="plex").map(g=>g.key),groups.artists.filter(g=>g.source==="plex").map(g=>g.key));
-});
-
-test("genres reuse validated normalization, filter both sources and never remove untagged albums from shelves", () => {
-  const c=context(0);
-  c.local.albums=[{...local("one"),genres:[" ROCK  ","rock"," ","bad\u0000genre"]},local("absent"),{...local("empty"),genres:[]}];
-  c.plex.albums=[{...plex("one","Other artist"),genres:["Rock","Jazz"]},...Array.from({length:3},(_,i)=>({...plex(`extra-${i}`),genres:["Rock"]}))];
-  const groups=deriveExploreGroups(c);assert.deepEqual(groups.genres.map(g=>g.value),["jazz","rock"]);
-  const rock=groups.genres.find(g=>g.value==="rock");assert.deepEqual(rock.sources,["local","plex"]);
-  const s=createExploreSession(()=>0.4);s.syncContext(c,true);assert.equal(s.getSnapshot().selected.length,7);
-  assert.ok(s.visibleEntries().some(e=>e.source==="local"&&e.album.id==="absent"));
-  s.openSlice(s.getSnapshot().genres.find(g=>g.value==="rock"),s.getSnapshot().revision);
-  const filtered=s.getSnapshot().slice.entries;assert.equal(filtered.length,5);
-  assert.equal(new Set(filtered.map(e=>e.key)).size,5);assert.deepEqual(filtered.map(e=>e.source),["local","plex","plex","plex","plex"]);
-  assert.ok(filtered.every(e=>e.album.title==="Same title"));
-});
-
-test("group derivation and all shelves stay stable through telemetry and detail return; renewal only samples cached inventory", () => {
-  const c=context(20);let genreReads=0;
-  [...c.local.albums,...c.plex.albums].forEach((a,i)=>Object.defineProperty(a,"genres",{get(){genreReads++;return [`Genre ${i%8}`];}}));
-  const s=createExploreSession(()=>0.4);s.syncContext(c,true);const initial=s.getSnapshot(),reads=genreReads;
-  for(let i=0;i<30;i++){s.syncContext({local:{...c.local},plex:{...c.plex}},true);s.candidateCount();s.visibleArtists();s.visibleGenres();}
-  assert.equal(s.getSnapshot(),initial);assert.equal(genreReads,reads);
-  s.syncContext(c,false);s.syncContext(c,true);
-  for(const field of ["selected","artists","genres"])assert.deepEqual(s.getSnapshot()[field],initial[field]);
-  assert.equal(genreReads,reads);
-  s.renew();const renewed=s.getSnapshot();
-  for(const field of ["selected","artists","genres"])assert.notDeepEqual(renewed[field].map(x=>x.key),initial[field].map(x=>x.key));
-  assert.equal(genreReads,reads);assert.equal(renewed.selected.length,10);assert.equal(renewed.artists.length,4);assert.equal(renewed.genres.length,4);
-  assert.equal(new Set(renewed.artists.map(g=>g.source)).size,2);
 });
 
 test("slice membership has its own page guard, never relaxes shelf canUse and restores page after detail", () => {
@@ -433,53 +226,11 @@ test("slice membership has its own page guard, never relaxes shelf canUse and re
   s.leaveSlice(s.getSnapshot().revision);assert.equal(s.getSnapshot().slice,null);assert.deepEqual(s.getSnapshot().selected,initial.selected);
 });
 
-test("catalog/scope/availability changes invalidate slices, old group buttons, result clicks and page commands", () => {
-  for(const cause of ["local","plex","credential","server","library","unavailable","source"]){
-    const c=context(0);c.local.albums=[{...local("one"),genres:["Rock"]},...Array.from({length:3},(_,i)=>({...local(`extra-${i}`),genres:["Rock"]}))];c.plex.albums=[{...plex("one","Plex artist"),genres:["Rock"]}];
-    const s=createExploreSession(()=>0.5);s.syncContext(c,true);const group=s.getSnapshot().genres[0],groupRevision=s.getSnapshot().revision;
-    s.openSlice(group,groupRevision);const old=s.getSnapshot(),entry=s.sliceEntries()[0];assert.equal(s.canUseSlice(entry,old.revision),true);
-    let next=c;
-    if(cause==="local")next={...c,local:{...c.local,albums:c.local.albums.map(a=>({...a}))}};
-    if(cause==="plex")next={...c,plex:{...c.plex,albums:c.plex.albums.map(a=>({...a}))}};
-    if(cause==="credential")next={...c,plex:{...c.plex,identity:{}}};
-    if(cause==="server")next={...c,plex:{...c.plex,serverId:"other"}};
-    if(cause==="library")next={...c,plex:{...c.plex,libraryId:"other"}};
-    if(cause==="unavailable")next={...c,local:{...c.local,state:"unavailable"}};
-    if(cause==="source")next={...c,local:{...c.local,state:"not_configured"}};
-    s.syncContext(next,true);assert.equal(s.getSnapshot().slice,null,cause);assert.equal(s.getSnapshot().sliceInvalidated,true);
-    assert.equal(s.canUseSlice(entry,old.revision),false);const current=s.getSnapshot();s.openSlice(group,groupRevision);s.setPage(0,old.revision);assert.equal(s.getSnapshot(),current);
-  }
-  const c=context(),s=createExploreSession(()=>0.5);s.syncContext(c,true);const old=s.getSnapshot();s.close();s.openSlice(old.artists[0],old.revision);assert.equal(s.getSnapshot().slice,null);
-});
-
 function catalogWithSlices(){
   const c=context(0);c.local.albums=Array.from({length:15},(_,i)=>({...local(`L${i}`,"Artist"),title:i<4?`Other title ${i}`:"Same title",genres:["Rock"]}));
   c.plex.albums=Array.from({length:3},(_,i)=>({...plex(`P${i}`,"Artist"),artist_rating_key:"100",genres:["rock"]}));return c;
 }
 const namedButton=(tree,name)=>nodes(tree,n=>n.type==="button"&&(React.Children.toArray(n.props.children).includes(name)||nodes(n,c=>c.type==="p"&&c.props.children===name).length))[0];
-test("real artist/genre buttons show bounded pages, open exact albums and return to slice then unchanged shelves without catalog or metadata I/O", () => {
-  for(const language of ["pt-BR","en"])for(const kind of ["artist","genre"]){
-    globalThis.__exploreTranslation=translations[language];let ensured=0,covers=0;const opened=[],c=catalogWithSlices(),t=translations[language].t.bind(translations[language]);
-    globalThis.__exploreCover=async()=>{covers++;return null;};
-    const props={context:c,active:true,libraryTitle:"Exact library",ensureLocal(){ensured++;},isCurrent:()=>true,onOpen:e=>opened.push(e)};
-    const h=host(ExploreView,props);let tree=h.render();h.effects();
-    const shelves=nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key);
-    const groupName=kind==="artist"?"Artist":"Rock";
-    const groupButton=kind==="artist"?nodes(tree,n=>n.type==="button"&&nodes(n,p=>p.type==="p"&&p.props.children==="Artist").length&&nodes(n,p=>p.type==="p"&&typeof p.props.children==="string"&&p.props.children.startsWith(t("explore.sources.local")+" · ")).length)[0]:namedButton(tree,groupName);
-    assert.ok(groupButton);groupButton.props.onClick();
-    tree=h.render();h.effects();assert.equal(ensured,1);assert.equal(covers,0);assert.equal(opened.length,0);
-    let cards=nodes(tree,n=>n.type===ExploreAlbumCard);assert.equal(cards.length,6);
-    namedButton(tree,t("explore.nextPage")).props.onClick();tree=h.render();h.effects();cards=nodes(tree,n=>n.type===ExploreAlbumCard);assert.equal(cards.length,6);
-    const page=cards.map(n=>n.props.entry.key),card=host(ExploreAlbumCard,cards[0].props);card.render().props.onClick();assert.equal(opened[0],cards[0].props.entry);
-    h.render({...props,active:false});h.effects();tree=h.render(props);h.effects();
-    assert.deepEqual(nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key),page);
-    namedButton(tree,t("explore.backToShelves")).props.onClick();tree=h.render();h.effects();
-    assert.deepEqual(nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key),shelves);
-    assert.equal(ensured,2,"coordinator called on initial activation and detail return only; never on group/page selection or hide");
-    assert.equal(covers,0,"this host does not mount child artwork effects; selection itself starts no artwork I/O");
-    h.close();card.close();
-  }
-});
 
 test("real slice invalidates delayed cover and obsolete UI controls without reopening or routing another edition", async () => {
   globalThis.__exploreTranslation=translations.en;const c=catalogWithSlices(),opened=[],pending=deferred();let blocked;
@@ -489,39 +240,12 @@ test("real slice invalidates delayed cover and obsolete UI controls without reop
   const group=nodes(tree,n=>n.type==="button"&&nodes(n,p=>p.type==="p"&&p.props.children==="Artist").length&&nodes(n,p=>p.type==="p"&&typeof p.props.children==="string"&&p.props.children.startsWith(translations.en.t("explore.sources.local")+" · ")).length)[0];
   group.props.onClick();
   tree=h.render();h.effects();const back=namedButton(tree,translations.en.t("explore.backToShelves")),next=namedButton(tree,translations.en.t("explore.nextPage"));
-  const node=nodes(tree,n=>n.type===ExploreAlbumCard)[0],card=host(ExploreAlbumCard,node.props),button=card.render();card.effects();assert.equal(blocked(),false);
+  const node=nodes(tree,n=>n.type===ExploreAlbumCard)[0],card=host(ExploreAlbumCard,node.props),button=nodes(card.render(),n=>n.type==="button")[0];card.effects();assert.equal(blocked(),false);
   tree=h.render({...props,context:{...c,local:{...c.local,albums:c.local.albums.map(a=>({...a}))}}});h.effects();
   assert.equal(blocked(),true);pending.resolve("stale");await flush();assert.equal(card.slots[0],null);
   button.props.onClick();group.props.onClick();next.props.onClick();back.props.onClick();assert.equal(opened.length,0);
   tree=h.render();assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(translations.en.t("explore.sliceInvalidated")));
   assert.equal(namedButton(tree,translations.en.t("explore.backToShelves")),undefined);h.close();card.close();
-});
-
-test("real aggregate shelf opens another library without browser navigation and renders translated partial progress/retry", () => {
-  for (const language of ["pt-BR", "en"]) {
-    globalThis.__exploreTranslation=translations[language];const t=translations[language].t.bind(translations[language]);
-    const c=context(0);c.local.state="empty";
-    const a=Array.from({length:7},(_,i)=>({...plex(`A${i}`,"One artist"),title:`Album A${i}`,artist_rating_key:"100",genres:["Rock"],library_id:"1",library_title:"One"}));
-    const b=Array.from({length:7},(_,i)=>({...plex(`B${i}`,"Other artist"),title:`Album B${i}`,artist_rating_key:"200",genres:["Rock"],library_id:"2",library_title:"Two"}));
-    c.plex={...c.plex,albums:[...a,...b],libraryId:"",catalogs:[{libraryId:"1",albums:a},{libraryId:"2",albums:b}],completeness:"partial",loading:true};
-    const live={current:{context:c,visible:true}},opened=[],selectedLibrary={key:"1"};let retries=0;
-    const current=new Function("exploreLive","exploreEntryIsCurrent",`return (${expression("exploreEntryCurrent")});`)(live,exploreEntryIsCurrent);
-    const open=new Function("exploreLive","exploreEntryCurrent","setExploreDetail","setExploreLocalSubview",`return (${expression("openExploreAlbum")});`)(live,current,e=>opened.push(e),()=>{});
-    const props={context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:current,onOpen:open,
-      plexProgress:{loading:true,failedLibraries:["Unavailable library"],discoveryFailed:false,complete:false},retryPlex(){retries++;}};
-    const h=host(ExploreView,props);let tree=h.render();h.effects();
-    const text=renderToStaticMarkup(shallowMarkup(tree));assert.ok(text.includes(t("explore.aggregateScope")));
-    assert.ok(text.includes(t("explore.librariesLoading")));assert.ok(text.includes("Unavailable library"));
-    namedButton(tree,t("explore.retryLibraries")).props.onClick();assert.equal(retries,1);
-    const group=namedButton(tree,"Other artist");assert.ok(group);group.props.onClick();tree=h.render();h.effects();
-    const cards=nodes(tree,n=>n.type===ExploreAlbumCard);assert.equal(cards.length,6);assert.ok(cards.every(n=>n.props.entry.libraryId==="2"));
-    const card=host(ExploreAlbumCard,cards[0].props);card.render().props.onClick();assert.equal(opened[0],cards[0].props.entry);
-    assert.equal(opened[0].album.rating_key,cards[0].props.entry.album.rating_key);assert.equal(selectedLibrary.key,"1");
-    namedButton(tree,t("explore.backToShelves")).props.onClick();tree=h.render();namedButton(tree,"Rock").props.onClick();tree=h.render();
-    assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(t("explore.sliceCount",{count:14})));
-    namedButton(tree,t("explore.nextPage")).props.onClick();tree=h.render();assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,6);
-    h.close();card.close();
-  }
 });
 
 test("actual shelf transitions from preparation to definitive cards, with late load and detail return preserving entries", () => {
@@ -575,51 +299,6 @@ test("a loaded Local cover survives a session revision/late library without anot
   revision=s.getSnapshot().revision;entry=s.visibleEntries().find(e=>e.key===entry.key);
   h.render({...props,entry,revision,current:()=>s.canUse(entry,revision)});h.effects();
   assert.equal(h.slots[0],cover);assert.equal(reads,1);delete globalThis.__exploreCached;h.close();
-});
-
-
-test("portrait arrival changes only the image; same-name Local stays unassociated and navigation keeps the library/page", async () => {
-  globalThis.__exploreTranslation=translations.en;
-  const c=catalogWithSlices();c.plex.albums.forEach(a=>a.library_title="Other library");
-  const pending=deferred(), calls=[];
-  const cache=new PlexArtistPortraitCache((server,key)=>{calls.push([server,key]);return pending.promise;});
-  cache.setContext(c.plex.identity,c.plex.serverId);
-  const props={context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){},portraits:cache};
-  const h=host(ExploreView,props);let tree=h.render();h.effects();
-  const before=h.slots[0].value.getSnapshot();
-  const portraits=nodes(tree,n=>n.type===ExploreArtistPortrait);
-  assert.equal(portraits.length,2);
-  const plexNode=portraits.find(n=>n.props.group.source==="plex"), localNode=portraits.find(n=>n.props.group.source==="local");
-  const localPhoto=host(ExploreArtistPortrait,localNode.props);localPhoto.render();localPhoto.effects();
-  const photo=host(ExploreArtistPortrait,plexNode.props);let image=photo.render();photo.effects();await flush();
-  assert.deepEqual(calls,[["server","100"]]);assert.equal(nodes(image,n=>n.props?.image).length,0);
-  pending.resolve({server_id:"server",path:"/library/metadata/100/thumb/1"});await flush();
-  image=photo.render();const picture=nodes(image,n=>n.props?.image)[0];
-  assert.equal(picture.props.image.path,"/library/metadata/100/thumb/1");assert.equal(picture.props.cacheScope,c.plex.identity);
-  assert.equal(nodes(localPhoto.render(),n=>n.props?.image).length,0);
-  tree=h.render();assert.equal(h.slots[0].value.getSnapshot(),before);
-  const button=nodes(tree,n=>n.type==="button"&&nodes(n,p=>p.type===ExploreArtistPortrait&&p.props.group.source==="plex").length)[0];
-  button.props.onClick();tree=h.render();assert.equal(h.slots[0].value.getSnapshot().slice.group.libraryId,"library");
-  assert.equal(h.slots[0].value.getSnapshot().slice.entries.length,3);assert.equal(h.slots[0].value.getSnapshot().slice.page,0);
-  assert.equal(calls.length,1);h.close();photo.close();localPhoto.close();cache.invalidate();
-});
-
-test("portrait component discards obsolete artist/auth replies and reuses a cached portrait on return", async () => {
-  globalThis.__exploreTranslation=translations.en;
-  const identity={}, pending=deferred(), calls=[];
-  const cache=new PlexArtistPortraitCache((server,key)=>{calls.push(key);return key==="one"?pending.promise:Promise.resolve({server_id:server,path:`/library/metadata/${key}/thumb/1`});});
-  cache.setContext(identity,"server");
-  const group={kind:"artist",key:"one",source:"plex",artistId:"rating:one",ratingKey:"one",name:"Same name"};
-  const props={group,identity,serverId:"server",active:true,cache};const h=host(ExploreArtistPortrait,props);
-  h.render();h.effects();await flush();
-  const next={...props,group:{...group,key:"two",ratingKey:"two"}};
-  assert.equal(nodes(h.render(next),n=>n.props?.image).length,0);h.effects();await flush();
-  pending.resolve({server_id:"server",path:"/library/metadata/one/thumb/1"});await flush();
-  assert.equal(nodes(h.render(),n=>n.props?.image)[0].props.image.path,"/library/metadata/two/thumb/1");
-  h.render({...next,active:false});h.effects();assert.equal(nodes(h.render(next),n=>n.props?.image).length,1);h.effects();await flush();assert.equal(calls.length,2);
-  const newIdentity={};cache.setContext(newIdentity,"server");
-  assert.equal(nodes(h.render({...next,identity:newIdentity}),n=>n.props?.image).length,0);
-  h.effects();await flush();assert.equal(calls.length,3);h.close();cache.invalidate();
 });
 
 
@@ -768,19 +447,6 @@ test("initial configuration waits before onboarding, and source configuration is
   assert.equal(check(null,"explore"),true);assert.equal(check({first_run:false,local_folders:[],plex_token:""},"explore"),false);
 });
 
-test("Local-only, Plex-only and a healthy source alongside failure publish without waiting for unconfigured sources",()=>{
-  for(const sourceName of ["local","plex"])for(const otherState of ["not_configured","unavailable","loading"]){
-    const c=context(5),other=sourceName==="local"?"plex":"local";c[other]={...c[other],albums:[],state:otherState};
-    const s=createExploreSession(()=>0.5);s.syncContext(c,true);assert.equal(s.getSnapshot().preparing,false);assert.equal(s.visibleEntries().length,5);
-    assert.ok(s.visibleEntries().every(e=>e.source===sourceName));const before=s.visibleEntries().map(e=>e.key);
-    s.syncContext(c,false);s.syncContext(c,true);assert.deepEqual(s.visibleEntries().map(e=>e.key),before);
-    globalThis.__exploreTranslation=translations.en;const h=host(ExploreView,{context:c,active:true,ensureLocal(){},isCurrent:()=>true,onOpen(){},onConfigure(){}});
-    const tree=h.render();assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,5);
-    assert.ok(!renderToStaticMarkup(shallowMarkup(tree)).includes(translations.en.t("explore.collectionStartTitle")));
-    assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(translations.en.t(otherState==="not_configured"?`explore.${sourceName}Scope`:"explore.aggregateScope")));h.close();
-  }
-});
-
 test("configured empty or failed sources retain configuration actions and useful retries, with loading distinct from empty",()=>{
   globalThis.__exploreTranslation=translations.en;const t=translations.en.t.bind(translations.en);
   for(const phase of ["empty","unavailable","loading"]){
@@ -796,21 +462,59 @@ test("configured empty or failed sources retain configuration actions and useful
 });
 
 
-test("App reopens the existing wizard as an overlay; cancel only closes it, completion updates config and accepted saves await the monitor",()=>{
-  let wizardNode,exploreNode;
+test("App Configure collection opens Local preferences for absent, empty and unavailable sources without writes",()=>{
+  let exploreNode,settingsNode;
   const visit=n=>{if(ts.isJsxSelfClosingElement(n)){
-    const tag=n.tagName.getText(appAst);if(tag==="WelcomeWizard"&&n.attributes.properties.some(p=>p.name?.getText(appAst)==="onCancel"))wizardNode=n;
-    if(tag==="ExploreView")exploreNode=n;
-  }ts.forEachChild(n,visit);};visit(appAst);assert.ok(wizardNode);assert.ok(exploreNode);
+    if(n.tagName.getText(appAst)==="ExploreView")exploreNode=n;
+    if(n.tagName.getText(appAst)==="SettingsModal")settingsNode=n;
+  }ts.forEachChild(n,visit);};visit(appAst);assert.ok(exploreNode);assert.ok(settingsNode);
   const attr=(node,name)=>node.attributes.properties.find(p=>p.name?.getText(appAst)===name)?.initializer?.expression?.getText(appAst);
-  const config={first_run:false,local_folders:[],plex_token:""},events=[];let opened=false,revision=4;
-  const scope={config,setShowCollectionWizard:v=>{opened=v;events.push(["open",v]);},setConfig:v=>events.push(["config",v]),setLocalCatalogRevision:fn=>{revision=fn(revision);},configSaveMonitorRef:{current:{accepted:op=>events.push(["accepted",op])}}};
+  const config={first_run:false,local_folders:[],plex_token:""},events=[];
+  let opened=false,page="general",draft=null;
+  const busy={current:false};
+  const scope={config,configSaveInProgressRef:busy,
+    setShowSettings:v=>{opened=v;events.push(["open",v]);},
+    setSettingsInitialPage:v=>{page=v;events.push(["page",v]);},
+    setLocalFoldersDraft:v=>{draft=v;events.push(["draft",v]);}};
   const run=(node,name)=>new Function(...Object.keys(scope),`${compile("const extracted = " + attr(node,name))}; return extracted;`)(...Object.values(scope));
-  assert.equal(new Function("config",`return (${attr(wizardNode,"initialConfig")});`)(config),config);
-  run(exploreNode,"onConfigure")();assert.equal(opened,true);run(wizardNode,"onCancel")();assert.equal(opened,false);assert.deepEqual(events,[["open",true],["open",false]]);
-  run(exploreNode,"onConfigure")();const next={...config,local_folders:["/fixture/first"]};run(wizardNode,"onFinish")(next);assert.equal(opened,false);assert.equal(revision,5);assert.ok(events.some(e=>e[0]==="config"&&e[1]===next));
-  const count=events.filter(e=>e[0]==="config").length,operation={id:"fixture-operation",phase:"preparing"};run(wizardNode,"onSaveAccepted")(operation);
-  assert.equal(events.filter(e=>e[0]==="config").length,count);assert.ok(events.some(e=>e[0]==="accepted"&&e[1]===operation));assert.equal(config.local_folders.length,0);
+  const configure=run(exploreNode,"onConfigure"),cancel=run(settingsNode,"onClose");
+  globalThis.__exploreTranslation=translations.en;const t=translations.en.t.bind(translations.en);
+  for(const phase of ["not_configured","empty","unavailable"]){
+    events.length=0;
+    const c=context(0);c.local.state=phase;c.plex.state="not_configured";
+    const h=host(ExploreView,{context:c,active:true,configurationReady:true,onConfigure:configure,ensureLocal(){},isCurrent:()=>true,onOpen(){}});
+    try {
+      const tree=h.render(),button=namedButton(tree,t("explore.configureCollection"));assert.ok(button);assert.equal(button.props.disabled,false);
+      button.props.onClick();assert.equal(opened,true);assert.equal(page,"local");
+      assert.deepEqual(events,[["page","local"],["open",true]],"only navigation; no wizard, save, directory picker or indexing calls");
+      cancel();assert.equal(opened,false);assert.equal(draft,null);
+      assert.deepEqual(events.slice(2),[["open",false],["draft",null]],"Cancel only closes and drops the draft");
+      assert.deepEqual(config,{first_run:false,local_folders:[],plex_token:""});
+      events.length=0;busy.current=true;button.props.onClick();assert.deepEqual(events,[]);assert.equal(opened,false);busy.current=false;
+      assert.equal(namedButton(h.render({context:c,active:false,onConfigure:configure,ensureLocal(){},isCurrent:()=>true,onOpen(){}}),t("explore.configureCollection")).props.disabled,true);
+    } finally {h.close();}
+  }
+  assert.match(source("../App.tsx"),/initialPage=\{settingsInitialPage\}/);
+  assert.doesNotMatch(source("../App.tsx"),/showCollectionWizard|setShowCollectionWizard|collectionWizardWasOpen/);
+});
+
+test("first_run alone retains the onboarding wizard and its completion route",()=>{
+  let guard;const wizards=[];
+  const visit=n=>{
+    if(ts.isIfStatement(n)&&n.expression.getText(appAst)==="config && config.first_run")guard=n;
+    if(ts.isJsxSelfClosingElement(n)&&n.tagName.getText(appAst)==="WelcomeWizard")wizards.push(n);
+    ts.forEachChild(n,visit);
+  };visit(appAst);assert.ok(guard);assert.equal(wizards.length,1);
+  assert.ok(wizards[0].pos>guard.pos&&wizards[0].end<guard.end,"wizard belongs only to first_run return");
+  const check=new Function("config",`return (${guard.expression.getText(appAst)});`);
+  assert.equal(check({first_run:false,local_folders:[]}),false);
+  assert.equal(check({first_run:true,local_folders:[]}),true);
+  assert.equal(check({first_run:true,local_folders:["/fixture"]}),true);
+  assert.ok(!wizards[0].attributes.properties.some(p=>["onCancel","onSaveAccepted"].includes(p.name?.getText(appAst))),"first setup cannot be cancelled into the configured app");
+  const finish=wizards[0].attributes.properties.find(p=>p.name?.getText(appAst)==="onFinish").initializer.expression.getText(appAst);
+  const events=[];const next={first_run:false,local_folders:["/fixture"]};
+  const handler=new Function("setConfig","mainSectionPreference",`${compile("const extracted = " + finish)}; return extracted;`)(v=>events.push(["config",v]),{finishSetup:v=>events.push(["setup",v])});
+  handler(next);assert.deepEqual(events,[["config",next],["setup",next]]);
 });
 
 test("three native shelves retain independent positions, reset only the renewed shelf and survive artist detail return",()=>{
@@ -847,44 +551,26 @@ test("three native shelves retain independent positions, reset only the renewed 
   }finally{h.close();Object.assign(globalThis,previous);}
 });
 
-test("artist imagery uses one associated album, retains initials on absence and replaces only the image when portrait arrives",async()=>{
+test("Local artist imagery uses one associated album and retains initials on absence",async()=>{
   globalThis.__exploreTranslation=translations.en;
   const c=context(1);c.plex.albums[0].artist_rating_key="exact-artist";const s=createExploreSession(()=>0.5);s.syncContext(c,true);
   const group=s.getSnapshot().artists.find(g=>g.source==="local"),entry=s.artistAlbum(group);
-  let reads=0;const r=new LocalArtworkResolver(async()=>{reads++;return null;},async()=>assert.fail("online disabled"));r.setContext(false,c.local.albums);globalThis.__exploreResolver=r;
-  const props={group,identity:c.plex.identity,serverId:"server",active:true,album:entry,currentAlbum:()=>s.validDetail(entry),onlineArtworkEnabled:false};
-  const portrait=host(ExploreArtistPortrait,props);let card;
-  try{
-    const fallback=nodes(portrait.render(),n=>n.type===ExploreAlbumCard)[0];assert.equal(fallback.props.entry,entry);assert.equal(fallback.props.artworkOnly,true);
-    card=host(ExploreAlbumCard,fallback.props);let tree=card.render();card.effects();await flush();tree=card.render();
-    assert.equal(reads,1);assert.equal(nodes(tree,n=>n.type==="button").length,0);assert.equal(nodes(tree,n=>n.type==="img").length,0);assert.ok(nodes(tree,n=>n.type==="span").length);
-    for(let i=0;i<5;i++){card.render();card.effects();}assert.equal(reads,1);
-  }finally{portrait.close();card?.close();delete globalThis.__exploreResolver;}
-  const plexGroup=s.getSnapshot().artists.find(g=>g.source==="plex");
-  const pending=deferred(),cache=new PlexArtistPortraitCache(()=>pending.promise);cache.setContext(c.plex.identity,"server");const associated=s.artistAlbum(plexGroup);
-  const photo=host(ExploreArtistPortrait,{group:plexGroup,identity:c.plex.identity,serverId:"server",active:true,cache,album:associated,currentAlbum:()=>s.validDetail(associated)});
-  try{
-    const before=s.getSnapshot();let tree=photo.render();photo.effects();await flush();assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard)[0].props.entry,associated);
-    pending.resolve({server_id:"server",path:"/library/metadata/exact-artist/thumb/1"});await flush();tree=photo.render();
-    assert.equal(nodes(tree,n=>n.props?.image)[0].props.image.path,"/library/metadata/exact-artist/thumb/1");assert.equal(s.getSnapshot(),before);assert.equal(s.artistAlbum(plexGroup),associated);
-  }finally{photo.close();cache.invalidate();}
-});
-
-
-test("colored navigation genre cards show the count/source of the actual slice, including availability changes",()=>{
-  for(const language of ["pt-BR","en"]){
-    globalThis.__exploreTranslation=translations[language];const t=translations[language].t.bind(translations[language]);
-    const c=context(1);c.local.albums[0].genres=["Jazz"," jazz ","Unknown"];c.plex.albums[0].genres=["Jazz","Desconhecido"];c.plex.albums.push(...Array.from({length:4},(_,i)=>({...plex(`extra-${i}`),genres:["Jazz"]})));
-    const props={context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){}};
-    const h=host(ExploreView,props);let tree=h.render();const button=namedButton(tree,"Jazz");assert.ok(button);
-    assert.equal(button.props["aria-label"],`Jazz · ${t("explore.sliceCount",{count:6})} · ${t("explore.sources.local")} / ${t("explore.sources.plex")}`);
-    assert.equal(namedButton(tree,"Unknown"),undefined);assert.equal(namedButton(tree,"Desconhecido"),undefined);
-    button.props.onClick();tree=h.render();assert.equal(h.slots[0].value.getSnapshot().slice.entries.length,6);assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,6);
-    const s=h.slots[0].value;s.leaveSlice(s.getSnapshot().revision);
-    tree=h.render({...props,context:{...c,local:{...c.local,state:"unavailable"}}});const current=namedButton(tree,"Jazz");
-    assert.equal(current.props["aria-label"],`Jazz · ${t("explore.sliceCount",{count:5})} · ${t("explore.sources.plex")}`);
-    current.props.onClick();h.render();assert.equal(s.getSnapshot().slice.entries.length,5);assert.equal(s.getSnapshot().slice.entries[0].source,"plex");h.close();
+  for(const resolvedCover of [null,"data:image/png;base64,album-cover-fixture"]){
+    let reads=0;const r=new LocalArtworkResolver(async()=>{reads++;return resolvedCover;},async()=>assert.fail("online disabled"));r.setContext(false,c.local.albums);globalThis.__exploreResolver=r;
+    const props={group,identity:c.plex.identity,serverId:"server",active:true,album:entry,currentAlbum:()=>s.validDetail(entry),onlineArtworkEnabled:false};
+    const portrait=host(ExploreArtistPortrait,props);let card;
+    try{
+      const fallback=nodes(portrait.render(),n=>n.type===ExploreAlbumCard)[0];assert.equal(fallback.props.entry,entry);assert.equal(fallback.props.artworkOnly,true);
+      card=host(ExploreAlbumCard,fallback.props);let tree=card.render();card.effects();await flush();tree=card.render();
+      assert.equal(reads,1);assert.equal(nodes(tree,n=>n.type==="button").length,0);
+      if(resolvedCover){
+        assert.equal(nodes(tree,n=>n.type==="img")[0].props.src,resolvedCover);
+        assert.equal(nodes(tree,n=>n.props.role==="img")[0].props["aria-label"],translations.en.t("explore.artistAlbumCover",{album:entry.album.title}));
+      }else{assert.equal(nodes(tree,n=>n.type==="img").length,0);assert.ok(nodes(tree,n=>n.type==="span").length);}
+      for(let i=0;i<5;i++){card.render();card.effects();}assert.equal(reads,1);
+    }finally{portrait.close();card?.close();delete globalThis.__exploreResolver;}
   }
+
 });
 
 
@@ -919,8 +605,8 @@ test("Rock variants open the same real navigation slice and name the album theme
       assert.equal(namedButton(tree,"Rock & Roll"),undefined);assert.equal(namedButton(tree,"Rock and Roll"),undefined);
       assert.ok(nodes(tree,n=>n.type==="h2"&&n.props.children===translations[language].t("explore.genreTheme",{genre:"Rock"})).length);
       button.props.onClick();tree=h.render();const slice=h.slots[0].value.getSnapshot().slice;
-      assert.equal(slice.entries.length,20);assert.equal(new Set(slice.entries.map(e=>e.key)).size,20);
-      assert.deepEqual(slice.entries.map(e=>e.album),[...c.local.albums,...c.plex.albums]);assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,6);
+      assert.equal(slice.entries.length,10);assert.equal(new Set(slice.entries.map(e=>e.key)).size,10);
+      assert.deepEqual(slice.entries.map(e=>e.album),c.local.albums);assert.equal(nodes(tree,n=>n.type===ExploreGenreSlice)[0].props.entries.length,10);
     }finally{h.close();}
   }
 });
@@ -932,5 +618,184 @@ test("the decade shelf title uses four digits in both languages",()=>{
     const h=host(ExploreView,{context:c,active:true,libraryTitle:null,ensureLocal(){},isCurrent:()=>true,onOpen(){}});
     const tree=h.render(),title=translations[language].t("explore.pastDecade",{decade:2010});
     assert.ok(nodes(tree,n=>n.type==="h2"&&n.props.children===title).length);assert.equal(nodes(tree,n=>n.type==="h2"&&n.props.children===translations[language].t("explore.pastDecade",{decade:"10"})).length,0);h.close();
+  }
+});
+
+test('Local source scope uses managed source_id including NAS, keeps All complete and selection independent',()=>{
+ const albums=[{...local('a'),source_id:'managed-a',source_label:'Disk',folder_path:'/same/path'},
+  {...local('b'),source_id:'managed-nas',source_label:'NAS',folder_path:'/same/path'},local('legacy')];
+ const options=localLibrarySourceOptions(albums);assert.deepEqual(options.map(x=>x.id),['managed-a','managed-nas']);
+ const browserSelection='managed-a',exploreSelection='managed-nas';
+ assert.deepEqual(filterLocalAlbumsByScope(albums,exploreSelection,'').map(a=>a.id),['b']);assert.equal(browserSelection,'managed-a');
+ assert.deepEqual(filterLocalAlbumsByScope(albums,null,''),albums);assert.equal(validLocalLibrarySourceSelection('removed-source',options),null);
+ assert.deepEqual(localLibrarySourceOptions([local('no-source')]),[]);
+ const run=new Function('useMemo','filterLocalAlbumsByScope','localCatalog','activeExploreSourceId',`return ${expression('exploreAlbums')};`);
+ assert.deepEqual(run(fn=>fn(),filterLocalAlbumsByScope,{albums},exploreSelection).map(a=>a.id),['b']);
+ assert.match(appSource,/const \[exploreSourceId, setExploreSourceId\] = useState<string \| null>\(null\)/);
+});
+
+test('source changes invalidate Local result/group/page tokens and detail, while normal renders/return never resample',()=>{
+ const albums=Array.from({length:30},(_,i)=>({...local(String(i),'Same artist'),title:`Album ${i}`,genres:['Jazz'],source_id:i<15?'disk':'nas'}));
+ const scope=id=>({local:{albums:filterLocalAlbumsByScope(albums,id,''),state:'ready',sourceId:id}});
+ let draws=0;const s=createExploreSession(()=>{draws++;return .5;});const a=scope('disk');s.syncContext(a,true);
+ const first=s.getSnapshot(),entry=first.selected[0],artist=first.artists[0];s.openSlice(artist,first.revision);s.setPage(1,s.getSnapshot().revision);
+ const slice=s.getSnapshot().slice,selected=s.getSnapshot().selected,n=draws;
+ for(let i=0;i<20;i++)s.syncContext({local:{...a.local}},true);assert.equal(draws,n);
+ s.syncContext(a,false);s.syncContext(a,true);assert.equal(s.getSnapshot().slice,slice);assert.equal(s.getSnapshot().selected,selected);assert.equal(draws,n);
+ const b=scope('nas');s.syncContext(b,true);assert.equal(s.getSnapshot().slice,null);assert.ok(s.visibleEntries().every(e=>e.album.source_id==='nas'));
+ assert.equal(s.canUse(entry,first.revision),false);assert.equal(s.validDetail(entry),false);assert.equal(exploreEntryIsCurrent(b,entry),false);
+ const current=s.getSnapshot();s.openSlice(artist,first.revision);s.setPage(1,first.revision);assert.equal(s.getSnapshot(),current);
+ s.syncContext(scope(null),true);assert.equal(s.candidateCount(),30);assert.ok(s.visibleArtists().every(g=>g.source==='local'));
+});
+
+test('Explore has no Plex context/query/portrait; preserved browser loader is inert for Explore',async()=>{
+ assert.doesNotMatch(appSource,/\.aggregate\(|retryFailures\(|exploreDetail\?\.source === "plex"/);
+ assert.doesNotMatch(source('../components/ExploreView.tsx'),/PlexImage|plexArtistPortraits|context\.plex|retryPlex|plexProgress/);
+ assert.doesNotMatch(source('./explore.ts'),/PlexAlbum|context\.plex|next\.plex|derivePlex/);
+ const calls=[];const dummy=new Proxy({}, {get:()=>()=>{calls.push('Plex query');throw Error('unexpected Plex query');}});
+ const setters=['setAlbums','setCollections','setHasCollections','setLoading'];
+ const run=new Function('selectedLibrary','plexLibrariesIdentity','plexConnectionIdentity','centralSection','plexArea','plexService','plexCatalog',...setters,`return (${effect('plexCatalog.loadLibrary(selectedLibrary')});`);
+ const identity={};run({key:'library'},identity,identity,'explore','library',dummy,dummy,...setters.map(()=>()=>{}))();await flush();assert.deepEqual(calls,[]);
+ const c={local:{albums:[local('only')],state:'ready'}};Object.defineProperty(c,'plex',{get:()=>assert.fail('Plex context read')});
+ const s=createExploreSession(()=>.5);s.syncContext(c,true);assert.equal(s.candidateCount(),1);assert.equal(s.visibleEntries()[0].source,'local');
+});
+
+test('Explore sidebar is under Local, preserves section preference and leaves Discover under Plex',()=>{
+ const ast=ts.createSourceFile('App.tsx',appSource,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let explore,discover;
+ const visit=node=>{if(ts.isJsxSelfClosingElement(node)&&node.tagName.getText(ast)==='SidebarNavItem'){
+  const label=node.attributes.properties.find(p=>p.name?.getText(ast)==='label')?.initializer?.getText(ast);
+  if(label?.includes('explore.title'))explore=node;if(label?.includes('discover.menu'))discover=node;
+ }ts.forEachChild(node,visit);};visit(ast);
+ assert.ok(explore&&discover);assert.equal(explore.parent.openingElement.tagName.getText(ast),'div');assert.match(explore.parent.openingElement.getText(ast),/ml-6 border-l/);
+ assert.match(explore.parent.parent.getText(ast),/navigateLocalSubview\("browser"\)/);assert.match(explore.getText(ast),/mainSectionPreference.navigate\("explore"\)/);
+ assert.match(discover.getText(ast),/setPlexArea\("discover"\).*navigate\("plex"\)/);
+ assert.match(appSource,/new PlexDiscoverSession\(plexService.getDiscover, plexService.getDiscoverChildren, plexService.getDiscoverRecent/);
+});
+
+test('Local Explore exposes loading, empty, unavailable and configuration states in both languages with its source selector',()=>{
+ for(const language of ['en','pt-BR'])for(const phase of ['loading','empty','unavailable','not_configured','ready']){
+  globalThis.__exploreTranslation=translations[language];const c={local:{albums:phase==='ready'?[local('one')]:[],state:phase}};
+  const selector=React.createElement('button',{'aria-label':translations[language].t('explore.selectSource')},translations[language].t('explore.allLibraries'));
+  const h=host(ExploreView,{context:c,active:true,ensureLocal(){},isCurrent:()=>true,onOpen(){},sourceSelector:selector,onConfigure(){},retryLocal(){}});
+  const html=renderToStaticMarkup(shallowMarkup(h.render()));
+  assert.doesNotMatch(html,/explore\.|Plex/);assert.match(html,new RegExp(translations[language].t(phase==='not_configured'?'explore.collectionStartText':'explore.localScope')));
+  if(phase!=='not_configured')assert.ok(html.includes(translations[language].t('explore.allLibraries')));
+  h.close();
+ }
+});
+
+
+test('actual Local Explore main scroll returns after detail and resets only on source change',()=>{
+ globalThis.__exploreTranslation=translations.en;
+ const albums=Array.from({length:12},(_,i)=>({...local(String(i)),source_id:'disk'}));
+ const context={local:{albums,state:'ready',sourceId:null}};
+ const props={context,active:true,ensureLocal(){},isCurrent:()=>true,onOpen(){}};
+ const h=host(ExploreView,props),node={scrollTop:0};
+ const scroll=tree=>nodes(tree,n=>n.type==='div'&&typeof n.props.onScroll==='function')[0];
+ try{
+  let tree=h.render();scroll(tree).props.ref.current=node;h.effects();node.scrollTop=460;scroll(tree).props.onScroll({currentTarget:node});
+  tree=h.render({...props,active:false});h.effects();node.scrollTop=0;scroll(tree).props.onScroll({currentTarget:node});
+  tree=h.render(props);h.effects();assert.equal(node.scrollTop,460);
+  tree=h.render({...props,context:{local:{...context.local,sourceId:'disk'}}});h.effects();assert.equal(node.scrollTop,0);
+ }finally{h.close();}
+});
+
+test("album card has sibling native Play/navigation buttons, translated focus overlay and one explicit activation",async()=>{
+  for(const language of ["en","pt-BR"]){
+    globalThis.__exploreTranslation=translations[language];const c=context(),s=createExploreSession();s.syncContext(c,true);
+    const entry=s.visibleEntries()[0],d=deferred();let plays=0,opens=0,valid;
+    const props={entry,revision:s.getSnapshot().revision,active:true,current:()=>true,isPlaybackAvailable:true,
+      onPlay:async(e,current)=>{assert.equal(e,entry);plays++;valid=current;await d.promise;},onOpen(){opens++;}};
+    const h=host(ExploreAlbumCard,props);let tree=h.render();h.effects();
+    const buttons=nodes(tree,n=>n.type==="button");assert.equal(buttons.length,2);
+    for(const b of buttons)assert.equal(nodes(b.props.children,n=>n.type==="button").length,0);
+    const [open,play]=buttons;
+    assert.equal(play.props.type,"button");assert.equal(play.props.onKeyDown,undefined,"native Enter/Space activation, no duplicate key handler");
+    assert.equal(play.props.title,translations[language].t("common.playAlbum"));assert.ok(play.props["aria-label"].includes(entry.album.title));
+    assert.ok(nodes(tree,n=>n.props?.className?.includes("bg-black/40")&&n.props.className.includes("group-focus-within:opacity-100")).length);
+    assert.ok(play.props.className.includes("w-12 h-12"));assert.equal(plays,0,"render/effects never play");
+    for(const key of [" ","Enter"]){let stopped=0;tree.props.onKeyDown({key,stopPropagation(){stopped++;},preventDefault(){assert.fail("native activation must remain enabled");}});assert.equal(stopped,1);assert.equal(plays,0);}
+    const pending=play.props.onClick();await play.props.onClick();assert.equal(plays,1);assert.equal(opens,0);assert.equal(valid(),true);
+    tree=h.render();h.effects();assert.equal(nodes(tree,n=>n.type==="button")[1].props.disabled,true);
+    d.resolve();await pending;tree=h.render();h.effects();assert.equal(nodes(tree,n=>n.type==="button")[1].props.disabled,false);
+    open.props.onClick();assert.equal(opens,1);assert.equal(plays,1);
+    const artwork=host(ExploreAlbumCard,{...props,artworkOnly:true});assert.equal(nodes(artwork.render(),n=>n.type==="button").length,0);artwork.close();
+    h.close();
+  }
+});
+
+test("card invalidates delayed playback after revision, visibility, MPD, update or unmount even after returning",async()=>{
+  globalThis.__exploreTranslation=translations.en;
+  for(const change of [{revision:2},{active:false},{isPlaybackAvailable:false},{artworkBlocked:true},"unmount"]){
+    const c=context(),s=createExploreSession();s.syncContext(c,true);const entry=s.visibleEntries()[0],d=deferred();let submitted=0;
+    const props={entry,revision:1,active:true,isPlaybackAvailable:true,current:()=>true,onOpen(){},onPlay:async(_,valid)=>{await d.promise;if(valid())submitted++;}};
+    const h=host(ExploreAlbumCard,props);let tree=h.render();h.effects();const run=nodes(tree,n=>n.type==="button")[1].props.onClick();
+    if(change==="unmount")h.close();else{h.render({...props,...change});h.effects();h.render(props);h.effects();}
+    d.resolve();await run;assert.equal(submitted,0);
+    if(change!=="unmount"){tree=h.render();assert.equal(nodes(tree,n=>n.type==="button")[1].props.disabled,false);h.close();}
+  }
+});
+
+test("card failures use sanitized Local playback diagnostics and translated feedback; an explicit retry succeeds",async()=>{
+  globalThis.__exploreTranslation=translations.en;const old=console.error,logs=[];console.error=(...args)=>logs.push(args);
+  try{
+    const c=context(),s=createExploreSession();s.syncContext(c,true);let fail=true;
+    const props={entry:s.visibleEntries()[0],revision:1,active:true,isPlaybackAvailable:true,current:()=>true,onOpen(){},onPlay:async()=>{if(fail)throw Error("/private/fixture?X-Plex-Token=secret");}};
+    const h=host(ExploreAlbumCard,props);let tree=h.render();h.effects();await nodes(tree,n=>n.type==="button")[1].props.onClick();tree=h.render();
+    assert.ok(nodes(tree,n=>n.props?.role==="alert").some(n=>n.props.children===translations.en.t("explore.albumPlayError")));
+    assert.equal(logs.length,1);assert.doesNotMatch(JSON.stringify(logs),/private|secret|X-Plex/);
+    fail=false;await nodes(tree,n=>n.type==="button")[1].props.onClick();tree=h.render();assert.equal(nodes(tree,n=>n.props?.role==="alert").length,0);h.close();
+  }finally{console.error=old;}
+});
+
+test("all real suggested-album uses including themes, artist slices and virtual genre items receive Play; portraits and skeletons do not",()=>{
+  globalThis.__exploreTranslation=translations.en;const c=context(0);c.local.albums=Array.from({length:30},(_,i)=>({...local(`play-${i}`,"Artist"),title:`Album ${i}`,year:"1995",genres:["Jazz"]}));
+  const play=async()=>{};const props={context:c,active:true,isPlaybackAvailable:true,onPlay:play,ensureLocal(){},isCurrent:()=>true,onOpen(){}};
+  const h=host(ExploreView,props);let tree=h.render();h.effects();
+  const cards=nodes(tree,n=>n.type===ExploreAlbumCard);assert.ok(cards.length>10,"main and theme shelves");
+  const check=card=>{assert.equal(card.props.onPlay,play);assert.equal(card.props.isPlaybackAvailable,true);assert.equal(card.props.current(),true);};cards.forEach(check);
+  const session=h.slots[0].value,state=session.getSnapshot();session.openSlice(state.artists[0],state.revision);tree=h.render();h.effects();nodes(tree,n=>n.type===ExploreAlbumCard).forEach(check);
+  session.leaveSlice(session.getSnapshot().revision);session.openSlice(session.getSnapshot().genres[0],session.getSnapshot().revision);tree=h.render();h.effects();
+  const slice=nodes(tree,n=>n.type===ExploreGenreSlice)[0];assert.ok(slice);assert.ok(slice.props.entries.length>6);slice.props.entries.forEach(entry=>check(slice.props.renderItem(entry)));
+  h.close();
+  const loading=host(ExploreView,{...props,context:{local:{albums:[],state:"loading"}}});assert.equal(nodes(loading.render(),n=>n.type===ExploreAlbumCard).length,0);loading.close();
+  const ast=ts.createSourceFile("ExploreView.tsx",source("../components/ExploreView.tsx"),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let real=0,portrait=0;
+  const visit=n=>{if(ts.isJsxSelfClosingElement(n)&&n.tagName.getText(ast)==="ExploreAlbumCard"){
+    const attrs=n.attributes.properties.map(p=>p.name?.getText(ast));if(attrs.includes("artworkOnly")){portrait++;assert.ok(!attrs.includes("onPlay"));}else{real++;assert.ok(attrs.includes("onPlay"));}
+  }ts.forEachChild(n,visit);};visit(ast);assert.equal(real,3);assert.equal(portrait,1);
+});
+
+test("actual App playback callback revalidates live catalog, source scope, visibility, saves and MPD before submission",async()=>{
+  for(const mode of ["success","mpd","loading","saveBlocked","mpdBusy","error","loaded","removed","version","scope","unavailable","hidden","card","save","save-generation","cancel-return"]){
+    const c=context(),s=createExploreSession();s.syncContext(c,true);const entry=s.visibleEntries()[0],d=deferred();let plays=0,card=true;
+    const live={current:{context:c,visible:true}},available={current:true},saving={current:false},saveGeneration={current:0};
+    let snapshot={albums:c.local.albums,loaded:true,loading:false,saveBlocked:false,mpdBusy:false,error:null};
+    const playback=createLocalAlbumPlayback(()=>d.promise,async()=>null,async()=>{plays++;});
+    const scope={localAlbumCatalog:{getSnapshot:()=>snapshot},exploreLive:live,playbackAvailableRef:available,
+      configSaveInProgressRef:saving,configSaveGenerationRef:saveGeneration,explorePlayback:playback,
+      exploreEntryCurrent:e=>exploreEntryIsCurrent(live.current.context,e)};
+    const run=new Function(...Object.keys(scope),`return (${expression("playExploreAlbum")});`)(...Object.values(scope));
+    const pending=run(entry,()=>card);
+    if(mode==="mpd")available.current=false;
+    else if(["loading","saveBlocked","mpdBusy"].includes(mode))snapshot={...snapshot,[mode]:true};
+    else if(mode==="loaded")snapshot={...snapshot,loaded:false};
+    else if(mode==="error")snapshot={...snapshot,error:"fixture"};
+    else if(mode==="removed")snapshot={...snapshot,albums:[]};
+    else if(mode==="version")snapshot={...snapshot,albums:[...snapshot.albums]};
+    else if(mode==="scope")live.current.context={local:{...c.local,albums:[...c.local.albums],sourceId:"other"}};
+    else if(mode==="unavailable")live.current.context={local:{...c.local,state:"unavailable"}};
+    else if(mode==="hidden")live.current.visible=false;
+    else if(mode==="card")card=false;
+    else if(mode==="save")saving.current=true;
+    else if(mode==="save-generation")saveGeneration.current++;
+    else if(mode==="cancel-return"){
+      let effect;
+      const visit=n=>{if(ts.isCallExpression(n)&&n.expression.getText(appAst)==="useLayoutEffect"&&n.arguments[0].getText(appAst).includes("explorePlayback.cancel"))effect=n;ts.forEachChild(n,visit);};visit(appAst);assert.ok(effect);
+      const deps=effect.arguments[1].getText(appAst);for(const key of ["exploreAlbums","activeExploreSourceId","centralSection","playerTarget","exploreDetail","isPlaybackAvailable","playbackStatus.is_updating","localCatalog.albums","localCatalog.loading","localCatalog.saveBlocked"])assert.ok(deps.includes(key));
+      const setup=new Function("explorePlayback",`${compile("const setup = "+effect.arguments[0].getText(appAst))}; return setup;`)(playback);
+      setup()();
+    }
+    d.resolve([{disc:{number:1},tracks:[{path:"exact-source/disc.cue/track0001",name:"one"}]}]);await pending;
+    assert.equal(plays,mode==="success"?1:0,mode);
   }
 });

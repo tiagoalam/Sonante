@@ -58,7 +58,7 @@ Package installation does **not** enable a system-wide MPD service. Sonante mana
 
 ### System requirements
 
-- A Linux desktop with **GTK 3 and WebKitGTK 4.1** support.
+- A Linux desktop with **GTK 3 and WebKitGTK 4.1 API, library version 2.40 or newer** support.
 - **MPD** for playback, decoding, and local-library indexing; available formats depend on the installed MPD build.
 - **ALSA** and `aplay` (usually from `alsa-utils`) for audio devices.
 - **OpenSSL 3**, `xdg-open`, and an **XDG Desktop Portal** backend for integration with the desktop and folder selection.
@@ -66,6 +66,12 @@ Package installation does **not** enable a system-wide MPD service. Sonante mana
 - **`webp-pixbuf-loader` is optional for artwork**: it is recommended by the DEB/RPM packages and listed as an optional dependency in Arch. Without it, some WebP artwork previews may be unavailable.
 
 Exact native dependencies vary by distribution and are checked as part of packaging. The Ubuntu 22.04 build is additionally checked against a maximum required **GLIBC 2.35** symbol version; this does not guarantee compatibility with every distribution or device.
+
+The current DEB/RPM packaging requires WebKitGTK **2.40 or newer**: Tauri/Wry uses [`webkit_uri_scheme_request_get_http_body`, introduced in 2.40](https://webkitgtk.org/reference/webkit2gtk/2.42.1/method.URISchemeRequest.get_http_body.html). The **4.1** API/SONAME does not imply that library version. A Fedora 37 installation with WebKitGTK 2.38.2 accepted the older v0.4.9 RPM but failed at startup with this missing symbol. Versioned package requirements prevent that unsupported dependency combination; they do not establish full Fedora compatibility or replace installation/startup validation with suitable dependencies.
+
+RPM uses the rich dependency `(webkit2gtk4.1 >= 2.40)`: the pinned [Tauri CLI 2.12.0 bundler](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.0/crates/tauri-bundler/src/bundle/linux/rpm.rs) stores dependency strings as names, and RPM interprets a leading `(` using its [rich dependency parser](https://github.com/rpm-software-management/rpm/blob/master/lib/rpmds.cc). The unparenthesized string becomes an unsatisfiable literal name. Inspection checks REQUIRENAME/REQUIREFLAGS/REQUIREVERSION; CI also runs `python3 tests/rpm_solver_check.py <candidate.rpm>` with real RPM tools and a disposable database (`--test --noscripts --notriggers`), accepting 2.40/2.52.1 and rejecting 2.38.2, no provider, and the old literal encoding. Other dependencies in that test have synthetic providers; this does not prove a complete Fedora installation or runtime.
+
+Fedora 44 lists [libayatana-appindicator-gtk3](https://packages.fedoraproject.org/pkgs/libayatana-appindicator/libayatana-appindicator-gtk3/fedora-44.html) as the provider of `libayatana-appindicator3.so.1()(64bit)` required by the Ubuntu-built RPM. [libappindicator-gtk3](https://packages.fedoraproject.org/pkgs/libappindicator/libappindicator-gtk3/fedora-44.html) provides the different `libappindicator3.so.1()(64bit)` and cannot replace that ABI requirement. The separate [mpd package](https://packages.fedoraproject.org/pkgs/mpd/mpd/fedora-44-updates.html) provides `mpd` and `/usr/bin/mpd`. Repository metadata establishes available providers, not their installation or operation on a particular machine.
 
 ## Getting started
 

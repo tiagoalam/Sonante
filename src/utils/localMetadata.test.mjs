@@ -226,10 +226,30 @@ test("Local sidebar omits Metadata and preserves Local/player subview context an
 });
 
 test("App leaves Escape to an open Local dialog instead of unmounting the player host before confirmations", () => {
-  const expression = expressionFrom("../App.tsx", "handleKeyDown"), calls = [];
-  const doc = { activeElement: { tagName: "BUTTON" }, querySelector: selector => selector === "[data-local-tag-dialog-open]" ? {} : null };
-  const handler = new Function("document", "playerNavigationRequests", `return (${expression});`)(doc, { invalidate: () => calls.push("invalidated") });
-  handler({ key: "Escape", ctrlKey: false, metaKey: false }); assert.deepEqual(calls, []);
+  const expression = expressionFrom("../App.tsx", "handleKeyDown");
+  for (const mode of ["closed", "embedded", "detached"]) for (const modal of [null, "settings", "about"]) {
+    const calls = [], player = { kind: "local", albumId: "A" };
+    // Local retains this marker during draft/result confirmations and Apply.
+    let dialog = { phase: "draft" };
+    const scope = { nowPlayingHosting: { getSnapshot: () => ({ mode }) }, showSettings: modal === "settings", showAbout: modal === "about",
+      showQueue: false, playerTarget: player, exploreDetail: null, discoverAlbum: null, discoverArtist: null,
+      centralSection: "local", plexArea: "library", searchQuery: "", document: { activeElement: { tagName: "BUTTON" }, querySelector: selector => selector === "[data-local-tag-dialog-open]" ? dialog : null },
+      playerNavigationRequests: { invalidate: () => calls.push("invalidated") },
+      closePlayerNavigation: () => calls.push("close-player"), setShowSettings: value => calls.push(["settings", value]),
+      setLocalFoldersDraft: value => calls.push(["folder-draft", value]), setShowAbout: value => calls.push(["about", value]) };
+    const handler = new Function(...Object.keys(scope), `return (${expression});`)(...Object.values(scope));
+    for (const phase of ["draft", "discard-confirmation", "result-confirmation", "applying"]) {
+      dialog = { phase }; calls.length = 0;
+      handler({ key: "Escape", ctrlKey: false, metaKey: false, preventDefault() {} });
+      assert.deepEqual(calls, [], `${mode}/${modal}/${phase}: Local dialog retains ownership`);
+      assert.equal(dialog.phase, phase); assert.equal(scope.playerTarget, player);
+    }
+    dialog = null; calls.length = 0;
+    handler({ key: "Escape", ctrlKey: false, metaKey: false, preventDefault: () => calls.push("prevented") });
+    const expected = modal ? ["prevented", "invalidated", [modal, false]] : mode === "embedded" ? [] : ["invalidated", "close-player"];
+    if (modal === "settings") expected.push(["folder-draft", null]);
+    assert.deepEqual(calls, expected);
+  }
 });
 
 

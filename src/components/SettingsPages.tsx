@@ -2,12 +2,13 @@ import React, { useId, useRef, useState } from "react";
 import { HardDrive, Languages, Radio, Server } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-type Page = "general" | "audio" | "local" | "plex";
+export type SettingsPage = "general" | "audio" | "local" | "plex";
 
 // All panels stay mounted: changing pages must not reset drafts or async work.
-export function SettingsPages({ general, audio, local, plex }: Record<Page, React.ReactNode>) {
+export function SettingsPages({ initialPage = "general", general, audio, local, plex }: Record<SettingsPage, React.ReactNode> & { initialPage?: SettingsPage }) {
   const { t } = useTranslation();
-  const [active, setActive] = useState<Page>("general");
+  // Consume the destination once on mount; polling must not override user navigation.
+  const [active, setActive] = useState<SettingsPage>(initialPage);
   const id = useId();
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
   const scroll = useRef<HTMLDivElement>(null);

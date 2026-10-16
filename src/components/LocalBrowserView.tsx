@@ -30,7 +30,8 @@ import { favoritesService } from "../services/favorites";
 import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
 import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDiscs";
-import { LocalAlbumCatalog, emptyLocalAlbumCatalogState, localCatalogActivity } from "../utils/localAlbumCatalog";
+import { localAlbumCatalog } from "../utils/localAlbumCatalogSession";
+import { emptyLocalAlbumCatalogState, localCatalogActivity } from "../utils/localAlbumCatalog";
 import { albumLocationSources } from "../utils/localAlbumLocations";
 import { localArtworkEnrichment, localArtworkResolver } from "../utils/localArtworkSession";
 import {
@@ -77,7 +78,7 @@ import { validAlbumGenre } from "../utils/albumGenres";
 import { deriveLocalGenreFamilies, filterLocalAlbumsByFamily } from "../utils/localGenreFamilies";
 import { AlbumGenreGrid } from "./AlbumGenreGrid";
 
-export const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
+export { localAlbumCatalog } from "../utils/localAlbumCatalogSession";
 
 async function getLocalAlbumCover(album: LocalAlbum, onlineEnabled: boolean | (() => boolean), libraryUpdating: boolean | (() => boolean), consumerActive: () => boolean = () => true): Promise<string | null> {
   const version = localAlbumCatalog.getSnapshot().albums;

@@ -1,3 +1,6 @@
+#[path = "plex_discover.rs"]
+mod discover;
+pub use discover::{PlexDiscoverPage, PlexDiscoverRecent, PlexDiscoverHub, PlexDiscoverArtistContent, PlexLibraryMixPage, PlexMixYears, PlexMixStyles, PlexStyleSelection};
 use crate::audio::MediaLocator;
 use crate::config::AppConfig;
 use reqwest::{header::CONTENT_TYPE, RequestBuilder, StatusCode};

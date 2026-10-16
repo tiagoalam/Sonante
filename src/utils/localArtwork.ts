@@ -54,6 +54,10 @@ export class LocalArtworkResolver {
     return this.coverSources.get(albumId) ?? null;
   }
 
+  getDiagnostics(): { active: number; queued: number; inFlight: number; blocked: boolean } {
+    return { active: this.active, queued: this.queued.length, inFlight: this.inFlight.size, blocked: this.blocked };
+  }
+
   setContext(blocked: boolean, catalog: readonly LocalAlbum[]): void {
     if (this.blocked === blocked && this.catalog === catalog) return;
     this.blocked = blocked;

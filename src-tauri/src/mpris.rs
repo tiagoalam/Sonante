@@ -232,26 +232,162 @@ async fn query_audio_snapshot_async(app: AppHandle) -> Result<MprisSnapshot, Str
         .map_err(|error| format!("Falha na tarefa MPRIS: {error}"))?
 }
 
-async fn publish_snapshot(app: AppHandle, snapshot: MprisSnapshot) -> Result<(), String> {
-    let (server, changed) = {
-        let state = app
-            .try_state::<MprisState>()
-            .ok_or_else(|| "Estado do serviço MPRIS indisponível.".to_string())?;
-        let mut lifecycle = state
-            .0
-            .lock()
-            .map_err(|error| format!("Falha ao acessar o lifecycle MPRIS: {error}"))?;
-        if lifecycle.phase != LifecyclePhase::Running {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshStage {
+    MpdQuery,
+    DbusEmit,
+    ServiceState,
+}
+
+#[derive(Debug)]
+struct RefreshError {
+    stage: RefreshStage,
+    error: String,
+}
+
+impl RefreshError {
+    fn new(stage: RefreshStage, error: impl ToString) -> Self {
+        Self {
+            stage,
+            error: error.to_string(),
+        }
+    }
+
+    fn summary(&self) -> String {
+        let stage = match self.stage {
+            RefreshStage::MpdQuery => "mpd_query",
+            RefreshStage::DbusEmit => "dbus_emit",
+            RefreshStage::ServiceState => "service_state",
+        };
+        format!(
+            "stage={stage} {}",
+            crate::diagnostics::error_summary(&self.error)
+        )
+    }
+}
+
+#[derive(Debug)]
+struct SnapshotUpdates {
+    // Serialize BEFORE querying, not just before sending: a delayed query must
+    // not publish an older result after a newer refresh. Never blocks audio
+    // commands or holds the synchronous lifecycle lock over I/O/await.
+    serial: tauri::async_runtime::Mutex<()>,
+    published: Mutex<Option<MprisSnapshot>>,
+    stopped: AtomicBool,
+    pending: Mutex<Option<std::task::Waker>>,
+}
+
+impl SnapshotUpdates {
+    fn new() -> Self {
+        Self {
+            serial: tauri::async_runtime::Mutex::new(()),
+            published: Mutex::new(None),
+            stopped: AtomicBool::new(false),
+            pending: Mutex::new(None),
+        }
+    }
+
+    fn stop(&self) {
+        // Registering a pending operation and stopping it share this lock, so
+        // cancellation cannot lose a wakeup. Only the serialized owner uses it.
+        let wake = match self.pending.lock() {
+            Ok(mut pending) => {
+                self.stopped.store(true, Ordering::SeqCst);
+                pending.take()
+            }
+            Err(_) => {
+                self.stopped.store(true, Ordering::SeqCst);
+                None
+            }
+        };
+        if let Ok(mut published) = self.published.lock() {
+            *published = None;
+        }
+        if let Some(wake) = wake {
+            wake.wake();
+        }
+    }
+
+    async fn while_running<F: std::future::Future>(
+        &self,
+        future: F,
+    ) -> Result<Option<F::Output>, RefreshError> {
+        let mut future = std::pin::pin!(future);
+        let result = std::future::poll_fn(|cx| {
+            let mut pending = match self.pending.lock() {
+                Ok(pending) => pending,
+                Err(error) => {
+                    return std::task::Poll::Ready(Err(RefreshError::new(
+                        RefreshStage::ServiceState,
+                        error,
+                    )))
+                }
+            };
+            if self.stopped.load(Ordering::SeqCst) {
+                return std::task::Poll::Ready(Ok(None));
+            }
+            *pending = Some(cx.waker().clone());
+            drop(pending);
+            // No synchronous lock is held while polling query or D-Bus I/O.
+            future.as_mut().poll(cx).map(|value| Ok(Some(value)))
+        })
+        .await;
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.take();
+        }
+        result
+    }
+
+    async fn refresh<Q, QF, E, EF>(&self, query: Q, emit: E) -> Result<(), RefreshError>
+    where
+        Q: FnOnce() -> QF,
+        QF: std::future::Future<Output = Result<MprisSnapshot, String>>,
+        E: FnOnce(MprisSnapshot, Vec<ChangedProperty>) -> EF,
+        EF: std::future::Future<Output = Result<(), String>>,
+    {
+        let _serial = self.serial.lock().await;
+        if self.stopped.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let changed = changed_properties(lifecycle.snapshot.as_ref(), &snapshot);
-        lifecycle.snapshot = Some(snapshot.clone());
-        (lifecycle.server.clone(), changed)
-    };
+        let Some(snapshot) = self.while_running(query()).await? else {
+            return Ok(());
+        };
+        let snapshot =
+            snapshot.map_err(|error| RefreshError::new(RefreshStage::MpdQuery, error))?;
+        let changed = {
+            let published = self
+                .published
+                .lock()
+                .map_err(|error| RefreshError::new(RefreshStage::ServiceState, error))?;
+            if self.stopped.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            changed_properties(published.as_ref(), &snapshot)
+        };
+        if !changed.is_empty() {
+            let Some(result) = self.while_running(emit(snapshot.clone(), changed)).await? else {
+                return Ok(());
+            };
+            result.map_err(|error| RefreshError::new(RefreshStage::DbusEmit, error))?;
+        }
+        let mut published = self
+            .published
+            .lock()
+            .map_err(|error| RefreshError::new(RefreshStage::ServiceState, error))?;
+        // stop() and this commit use the same lock; a late completion cannot
+        // restore cleared state. Only a successful send consumes the delta.
+        if !self.stopped.load(Ordering::SeqCst) {
+            *published = Some(snapshot);
+        }
+        Ok(())
+    }
+}
 
-    let Some(server) = server else {
-        return Ok(());
-    };
+async fn publish_snapshot(
+    server: Arc<SonanteMprisServer>,
+    snapshot: MprisSnapshot,
+    changed: Vec<ChangedProperty>,
+) -> Result<(), String> {
     let mut properties = Vec::new();
     for property in changed {
         match property {
@@ -263,18 +399,33 @@ async fn publish_snapshot(app: AppHandle, snapshot: MprisSnapshot) -> Result<(),
             }
         }
     }
-    if properties.is_empty() {
-        return Ok(());
-    }
     server
         .properties_changed(properties)
         .await
         .map_err(|error| format!("Falha ao emitir PropertiesChanged MPRIS: {error}"))
 }
 
-fn refresh_properties_blocking(app: AppHandle) -> Result<(), String> {
-    let snapshot = query_audio_snapshot(&app)?;
-    tauri::async_runtime::block_on(publish_snapshot(app, snapshot))
+fn refresh_properties_blocking(app: AppHandle) -> Result<(), RefreshError> {
+    let (server, updates) = {
+        let state = app.try_state::<MprisState>().ok_or_else(|| {
+            RefreshError::new(RefreshStage::ServiceState, "MPRIS state unavailable")
+        })?;
+        let lifecycle = state
+            .0
+            .lock()
+            .map_err(|error| RefreshError::new(RefreshStage::ServiceState, error))?;
+        if lifecycle.phase != LifecyclePhase::Running {
+            return Ok(());
+        }
+        let server = lifecycle.server.clone().ok_or_else(|| {
+            RefreshError::new(RefreshStage::ServiceState, "MPRIS server unavailable")
+        })?;
+        (server, Arc::clone(&lifecycle.updates))
+    };
+    tauri::async_runtime::block_on(updates.refresh(
+        || query_audio_snapshot_async(app),
+        |snapshot, changed| publish_snapshot(server, snapshot, changed),
+    ))
 }
 
 #[derive(Debug)]
@@ -324,7 +475,7 @@ impl SonanteMpris {
         if let Err(error) = refresh {
             eprintln!(
                 "[MPRIS] Control accepted, but property refresh failed: {}",
-                crate::diagnostics::error_summary(&error)
+                error.summary()
             );
         }
         Ok(())
@@ -710,7 +861,7 @@ trait PlayerObserverRuntime {
     type Connection: PlayerObserverConnection;
 
     fn connect(&mut self, control: &ObserverControl) -> Result<Self::Connection, String>;
-    fn refresh_snapshot(&mut self) -> Result<(), String>;
+    fn refresh_snapshot(&mut self) -> Result<(), RefreshError>;
 }
 
 struct MpdObserverConnection {
@@ -763,9 +914,50 @@ impl PlayerObserverRuntime for AppObserverRuntime<'_> {
         Ok(MpdObserverConnection { stream, reader })
     }
 
-    fn refresh_snapshot(&mut self) -> Result<(), String> {
+    fn refresh_snapshot(&mut self) -> Result<(), RefreshError> {
         refresh_properties_blocking(self.app.clone())
     }
+}
+
+// One initial attempt plus at most three retries (250ms, 500ms, 1s).
+// Exhaustion returns to idle events, never an ongoing refresh timer.
+const REFRESH_RETRIES: usize = 3;
+
+fn refresh_observer_snapshot<R, W>(
+    runtime: &mut R,
+    control: &ObserverControl,
+    wait_for_retry: &mut W,
+) -> Result<(), String>
+where
+    R: PlayerObserverRuntime,
+    W: FnMut(&ObserverControl, Duration) -> Result<bool, String>,
+{
+    let mut backoff = ReconnectBackoff::new(Duration::from_millis(250), Duration::from_secs(1));
+    for attempt in 0..=REFRESH_RETRIES {
+        if control.is_cancelled() {
+            return Ok(());
+        }
+        match runtime.refresh_snapshot() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                eprintln!(
+                    "[MPRIS] Snapshot refresh failed: attempt={} {}",
+                    attempt + 1,
+                    error.summary()
+                );
+                if attempt == REFRESH_RETRIES {
+                    eprintln!(
+                        "[MPRIS] Snapshot refresh retries exhausted; waiting for a player event."
+                    );
+                    return Ok(());
+                }
+                if !wait_for_retry(control, backoff.next_delay())? {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_observer_state_machine<R, W>(
@@ -795,22 +987,15 @@ where
                 if control.is_cancelled() {
                     Ok(())
                 } else {
-                    if let Err(error) = runtime.refresh_snapshot() {
-                        eprintln!(
-                            "[MPRIS] Observer snapshot unavailable: {}",
-                            crate::diagnostics::error_summary(&error)
-                        );
-                    }
+                    refresh_observer_snapshot(runtime, control, &mut wait_for_retry)?;
                     loop {
+                        if control.is_cancelled() {
+                            break Ok(());
+                        }
                         match connection.wait_for_player_change() {
                             Ok(()) if control.is_cancelled() => break Ok(()),
                             Ok(()) => {
-                                if let Err(error) = runtime.refresh_snapshot() {
-                                    eprintln!(
-                                        "[MPRIS] Failed to refresh player event: {}",
-                                        crate::diagnostics::error_summary(&error)
-                                    );
-                                }
+                                refresh_observer_snapshot(runtime, control, &mut wait_for_retry)?;
                             }
                             Err(error) => break Err(error),
                         }
@@ -869,7 +1054,7 @@ struct ServiceLifecycle {
     server: Option<Arc<SonanteMprisServer>>,
     startup_task: Option<tauri::async_runtime::JoinHandle<()>>,
     observer: Option<ObserverHandle>,
-    snapshot: Option<MprisSnapshot>,
+    updates: Arc<SnapshotUpdates>,
 }
 
 impl ServiceLifecycle {
@@ -879,7 +1064,7 @@ impl ServiceLifecycle {
             server: None,
             startup_task: None,
             observer: None,
-            snapshot: None,
+            updates: Arc::new(SnapshotUpdates::new()),
         }
     }
 
@@ -934,7 +1119,7 @@ impl ServiceLifecycle {
         Option<ObserverHandle>,
     ) {
         self.phase = LifecyclePhase::Stopping;
-        self.snapshot = None;
+        self.updates.stop();
         (
             self.server.take(),
             self.startup_task.take(),
@@ -1198,6 +1383,7 @@ mod tests {
 
     fn audio_status(state: &str, current_media: Option<CurrentMedia>) -> AudioPlaybackStatus {
         AudioPlaybackStatus {
+            options: None,
             state: state.into(),
             elapsed: 12.5,
             duration: 245.25,
@@ -1441,7 +1627,10 @@ mod tests {
         connect_count: usize,
         refresh_count: usize,
         snapshots: VecDeque<MprisSnapshot>,
-        previous_snapshot: Option<MprisSnapshot>,
+        updates: SnapshotUpdates,
+        query_results: VecDeque<Result<MprisSnapshot, String>>,
+        emit_results: VecDeque<Result<(), String>>,
+        failure_stages: Vec<RefreshStage>,
         published_changes: Vec<Vec<ChangedProperty>>,
         waited: Arc<Mutex<Vec<usize>>>,
         dropped: Arc<Mutex<Vec<usize>>>,
@@ -1454,7 +1643,10 @@ mod tests {
                 connect_count: 0,
                 refresh_count: 0,
                 snapshots: VecDeque::new(),
-                previous_snapshot: None,
+                updates: SnapshotUpdates::new(),
+                query_results: VecDeque::new(),
+                emit_results: VecDeque::new(),
+                failure_stages: Vec::new(),
                 published_changes: Vec::new(),
                 waited: Arc::new(Mutex::new(Vec::new())),
                 dropped: Arc::new(Mutex::new(Vec::new())),
@@ -1482,14 +1674,27 @@ mod tests {
             }
         }
 
-        fn refresh_snapshot(&mut self) -> Result<(), String> {
+        fn refresh_snapshot(&mut self) -> Result<(), RefreshError> {
             self.refresh_count += 1;
-            if let Some(snapshot) = self.snapshots.pop_front() {
-                let changed = changed_properties(self.previous_snapshot.as_ref(), &snapshot);
-                self.previous_snapshot = Some(snapshot);
-                self.published_changes.push(changed);
+            let result = self
+                .query_results
+                .pop_front()
+                .or_else(|| self.snapshots.pop_front().map(Ok));
+            let Some(result) = result else {
+                return Ok(());
+            };
+            let emit_result = self.emit_results.pop_front().unwrap_or(Ok(()));
+            let result = tauri::async_runtime::block_on(self.updates.refresh(
+                || std::future::ready(result),
+                |_, changed| {
+                    self.published_changes.push(changed);
+                    std::future::ready(emit_result)
+                },
+            ));
+            if let Err(error) = &result {
+                self.failure_stages.push(error.stage);
             }
-            Ok(())
+            result
         }
     }
 
@@ -1592,19 +1797,17 @@ mod tests {
             disconnected_connection(2),
             disconnected_connection(3),
         ]);
-        runtime.previous_snapshot = Some(playing.clone());
+        *runtime.updates.published.lock().unwrap() = Some(playing.clone());
         runtime.snapshots = VecDeque::from([playing, paused]);
         let mut delays = Vec::new();
 
         run_fake_until_wait_stops(&mut runtime, &mut delays, 3);
 
         assert_eq!(runtime.refresh_count, 3);
-        assert_eq!(runtime.published_changes[0], Vec::<ChangedProperty>::new());
         assert_eq!(
-            runtime.published_changes[1],
-            vec![ChangedProperty::PlaybackStatus]
+            runtime.published_changes,
+            vec![vec![ChangedProperty::PlaybackStatus]]
         );
-        assert_eq!(runtime.published_changes.len(), 2);
     }
 
     #[test]
@@ -1660,7 +1863,7 @@ mod tests {
                 Err("MPD indisponível".into())
             }
 
-            fn refresh_snapshot(&mut self) -> Result<(), String> {
+            fn refresh_snapshot(&mut self) -> Result<(), RefreshError> {
                 unreachable!()
             }
         }
@@ -1683,6 +1886,250 @@ mod tests {
 
         observer.join().unwrap().unwrap();
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    fn poll_once<F: std::future::Future>(
+        future: std::pin::Pin<&mut F>,
+    ) -> std::task::Poll<F::Output> {
+        future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    }
+
+    #[test]
+    fn failed_emit_retries_same_snapshot_then_suppresses_redundant_emissions() {
+        let mut runtime = FakeObserverRuntime::new(vec![disconnected_connection(1)]);
+        let snapshot = MprisSnapshot::stopped();
+        runtime.snapshots = VecDeque::from([snapshot.clone(), snapshot.clone(), snapshot.clone()]);
+        runtime.emit_results =
+            VecDeque::from([Err("D-Bus unavailable (os error 11) secret".into()), Ok(())]);
+        let mut waits = Vec::new();
+        refresh_observer_snapshot(&mut runtime, &ObserverControl::new(), &mut |_, delay| {
+            waits.push(delay);
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(runtime.failure_stages, [RefreshStage::DbusEmit]);
+        assert_eq!(runtime.refresh_count, 2);
+        assert_eq!(runtime.published_changes.len(), 2);
+        assert_eq!(runtime.published_changes[0], runtime.published_changes[1]);
+        assert_eq!(*runtime.updates.published.lock().unwrap(), Some(snapshot));
+        assert_eq!(waits, [Duration::from_millis(250)]);
+        runtime.refresh_snapshot().unwrap();
+        assert_eq!(runtime.published_changes.len(), 2);
+    }
+
+    #[test]
+    fn failed_query_recovers_without_consuming_publication_or_replaying_controls() {
+        let mut runtime = FakeObserverRuntime::new(vec![disconnected_connection(1)]);
+        runtime.query_results = VecDeque::from([
+            Err("MPD unavailable (os error 11) /private/path".into()),
+            Ok(MprisSnapshot::stopped()),
+        ]);
+        let mut waits = Vec::new();
+        run_observer_state_machine(&mut runtime, &ObserverControl::new(), |_, delay| {
+            waits.push(delay);
+            // The first wait recovers the query; the second ends reconnect.
+            Ok(waits.len() == 1)
+        })
+        .unwrap();
+        assert_eq!(runtime.failure_stages, [RefreshStage::MpdQuery]);
+        assert_eq!(runtime.refresh_count, 2);
+        assert_eq!(runtime.published_changes.len(), 1);
+        assert_eq!(waits, [Duration::from_millis(250); 2]);
+    }
+
+    #[test]
+    fn refresh_retry_ceiling_returns_to_events_and_shutdown_cancels_recovery() {
+        let mut runtime = FakeObserverRuntime::new(vec![FakeConnectionAttempt::Connect {
+            id: 1,
+            events: VecDeque::from([Ok(()), Err("EOF".into())]),
+        }]);
+        runtime.query_results = (0..=REFRESH_RETRIES)
+            .map(|_| Err("unavailable".into()))
+            .collect();
+        runtime
+            .query_results
+            .push_back(Ok(MprisSnapshot::stopped()));
+        let mut waits = Vec::new();
+        run_observer_state_machine(&mut runtime, &ObserverControl::new(), |_, delay| {
+            waits.push(delay);
+            Ok(waits.len() <= REFRESH_RETRIES)
+        })
+        .unwrap();
+        assert_eq!(runtime.refresh_count, REFRESH_RETRIES + 2); // event after exhaustion
+        assert_eq!(runtime.published_changes.len(), 1);
+        assert_eq!(
+            &waits[..REFRESH_RETRIES],
+            [
+                Duration::from_millis(250),
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+            ]
+        );
+
+        let control = ObserverControl::new();
+        runtime.query_results =
+            VecDeque::from([Err("unavailable".into()), Ok(MprisSnapshot::stopped())]);
+        let before = runtime.refresh_count;
+        refresh_observer_snapshot(&mut runtime, &control, &mut |control, _| {
+            control.cancel();
+            Ok(true) // even a wakeup racing cancellation cannot retry
+        })
+        .unwrap();
+        assert_eq!(runtime.refresh_count, before + 1);
+        assert_eq!(runtime.query_results.len(), 1);
+    }
+
+    #[test]
+    fn refresh_diagnostics_distinguish_stages_without_leaking_raw_errors() {
+        for (stage, label) in [
+            (RefreshStage::MpdQuery, "mpd_query"),
+            (RefreshStage::DbusEmit, "dbus_emit"),
+        ] {
+            let error = RefreshError::new(
+                stage,
+                "unavailable (os error 11) /private?X-Plex-Token=secret",
+            );
+            assert_eq!(
+                error.summary(),
+                format!("stage={label} error_hint=unavailable os_code=11")
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_refreshes_serialize_query_and_emit_without_reverting_track_identity() {
+        for pause_query in [true, false] {
+            let updates = SnapshotUpdates::new();
+            let ready = AtomicBool::new(false);
+            let second_queried = AtomicBool::new(false);
+            let emitted = Mutex::new(Vec::new());
+            let old = MprisSnapshot::from_audio(audio_status(
+                "play",
+                Some(CurrentMedia::Local {
+                    uri: "old.flac".into(),
+                    queue_index: 0,
+                }),
+            ))
+            .unwrap();
+            let new = MprisSnapshot::from_audio(audio_status(
+                "pause",
+                Some(CurrentMedia::Plex {
+                    server_id: "server".into(),
+                    part_key: "/new".into(),
+                    queue_index: 1,
+                }),
+            ))
+            .unwrap();
+            let mut first = std::pin::pin!(updates.refresh(
+                || std::future::poll_fn(|_| {
+                    if pause_query && !ready.load(Ordering::SeqCst) {
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(Ok(old.clone()))
+                    }
+                }),
+                |snapshot, _| async {
+                    std::future::poll_fn(|_| {
+                        if !pause_query && !ready.load(Ordering::SeqCst) {
+                            std::task::Poll::Pending
+                        } else {
+                            std::task::Poll::Ready(())
+                        }
+                    })
+                    .await;
+                    emitted.lock().unwrap().push(snapshot);
+                    Ok(())
+                },
+            ));
+            assert!(poll_once(first.as_mut()).is_pending());
+            let mut second = std::pin::pin!(updates.refresh(
+                || {
+                    second_queried.store(true, Ordering::SeqCst);
+                    std::future::ready(Ok(new.clone()))
+                },
+                |snapshot, _| async {
+                    emitted.lock().unwrap().push(snapshot);
+                    Ok(())
+                },
+            ));
+            assert!(poll_once(second.as_mut()).is_pending());
+            assert!(!second_queried.load(Ordering::SeqCst));
+            ready.store(true, Ordering::SeqCst);
+            assert!(matches!(
+                poll_once(first.as_mut()),
+                std::task::Poll::Ready(Ok(()))
+            ));
+            assert!(matches!(
+                poll_once(second.as_mut()),
+                std::task::Poll::Ready(Ok(()))
+            ));
+            assert_eq!(*emitted.lock().unwrap(), vec![old.clone(), new.clone()]);
+            assert_eq!(*updates.published.lock().unwrap(), Some(new.clone()));
+        }
+    }
+
+    #[derive(Default)]
+    struct WakeCounter(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn shutdown_cancels_inflight_query_or_emit_and_queued_refresh_without_restoring_cache() {
+        for pause_query in [true, false] {
+            let mut lifecycle = ServiceLifecycle::new();
+            lifecycle.phase = LifecyclePhase::Running;
+            let updates = Arc::clone(&lifecycle.updates);
+            let ready = AtomicBool::new(false);
+            let queued_queried = AtomicBool::new(false);
+            let mut first = std::pin::pin!(updates.refresh(
+                || std::future::poll_fn(|_| {
+                    if pause_query && !ready.load(Ordering::SeqCst) {
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(Ok(MprisSnapshot::stopped()))
+                    }
+                }),
+                |_, _| std::future::poll_fn(|_| {
+                    if !pause_query && !ready.load(Ordering::SeqCst) {
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(Ok(()))
+                    }
+                }),
+            ));
+            let wake_count = Arc::new(WakeCounter::default());
+            let waker = std::task::Waker::from(Arc::clone(&wake_count));
+            let mut context = std::task::Context::from_waker(&waker);
+            assert!(std::future::Future::poll(first.as_mut(), &mut context).is_pending());
+            let mut queued = std::pin::pin!(updates.refresh(
+                || {
+                    queued_queried.store(true, Ordering::SeqCst);
+                    std::future::ready(Ok(MprisSnapshot::stopped()))
+                },
+                |_, _| async { panic!("must not publish after shutdown") },
+            ));
+            assert!(poll_once(queued.as_mut()).is_pending());
+            lifecycle.begin_shutdown();
+            assert!(wake_count.0.load(Ordering::SeqCst) > 0);
+            // Cancellation wins even when the old response becomes ready.
+            ready.store(true, Ordering::SeqCst);
+            assert!(matches!(
+                poll_once(first.as_mut()),
+                std::task::Poll::Ready(Ok(()))
+            ));
+            assert!(matches!(
+                poll_once(queued.as_mut()),
+                std::task::Poll::Ready(Ok(()))
+            ));
+            assert!(!queued_queried.load(Ordering::SeqCst));
+            assert_eq!(*updates.published.lock().unwrap(), None);
+            assert_eq!(lifecycle.phase, LifecyclePhase::Stopping);
+            assert!(!lifecycle.begin_start());
+        }
     }
 
     #[test]

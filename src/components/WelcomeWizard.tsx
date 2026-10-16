@@ -30,7 +30,7 @@ import { configService } from "../services/config";
 import { plexService } from "../services/plex";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
 import { createDeviceAvailabilityQuery, shouldCheckContextualDevice, type AvailabilityQueryState } from "../utils/deviceAvailability";
-import { wizardPlexConnectionReady, wizardSaveErrorKey } from "../utils/welcomeWizard";
+import { wizardPlexConnectionReady, wizardSaveErrorKey, type WizardSaveErrorKey } from "../utils/welcomeWizard";
 
 interface Props {
   initialConfig: AppConfig;
@@ -53,7 +53,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   const [isPickingFolder, setIsPickingFolder] = useState(false);
   const pickingFolderRef = useRef(false);
   const finishingRef = useRef(false);
-  const [completionError, setCompletionError] = useState<string | null>(null);
+  const [completionError, setCompletionError] = useState<WizardSaveErrorKey | "wizard.plexNotReady" | "wizard.folderError" | null>(null);
   const [availability, setAvailability] = useState<AvailabilityQueryState>({ checking: false, results: [], failed: false });
   const availabilityQueryRef = useRef<ReturnType<typeof createDeviceAvailabilityQuery> | null>(null);
   const [showAvailabilityHelp, setShowAvailabilityHelp] = useState(false);
@@ -211,6 +211,22 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
       plex_server_id: server.client_identifier,
       plex_server_name: server.name,
     }));
+  };
+
+  const completionErrorMessage = (error: NonNullable<typeof completionError>): string => {
+    switch (error) {
+      case "settings.localFolderOverlap": return t("settings.localFolderOverlap");
+      case "wizard.configPersistenceUncertain": return t("wizard.configPersistenceUncertain");
+      case "wizard.deviceBusy": return t("wizard.deviceBusy");
+      case "wizard.deviceUnavailable": return t("wizard.deviceUnavailable");
+      case "wizard.saveError": return t("wizard.saveError");
+      case "wizard.plexNotReady": return t("wizard.plexNotReady");
+      case "wizard.folderError": return t("wizard.folderError");
+      default: {
+        const unsupported: never = error;
+        throw new Error(`Unsupported wizard completion error type: ${typeof unsupported}`);
+      }
+    }
   };
 
   const handleComplete = async () => {
@@ -678,7 +694,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
             </div>
           )}
 
-          {completionError && <p role="alert" className="mt-4 text-xs text-[#FF8686]">{t(`wizard.${completionError.slice("wizard.".length)}`)}</p>}
+          {completionError && <p role="alert" className="mt-4 text-xs text-[#FF8686]">{completionErrorMessage(completionError)}</p>}
         </div>
         {/* Rodapé */}
         <div className="px-4 sm:px-6 py-4 border-t border-[#242424] flex items-center justify-between shrink-0">

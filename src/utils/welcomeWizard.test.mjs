@@ -246,7 +246,7 @@ test("late server discovery after disconnect cannot reconnect or replace a new a
 });
 
 test("failed/busy/uncertain/accepted Save never finishes early or discards the review draft; retries remain possible", async () => {
-  for (const error of ["ALSA_PREFLIGHT_OUTPUT_BUSY", "ALSA_PREFLIGHT_OUTPUT_UNAVAILABLE", "CONFIG_PERSISTENCE_UNCERTAIN: private", "RAW SECRET"]) {
+  for (const error of ["ALSA_PREFLIGHT_OUTPUT_BUSY", "ALSA_PREFLIGHT_OUTPUT_UNAVAILABLE", "CONFIG_PERSISTENCE_UNCERTAIN: private", "RAW SECRET", "LOCAL_SOURCE_NEW_OVERLAP"]) {
     let attempts = 0;
     const f = wizard({ save: async () => { if (++attempts === 1) throw error; return { status: "completed" }; } });
     selectSources(f, true, false); await button(f, "settings.addFolder").props.onClick(); f.render(); next(f);

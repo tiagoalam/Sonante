@@ -22,14 +22,14 @@ static CACHE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Deserialize)]
 pub struct OnlineAlbumCoverRequest {
-    album_id: String,
-    title: String,
-    artist: String,
-    year: Option<String>,
+    pub(crate) album_id: String,
+    pub(crate) title: String,
+    pub(crate) artist: String,
+    pub(crate) year: Option<String>,
 }
 
 impl OnlineAlbumCoverRequest {
-    fn validated(mut self) -> Result<Option<Self>, String> {
+    pub(crate) fn validated(mut self) -> Result<Option<Self>, String> {
         if self.album_id.len() > 2048
             || self.title.chars().count() > 512
             || self.artist.chars().count() > 512
@@ -137,7 +137,7 @@ fn cache_filename(id: &str) -> String {
     )
 }
 
-fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         Some("image/jpeg")
     } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -157,6 +157,7 @@ fn data_uri(mime: &str, bytes: &[u8]) -> String {
 }
 
 fn read_cache(dir: &Path, id: &str, now: u64) -> Result<CacheHit, String> {
+    let _diagnostic = crate::diagnostics::DevSpan::new("cover.cache");
     let _guard = CACHE_LOCK
         .lock()
         .map_err(|_| "Cache de capas indisponível.".to_string())?;
@@ -313,7 +314,7 @@ fn read_image_file(dir: &Path, file: &str, mime: &str) -> Result<Option<String>,
     )
 }
 
-fn normalize(value: &str) -> String {
+pub(crate) fn normalize(value: &str) -> String {
     value
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -347,7 +348,7 @@ enum ArtistCredit {
     },
 }
 
-fn valid_mbid(id: &str) -> bool {
+pub(crate) fn valid_mbid(id: &str) -> bool {
     id.len() == 36
         && id.bytes().enumerate().all(|(i, byte)| {
             if [8, 13, 18, 23].contains(&i) {
@@ -413,10 +414,16 @@ fn next_request_at(last: Option<Instant>, now: Instant) -> Instant {
 }
 
 pub(crate) fn wait_for_musicbrainz() -> Result<(), String> {
+    let mut diagnostic = crate::diagnostics::DevSpan::new("musicbrainz.admission");
+    diagnostic.phase("wait.rate_lock");
     let limiter = LAST_MUSICBRAINZ_REQUEST.get_or_init(|| Mutex::new(None));
     let mut last = limiter
         .lock()
-        .map_err(|_| "Limitador MusicBrainz indisponível.".to_string())?;
+        .map_err(|_| {
+            diagnostic.result(&Err::<(), ()>(()));
+            "Limitador MusicBrainz indisponível.".to_string()
+        })?;
+    diagnostic.phase("rate.wait");
     let next = next_request_at(*last, Instant::now());
     if let Some(wait) = next.checked_duration_since(Instant::now()) {
         std::thread::sleep(wait);
@@ -430,6 +437,31 @@ fn now_secs() -> Result<u64, String> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "Relógio do sistema inválido.".to_string())?
         .as_secs())
+}
+
+// Reuses the persistent enrichment cache without entering HTTP lookup, even on a miss.
+fn cached_cover_at(dir: &Path, id: &str, now: u64) -> Result<Option<String>, String> {
+    Ok(match read_cache(dir, id, now)? {
+        CacheHit::Image(image) => Some(image),
+        CacheHit::Negative | CacheHit::Miss => None,
+    })
+}
+
+pub async fn cached_cover(
+    request: OnlineAlbumCoverRequest,
+    enabled: bool,
+) -> Result<Option<String>, String> {
+    if !enabled {
+        return Ok(None);
+    }
+    let Some(request) = request.validated()? else {
+        return Ok(None);
+    };
+    let dir = cache_dir()?;
+    let now = now_secs()?;
+    tauri::async_runtime::spawn_blocking(move || cached_cover_at(&dir, &request.album_id, now))
+        .await
+        .map_err(|error| format!("Falha na tarefa de cache: {error}"))?
 }
 
 pub async fn get_online_album_cover(
@@ -708,6 +740,24 @@ mod tests {
             "sonante-online-artwork-{}-{id}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn cached_cover_only_reads_positive_entries_and_never_falls_back_on_miss() {
+        let dir = test_dir();
+        let jpeg = [0xff, 0xd8, 0xff, 0xd9];
+        assert_eq!(cached_cover_at(&dir, "missing", 100).unwrap(), None);
+        let uri = save_positive(&dir, "album-a", ID, "image/jpeg", &jpeg, 100).unwrap();
+        assert_eq!(cached_cover_at(&dir, "album-a", 101).unwrap(), Some(uri));
+        save_negative(&dir, "album-b", 100).unwrap();
+        assert_eq!(cached_cover_at(&dir, "album-b", 101).unwrap(), None);
+        let cached_file = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("img"))
+            .unwrap();
+        fs::remove_file(cached_file).unwrap();
+        assert_eq!(cached_cover_at(&dir, "album-a", 102).unwrap(), None);
     }
 
     #[test]

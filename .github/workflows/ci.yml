@@ -32,11 +32,20 @@ jobs:
             wget \
             file \
             libxdo-dev \
+            libayatana-appindicator3-dev \
             libssl-dev \
             librsvg2-dev \
             webp-pixbuf-loader \
             libasound2-dev \
             pkg-config rpm desktop-file-utils python3
+
+      - name: Verify AppIndicator discovery for Tauri bundling
+        run: |
+          if ! library_dirs="$(PKG_CONFIG_ALLOW_SYSTEM_LIBS=1 pkg-config --libs-only-L ayatana-appindicator3-0.1)" || [[ -z "$library_dirs" ]]; then
+            echo "::error::Tauri bundler requires a nonempty ayatana-appindicator3-0.1 library path from pkg-config."
+            exit 1
+          fi
+          printf 'AppIndicator library search path: %s\n' "$library_dirs"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -86,6 +95,9 @@ jobs:
 
       - name: Build DEB and RPM packages
         run: npm run tauri -- bundle --bundles deb,rpm --config "$RUNNER_TEMP/sonante-rpm.json"
+
+      - name: Check RPM WebKit dependency resolution without installation
+        run: python3 tests/rpm_solver_check.py src-tauri/target/release/bundle/rpm/*.rpm
 
       - name: Inspect packages and create checksums
         run: |

@@ -1,28 +1,50 @@
+import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { ArrowLeft, Compass, RefreshCw, UserRound, ChevronLeft, ChevronRight, Guitar, Piano, Mic2, Radio, Headphones, Music2, Disc3, AudioLines, ListMusic } from "lucide-react";
+import { Play, ArrowLeft, Compass, RefreshCw, UserRound, ChevronLeft, ChevronRight, Guitar, Piano, Mic2, Radio, Headphones, Music2, Disc3, AudioLines, ListMusic } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createExploreSession, exploreOriginName, EXPLORE_PAGE_SIZE, EXPLORE_SUGGESTION_COUNT } from "../utils/explore";
 import { exploreGenreCardStyle, assignExploreGenreColors, assignExploreGenreIcons } from "../utils/exploreGenreCards";
 import { albumShelfEdges, albumShelfLayout, albumShelfTarget } from "../utils/exploreAlbumShelf";
 import type { ExploreArtistGroup, ExploreContext, ExploreEntry, ExploreShelfId } from "../utils/explore";
-import { artistPortraitInitials } from "../utils/plexArtistPortraits";
-import type { ArtistPortraitResult, PlexArtistPortraitCache } from "../utils/plexArtistPortraits";
+import { artistPortraitInitials } from "../utils/artistInitials";
 import { localArtworkResolver } from "../utils/localArtworkSession";
-import { PlexImage } from "./PlexImage";
+import { ExploreGenreSlice } from "./ExploreGenreSlice";
 import { AlbumArtworkPlaceholder } from "./AlbumArtworkPlaceholder";
 
 const genreIcons = { guitar: Guitar, piano: Piano, mic: Mic2, radio: Radio, headphones: Headphones, music: Music2, disc: Disc3, audio: AudioLines, playlist: ListMusic };
 
 export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => boolean; revision: number; active: boolean;
-  onlineArtworkEnabled?: boolean; artworkBlocked?: boolean; artworkOnly?: boolean; fallback?: React.ReactNode; onOpen: () => void }> = ({ entry, current, active, onlineArtworkEnabled = false, artworkBlocked = false, artworkOnly = false, fallback, onOpen }) => {
+  onPlay?: (entry: ExploreEntry, current: () => boolean) => Promise<void>; isPlaybackAvailable?: boolean;
+  onlineArtworkEnabled?: boolean; artworkBlocked?: boolean; artworkOnly?: boolean; fallback?: React.ReactNode; onOpen: () => void }> = ({ entry, current, revision, active, onPlay, isPlaybackAvailable = false, onlineArtworkEnabled = false, artworkBlocked = false, artworkOnly = false, fallback, onOpen }) => {
   const { t } = useTranslation();
-  const [cover, setCover] = useState<string | null>(() => entry.source === "local" ? localArtworkResolver.get(entry.album.id) : null);
+  const [cover, setCover] = useState<string | null>(() => localArtworkResolver.get(entry.album.id));
   const [phase, setPhase] = useState<"idle" | "loading" | "ready" | "missing" | "error">("idle");
   const [visible, setVisible] = useState(() => typeof IntersectionObserver === "undefined");
   const cardNode = useRef<HTMLElement | null>(null);
   const live = useRef(current); live.current = current;
   const flags = useRef({ active, onlineArtworkEnabled, artworkBlocked });
   flags.current = { active, onlineArtworkEnabled, artworkBlocked };
+  const [playing, setPlaying] = useState(false);
+  const [playError, setPlayError] = useState(false);
+  const pending = useRef(false);
+  const playbackEpoch = useRef(0);
+  const mounted = useRef(false);
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useLayoutEffect(() => {
+    playbackEpoch.current++;
+    return () => { playbackEpoch.current++; };
+  }, [entry, revision, active, isPlaybackAvailable, artworkBlocked]);
+  const handlePlay = async () => {
+    if (pending.current || !active || !isPlaybackAvailable || artworkBlocked || !live.current() || !onPlay) return;
+    pending.current = true; setPlaying(true); setPlayError(false);
+    const epoch = playbackEpoch.current;
+    const valid = () => epoch === playbackEpoch.current && flags.current.active && !flags.current.artworkBlocked && live.current();
+    try { await onPlay(entry, valid); }
+    catch (error) {
+      logError("local.album-play", error);
+      if (valid()) setPlayError(true);
+    } finally { pending.current = false; if (mounted.current) setPlaying(false); }
+  };
   const origin = `${t(`explore.sources.${entry.source}`)} · ${exploreOriginName(entry) ?? t("explore.unknownOrigin")}`;
   useEffect(() => {
     if (!active || typeof IntersectionObserver === "undefined" || !cardNode.current) return;
@@ -33,7 +55,6 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
     return () => observer.disconnect();
   }, [entry.key, active]);
   useEffect(() => {
-    if (entry.source !== "local") return;
     const cached = localArtworkResolver.get(entry.album.id);
     setCover(cached); setPhase(cached ? "ready" : "idle");
     return localArtworkResolver.subscribe(entry.album.id, value => {
@@ -41,7 +62,7 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
     });
   }, [entry.album, entry.source]);
   useEffect(() => {
-    if (entry.source !== "local" || !active || !visible || artworkBlocked || !live.current()) return;
+    if (!active || !visible || artworkBlocked || !live.current()) return;
     let mounted = true;
     const interested = () => mounted && flags.current.active && !flags.current.artworkBlocked && live.current();
     const cached = localArtworkResolver.get(entry.album.id);
@@ -56,34 +77,37 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
     });
     return () => { mounted = false; };
   }, [entry.album, entry.source, active, visible, onlineArtworkEnabled, artworkBlocked]);
-  const artwork = <div aria-busy={entry.source === "local" && phase === "loading"} className="aspect-square overflow-hidden rounded-lg bg-[#202020]">
-      {entry.source === "plex" && entry.album.thumb && active ? <PlexImage cacheScope={artworkOnly && typeof entry.identity === "object" && entry.identity !== null ? entry.identity : undefined} image={entry.album.thumb} alt="" className="h-full w-full object-cover" fallback={fallback ?? <AlbumArtworkPlaceholder />} />
-        : cover ? <img src={cover} alt="" className="h-full w-full object-cover" onError={() => { setCover(null); setPhase("error"); }} /> : fallback ?? <AlbumArtworkPlaceholder />}
+  const isAlbumArtwork = artworkOnly && !!cover;
+  const artwork = <div aria-busy={phase === "loading"} role={isAlbumArtwork ? "img" : undefined}
+      aria-label={isAlbumArtwork ? t("explore.artistAlbumCover", { album: entry.album.title }) : undefined}
+      title={isAlbumArtwork ? t("explore.artistAlbumCover", { album: entry.album.title }) : undefined}
+      className="aspect-square overflow-hidden rounded-lg bg-[#202020]">
+      {cover ? <img src={cover} alt="" className="h-full w-full object-cover" onError={() => { setCover(null); setPhase("error"); }} /> : fallback ?? <AlbumArtworkPlaceholder />}
     </div>;
   if (artworkOnly) return <div ref={cardNode as React.Ref<HTMLDivElement>} className="h-full w-full">{artwork}</div>;
-  return <button ref={cardNode as React.Ref<HTMLButtonElement>} type="button" onClick={() => { if (live.current()) onOpen(); }} disabled={!active}
-    className="w-full min-w-0 rounded-xl p-2 text-left hover:bg-[#222222] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-60">
+  return <div ref={cardNode as React.Ref<HTMLDivElement>}
+    onKeyDown={event => { if (event.key === " " || event.key === "Enter") event.stopPropagation(); }}
+    className="group relative w-full min-w-0 rounded-xl p-2 text-left hover:bg-[#222222]">
+    <button type="button" onClick={() => { if (active && live.current()) onOpen(); }} disabled={!active}
+      aria-label={`${entry.album.title || t("explore.untitled")} · ${entry.album.artist || t("explore.artistNotProvided")}`}
+      className="absolute inset-0 rounded-xl focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-60" />
     {artwork}
+    {onPlay && <div className="pointer-events-none absolute top-2 left-2 right-2 aspect-square rounded-lg bg-black/40 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity flex items-center justify-center">
+      <button type="button" onClick={handlePlay} disabled={!active || !isPlaybackAvailable || artworkBlocked || playing}
+        aria-label={`${t("common.playAlbum")}: ${entry.album.title}`} title={t("common.playAlbum")}
+        className="pointer-events-auto w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-white">
+        <Play size={20} className="ml-1" fill="black" aria-hidden="true" />
+      </button>
+    </div>}
     <p className="mt-2 truncate text-sm font-semibold text-white" title={entry.album.title}>{entry.album.title || t("explore.untitled")}</p>
     <p className="truncate text-xs text-[#AAAAAA]" title={entry.album.artist}>{entry.album.artist || t("explore.artistNotProvided")}</p>
     <p className="mt-1 truncate text-[11px] text-[#777777]" title={origin}>{origin}</p>
-  </button>;
+    {playError && <p role="alert" className="text-xs text-red-300">{t("explore.albumPlayError")}</p>}
+  </div>;
 };
 
-export const ExploreArtistPortrait: React.FC<{ group: ExploreArtistGroup; identity: unknown; serverId: string;
-  active: boolean; cache?: PlexArtistPortraitCache; album?: ExploreEntry; currentAlbum?: () => boolean; onlineArtworkEnabled?: boolean; artworkBlocked?: boolean }> = ({ group, identity, serverId, active, cache, album, currentAlbum, onlineArtworkEnabled, artworkBlocked }) => {
-  const [resolved, setResolved] = useState<{ identity: unknown; serverId: string; ratingKey: string; result: ArtistPortraitResult } | null>(null);
-  const ratingKey = group.source === "plex" ? group.ratingKey : undefined;
-  useEffect(() => {
-    if (!active || !cache || !ratingKey) return;
-    let current = true;
-    const lease = cache.acquire(identity, serverId, ratingKey);
-    void lease.promise.then(result => { if (current) setResolved({ identity, serverId, ratingKey, result }); });
-    return () => { current = false; lease.release(); };
-  }, [cache, identity, serverId, ratingKey, active]);
-  const result = active && ratingKey && cache?.isCurrent(identity, serverId)
-    ? cache.peek(identity, serverId, ratingKey) ?? (resolved && resolved.identity === identity && resolved.serverId === serverId
-      && resolved.ratingKey === ratingKey ? resolved.result : null) : null;
+export const ExploreArtistArtwork: React.FC<{ group: ExploreArtistGroup; active: boolean; album?: ExploreEntry;
+  currentAlbum?: () => boolean; onlineArtworkEnabled?: boolean; artworkBlocked?: boolean }> = ({ group, active, album, currentAlbum, onlineArtworkEnabled, artworkBlocked }) => {
   const initials = artistPortraitInitials(group.name);
   const initialsFallback = <span aria-hidden="true" className="flex h-full w-full items-center justify-center text-3xl font-medium text-[#AAAAAA]">
     {initials ?? <UserRound size={44} strokeWidth={1.25} />}
@@ -91,10 +115,7 @@ export const ExploreArtistPortrait: React.FC<{ group: ExploreArtistGroup; identi
   const fallback = album && currentAlbum ? <ExploreAlbumCard artworkOnly fallback={initialsFallback} entry={album} revision={0} active={active}
     current={currentAlbum} onlineArtworkEnabled={onlineArtworkEnabled} artworkBlocked={artworkBlocked} onOpen={() => {}} />
     : <div className="h-full w-full rounded-full border border-[#333333] bg-[#202020]">{initialsFallback}</div>;
-  return <div className="mx-auto h-32 w-32 shrink-0">
-    {result?.status === "ready" ? <PlexImage image={result.image} cacheScope={typeof identity === "object" && identity !== null ? identity : undefined}
-      alt="" className="h-32 w-32 rounded-full border border-[#333333] object-cover" fallback={fallback} /> : fallback}
-  </div>;
+  return <div className="mx-auto h-32 w-32 shrink-0">{fallback}</div>;
 };
 
 export const ExploreAlbumShelf: React.FC<{ id: string; title: string; cards: React.ReactElement[]; active: boolean;
@@ -182,13 +203,12 @@ export const ExploreAlbumShelf: React.FC<{ id: string; title: string; cards: Rea
 interface Props {
   context: ExploreContext;
   active: boolean;
-  libraryTitle: string | null;
+  sourceSelector?: React.ReactNode;
   ensureLocal: () => void;
   isCurrent: (entry: ExploreEntry) => boolean;
   onOpen: (entry: ExploreEntry) => void;
-  plexProgress?: { loading: boolean; failedLibraries: readonly string[]; discoveryFailed: boolean; complete: boolean };
-  retryPlex?: () => void;
-  portraits?: PlexArtistPortraitCache;
+  onPlay?: (entry: ExploreEntry, current: () => boolean) => Promise<void>;
+  isPlaybackAvailable?: boolean;
   onlineArtworkEnabled?: boolean;
   artworkBlocked?: boolean;
   configurationReady?: boolean;
@@ -196,21 +216,35 @@ interface Props {
   retryLocal?: () => void;
   canRetryLocal?: boolean;
 }
-export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isCurrent, onOpen, plexProgress, retryPlex, portraits, onlineArtworkEnabled = false, artworkBlocked = false, configurationReady = true, onConfigure, retryLocal, canRetryLocal = true }) => {
+export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isCurrent, onOpen, onPlay, isPlaybackAvailable = false, sourceSelector, onlineArtworkEnabled = false, artworkBlocked = false, configurationReady = true, onConfigure, retryLocal, canRetryLocal = true }) => {
   const { t } = useTranslation();
   const session = useMemo(() => createExploreSession(), []);
-  session.syncContext(configurationReady ? context : { ...context, local: { ...context.local, state: "loading" }, plex: { ...context.plex, state: "loading" } }, active, false);
+  session.syncContext(configurationReady ? context : { ...context, local: { ...context.local, state: "loading" } }, active, false);
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
   const ensure = useRef(ensureLocal); ensure.current = ensureLocal;
   useEffect(() => { session.activate(); return () => session.close(); }, [session]);
   useEffect(() => { if (active && configurationReady && context.local.state !== "not_configured") ensure.current(); }, [active, configurationReady, context.local.state]);
   const slice = state.slice;
-  const selected = slice ? session.sliceEntries() : session.visibleEntries();
+  const continuousGenre = slice?.group.kind === "genre";
+  const selected = continuousGenre ? [] : slice ? session.sliceEntries() : session.visibleEntries();
   const artists = session.visibleArtists(), genres = session.visibleGenres();
   const genreColors = assignExploreGenreColors(genres.map(group => group.value));
   const assignedGenreIcons = assignExploreGenreIcons(genres.map(group => group.value));
-  const waiting = state.preparing || !selected.length && (context.local.state === "loading" || context.plex.state === "loading" || context.plex.loading === true);
+  const waiting = state.preparing || !selected.length && context.local.state === "loading";
   const shelfPositions = useRef<Record<string, number>>({});
+  const genrePositions = useRef<Record<string, number>>({});
+  const sliceIdentity = useRef<string | null>(null);
+  const viewScope = useRef(context.local.sourceId ?? null);
+  const scrollNode = useRef<HTMLDivElement | null>(null);
+  const mainPosition = useRef(0);
+  if (viewScope.current !== (context.local.sourceId ?? null)) {
+    viewScope.current = context.local.sourceId ?? null;
+    shelfPositions.current = {}; genrePositions.current = {}; sliceIdentity.current = null; mainPosition.current = 0;
+  }
+  useLayoutEffect(() => { if (active && scrollNode.current) scrollNode.current.scrollTop = mainPosition.current; }, [active, context.local.sourceId]);
+
+  if (!slice || !continuousGenre) sliceIdentity.current = null;
+  else if (sliceIdentity.current !== slice.group.key) { genrePositions.current[slice.group.key] = 0; sliceIdentity.current = slice.group.key; }
   const renew = () => {
     const before = session.getSnapshot(); session.renew();
     if (session.getSnapshot() !== before) Object.keys(shelfPositions.current).forEach(id => { shelfPositions.current[id] = 0; });
@@ -221,15 +255,15 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
   };
   // Online enrichment is confined to suggested albums; slices may reuse the same cache.
   const albumCards = selected.map(entry => <ExploreAlbumCard key={entry.key} entry={entry}
-    revision={state.revision} active={active} onlineArtworkEnabled={!slice && onlineArtworkEnabled} artworkBlocked={artworkBlocked} current={() => (slice ? session.canUseSlice(entry, state.revision) : session.canUse(entry, state.revision)) && isCurrent(entry)}
+    revision={state.revision} active={active} onPlay={onPlay} isPlaybackAvailable={isPlaybackAvailable} onlineArtworkEnabled={!slice && onlineArtworkEnabled} artworkBlocked={artworkBlocked} current={() => (slice ? session.canUseSlice(entry, state.revision) : session.canUse(entry, state.revision)) && isCurrent(entry)}
     onOpen={() => { if ((slice ? session.canUseSlice(entry, state.revision) : session.canUse(entry, state.revision)) && isCurrent(entry)) onOpen(entry); }} />);
   const albumGrid = <div className="mt-3 grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">{albumCards}</div>;
-  const configured = (["local", "plex"] as const).filter(source => context[source].state !== "not_configured");
-  const scope = t(configured.length === 2 ? "explore.aggregateScope" : configured[0] === "local" ? "explore.localScope" : "explore.plexScope");
+  const configured = context.local.state !== "not_configured";
+  const scope = t("explore.localScope");
   const configureButton = onConfigure && <button id="explore-configure-collection" type="button" disabled={!active} onClick={onConfigure}
     className="mt-6 rounded-lg bg-[#E5A00D] px-5 py-3 text-sm font-semibold text-black hover:bg-[#F5B01D] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:opacity-40">{t("explore.configureCollection")}</button>;
   if (!configurationReady) return <main className="flex min-h-0 flex-1 items-center justify-center bg-[#121212] p-8"><p role="status" className="text-sm text-[#AAAAAA]">{t("explore.creatingSuggestions")}</p></main>;
-  if (!configured.length) return <main className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-y-auto bg-[#121212] p-8">
+  if (!configured) return <main className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-y-auto bg-[#121212] p-8">
     <div className="max-w-lg text-center">
       <div aria-hidden="true" className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full border border-[#E5A00D]/20 bg-[#E5A00D]/10 text-[#E5A00D]"><Compass size={36} strokeWidth={1.5} /></div>
       <h1 className="text-2xl font-bold leading-snug text-white">{t("explore.collectionStartTitle")}</h1>
@@ -237,46 +271,42 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
       {configureButton}
     </div>
   </main>;
-  const unavailable = configured.some(source => context[source].state === "unavailable");
+  const unavailable = context.local.state === "unavailable";
   return <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[#121212] select-none">
     <header className="flex flex-wrap items-center justify-between gap-4 border-b border-[#222222] px-8 pt-8 pb-4">
       <div className="min-w-0">
         <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-white"><Compass size={22} className="shrink-0 text-[#E5A00D]" />{t("explore.title")}</h1>
         <p className="mt-1 text-xs text-[#888888]">{scope}</p>
       </div>
+      {sourceSelector}
       {!slice && (waiting || selected.length > 0) && <button type="button" disabled={!active || waiting || session.candidateCount() < 2} onClick={renew}
         title={t("explore.renewHint")} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">
         <RefreshCw size={14} />{t("explore.renew")}
       </button>}
     </header>
-    <div className="min-h-0 flex-1 overflow-y-auto px-8 py-5">
-      <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-[#999999]">{(["local", "plex"] as const).filter(source => context[source].state !== "ready" && context[source].state !== "not_configured").map(source => <p key={source}
-        role={context[source].state === "unavailable" ? "alert" : "status"}>
-        {t(`explore.sources.${source}`)}: {t(`explore.states.${context[source].state}`)}
-      </p>)}</div>
-      {plexProgress && !plexProgress.complete && <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[#999999]">
-        {plexProgress.loading && <p role="status">{t("explore.librariesLoading")}</p>}
-        {plexProgress.failedLibraries.length > 0 && <p role="status">{t("explore.librariesFailed", { libraries: plexProgress.failedLibraries.join(", ") })}</p>}
-        {plexProgress.discoveryFailed && <p role="status">{t("explore.librariesUnavailable")}</p>}
-        {(plexProgress.discoveryFailed || plexProgress.failedLibraries.length > 0) && <button type="button" disabled={!active} onClick={retryPlex}
-          className="rounded px-2 py-1 text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">{t("explore.retryLibraries")}</button>}
-      </div>}
+    <div ref={scrollNode} onScroll={event => { if (active) mainPosition.current = event.currentTarget.scrollTop; }} className={`min-h-0 flex-1 px-8 py-5 ${continuousGenre ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}>
+      {context.local.state !== "ready" && context.local.state !== "not_configured" && <p className="text-xs text-[#999999]"
+        role={unavailable ? "alert" : "status"}>{t("explore.sources.local")}: {t(`explore.states.${context.local.state}`)}</p>}
       {context.local.state === "unavailable" && retryLocal && <button type="button" disabled={!active || !canRetryLocal} onClick={retryLocal}
         className="mt-2 rounded px-2 py-1 text-xs text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">{t("explore.retryLocal")}</button>}
       {state.sliceInvalidated && <p role="status" className="mt-3 text-xs text-[#999999]">{t("explore.sliceInvalidated")}</p>}
       {!slice && !waiting && !selected.length ? <section className="flex min-h-64 flex-col items-center justify-center py-12 text-center">
         <p role={unavailable ? "alert" : "status"} className="max-w-md text-sm text-[#AAAAAA]">{t(unavailable ? "explore.collectionUnavailable" : "explore.collectionEmpty")}</p>
         {configureButton}
-      </section> : slice ? <section className="mt-4">
+      </section> : slice ? <section className={continuousGenre ? "mt-4 flex min-h-0 flex-1 flex-col" : "mt-4"}>
         <button type="button" disabled={!active} onClick={() => session.leaveSlice(state.revision)} className="mb-4 flex items-center gap-2 rounded px-1 py-1 text-xs text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D]">
           <ArrowLeft size={16} />{t("explore.backToShelves")}
         </button>
         <h2 className="text-lg font-bold text-white">{slice.group.name}</h2>
         <p className="mt-1 text-xs text-[#888888]">{slice.group.kind === "artist" ? t(`explore.sources.${slice.group.source}`) : t("explore.genreSlice")}
           {" · "}{t("explore.sliceCount", { count: slice.entries.length })}</p>
-        {albumGrid}
-        {!selected.length && <p role="status" className="mt-4 text-xs text-[#999999]">{t("explore.noSliceAlbums")}</p>}
-        {slice.entries.length > EXPLORE_PAGE_SIZE && <nav aria-label={t("explore.pagination")} className="mt-5 flex items-center gap-4 text-xs text-[#AAAAAA]">
+        {continuousGenre ? <ExploreGenreSlice id={slice.group.key} label={slice.group.name} entries={slice.entries}
+          active={active} positions={genrePositions.current} renderItem={entry => <ExploreAlbumCard key={entry.key} entry={entry}
+            revision={state.revision} active={active} onPlay={onPlay} isPlaybackAvailable={isPlaybackAvailable} onlineArtworkEnabled={false} artworkBlocked={artworkBlocked}
+            current={() => session.canUseSlice(entry, state.revision) && isCurrent(entry)}
+            onOpen={() => { if (session.canUseSlice(entry, state.revision) && isCurrent(entry)) onOpen(entry); }} />} /> : albumGrid}
+        {!slice.entries.length && <p role="status" className="mt-4 text-xs text-[#999999]">{t("explore.noSliceAlbums")}</p>}
+        {!continuousGenre && slice.entries.length > EXPLORE_PAGE_SIZE && <nav aria-label={t("explore.pagination")} className="mt-5 flex items-center gap-4 text-xs text-[#AAAAAA]">
           <button type="button" disabled={!active || slice.page === 0} onClick={() => session.setPage(slice.page - 1, state.revision)} className="rounded px-2 py-1 hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">{t("explore.previousPage")}</button>
           <span>{t("explore.page", { current: slice.page + 1, total: Math.ceil(slice.entries.length / EXPLORE_PAGE_SIZE) })}</span>
           <button type="button" disabled={!active || (slice.page + 1) * EXPLORE_PAGE_SIZE >= slice.entries.length} onClick={() => session.setPage(slice.page + 1, state.revision)} className="rounded px-2 py-1 hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">{t("explore.nextPage")}</button>
@@ -286,7 +316,7 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
           active={active && !slice} waiting={waiting} positions={shelfPositions.current} resetRevision={state.resets.albums ?? 0} onRenew={() => renewShelf("albums")} />,
         state.themes.map(theme => <ExploreAlbumShelf key={theme.id} id={`explore-${theme.id}-shelf`}
           title={theme.id === "genre" ? t("explore.genreTheme", { genre: theme.label }) : t(theme.current ? "explore.currentDecade" : "explore.pastDecade", { decade: theme.value })}
-          cards={theme.selected.map(entry => <ExploreAlbumCard key={entry.key} entry={entry} revision={state.revision} active={active}
+          cards={theme.selected.map(entry => <ExploreAlbumCard key={entry.key} entry={entry} revision={state.revision} active={active} onPlay={onPlay} isPlaybackAvailable={isPlaybackAvailable}
             onlineArtworkEnabled={onlineArtworkEnabled} artworkBlocked={artworkBlocked}
             current={() => session.canUseShelf(entry, state.revision, theme.id) && isCurrent(entry)}
             onOpen={() => { if (session.canUseShelf(entry, state.revision, theme.id) && isCurrent(entry)) onOpen(entry); }} />)}
@@ -297,14 +327,14 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
             ? Array.from({ length: 4 }, (_, index) => <div key={index} aria-hidden="true" className="rounded-xl bg-[#1A1A1A] px-4 py-5">
               <div className="mx-auto h-32 w-32 rounded-full bg-[#202020]" /><div className="mt-4 h-5 rounded bg-[#202020]" /><div className="mt-1 h-4 rounded bg-[#202020]" />
             </div>) : artists.map(group => {
-              const origin = `${t(`explore.sources.${group.source}`)}${group.libraryTitle ? ` · ${group.libraryTitle}` : ""}${group.albumCount !== undefined ? ` · ${t("explore.sliceCount", { count: group.albumCount })}` : ""}`;
-              const artistAlbum = session.artistAlbum(group, entry => entry.source === "local" ? !!localArtworkResolver.get(entry.album.id) : !!entry.album.thumb);
+              const origin = `${t(`explore.sources.${group.source}`)}${group.albumCount !== undefined ? ` · ${t("explore.sliceCount", { count: group.albumCount })}` : ""}`;
+              const artistAlbum = session.artistAlbum(group, entry => !!localArtworkResolver.get(entry.album.id));
               return <button key={group.key} type="button" disabled={!active} aria-label={`${group.name} · ${origin}`}
                 onClick={() => session.openSlice(group, state.revision)}
                 className="min-w-0 rounded-xl bg-[#1A1A1A] px-4 py-5 text-center hover:bg-[#222222] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">
-                <ExploreArtistPortrait album={artistAlbum}
+                <ExploreArtistArtwork album={artistAlbum}
                   currentAlbum={() => !!artistAlbum && session.validDetail(artistAlbum) && isCurrent(artistAlbum)}
-                  onlineArtworkEnabled={onlineArtworkEnabled} artworkBlocked={artworkBlocked} group={group} identity={context.plex.identity} serverId={context.plex.serverId} active={active} cache={portraits} />
+                  onlineArtworkEnabled={onlineArtworkEnabled} artworkBlocked={artworkBlocked} group={group} active={active} />
                 <p className="mt-4 truncate text-sm font-semibold text-white" title={group.name}>{group.name}</p>
                 <p className="mt-1 truncate text-[11px] text-[#888888]" title={origin}>{origin}</p>
               </button>;

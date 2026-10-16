@@ -11,7 +11,8 @@ import { signalPathInformation } from "./signalPath.ts";
 
 const resource = language => JSON.parse(readFileSync(new URL(`../locales/${language}.json`, import.meta.url)));
 const source = name => readFileSync(new URL(`../components/${name}.tsx`, import.meta.url), "utf8");
-const status = { state: "play", title: "A very long track title ".repeat(12), artist: "An artist ".repeat(10), album: "An album ".repeat(10), audio_format: "192000:24:2", current_media: { kind: "local" }, elapsed: 12, duration: 180, volume: { backend: "mpd_software", available: true, writable: true, value: 50, muted: false } };
+const status = { state: "play", title: "A very long track title ".repeat(12), artist: "An artist ".repeat(10), album: "An album ".repeat(10), audio_format: "192000:24:2", current_media: { kind: "local" }, options: { repeat: false, single: "off", random: false }, elapsed: 12, duration: 180, volume: { backend: "mpd_software", available: true, writable: true, value: 50, muted: false } };
+const iconSizeOf = button => React.Children.toArray(button.props.children)[0].props.size;
 const nodes = element => React.isValidElement(element) ? [element, ...nodes(element.props.children)] : Array.isArray(element) ? element.flatMap(nodes) : [];
 function compile(name, dependencies) {
   const exports = {};
@@ -26,15 +27,17 @@ async function fixture(language = "en") {
   const dependencies = { react: { ...React, default: React, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons, "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": { signalPathInformation } };
   const SignalPath = compile("SignalPath", dependencies);
   const hooks = { ...React, useState: initial => [initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
-  const PlayerBar = compile("PlayerBar", { ...dependencies,
+  const controlled = { ...dependencies,
     react: { ...hooks, default: hooks, __esModule: true },
     "./SignalPath": { SignalPath }, "./PlexImage": { PlexImage: () => null },
     "../utils/frontendDiagnostics": { logError() { assert.fail("Unexpected diagnostic"); } },
-    "../services/audio": { audioService: Object.fromEntries(["togglePlay", "next", "previous", "seek", "setVolume"].map(name => [name, async (...args) => { calls.push([name, ...args]); }])) },
-  });
+    "../services/audio": { audioService: Object.fromEntries(["togglePlay", "next", "previous", "seek", "setVolume", "changePlaybackOption"].map(name => [name, async (...args) => { calls.push([name, ...args]); }])) },
+  };
+  const PlaybackOptionsControls = compile("PlaybackOptionsControls", controlled);
+  const PlayerBar = compile("PlayerBar", { ...controlled, "./PlaybackOptionsControls": { PlaybackOptionsControls } });
   const props = { status, health: { state: "available" }, route: { mode: "direct", endpoint: "hw:Fixture,0" }, isQueueOpen: false,
     onNavigateToAlbum: () => calls.push(["album"]), onNavigateToArtist: () => calls.push(["artist"]), onToggleQueue: () => calls.push(["queue"]), onOpenNowPlaying: () => calls.push(["now-playing"]) };
-  return { t, calls, props, SignalPath, render: changes => PlayerBar({ ...props, ...changes }) };
+  return { t, calls, props, SignalPath, PlaybackOptionsControls, render: changes => PlayerBar({ ...props, ...changes }) };
 }
 
 // Simulates the CSS tracks emitted by the actual component at the default
@@ -51,7 +54,8 @@ function geometry(tree, width) {
 }
 
 test("three regions center playback independently of side content at 1024, 1366 and 1920px", async () => {
-  const { render, SignalPath, props } = await fixture();
+  const { render, SignalPath, PlaybackOptionsControls, props } = await fixture();
+  const offCenter = new Map();
   for (const width of [1024, 1366, 1920, 2560]) {
     for (const long of [false, true]) for (const mode of ["shared", "direct"]) for (const kind of ["local", "plex"]) {
       const tree = render({
@@ -73,16 +77,48 @@ test("three regions center playback independently of side content at 1024, 1366 
       const layout = geometry(tree, width);
       assert.equal(layout.center, width / 2);
       assert.match(regions[1].props.className, /items-center/);
-      const controls = nodes(regions[1]).find(node => node.type === "div" && node.props.className === "flex items-center gap-7");
+      const controls = nodes(regions[1]).find(node => node.props["data-player-controls"] !== undefined);
       assert.ok(controls);
-      const buttons = React.Children.toArray(controls.props.children);
+      const children = React.Children.toArray(controls.props.children);
+      const buttons = children.filter(node => node.type === "button");
       assert.equal(buttons.length, 3);
-      // Previous/Next are equal-width icons. The middle Play/Pause button and
-      // its symmetric gaps are centered by the playback region's items-center.
-      const iconSize = button => React.Children.toArray(button.props.children)[0].props.size;
-      assert.equal(iconSize(buttons[0]), iconSize(buttons[2]));
-      const controlsWidth = iconSize(buttons[0]) + 40 + iconSize(buttons[2]) + 2 * 28;
-      assert.equal(layout.centerLeft + (layout.centerWidth - controlsWidth) / 2 + controlsWidth / 2, width / 2);
+      assert.equal(children.length, 4);
+      const optionsNode = nodes(children[3]).find(node => node.type === PlaybackOptionsControls);
+      assert.ok(optionsNode);
+      const options = PlaybackOptionsControls(optionsNode.props);
+      const optionButtons = nodes(options).filter(node => node.type === "button");
+      assert.equal(optionButtons.length, 2);
+      const optionsWidth = optionButtons.reduce((width, button) => width + iconSizeOf(button) + 2 * button.props.style.padding, 0) + 8;
+      // Derive tracks and item positions from the emitted grid/classes, including
+      // real option button widths. Do not equate the group center with Play.
+      assert.match(controls.props.className, /grid w-full/);
+      const tracks = /grid-cols-\[minmax\(0,1fr\)_(\d+)px_(\d+)px_(\d+)px_minmax\(0,1fr\)\]/.exec(controls.props.className);
+      assert.ok(tracks, "equal flexible side tracks must flank the transport");
+      const gap = Number(/gap-([\d.]+)/.exec(controls.props.className)[1]) * 4;
+      const fixed = tracks.slice(1).map(Number);
+      const side = (layout.centerWidth - fixed.reduce((a,b) => a+b,0) - 4 * gap) / 2;
+      const widths = [side, ...fixed, side];
+      const bounds = node => {
+        const column = Number(/col-start-(\d+)/.exec(node.props.className)[1]) - 1;
+        const left = layout.centerLeft + widths.slice(0,column).reduce((a,b) => a+b,0) + column * gap;
+        return { left, right: left + widths[column], width: widths[column] };
+      };
+      const previous = bounds(buttons[0]), play = bounds(buttons[1]), next = bounds(buttons[2]), extras = bounds(children[3]);
+      const playWidth = Number(/\bw-(\d+)\b/.exec(buttons[1].props.className)[1]) * 4;
+      assert.equal(play.width, playWidth);
+      for (const [button, track] of [[buttons[0], previous], [buttons[2], next]]) {
+        assert.match(button.props.className, /justify-self-center/);
+        assert.ok(iconSizeOf(button) <= track.width);
+      }
+      assert.equal(iconSizeOf(buttons[0]), iconSizeOf(buttons[2]));
+      const playCenter = play.left + playWidth / 2;
+      if (Math.abs(playCenter - width / 2) > 1e-9) offCenter.set(width, { actual: playCenter, expected: width / 2 });
+      assert.ok(Math.abs((playCenter - (previous.left + previous.width/2)) - ((next.left + next.width/2) - playCenter)) < 1e-9, "Previous/Next remain symmetric around Play");
+      assert.ok(previous.right <= play.left && play.right <= next.left && next.right <= extras.left, "transport and options never overlap");
+      assert.match(children[3].props.className, /justify-start/);
+      assert.ok(optionsWidth <= extras.width, "both real repeat/random buttons fit their side track");
+      assert.ok(extras.left + optionsWidth <= layout.centerLeft + layout.centerWidth, "options stay inside the central region");
+      assert.doesNotMatch(controls.props.className + buttons.map(button => button.props.className).join(" "), /absolute|translate-|left-|right-/);
       const progress = nodes(regions[1]).find(node => node.type === "div" && node.props.className.startsWith("w-full flex items-center gap-3"));
       assert.ok(progress);
       const progressChildren = React.Children.toArray(progress.props.children);
@@ -110,13 +146,17 @@ test("three regions center playback independently of side content at 1024, 1366 
       if (long) for (const value of [status.title, status.artist, status.album]) assert.ok(nodes(left[0]).some(node => node.props.title === value && node.props.className.includes("truncate")));
     }
   }
+  assert.deepEqual([...offCenter], [], "actual Play/Pause must remain centered including repeat/random controls");
 });
 
 test("queue drawer and Save feedback clear the new 112px player without shifting unrelated layouts", () => {
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const queue = source("QueueDrawer");
   assert.match(app, /fixed bottom-28 right-6/);
-  assert.match(queue, /fixed top-0 right-0 bottom-28/);
+  assert.match(queue, /className="np-queue-drawer"/);
+  const css = readFileSync(new URL("../components/nowPlaying.css", import.meta.url), "utf8");
+  const drawer = css.match(/\.np-queue-drawer\s*\{([^}]+)\}/)[1];
+  for (const rule of [/position:\s*fixed/, /top:\s*0/, /right:\s*0/, /bottom:\s*112px/]) assert.match(drawer, rule);
   assert.doesNotMatch(app, /bottom-24/);
   assert.doesNotMatch(queue, /bottom-24/);
 });
@@ -159,6 +199,30 @@ test("navigation, playback, seek, volume and actions retain their handlers", asy
   await ranges[1].props.onChange({ target: { value: "25" } });
   await click(t("player.mute")); await click(t("player.openNowPlaying")); await click(t("player.queue"));
   assert.deepEqual(calls, [["album"], ["album"], ["artist"], ["previous"], ["togglePlay"], ["next"], ["seek", 42.5], ["setVolume", 25], ["setVolume", 0], ["now-playing"], ["queue"]]);
+});
+
+test("real repeat/random controls preserve accessible MPD state, submit actions and block unavailable playback", async () => {
+  for (const language of ["en", "pt-BR"]) {
+    const { render, PlaybackOptionsControls, calls, t } = await fixture(language);
+    const optionNode = tree => nodes(tree).find(node => node.type === PlaybackOptionsControls);
+    const node = optionNode(render()), tree = PlaybackOptionsControls(node.props);
+    const buttons = nodes(tree).filter(node => node.type === "button");
+    assert.equal(buttons.length, 2);
+    for (const [index, key] of [[0, "player.repeat.off"], [1, "player.random.off"]]) {
+      assert.equal(buttons[index].props["aria-label"], t(key));
+      assert.equal(buttons[index].props.title, t(key)); assert.notEqual(t(key), key);
+      assert.equal(buttons[index].props["aria-pressed"], false);
+      buttons[index].props.onClick(); await Promise.resolve(); await Promise.resolve();
+    }
+    assert.deepEqual(calls, [["changePlaybackOption", "cycle_repeat", status.options], ["changePlaybackOption", "toggle_random", status.options]]);
+    assert.deepEqual(status.options, { repeat: false, single: "off", random: false });
+    calls.length = 0;
+    const unavailable = optionNode(render({ health: { state: "unavailable", reason: "socket_unavailable" } }));
+    for (const button of nodes(PlaybackOptionsControls(unavailable.props)).filter(node => node.type === "button")) {
+      assert.equal(button.props.disabled, true); button.props.onClick();
+    }
+    await Promise.resolve(); assert.deepEqual(calls, []);
+  }
 });
 
 test("paused, stopped and unavailable signal never claims stale data is active", async () => {

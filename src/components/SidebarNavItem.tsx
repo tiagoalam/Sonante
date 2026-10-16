@@ -1,4 +1,5 @@
 import React from "react";
+import { traceInteractionAction, type InteractionAction } from "../utils/frontendDiagnostics";
 import type { LucideIcon } from "lucide-react";
 
 interface SidebarNavItemProps {
@@ -8,6 +9,7 @@ interface SidebarNavItemProps {
   onClick: () => void;
   trailing?: React.ReactNode;
   title?: string;
+  diagnosticAction?: InteractionAction;
 }
 
 export const SidebarNavItem: React.FC<SidebarNavItemProps> = ({
@@ -17,10 +19,11 @@ export const SidebarNavItem: React.FC<SidebarNavItemProps> = ({
   onClick,
   trailing,
   title,
+  diagnosticAction,
 }) => (
   <button
     type="button"
-    onClick={onClick}
+    onClick={() => traceInteractionAction(diagnosticAction, onClick)}
     aria-current={active ? "page" : undefined}
     title={title}
     className={`group relative flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] ${

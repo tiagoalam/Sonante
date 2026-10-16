@@ -47,7 +47,15 @@ export interface PlaybackDiagnostic {
   code: "output_busy" | "output_unavailable" | "playback_error";
 }
 
+export interface PlaybackOptions {
+  repeat: boolean;
+  single: "off" | "on" | "oneshot";
+  random: boolean;
+}
+export type PlaybackOptionAction = "cycle_repeat" | "toggle_random";
+
 export interface PlaybackStatus {
+  options: PlaybackOptions | null;
   state: string;
   elapsed: number;
   duration: number;
@@ -85,7 +93,14 @@ export interface ConfiguredSignalRoute {
   endpoint: string | null;
 }
 
+export interface QueueArtworkContext {
+  blocked: boolean;
+  onlineEnabled: boolean;
+  generation: number;
+}
+
 export interface NowPlayingSnapshot {
+  queueArtwork?: QueueArtworkContext;
   route: ConfiguredSignalRoute | null;
   health: MpdHealth;
   playback: PlaybackStatus;
@@ -113,3 +128,11 @@ export interface QueueTrack {
   album?: string;
   duration?: number;
 }
+
+export interface AnalyzerOwner {
+  host: "main" | "now-playing";
+  sessionId: string;
+  generation: number;
+  leaseId?: string;
+}
+export interface AnalyzerEvent<T> { owner: AnalyzerOwner; data: T; }

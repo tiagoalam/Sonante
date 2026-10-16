@@ -9,10 +9,11 @@ interface Props {
   status: PlaybackStatus;
   health: MpdHealth;
   compact?: boolean;
+  horizontal?: boolean;
 }
 
 // A read-only view of confirmed configuration, never a Settings draft.
-export const SignalPath: React.FC<Props> = ({ route, status, health, compact = false }) => {
+export const SignalPath: React.FC<Props> = ({ route, status, health, compact = false, horizontal = false }) => {
   const { t } = useTranslation();
   const information = signalPathInformation(status, health);
   const format = information.format;
@@ -55,14 +56,14 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
   ];
 
   return (
-    <section aria-label={t("signalPath.title")} className="relative w-full min-w-0 rounded-xl border border-[#E5A00D]/20 bg-black/25 p-3">
-      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-        <h3 className="text-[11px] font-medium text-white/65">{t("signalPath.title")}</h3>
+    <section aria-label={t("signalPath.title")} className={`relative w-full min-w-0 rounded-xl border border-[#E5A00D]/20 bg-black/25 p-4 ${horizontal ? "np-signal-path" : ""}`}>
+      <div className="np-signal-heading flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+        <h3 className="text-xs font-semibold text-white/85">{t("signalPath.title")}</h3>
         <div className="flex items-center gap-2">
-          <span className="text-[10px] text-white/50">{mode} · {state}</span>
+          <span className="text-[11px] text-white/70">{mode} · {state}</span>
           <div className="group/signal-help flex">
             <button type="button" aria-label={t("signalPath.help")} className="rounded text-white/45 hover:text-white/80 focus-visible:outline focus-visible:outline-[#E5A00D]">
-              <CircleHelp size={14} aria-hidden="true" />
+              <CircleHelp size={16} aria-hidden="true" />
             </button>
             <span role="tooltip" className="pointer-events-none absolute inset-x-0 top-7 z-20 mt-1 hidden w-full rounded-lg border border-white/15 bg-[#202020] p-2 text-[11px] leading-relaxed text-white/80 shadow-lg group-hover/signal-help:block group-focus-within/signal-help:block">
               {t("signalPath.help")}
@@ -71,21 +72,35 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
         </div>
       </div>
       {route && (
-        <ol className={`mt-2 grid items-start gap-2 ${route.mode === "shared" ? "grid-cols-5" : "grid-cols-4"}`} aria-label={t("signalPath.configured")}>
+        <ol className={`np-signal-stages mt-3 grid items-start gap-3 ${route.mode === "shared" ? "grid-cols-5" : "grid-cols-4"}`} aria-label={t("signalPath.configured")}>
           {stages.map(({ label, icon: Icon }, index) => (
-            <li key={index} className="relative flex min-w-0 flex-col items-center gap-1 text-center">
-              {index > 0 && <ArrowRight size={10} className="absolute -left-2 top-0.5 text-[#E5A00D]/45" aria-hidden="true" />}
-              <Icon size={14} className="shrink-0 text-[#E5A00D]/75" aria-hidden="true" />
-              <span className="w-full break-words text-[9px] leading-tight text-white/65">{label}</span>
+            <li key={index} className="relative flex min-w-0 flex-col items-center gap-2 text-center">
+              {index > 0 && <ArrowRight size={12} className="absolute -left-2 top-1.5 text-[#E5A00D]/65" aria-hidden="true" />}
+              <Icon size={24} className="shrink-0 text-[#E5A00D]" aria-hidden="true" />
+              <span className="w-full break-words text-xs font-medium leading-snug text-white/85">{label}</span>
             </li>
           ))}
         </ol>
       )}
-      {route?.mode === "direct" && route.endpoint && <p className="mt-2 break-all text-[10px] text-white/50">{t("signalPath.endpointShort")}: {route.endpoint}</p>}
-      <div className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-[10px] text-white/65">
-        {information.source && <span>{source}</span>}
-        <span title={t("signalPath.reported")}>{formatLabel}</span>
-        {information.volumeBackend !== "unavailable" && <span>{t("signalPath.volume")}: {t(`player.volumeBackend.${information.volumeBackend}`)}</span>}
+      {!horizontal && route?.mode === "direct" && route.endpoint &&
+        <p className="mt-2 break-all text-[11px] text-white/70">{t("signalPath.endpointShort")}: {route.endpoint}</p>}
+      <div className="np-signal-metadata mt-3 flex flex-wrap items-center gap-3 text-[11px] text-white/75">
+        <div className="np-signal-format rounded-lg border border-[#E5A00D]/20 bg-[#E5A00D]/5 px-3 py-2" title={t("signalPath.reported")}>
+          <p className="np-signal-format-heading mb-1 flex flex-wrap items-center gap-x-1 text-[10px] font-semibold text-[#D1B475]">
+            {information.source && <><span>{source}</span><span aria-hidden="true">·</span></>}
+            <span>{t("signalPath.reported")}</span>
+          </p>
+          {format.kind === "pcm" ? <dl className="grid grid-cols-3 gap-x-3 gap-y-2">
+            {[["rate", `${format.rateKhz} kHz`], ["depth", `${format.bits}-bit`], ["channels", String(format.channels)]].map(([key, value]) => <div key={key}>
+              <dt className="text-[10px] text-white/60">{t(`signalPath.${key}`)}</dt><dd className="text-sm font-semibold tabular-nums text-white/95">{value}</dd>
+            </div>)}
+          </dl> : <p className="text-xs text-white/75">{formatLabel}</p>}
+          {information.volumeBackend !== "unavailable" && <p className="np-signal-format-volume mt-1 border-t border-white/10 pt-1 text-[11px] leading-snug text-white/75">
+            {t("signalPath.volume")}: {horizontal && status.volume.available ? `${status.volume.value}% · ` : ""}{t(`player.volumeBackend.${information.volumeBackend}`)}
+          </p>}
+          {horizontal && route?.mode === "direct" && route.endpoint &&
+            <details className="np-signal-endpoint"><summary>{t("signalPath.endpointShort")}</summary><p>{route.endpoint}</p></details>}
+        </div>
       </div>
       {/* Reserved presentation slot: future verified metadata, no inferred quality badges. */}
       <div data-signal-quality-slot />

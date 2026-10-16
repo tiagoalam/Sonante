@@ -624,3 +624,55 @@ test("busy conflict stays visible with collapsed help and Save refuses it only a
   assert.equal(f.calls.availability, 3); assert.equal(f.calls.save.length, 1);
   assert.equal(f.calls.save[0].audio_output_type, "pipewire"); f.h.dispose();
 });
+
+test("overlap refusal in Settings retains the proposal and shows translated feedback", async () => {
+  const alerts = [], oldAlert = globalThis.alert, oldError = console.error;
+  globalThis.alert = message => alerts.push(message); console.error = () => {};
+  let f;
+  try {
+    const draft = { ...base, first_run: true, local_folders: ["/music", "/music/reggae"] };
+    f = await modal({ config: { ...base, first_run: true },
+      props: { initialPage: "local", initialDraft: draft, initialFolderOverlap: true },
+      save: async () => { throw "LOCAL_SOURCE_NEW_OVERLAP"; } });
+    assert.ok(nodes(f.tree()).some(node => node.props.role === "alert" && text(node).includes("settings.localFolderOverlap")));
+    select(f.tree(), "-buffer").props.onChange({ target: { value: "32768" } }); f.render();
+    await button(f.tree(), "settings.save").props.onClick(); f.render();
+    assert.equal(f.calls.config, 1, "no confirmed-config reload discards this refused draft");
+    assert.equal(f.calls.closed, 0); assert.equal(f.calls.saved.length, 0);
+    assert.equal(select(f.tree(), "-buffer").props.value, 32768);
+    assert.deepEqual(f.calls.save[0].local_folders, draft.local_folders);
+    assert.deepEqual(alerts, ["settings.localFolderOverlap"]);
+  } finally { f?.h.dispose(); globalThis.alert = oldAlert; console.error = oldError; }
+});
+
+test("initial page survives config loading, tab selection survives rerenders, and all panels remain mounted", async () => {
+  for (const initialPage of [undefined, "general", "local", "plex"]) {
+    const f = await modal({ props: { initialPage } });
+    assert.equal(pageProps(f.tree()).initialPage, initialPage, "forwarded after async config load");
+    const pages = component("SettingsPages");
+    let tree = pages.render(pageProps(f.tree()));
+    const check = expected => {
+      const tabs = nodes(tree).filter(node => node.props.role === "tab");
+      const panels = nodes(tree).filter(node => node.props.role === "tabpanel");
+      assert.equal(tabs.length, 4); assert.equal(panels.length, 4);
+      for (let i = 0; i < tabs.length; i++) {
+        const active = tabs[i].props.id.endsWith(`-tab-${expected}`);
+        assert.equal(tabs[i].props["aria-selected"], active);
+        assert.equal(tabs[i].props.tabIndex, active ? 0 : -1);
+        assert.equal(panels[i].props.hidden, !active);
+        assert.equal(tabs[i].props["aria-controls"], panels[i].props.id);
+        assert.equal(panels[i].props["aria-labelledby"], tabs[i].props.id);
+      }
+    };
+    check(initialPage ?? "general");
+    const retained = nodes(tree).filter(node => node.props.role === "tabpanel").map(node => node.props.children[1]);
+    button(tree, "settings.pages.audio").props.onClick();
+    tree = pages.render(pageProps(f.tree())); check("audio");
+    assert.deepEqual(nodes(tree).filter(node => node.props.role === "tabpanel").map(node => node.props.children[1]), retained);
+    select(f.tree(), "-buffer").props.onChange({ target: { value: "32768" } });
+    f.render(); tree = pages.render(pageProps(f.tree())); check("audio");
+    tree = pages.render({ ...pageProps(f.tree()), initialPage: "plex" }); check("audio");
+    assert.equal(select(f.tree(), "-buffer").props.value, 32768);
+    pages.dispose(); f.h.dispose();
+  }
+});

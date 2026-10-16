@@ -10,7 +10,7 @@ const generic = new Set([
   "n/a", "na", "none",
 ]);
 
-function usableText(value: unknown): string | null {
+export function usablePresentationText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const text = normalize(value);
   return !text || generic.has(text) || !/[\p{L}\p{N}]/u.test(text) || /[\u0000-\u001f\u007f]/u.test(text) ? null : text;
@@ -19,7 +19,7 @@ function usableText(value: unknown): string | null {
 // Artist diversity uses the same surface normalization; placeholders cannot
 // establish that two unrelated entries belong to the same artist.
 export function explorePresentationArtistKey(entry: ExploreEntry): string {
-  const artist = usableText(entry.album.artist);
+  const artist = usablePresentationText(entry.album.artist);
   return artist ? JSON.stringify(["artist", artist]) : JSON.stringify(["item", entry.key]);
 }
 
@@ -44,7 +44,7 @@ export interface ExplorePresentationGroup {
 
 /** Suggestion diversity only, never album/file identity or edition equivalence.
  * artist is the existing album-artist display value (Local may fall back to a
- * track artist; Plex uses parentTitle). Only NFC, case and whitespace normalize;
+ * track artist). Only NFC, case and whitespace normalize;
  * punctuation, accents and all edition/live/disc qualifiers remain significant.
  * Unknown/generic text gets an individual item key. For each artist/title base,
  * missing years join a known year only when exactly one is present. If several
@@ -55,7 +55,7 @@ export interface ExplorePresentationGroup {
  */
 export function groupExplorePresentation(pool: readonly ExploreEntry[], retained: readonly ExploreEntry[] = []): ExplorePresentationGroup[] {
   const descriptors = pool.map(entry => {
-    const artist = usableText(entry.album.artist), title = usableText(entry.album.title);
+    const artist = usablePresentationText(entry.album.artist), title = usablePresentationText(entry.album.title);
     return { entry, base: artist && title ? JSON.stringify([artist, title]) : null, year: knownYear(entry.album.year) };
   });
   const years = new Map<string, Set<number>>();
@@ -70,7 +70,7 @@ export function groupExplorePresentation(pool: readonly ExploreEntry[], retained
     if (!groups.has(key)) groups.set(key, []); groups.get(key)!.push(entry);
   }
   return [...groups].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, members]) => {
-    const local = members.filter(entry => entry.source === "local"), preferred = local.length ? local : members;
+    const preferred = members;
     const kept = retained.flatMap(old => preferred.filter(entry => entry.key === old.key))[0];
     const candidate = kept ?? preferred.reduce((a, b) => b.key < a.key ? b : a);
     return { key, candidate, members };
