@@ -41,11 +41,12 @@ import { PlexDiscoverSession } from "./utils/plexDiscover";
 import { mixPlaybackMetadata } from "./utils/plexLibraryMix";
 import { playlistsService, isDuplicatePlaylistNameError } from "./services/playlists";
 import { discoverLanguage } from "./utils/plexDiscoverPresentation";
-import type { ExploreContext, ExploreEntry, ExploreSourceState } from "./utils/explore";
+import type { ExploreContext, ExploreEntry } from "./utils/explore";
 import { exploreEntryIsCurrent } from "./utils/explore";
 import { PlexCatalogCoordinator } from "./utils/plexCatalogCoordinator";
 import { LocalBrowserView, localAlbumCatalog, type LocalSubview } from "./components/LocalBrowserView";
 import { localCatalogActivity } from "./utils/localAlbumCatalog";
+import { localExplorePresentation } from "./utils/localExploreState";
 import { localArtworkEnrichment, localArtworkResolver } from "./utils/localArtworkSession";
 import { artworkReadBlocked } from "./utils/localArtwork";
 import { createMainSectionPreference, type MainSection } from "./utils/appBootstrap";
@@ -1344,10 +1345,12 @@ export function App() {
 
   const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
   const localExploreConfigured = Boolean(config?.local_folders.length);
-  const localExploreState: ExploreSourceState = !localExploreConfigured ? "not_configured"
-    : mpdHealth.state === "starting" ? "loading"
-    : !isPlaybackAvailable || playbackStatus.is_updating || localCatalog.saveBlocked || localCatalog.mpdBusy || localCatalog.error ? "unavailable"
-    : !localCatalog.loaded ? "loading" : localCatalog.albums.length ? "ready" : "empty";
+  const { state: localExploreState, activity: exploreLoadingActivity } = localExplorePresentation({
+    configured: localExploreConfigured, starting: mpdHealth.state === "starting", available: isPlaybackAvailable,
+    updating: playbackStatus.is_updating, catalog: localCatalog,
+    savePhase: configSavePhase === "local" ? localSavePhase : null,
+    saveStatusUncertain: Boolean(configSaveNotice?.uncertain || configSaveNotice?.statusUnavailable),
+  });
   const exploreSourceOptions = useMemo(() => localLibrarySourceOptions(localCatalog.albums), [localCatalog.albums]);
   const activeExploreSourceId = validLocalLibrarySourceSelection(exploreSourceId, exploreSourceOptions);
   const exploreAlbums = useMemo(() => filterLocalAlbumsByScope(localCatalog.albums, activeExploreSourceId, ""), [localCatalog.albums, activeExploreSourceId]);
@@ -1622,7 +1625,8 @@ export function App() {
           <div className="contents">
             <div className={exploreDetail ? "hidden" : "contents"}>
               <ExploreView context={exploreContext} active={!exploreDetail && !playerTarget}
-                configurationReady={config !== null} onConfigure={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("local"); setShowSettings(true); } }}
+                configurationReady={config !== null}
+                loadingActivity={exploreLoadingActivity} onConfigure={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("local"); setShowSettings(true); } }}
                 canRetryLocal={isPlaybackAvailable && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy}
                 retryLocal={() => { if (isPlaybackAvailable && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy) localAlbumCatalog.requestRefresh(); }}
                 onlineArtworkEnabled={config?.online_artwork_enabled ?? false}

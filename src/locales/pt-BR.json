@@ -227,6 +227,7 @@
     "tracks": "faixas"
   },
   "localBrowser": {
+    "playRequestError": "Não foi possível concluir a solicitação de reprodução.",
     "importPreviewTitle": "Álbuns em indexação",
     "importPreviewDescription": "Descobertas provisórias. A reprodução ficará disponível após a confirmação da atualização da biblioteca.",
     "importPreviewIndexing": "Indexando…",
@@ -1089,7 +1090,7 @@
     "close": "Fechar",
     "loading": "Lendo cabeçalho do arquivo…",
     "provenance": "Arquivo Local original · declaração STREAMINFO do FLAC",
-    "format": "Formato",
+    "format": "Contêiner",
     "sampleRate": "Taxa de amostragem",
     "bitDepthValue": "{{bits}} bits",
     "bitDepth": "Profundidade de bits",
@@ -1101,12 +1102,48 @@
       "outside_configured_roots": "A faixa está fora das fontes configuradas.",
       "file_not_found": "Arquivo não encontrado.",
       "cue_virtual": "Faixas virtuais CUE não são suportadas.",
-      "unsupported_format": "Somente FLAC nativo iniciado pela assinatura FLAC é suportado.",
-      "corrupt_header": "O cabeçalho FLAC está truncado ou inválido.",
+      "unsupported_format": "Este formato ou variante excede os limites da inspeção de cabeçalhos; codec, organização ou metadados necessários não puderam ser determinados com segurança.",
+      "corrupt_header": "O cabeçalho do arquivo está truncado ou é inválido.",
       "permission_denied": "Permissão de leitura do arquivo negada.",
       "unavailable": "Não foi possível ler o arquivo.",
       "stale": "O arquivo ou contexto da biblioteca mudou. Feche e solicite as informações novamente.",
       "busy": "Outra inspeção de arquivo ainda está em andamento. Feche e tente novamente após a conclusão."
-    }
+    },
+    "codec": "Codec",
+    "dsdProvenance": "Arquivo Local original · declaração do cabeçalho DSD",
+    "dsdRate": "{{hz}} Hz ({{mhz}} MHz)",
+    "dsdLevel": "Nível DSD",
+    "unknownLevel": "Família de frequência não reconhecida",
+    "duration": "Duração",
+    "durationValue": "{{seconds}} s",
+    "mp3Provenance": "Arquivo Local original · cabeçalhos de quadros MPEG (amostra limitada)",
+    "compression": "Compressão",
+    "lossy": "Com perdas",
+    "notApplicable": "Não aplicável a este codec",
+    "frameBitrate": "Bitrate do quadro",
+    "bitrateValue": "{{kbps}} kbps",
+    "frameBitrateHint": "Bitrate do primeiro quadro verificado. Não determina a média nem CBR/VBR do arquivo inteiro.",
+    "mp3DurationUnknown": "Não determinada por esta inspeção",
+    "containerProvenance": "Arquivo Local original · cabeçalhos de contêiner e codec com leitura limitada",
+    "compressionValues": {
+      "lossy": "Com perdas",
+      "lossless": "Sem perdas",
+      "uncompressed": "Sem compressão",
+      "hybrid": "Híbrido (com perdas sem correção)",
+      "unknown": "Desconhecida"
+    },
+    "opusClock": "Relógio de decodificação Opus",
+    "originalRate": "Taxa original de entrada declarada",
+    "aacCoreRate": "Frequência do núcleo AAC",
+    "sampleType": "Representação das amostras",
+    "sampleTypes": {
+      "integer": "PCM inteiro",
+      "float": "PCM em ponto flutuante"
+    },
+    "floatDepth": "Precisão de armazenamento",
+    "opusHint": "Opus usa um relógio de decodificação de 48 kHz. A taxa original de entrada é informativa e não comprova a banda codificada nem a resolução do master.",
+    "aacCoreHint": "ADTS declara o relógio do núcleo AAC. SBR implícito e a taxa efetiva da saída decodificada não são determinados por estes cabeçalhos.",
+    "floatHint": "A precisão de armazenamento em ponto flutuante não comprova a resolução do master nem uma profundidade inteira equivalente.",
+    "hybridHint": "O cabeçalho WavPack declara compressão híbrida. Nenhum arquivo de correção foi aberto; reconstrução sem perdas não foi comprovada."
   }
 }

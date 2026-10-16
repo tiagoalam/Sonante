@@ -227,6 +227,7 @@
     "tracks": "tracks"
   },
   "localBrowser": {
+    "playRequestError": "The playback request could not be completed.",
     "importPreviewTitle": "Albums being indexed",
     "importPreviewDescription": "Provisional discoveries. Playback will be available after the library update is confirmed.",
     "importPreviewIndexing": "Indexing…",
@@ -1089,7 +1090,7 @@
     "close": "Close",
     "loading": "Reading file header…",
     "provenance": "Original local file · FLAC STREAMINFO declaration",
-    "format": "Format",
+    "format": "Container",
     "sampleRate": "Sample rate",
     "bitDepthValue": "{{bits}} bits",
     "bitDepth": "Bit depth",
@@ -1101,12 +1102,48 @@
       "outside_configured_roots": "The track is outside the configured sources.",
       "file_not_found": "File not found.",
       "cue_virtual": "Virtual CUE tracks are not supported.",
-      "unsupported_format": "Only native FLAC with a leading FLAC signature is supported.",
-      "corrupt_header": "The FLAC header is truncated or invalid.",
+      "unsupported_format": "This format or variant exceeds the supported header inspection limits; codec, layout or required metadata could not be established safely.",
+      "corrupt_header": "The file header is truncated or invalid.",
       "permission_denied": "Permission to read the file was denied.",
       "unavailable": "The file could not be read.",
       "stale": "The file or library context changed. Close and request information again.",
       "busy": "Another file inspection is still running. Close and try again when it finishes."
-    }
+    },
+    "codec": "Codec",
+    "dsdProvenance": "Original local file · DSD header declaration",
+    "dsdRate": "{{hz}} Hz ({{mhz}} MHz)",
+    "dsdLevel": "DSD level",
+    "unknownLevel": "Unrecognized rate family",
+    "duration": "Duration",
+    "durationValue": "{{seconds}} s",
+    "mp3Provenance": "Original local file · MPEG frame headers (limited sample)",
+    "compression": "Compression",
+    "lossy": "Lossy",
+    "notApplicable": "Not applicable to this codec",
+    "frameBitrate": "Frame bitrate",
+    "bitrateValue": "{{kbps}} kbps",
+    "frameBitrateHint": "Bitrate from the first verified frame. It does not establish the average bitrate or CBR/VBR for the whole file.",
+    "mp3DurationUnknown": "Not determined by this inspection",
+    "containerProvenance": "Original local file · bounded container and codec headers",
+    "compressionValues": {
+      "lossy": "Lossy",
+      "lossless": "Lossless",
+      "uncompressed": "Uncompressed",
+      "hybrid": "Hybrid (lossy without correction)",
+      "unknown": "Unknown"
+    },
+    "opusClock": "Opus decoding clock",
+    "originalRate": "Declared original input rate",
+    "aacCoreRate": "AAC core sample rate",
+    "sampleType": "Sample representation",
+    "sampleTypes": {
+      "integer": "Integer PCM",
+      "float": "Floating-point PCM"
+    },
+    "floatDepth": "Storage precision",
+    "opusHint": "Opus uses a 48 kHz decoding clock. The original input rate is informational and does not establish the encoded bandwidth or master resolution.",
+    "aacCoreHint": "ADTS declares the AAC core clock. Implicit SBR and the effective decoded output rate are not established by these headers.",
+    "floatHint": "Floating-point storage precision does not establish master resolution or an equivalent integer bit depth.",
+    "hybridHint": "The WavPack header declares hybrid compression. No correction file was opened; lossless reconstruction is not established."
   }
 }

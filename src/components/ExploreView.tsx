@@ -124,7 +124,7 @@ export const ExploreAlbumShelf: React.FC<{ id: string; title: string; cards: Rea
   const shelfNode = useRef<HTMLDivElement | null>(null);
   const shelfPosition = useRef(positions[id] ?? 0);
   const restoringShelf = useRef(true);
-  const shelfActive = useRef(active); shelfActive.current = active;
+  const shelfActive = useRef(active); shelfActive.current = active && !waiting;
   const shelfReset = resetRevision;
   const lastReset = useRef(resetRevision);
   const shelfCount = waiting ? EXPLORE_SUGGESTION_COUNT : cards.length;
@@ -153,13 +153,13 @@ export const ExploreAlbumShelf: React.FC<{ id: string; title: string; cards: Rea
   }, [active, shelfCount]);
   useLayoutEffect(() => {
     const node = shelfNode.current;
-    if (!node || !active || node.clientWidth <= 0 || shelfLayout.viewportWidth !== node.clientWidth) return;
+    if (!node || !active || waiting || node.clientWidth <= 0 || shelfLayout.viewportWidth !== node.clientWidth) return;
     restoringShelf.current = true;
     if (lastReset.current !== resetRevision) { shelfPosition.current = 0; positions[id] = 0; lastReset.current = resetRevision; }
     const left = Math.max(0, Math.min(shelfPosition.current, node.scrollWidth - node.clientWidth));
     node.scrollTo({ left, behavior: "auto" }); shelfPosition.current = left; positions[id] = left;
     updateShelfEdges(node); restoringShelf.current = false;
-  }, [active, shelfLayout, shelfCount, shelfReset]);
+  }, [active, waiting, shelfLayout, shelfCount, shelfReset]);
   const scrollShelf = (direction: -1 | 1 | "first" | "last") => {
     const node = shelfNode.current;
     if (!node || !active || waiting || node.clientWidth <= 0 || node.scrollWidth <= node.clientWidth + 1) return;
@@ -215,8 +215,9 @@ interface Props {
   onConfigure?: () => void;
   retryLocal?: () => void;
   canRetryLocal?: boolean;
+  loadingActivity?: "indexing" | "organizing" | null;
 }
-export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isCurrent, onOpen, onPlay, isPlaybackAvailable = false, sourceSelector, onlineArtworkEnabled = false, artworkBlocked = false, configurationReady = true, onConfigure, retryLocal, canRetryLocal = true }) => {
+export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isCurrent, onOpen, onPlay, isPlaybackAvailable = false, sourceSelector, onlineArtworkEnabled = false, artworkBlocked = false, configurationReady = true, onConfigure, retryLocal, canRetryLocal = true, loadingActivity = null }) => {
   const { t } = useTranslation();
   const session = useMemo(() => createExploreSession(), []);
   session.syncContext(configurationReady ? context : { ...context, local: { ...context.local, state: "loading" } }, active, false);
@@ -224,13 +225,13 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
   const ensure = useRef(ensureLocal); ensure.current = ensureLocal;
   useEffect(() => { session.activate(); return () => session.close(); }, [session]);
   useEffect(() => { if (active && configurationReady && context.local.state !== "not_configured") ensure.current(); }, [active, configurationReady, context.local.state]);
-  const slice = state.slice;
+  const waiting = state.preparing || context.local.state === "loading";
+  const slice = waiting ? null : state.slice;
   const continuousGenre = slice?.group.kind === "genre";
   const selected = continuousGenre ? [] : slice ? session.sliceEntries() : session.visibleEntries();
   const artists = session.visibleArtists(), genres = session.visibleGenres();
   const genreColors = assignExploreGenreColors(genres.map(group => group.value));
   const assignedGenreIcons = assignExploreGenreIcons(genres.map(group => group.value));
-  const waiting = state.preparing || !selected.length && context.local.state === "loading";
   const shelfPositions = useRef<Record<string, number>>({});
   const genrePositions = useRef<Record<string, number>>({});
   const sliceIdentity = useRef<string | null>(null);
@@ -241,10 +242,10 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
     viewScope.current = context.local.sourceId ?? null;
     shelfPositions.current = {}; genrePositions.current = {}; sliceIdentity.current = null; mainPosition.current = 0;
   }
-  useLayoutEffect(() => { if (active && scrollNode.current) scrollNode.current.scrollTop = mainPosition.current; }, [active, context.local.sourceId]);
+  useLayoutEffect(() => { if (active && !waiting && scrollNode.current) scrollNode.current.scrollTop = mainPosition.current; }, [active, waiting, context.local.sourceId]);
 
-  if (!slice || !continuousGenre) sliceIdentity.current = null;
-  else if (sliceIdentity.current !== slice.group.key) { genrePositions.current[slice.group.key] = 0; sliceIdentity.current = slice.group.key; }
+  if (!state.slice || state.slice.group.kind !== "genre") sliceIdentity.current = null;
+  else if (sliceIdentity.current !== state.slice.group.key) { genrePositions.current[state.slice.group.key] = 0; sliceIdentity.current = state.slice.group.key; }
   const renew = () => {
     const before = session.getSnapshot(); session.renew();
     if (session.getSnapshot() !== before) Object.keys(shelfPositions.current).forEach(id => { shelfPositions.current[id] = 0; });
@@ -284,9 +285,9 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
         <RefreshCw size={14} />{t("explore.renew")}
       </button>}
     </header>
-    <div ref={scrollNode} onScroll={event => { if (active) mainPosition.current = event.currentTarget.scrollTop; }} className={`min-h-0 flex-1 px-8 py-5 ${continuousGenre ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}>
+    <div ref={scrollNode} onScroll={event => { if (active && !waiting) mainPosition.current = event.currentTarget.scrollTop; }} className={`min-h-0 flex-1 px-8 py-5 ${continuousGenre ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}>
       {context.local.state !== "ready" && context.local.state !== "not_configured" && <p className="text-xs text-[#999999]"
-        role={unavailable ? "alert" : "status"}>{t("explore.sources.local")}: {t(`explore.states.${context.local.state}`)}</p>}
+        role={unavailable ? "alert" : "status"}>{t("explore.sources.local")}: {context.local.state === "loading" && loadingActivity ? t(loadingActivity === "indexing" ? "settings.updatingLibrary" : "localBrowser.organizing") : t(`explore.states.${context.local.state}`)}</p>}
       {context.local.state === "unavailable" && retryLocal && <button type="button" disabled={!active || !canRetryLocal} onClick={retryLocal}
         className="mt-2 rounded px-2 py-1 text-xs text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">{t("explore.retryLocal")}</button>}
       {state.sliceInvalidated && <p role="status" className="mt-3 text-xs text-[#999999]">{t("explore.sliceInvalidated")}</p>}
@@ -320,7 +321,7 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
             onlineArtworkEnabled={onlineArtworkEnabled} artworkBlocked={artworkBlocked}
             current={() => session.canUseShelf(entry, state.revision, theme.id) && isCurrent(entry)}
             onOpen={() => { if (session.canUseShelf(entry, state.revision, theme.id) && isCurrent(entry)) onOpen(entry); }} />)}
-          active={active && !slice} waiting={false} positions={shelfPositions.current} resetRevision={state.resets[theme.id] ?? 0} onRenew={() => renewShelf(theme.id)} />),
+          active={active && !slice} waiting={waiting} positions={shelfPositions.current} resetRevision={state.resets[theme.id] ?? 0} onRenew={() => renewShelf(theme.id)} />),
         <section key="artists">
           <div className="flex items-center justify-between gap-4"><h2 className="text-lg font-bold text-white">{t("explore.artists")}</h2><button type="button" disabled={!active || waiting || !artists.length} onClick={() => renewShelf("artists")} aria-label={t("explore.renewSection", { title: t("explore.artists") })} className="rounded-full p-2 text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-30"><RefreshCw size={16} /></button></div>
           <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-6">{waiting

@@ -1,7 +1,13 @@
-//! Native FLAC STREAMINFO inspection only; never decode audio, tags or pictures.
+//! Bounded original-file headers only; never decode audio, tags or pictures.
 //! Layout: RFC 9639 §§8.1–8.2; cross-checked with Lofty 0.25.4 flac/properties.rs.
 use serde::Serialize;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
+#[path = "container_file_info.rs"]
+pub(crate) mod container;
+#[path = "dsd_file_info.rs"]
+pub(crate) mod dsd;
+#[path = "mp3_file_info.rs"]
+pub(crate) mod mp3;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -22,9 +28,19 @@ pub enum InfoError {
 #[derive(Debug, Serialize)]
 pub struct LocalFileInfo {
     pub provenance: &'static str,
+    /// File container, independently of the encoded signal.
     pub format: &'static str,
+    pub codec: &'static str,
+    pub lossy: bool,
+    pub compression: &'static str,
+    pub sample_type: &'static str,
+    pub sample_rate_basis: &'static str,
+    pub original_sample_rate: Option<u32>,
+    /// First confirmed frame only, never a whole-file average or CBR declaration.
+    pub frame_bitrate_kbps: Option<u16>,
+    pub dsd_level: Option<u16>,
     pub sample_rate: Option<u32>,
-    pub bit_depth: u8,
+    pub bit_depth: Option<u8>,
     pub channels: u8,
     pub duration_seconds: Option<f64>,
     pub revision: String,
@@ -49,11 +65,29 @@ impl Drop for InspectionPermit {
 }
 
 fn read_exact(reader: &mut impl Read, bytes: &mut [u8]) -> Result<(), InfoError> {
-    reader.read_exact(bytes).map_err(|e| match e.kind() {
-        io::ErrorKind::UnexpectedEof => InfoError::CorruptHeader,
-        io::ErrorKind::PermissionDenied => InfoError::PermissionDenied,
-        _ => InfoError::Unavailable,
-    })
+    let mut offset = 0;
+    for _ in 0..64 {
+        if offset == bytes.len() {
+            return Ok(());
+        }
+        match reader.read(&mut bytes[offset..]) {
+            Ok(0) => return Err(InfoError::CorruptHeader),
+            Ok(n) => offset += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                return Err(match e.kind() {
+                    io::ErrorKind::PermissionDenied => InfoError::PermissionDenied,
+                    io::ErrorKind::UnexpectedEof => InfoError::CorruptHeader,
+                    _ => InfoError::Unavailable,
+                })
+            }
+        }
+    }
+    if offset == bytes.len() {
+        Ok(())
+    } else {
+        Err(InfoError::UnsupportedFormat)
+    }
 }
 
 pub fn read_streaminfo(reader: &mut impl Read) -> Result<LocalFileInfo, InfoError> {
@@ -90,13 +124,57 @@ pub fn read_streaminfo(reader: &mut impl Read) -> Result<LocalFileInfo, InfoErro
     Ok(LocalFileInfo {
         provenance: "original_file_streaminfo",
         format: "FLAC",
+        codec: "FLAC",
+        lossy: false,
+        compression: "lossless",
+        sample_type: "integer",
+        sample_rate_basis: "encoded_header",
+        original_sample_rate: None,
+        frame_bitrate_kbps: None,
+        dsd_level: None,
         sample_rate: (sample_rate != 0).then_some(sample_rate),
-        bit_depth,
+        bit_depth: Some(bit_depth),
         channels,
         duration_seconds: (sample_rate != 0 && samples != 0)
             .then(|| samples as f64 / sample_rate as f64),
         revision: String::new(),
     })
+}
+
+/// `file_size` comes from the already opened descriptor, never from a filename.
+/// FLAC still reads exactly 42 bytes. DSD parsers have separate hard budgets.
+pub fn read_file_info(
+    reader: &mut (impl Read + Seek),
+    file_size: u64,
+) -> Result<LocalFileInfo, InfoError> {
+    let mut marker = [0; 4];
+    read_exact(reader, &mut marker)?;
+    match &marker {
+        b"fLaC" => read_streaminfo(&mut io::Cursor::new(marker).chain(reader)),
+        b"DSD " => dsd::read_dsf(reader, file_size),
+        b"FRM8" => dsd::read_dff(reader, file_size),
+        b"RF64" | b"RIFX" | b"ADIF" => Err(InfoError::UnsupportedFormat),
+        b"RIFF" | b"FORM" | b"OggS" | b"wvpk" | b"MPCK" => {
+            container::read(reader, file_size, marker)
+        }
+        [b'M', b'P', b'+', _] => container::read(reader, file_size, marker),
+        _ if marker[0] == 0xff && marker[1] & 0xf6 == 0xf0 => {
+            container::read(reader, file_size, marker)
+        }
+        _ if marker[0] != 0xff && marker[..3] != *b"ID3" && file_size >= 8 => {
+            let mut next = [0; 4];
+            read_exact(reader, &mut next)?;
+            reader
+                .seek(io::SeekFrom::Start(4))
+                .map_err(|_| InfoError::Unavailable)?;
+            if next == *b"ftyp" {
+                container::read(reader, file_size, marker)
+            } else {
+                mp3::read_mp3_probed(reader, file_size, marker)
+            }
+        }
+        _ => mp3::read_mp3(reader, file_size, marker),
+    }
 }
 
 #[cfg(test)]
@@ -128,7 +206,7 @@ pub(crate) mod tests {
             let result = read_streaminfo(&mut reader).unwrap();
             assert_eq!(
                 (result.sample_rate, result.bit_depth, result.channels),
-                (Some(rate), depth, channels)
+                (Some(rate), Some(depth), channels)
             );
             assert_eq!(result.duration_seconds, Some(2.0));
             assert_eq!(reader.position(), 42);
@@ -171,6 +249,16 @@ pub(crate) mod tests {
         assert_eq!(
             read_streaminfo(&mut Cursor::new(b"RIFF")).unwrap_err(),
             InfoError::UnsupportedFormat
+        );
+        struct ExplicitEof;
+        impl Read for ExplicitEof {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::UnexpectedEof.into())
+            }
+        }
+        assert_eq!(
+            read_streaminfo(&mut ExplicitEof).unwrap_err(),
+            InfoError::CorruptHeader
         );
         struct Denied;
         impl Read for Denied {

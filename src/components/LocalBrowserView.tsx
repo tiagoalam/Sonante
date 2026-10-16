@@ -492,28 +492,51 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     }
   }, [albums]);
 
-  const handlePlayEntireAlbum = async (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => {
-    if (!isPlaybackAvailable || !catalogConfirmed || (trackItems && !tracksReady)) return;
+  // Feedback belongs to one attempt in one Local view; old replies cannot
+  // reappear after navigation, a new attempt or unmount.
+  const playbackContext = useMemo(() => ({}), [
+    subview, viewMode, currentPath, selectedAlbum?.id, selectedArtist, selectedSourceId,
+    selectedGenre, selectedDecade, selectedYear, unknownYearSelected, albumSearch, artistSearch,
+    initialAlbumId, playerTarget, albums, catalogRefreshRevision, configuredLocalFolders,
+    isPlaybackAvailable, catalogConfirmed,
+  ]);
+  const currentPlaybackContext = useRef(playbackContext);
+  currentPlaybackContext.current = playbackContext;
+  const playbackAttempt = useRef<object | null>(null);
+  const [playbackFailure, setPlaybackFailure] = useState<{ context: object; attempt: object } | null>(null);
+  useEffect(() => () => { playbackAttempt.current = null; }, []);
+  const runLocalPlayback = async (action: () => Promise<void>) => {
+    const attempt = {};
+    playbackAttempt.current = attempt;
+    setPlaybackFailure(null);
     try {
-      const files = trackItems ?? flattenAlbumDiscs(await loadAlbumDiscTracks(album)).tracks;
-      const cov = (selectedAlbum?.id === album.id ? albumCover : null) || await localArtworkResolver.resolveLocalOnly(album);
-      const currentCatalog = localAlbumCatalog.getSnapshot();
-      if (currentCatalog.albums !== albums || currentCatalog.loading || currentCatalog.saveBlocked || currentCatalog.mpdBusy || currentCatalog.error || libraryUpdatingRef.current) return;
-      const meta = files.map((f) => ({
-        title: f.title || f.name,
-        artist: f.artist || album.artist,
-        album: f.album || album.title,
-        thumb: cov,
-        uri: f.path,
-	duration: f.duration,
-      }));
-      if (meta.length > 0) {
-        await audioService.playTracks(meta, startIdx);
+      await action();
+    } catch (error) {
+      logError("local.album-play", error);
+      if (currentPlaybackContext.current === playbackContext && playbackAttempt.current === attempt) {
+        setPlaybackFailure({ context: playbackContext, attempt });
       }
-    } catch (err) {
-      logError("local.album-play", err);
     }
   };
+
+  const handlePlayEntireAlbum = (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => runLocalPlayback(async () => {
+    if (!isPlaybackAvailable || !catalogConfirmed || (trackItems && !tracksReady)) return;
+    const files = trackItems ?? flattenAlbumDiscs(await loadAlbumDiscTracks(album)).tracks;
+    const cov = (selectedAlbum?.id === album.id ? albumCover : null) || await localArtworkResolver.resolveLocalOnly(album);
+    const currentCatalog = localAlbumCatalog.getSnapshot();
+    if (currentCatalog.albums !== albums || currentCatalog.loading || currentCatalog.saveBlocked || currentCatalog.mpdBusy || currentCatalog.error || libraryUpdatingRef.current) return;
+    const meta = files.map((f) => ({
+      title: f.title || f.name,
+      artist: f.artist || album.artist,
+      album: f.album || album.title,
+      thumb: cov,
+      uri: f.path,
+	duration: f.duration,
+    }));
+    if (meta.length > 0) {
+      await audioService.playTracks(meta, startIdx);
+    }
+  });
 
   const formatDuration = (secs?: number) => {
     if (!secs || isNaN(secs)) return "--:--";
@@ -932,6 +955,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         <div className="px-8 py-2 text-xs text-[#E5A00D] flex items-center gap-2 border-b border-[#222222]">
           <Disc3 size={14} className="animate-spin" />
           <span>{t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}</span>
+        </div>
+      )}
+      {playbackFailure?.context === playbackContext && playbackFailure.attempt === playbackAttempt.current && (
+        <div role="alert" className="px-8 py-2 text-xs text-red-400 border-b border-[#222222]">
+          {t("localBrowser.playRequestError")}
         </div>
       )}
       {catalog.error && (
@@ -1401,7 +1429,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 			      duration: item.duration,
                             },
                           ];
-                          audioService.playTracks(meta, 0);
+                          void runLocalPlayback(() => audioService.playTracks(meta, 0));
                         }
                       }}
                       aria-disabled={!isDir && !isPlaybackAvailable}
