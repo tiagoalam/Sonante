@@ -2171,25 +2171,71 @@ mod tests {
     #[test]
     fn file_info_discards_replaced_or_modified_files_after_read() {
         use crate::local_file_info::{read_streaminfo, tests::fixture as flac_header, InfoError};
+        use std::fs::FileTimes;
+        use std::time::{Duration, SystemTime};
+
+        let initial_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
         for replace in [false, true] {
             let fixture = Fixture::new("Music");
             let path = fixture.root.join("a.flac");
             fs::write(&path, flac_header(96000, 24, 2, 42)).unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(initial_modified))
+                .unwrap();
+            let before = fs::metadata(&path).unwrap();
+            let initial_revision = revision_for_metadata(&before);
             let error = inspect_local_file_info_with(
                 &fixture.library,
                 "Music/a.flac",
                 &fixture.folders(),
                 |file| {
                     let info = read_streaminfo(file)?;
+                    assert_eq!(revision_for_file(file).unwrap(), initial_revision);
                     if replace {
                         fs::rename(&path, fixture.root.join("old.flac")).unwrap();
                     }
                     fs::write(&path, flac_header(44100, 16, 2, 42)).unwrap();
+                    if !replace {
+                        // A same-length write need not advance filesystem timestamps.
+                        // Establish a different revision without waiting for a clock tick.
+                        File::options()
+                            .write(true)
+                            .open(&path)
+                            .unwrap()
+                            .set_times(
+                                FileTimes::new()
+                                    .set_modified(initial_modified + Duration::from_secs(2)),
+                            )
+                            .unwrap();
+                    }
+                    let after = fs::metadata(&path).unwrap();
+                    assert_eq!(after.len(), before.len());
+                    let original_identity = (before.dev(), before.ino());
+                    let current_identity = (after.dev(), after.ino());
+                    if replace {
+                        assert_ne!(current_identity, original_identity);
+                        assert_eq!(file.metadata().unwrap().ino(), before.ino());
+                    } else {
+                        assert_eq!(current_identity, original_identity);
+                        assert_ne!(after.modified().unwrap(), before.modified().unwrap());
+                    }
+                    assert_ne!(
+                        revision_for_metadata(&after),
+                        initial_revision,
+                        "replace={replace}"
+                    );
                     Ok(info)
                 },
             )
-            .unwrap_err();
-            assert_eq!(error, InfoError::Stale);
+            .expect_err(if replace {
+                "a new inode must invalidate the inspection"
+            } else {
+                "a changed metadata revision on the same inode must invalidate the inspection"
+            });
+            assert_eq!(error, InfoError::Stale, "replace={replace}");
         }
     }
     fn expected_physical(fixture: &Fixture, uri: &str) -> LocalAlbumTagBatchExpectedTrack {
