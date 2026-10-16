@@ -3,8 +3,62 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import ts from "typescript";
 import { logError, logWarning, summarizeDiagnostic } from "./frontendDiagnostics.ts";
+import { exploreDiagnosticAlias, exploreDiagnosticText } from "./frontendDiagnostics.ts";
 
 const secrets = "https://user:password@server/private/song?X-Plex-Token=secret /home/private/music /mnt/private";
+
+test("real Plex mix helper is DEV-only without opt-in, bounds scalars and tolerates a broken console", async () => {
+  const source = readFileSync(new URL("./frontendDiagnostics.ts", import.meta.url), "utf8");
+  const previous = console.info, calls = [];
+  console.info = (...args) => calls.push(args);
+  try {
+    for (const env of [{ DEV: false, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "1" }, { DEV: true }, { DEV: true, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "0" }, { DEV: true, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "1" }]) {
+      const js = ts.transpileModule(source.replaceAll("import.meta.env", JSON.stringify(env)), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
+      const { logPlexMixDiagnostic: log } = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
+      const before = calls.length;
+      log("ipc", "PLEX_DISCOVER_UNAVAILABLE", "operation_rejected", 0);
+      assert.equal(calls.length - before, env.DEV ? 1 : 0);
+      if (!env.DEV) continue;
+      for (const [value, expected] of [[999, 101], [-2, 0], [3.8, 3], [NaN, 0], [Infinity, 0], [secrets, 0]]) {
+        log("frontend", "PLEX_DISCOVER_INVALID", "response_shape", value);
+        assert.deepEqual(calls.at(-1), ["[Sonante] plex.mix.frontend", JSON.stringify({ stage: "frontend", category: "PLEX_DISCOVER_INVALID", reason: "response_shape", observed: expected })]);
+      }
+      const count = calls.length;
+      for (const args of [[secrets, "PLEX_DISCOVER_INVALID", "response_shape", 1], ["ipc", secrets, "operation_rejected", 1], ["frontend", "PLEX_DISCOVER_INVALID", secrets, 1]]) log(...args);
+      assert.equal(calls.length, count, "unknown enum values must not be logged");
+      console.info = () => { throw Error(secrets); };
+      assert.doesNotThrow(() => log("frontend", "PLEX_DISCOVER_CONTEXT", "track_or_locator_scope", 1));
+      console.info = (...args) => calls.push(args);
+    }
+  } finally { console.info = previous; }
+  assert.doesNotMatch(JSON.stringify(calls), /secret|password|https:|private|X-Plex/);
+  for (const [, payload] of calls) assert.deepEqual(Object.keys(JSON.parse(payload)), ["stage", "category", "reason", "observed"]);
+});
+
+test("Explore diagnostics require both development and explicit opt-in, build lazily and tolerate failure", async () => {
+  const source = readFileSync(new URL("./frontendDiagnostics.ts", import.meta.url), "utf8");
+  const old = console.info, calls = []; let built = 0;
+  console.info = (...args) => calls.push(args);
+  try {
+    for (const env of [{ DEV: false, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "1" }, { DEV: true }, { DEV: true, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "0" }, { DEV: true, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "1" }]) {
+      const js = ts.transpileModule(source.replaceAll("import.meta.env", JSON.stringify(env)), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
+      const helper = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
+      helper.logExploreDiagnostic(() => { built++; return { count: 6 }; });
+      assert.doesNotThrow(() => helper.logExploreDiagnostic(() => { throw Error(secrets); }));
+    }
+  } finally { console.info = old; }
+  assert.equal(built, 1); assert.deepEqual(calls, [["[Sonante] explore.diagnostic", '{"count":6}']]);
+});
+
+test("Explore metadata and identifiers omit paths, URLs and credential-like values", () => {
+  for (const value of [secrets, "/mnt/music", "C:\\Music", "token=private", "password:private", "secret=private", "file:private", "bad\nvalue"]) assert.equal(exploreDiagnosticText(value), "[redacted]");
+  assert.equal(exploreDiagnosticText("Brasilidades"), "Brasilidades");
+  assert.equal(exploreDiagnosticText("a".repeat(100)).length, 80);
+  const alias = exploreDiagnosticAlias("root", secrets);
+  assert.match(alias, /^root-\d+$/); assert.equal(exploreDiagnosticAlias("root", secrets), alias);
+  assert.notEqual(exploreDiagnosticAlias("root", "other"), alias);
+  assert.match(exploreDiagnosticAlias("library", secrets), /^library-\d+$/);
+});
 
 test("strings and Error instances retain safe ACK/OS context without secrets", () => {
   for (const error of [`ACK [5@2] {add} ${secrets} (os error 13)`, new Error(`ACK [5@2] {add} ${secrets} (os error 13)`)]) {
@@ -102,4 +156,113 @@ test("production frontend console calls are centralized and every operation is a
   }
   walk(root);
   assert.ok(checked > 60);
+});
+
+test("interaction observations aggregate healthy IPC, retain pending work and bound histories with safe correlation", async () => {
+  const { createInteractionObservations } = await import("./frontendDiagnostics.ts");
+  let time = 0;
+  const observer = createInteractionObservations(() => time);
+  for (let i = 0; i < 10000; i++) { const id = observer.begin("get_mpd_status_snapshot"); observer.finish(id, false); }
+  let snapshot = observer.snapshot();
+  assert.equal(snapshot.counts.get_mpd_status_snapshot.completed, 10000);
+  assert.deepEqual(snapshot.recent, []);
+  observer.action("local", "entered"); observer.action("local", "returned");
+  const pending = observer.begin("get_favorites"); time = 20000;
+  snapshot = observer.snapshot();
+  assert.equal(snapshot.pending[0].ipc, pending);
+  assert.equal(snapshot.pending[0].action, snapshot.recent[0].action);
+  assert.equal(snapshot.pending[0].elapsed_ms, 20000);
+  assert.equal(observer.snapshot().active_count, 1, "reporting is not cancellation");
+  observer.finish(pending, true, new Error(secrets));
+  assert.equal(observer.snapshot().counts.get_favorites.failed, 1);
+  for (let i = 0; i < 1000; i++) observer.begin("get_local_cover");
+  snapshot = observer.snapshot();
+  assert.equal(snapshot.active_count, 128); assert.equal(snapshot.pending.length, 16); assert.equal(snapshot.omitted, 872);
+  for (let i = 0; i < 10000; i++) observer.input("pointer", true, false);
+  observer.state({ section: secrets, health: secrets, settings: true, catalogAlbums: 908 });
+  observer.action(secrets, "entered"); assert.equal(observer.begin(secrets), undefined);
+  snapshot = observer.snapshot(); assert.equal(snapshot.recent.length, 16);
+  assert.equal(snapshot.recent.at(-1).event, "react.commit"); assert.equal(snapshot.recent.at(-1).section, null);
+  assert.doesNotMatch(JSON.stringify(snapshot), /secret|password|https:|private|X-Plex/);
+});
+
+test("IPC diagnostics pass safe identifiers only under opt-in and preserve values, rejections and executing promises", async () => {
+  const source = readFileSync(new URL("./frontendDiagnostics.ts", import.meta.url), "utf8");
+  for (const enabled of [false, true]) {
+    const env = { DEV: enabled, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "1" };
+    const js = ts.transpileModule(source.replaceAll("import.meta.env", JSON.stringify(env)), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
+    const helper = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
+    const calls = [], value = { preserved: secrets };
+    const invoke = async (command, args) => { calls.push({ command, args }); return value; };
+    assert.equal(await helper.diagnosticInvoke(invoke, "get_favorites"), value);
+    assert.equal(typeof calls[0].args?.diagnosticId, enabled ? "number" : "undefined");
+    await helper.diagnosticInvoke(invoke, "get_local_cover", { path: secrets });
+    assert.equal(calls[1].args.path, secrets, "real command arguments remain intact and are never logged");
+    if (enabled) assert.notEqual(calls[0].args.diagnosticId, calls[1].args.diagnosticId);
+    await helper.diagnosticInvoke(invoke, "untracked_command", { token: secrets });
+    assert.deepEqual(calls[2].args, { token: secrets });
+    const error = new Error(secrets);
+    await assert.rejects(helper.diagnosticInvoke(async () => { throw error; }, "get_favorites"), e => e === error);
+    assert.throws(() => helper.diagnosticInvoke(() => { throw error; }, "get_favorites"), e => e === error);
+    let resolve, settled = false;
+    const original = new Promise(done => { resolve = done; });
+    const pending = helper.diagnosticInvoke(() => original, "get_favorites");
+    pending.then(() => { settled = true; });
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    assert.equal(settled, false); resolve(value); assert.equal(await pending, value);
+  }
+});
+
+test("Explore diagnostic bursts and retained aliases are bounded", async () => {
+  const source = readFileSync(new URL("./frontendDiagnostics.ts", import.meta.url), "utf8");
+  const js = ts.transpileModule(source.replaceAll("import.meta.env", '{"DEV":true,"VITE_SONANTE_EXPLORE_DIAGNOSTICS":"1"}'), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const helper = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
+  const old = console.info, lines = []; let built = 0;
+  console.info = (...args) => lines.push(args);
+  try { for (let i = 0; i < 10000; i++) helper.logExploreDiagnostic(() => { built++; return { count: i }; }); }
+  finally { console.info = old; }
+  assert.ok(lines.length <= 16); assert.ok(built <= 16);
+  for (let i = 0; i < 10000; i++) helper.exploreDiagnosticAlias("root", String(i));
+  assert.equal(helper.exploreDiagnosticAlias("root", "another"), "root-omitted");
+});
+
+test("frontend probe reports loop lag, a blocked frame, overlay hit testing and pending IPC without cancelling work", async () => {
+  const source = readFileSync(new URL("./frontendDiagnostics.ts", import.meta.url), "utf8");
+  const js = ts.transpileModule(source.replaceAll("import.meta.env", '{"DEV":true,"VITE_SONANTE_EXPLORE_DIAGNOSTICS":"1"}'), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const helper = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}#probe`);
+  const keys = ["window", "document", "performance", "requestAnimationFrame", "cancelAnimationFrame", "getComputedStyle", "Element"];
+  const saved = Object.fromEntries(keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const old = console.info, logs = [], listeners = new Map(); let time = 0, tick, cancelled = 0, cleared = 0, resolve;
+  const sidebar = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 224, height: 600 }), contains: () => false, closest: () => null };
+  const fake = {
+    window: { setInterval: fn => { tick = fn; return 7; }, clearInterval: id => { assert.equal(id, 7); cleared++; } },
+    document: { visibilityState: "visible", querySelector: () => sidebar, elementFromPoint: () => ({}), addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
+    performance: { now: () => time }, requestAnimationFrame: () => 9, cancelAnimationFrame: id => { assert.equal(id, 9); cancelled++; },
+    getComputedStyle: () => ({ pointerEvents: "none" }), Element: class {},
+  };
+  for (const key of keys) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value: fake[key] });
+  console.info = (...args) => logs.push(args);
+  let cleanup;
+  try {
+    cleanup = helper.installInteractionProbe(() => ({ active: 2, queued: 27, inFlight: 29, blocked: false, path: secrets }));
+    assert.equal(listeners.size, 2);
+    helper.traceInteractionAction("local", () => {});
+    helper.recordInteractionState({ section: "local", health: "available", catalogAlbums: 908, settings: false });
+    const work = helper.diagnosticInvoke(() => new Promise(done => { resolve = done; }), "get_favorites");
+    for (time = 1000; time <= 10000; time += 1000) tick();
+    let summary = JSON.parse(logs.find(row => row[0] === "[Sonante] dev.frontend")[1]);
+    assert.equal(summary.loop.ticks, 10); assert.equal(summary.loop.frame_pending_ms, 9000);
+    assert.equal(summary.dom.sidebar_hit, false); assert.equal(summary.dom.sidebar_pointer_blocked, true);
+    assert.equal(summary.active_count, 1); assert.equal(summary.pending[0].command, "get_favorites");
+    assert.deepEqual(summary.artwork_queue, { active: 2, queued: 27, in_flight: 29, blocked: false });
+    assert.doesNotMatch(JSON.stringify(summary), /private|secret|X-Plex/);
+    assert.equal(summary.recent.find(row => row.event === "react.commit").catalogAlbums, 908);
+    time = 25000; tick(); summary = JSON.parse(logs.at(-1)[1]);
+    assert.equal(summary.loop.maximum_lag_ms, 14000); assert.equal(summary.active_count, 1);
+    resolve("preserved"); assert.equal(await work, "preserved");
+    cleanup(); cleanup = null; assert.equal(listeners.size, 0); assert.equal(cleared, 1); assert.equal(cancelled, 1);
+  } finally {
+    cleanup?.(); console.info = old;
+    for (const key of keys) { if (saved[key]) Object.defineProperty(globalThis, key, saved[key]); else delete globalThis[key]; }
+  }
 });

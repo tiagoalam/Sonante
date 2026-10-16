@@ -3,11 +3,14 @@ mod alsa_preflight;
 mod analyzer;
 mod artwork_progress;
 mod audio;
+mod playback_options;
 mod catalog_genres;
 mod config;
 mod config_save_operation;
 mod diagnostics;
+mod bounded_artwork_io;
 mod favorites;
+mod library_doctor;
 mod local_media;
 mod local_import_preview;
 mod local_import_artwork;
@@ -17,6 +20,8 @@ mod managed_preparation;
 mod managed_save_intent;
 mod mpris;
 mod online_artwork;
+mod system_tray;
+mod online_metadata;
 mod persistence;
 mod playlists;
 mod plex;
@@ -212,6 +217,26 @@ fn is_local_folders_only_change(current: &AppConfig, next: &AppConfig) -> bool {
     let mut expected = current.clone();
     expected.local_folders = next.local_folders.clone();
     expected == *next
+}
+
+fn validate_local_folder_admission(
+    current: &AppConfig,
+    proposed: &AppConfig,
+) -> Result<(), String> {
+    if !current.first_run && !local_folders_changed(current, proposed) {
+        return Ok(()); // Existing overlaps cannot block unrelated preferences.
+    }
+    let previous = if current.first_run {
+        Vec::new()
+    } else {
+        current.local_folders.iter().map(PathBuf::from).collect()
+    };
+    let next = proposed
+        .local_folders
+        .iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    local_media::mirror::validate_new_source_overlaps(&previous, &next)
 }
 
 fn validate_config_save_scope(current: &AppConfig, next: &AppConfig) -> Result<(), String> {
@@ -2076,36 +2101,88 @@ fn should_exit_application_on_window_close(window_label: &str) -> bool {
 }
 
 #[tauri::command]
-fn start_audio_analyzer(
+fn claim_audio_analyzer_host(
+    host: String,
     session_id: String,
     window: Window,
     app: AppHandle,
     analyzer_state: State<AnalyzerState>,
-) -> Result<(), String> {
-    if window.label() != "now-playing" || app.get_webview_window("now-playing").is_none() {
-        return Err("A janela Now Playing não está disponível para iniciar o analyzer.".into());
+) -> Result<analyzer::AnalyzerOwner, String> {
+    if window.label() != "main"
+        || !analyzer::authorized_analyzer_host(&host)
+        || app.get_webview_window(&host).is_none()
+    {
+        return Err("Transferência do analyzer não autorizada.".into());
     }
     let mut analyzer = analyzer_state
         .0
         .lock()
         .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?;
-    if app.get_webview_window("now-playing").is_none() {
-        return Err("A janela Now Playing foi fechada antes de iniciar o analyzer.".into());
+    if app.get_webview_window(&host).is_none() {
+        return Err("Host do analyzer fechado.".into());
     }
-    analyzer.start_for_window(session_id, app)
+    analyzer.claim_for_host(&host, session_id, &app)
+}
+
+#[tauri::command]
+fn release_audio_analyzer_host(
+    session_id: String,
+    generation: u64,
+    window: Window,
+    app: AppHandle,
+    analyzer_state: State<AnalyzerState>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Revogação do analyzer não autorizada.".into());
+    }
+    analyzer_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?
+        .release_owner(&session_id, generation, &app)
+}
+
+#[tauri::command]
+fn start_audio_analyzer(
+    session_id: String,
+    generation: u64,
+    lease_id: String,
+    window: Window,
+    app: AppHandle,
+    analyzer_state: State<AnalyzerState>,
+) -> Result<(), String> {
+    if !analyzer::authorized_analyzer_host(window.label())
+        || app.get_webview_window(window.label()).is_none()
+    {
+        return Err("Host do analyzer não autorizado ou fechado.".into());
+    }
+    let mut analyzer = analyzer_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?;
+    if app.get_webview_window(window.label()).is_none() {
+        return Err("Host do analyzer fechado.".into());
+    }
+    analyzer.start_for_host(window.label(), &session_id, generation, lease_id, app)
 }
 
 #[tauri::command]
 fn stop_audio_analyzer(
     session_id: String,
+    generation: u64,
+    lease_id: String,
+    window: Window,
     app: AppHandle,
     analyzer_state: State<AnalyzerState>,
 ) -> Result<(), String> {
+    if !analyzer::authorized_analyzer_host(window.label()) {
+        return Err("Host do analyzer não autorizado.".into());
+    }
     analyzer_state
         .0
         .lock()
         .map_err(|e| format!("Falha ao acessar o analyzer: {}", e))?
-        .stop_for_window(&session_id, &app)
+        .stop_for_host(window.label(), &session_id, generation, &lease_id, &app)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2205,37 +2282,51 @@ impl ConfigTransactionState {
 }
 
 #[tauri::command]
-fn get_playback_status(
-    sup_state: State<SupervisorState>,
-    audio_state: State<AudioState>,
-) -> Result<PlaybackStatus, String> {
-    let mut playback = audio_state
-        .0
-        .lock()
-        .map_err(|e| format!("Falha ao acessar o estado de reprodução: {}", e))?
-        .get_status()?;
-    let backend = sup_state
-        .0
-        .lock()
-        .map_err(|e| format!("Falha ao acessar o controle de volume: {}", e))?
-        .volume_backend();
-    apply_volume_backend(&mut playback, backend);
-    Ok(playback)
+async fn get_playback_status(app: AppHandle, diagnostic_id: Option<u64>) -> Result<PlaybackStatus, String> {
+    let diagnostic = diagnostics::DevSpan::ipc("health.legacy", diagnostic_id);
+    diagnostic.phase("executor.queued");
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut diagnostic = diagnostic;
+        let result = (|| {
+            diagnostic.phase("wait.audio");
+            let audio = app.state::<AudioState>();
+            let audio = audio.0.lock().map_err(|_| "Estado de reprodução indisponível.".to_string())?;
+            diagnostic.phase("mpd.status");
+            let mut playback = audio.get_telemetry_status()?;
+            drop(audio);
+            diagnostic.phase("wait.supervisor");
+            let supervisor = app.state::<SupervisorState>();
+            let supervisor = supervisor.0.lock().map_err(|_| "Controle de volume indisponível.".to_string())?;
+            diagnostic.phase("volume.backend");
+            let backend = supervisor.volume_backend();
+            drop(supervisor);
+            diagnostic.phase("volume.read");
+            apply_volume_backend(&mut playback, backend);
+            Ok(playback)
+        })();
+        diagnostic.result(&result);
+        result
+    }).await.map_err(|_| "Consulta de reprodução indisponível.".to_string())?
 }
 
 #[tauri::command]
-fn get_mpd_status_snapshot(
-    sup_state: State<SupervisorState>,
-    audio_state: State<AudioState>,
-) -> Result<MpdStatusSnapshot, String> {
-    collect_mpd_status_snapshot(&sup_state.0, &audio_state.0)
+async fn get_mpd_status_snapshot(app: AppHandle, diagnostic_id: Option<u64>) -> Result<MpdStatusSnapshot, String> {
+    let diagnostic = diagnostics::DevSpan::ipc("health.snapshot", diagnostic_id);
+    diagnostic.phase("executor.queued");
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut diagnostic = diagnostic;
+        let result = collect_mpd_status_snapshot_with_diagnostic(
+            &app.state::<SupervisorState>().0, &app.state::<AudioState>().0, &diagnostic);
+        diagnostic.result(&result);
+        result
+    }).await.map_err(|_| "Consulta de saúde indisponível.".to_string())?
 }
 
-fn observe_mpd_process(supervisor: &Mutex<MpdSupervisor>) -> Result<MpdProcessObservation, String> {
-    supervisor
-        .lock()
-        .map_err(|e| format!("Falha ao acessar a saúde do MPD: {}", e))?
-        .observe_health()
+fn observe_mpd_process(supervisor: &Mutex<MpdSupervisor>, diagnostic: &diagnostics::DevSpan) -> Result<MpdProcessObservation, String> {
+    diagnostic.phase("wait.supervisor");
+    let mut supervisor = supervisor.lock().map_err(|e| format!("Falha ao acessar a saúde do MPD: {}", e))?;
+    diagnostic.phase("health.process");
+    supervisor.observe_health()
 }
 
 fn unavailable_snapshot(health: MpdHealth) -> MpdStatusSnapshot {
@@ -2267,25 +2358,35 @@ fn apply_volume_backend_with<F>(
     };
 }
 
-fn collect_mpd_status_snapshot(
+#[cfg(test)]
+fn collect_mpd_status_snapshot(supervisor: &Mutex<MpdSupervisor>, audio: &Mutex<AudioEngine>) -> Result<MpdStatusSnapshot, String> {
+    collect_mpd_status_snapshot_with_diagnostic(supervisor, audio, &diagnostics::DevSpan::new("health.test"))
+}
+
+fn collect_mpd_status_snapshot_with_diagnostic(
     supervisor: &Mutex<MpdSupervisor>,
     audio: &Mutex<AudioEngine>,
+    diagnostic: &diagnostics::DevSpan,
 ) -> Result<MpdStatusSnapshot, String> {
-    if let MpdProcessObservation::NotRunning(health) = observe_mpd_process(supervisor)? {
+    if let MpdProcessObservation::NotRunning(health) = observe_mpd_process(supervisor, diagnostic)? {
         return Ok(unavailable_snapshot(health));
     }
 
-    let playback_result = audio
-        .lock()
-        .map_err(|e| format!("Falha ao acessar o cliente MPD: {}", e))?
-        .get_status();
+    diagnostic.phase("wait.audio");
+    let playback_result = {
+        let audio = audio.lock().map_err(|e| format!("Falha ao acessar o cliente MPD: {}", e))?;
+        diagnostic.phase("mpd.status");
+        audio.get_telemetry_status()
+    };
 
     match playback_result {
         Ok(mut playback) => {
             let (health, volume_backend) = {
+                diagnostic.phase("wait.supervisor");
                 let mut supervisor = supervisor
                     .lock()
                     .map_err(|e| format!("Falha ao confirmar a saúde do MPD: {}", e))?;
+                diagnostic.phase("health.process");
                 match supervisor.observe_health()? {
                     MpdProcessObservation::Running => {
                         let health = supervisor.mark_available();
@@ -2296,6 +2397,7 @@ fn collect_mpd_status_snapshot(
                     }
                 }
             };
+            diagnostic.phase("volume.read");
             apply_volume_backend(&mut playback, volume_backend);
             Ok(MpdStatusSnapshot {
                 health,
@@ -2303,15 +2405,17 @@ fn collect_mpd_status_snapshot(
             })
         }
         Err(_) => {
-            if let MpdProcessObservation::NotRunning(health) = observe_mpd_process(supervisor)? {
+            if let MpdProcessObservation::NotRunning(health) = observe_mpd_process(supervisor, diagnostic)? {
                 return Ok(unavailable_snapshot(health));
             }
 
-            let reason = match audio
-                .lock()
-                .map_err(|e| format!("Falha ao verificar o protocolo MPD: {}", e))?
-                .probe_mpd()
-            {
+            diagnostic.phase("wait.audio");
+            let probe = {
+                let audio = audio.lock().map_err(|e| format!("Falha ao verificar o protocolo MPD: {}", e))?;
+                diagnostic.phase("mpd.probe");
+                audio.probe_mpd()
+            };
+            let reason = match probe {
                 Err(MpdProbeFailure::SocketUnavailable) => {
                     MpdUnavailableReason::SocketUnavailable
                 }
@@ -2321,9 +2425,11 @@ fn collect_mpd_status_snapshot(
             };
 
             let health = {
+                diagnostic.phase("wait.supervisor");
                 let mut supervisor = supervisor
                     .lock()
                     .map_err(|e| format!("Falha ao concluir a saúde do MPD: {}", e))?;
+                diagnostic.phase("health.process");
                 match supervisor.observe_health()? {
                     MpdProcessObservation::Running => supervisor.mark_unavailable(reason),
                     MpdProcessObservation::NotRunning(health) => health,
@@ -2332,6 +2438,19 @@ fn collect_mpd_status_snapshot(
             Ok(unavailable_snapshot(health))
         }
     }
+}
+
+#[tauri::command]
+fn change_playback_option(
+    audio_state: State<AudioState>,
+    action: playback_options::PlaybackOptionAction,
+    expected: playback_options::PlaybackOptions,
+) -> Result<playback_options::PlaybackOptions, String> {
+    audio_state
+        .0
+        .lock()
+        .map_err(|e| format!("Falha ao acessar opções de reprodução: {e}"))?
+        .change_playback_option(action, expected)
 }
 
 #[tauri::command]
@@ -2394,6 +2513,7 @@ fn previous_track(
 #[tauri::command]
 fn seek_playback(
     seconds: f64,
+    window: Window,
     config_state: State<ConfigState>,
     audio_state: State<AudioState>,
 ) -> Result<(), String> {
@@ -2404,11 +2524,14 @@ fn seek_playback(
             .map_err(|e| format!("Falha ao acessar configuração durante seek: {}", e))?;
         is_shared_output(&config)
     };
-    audio_state
+    let mut audio = audio_state
         .0
         .lock()
-        .map_err(|e| format!("Falha ao acessar reprodução durante seek: {}", e))?
-        .seek(seconds, is_shared)
+        .map_err(|e| format!("Falha ao acessar reprodução durante seek: {}", e))?;
+    let observation = diagnostics::now_playing_seek_begin(window.label(), seconds, is_shared);
+    let result = audio.seek(seconds, is_shared);
+    diagnostics::now_playing_seek_finish(observation, &result);
+    result
 }
 
 #[tauri::command]
@@ -2624,8 +2747,22 @@ where
 }
 
 #[tauri::command]
-fn get_queue(state: State<AudioState>) -> Result<Vec<audio::TrackMetadata>, String> {
-    Ok(state.0.lock().unwrap().get_queue())
+async fn get_queue(app: AppHandle, diagnostic_id: Option<u64>) -> Result<Vec<audio::TrackMetadata>, String> {
+    let diagnostic = diagnostics::DevSpan::ipc("queue.read", diagnostic_id);
+    diagnostic.phase("executor.queued");
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut diagnostic = diagnostic;
+        let result = read_queue_from_audio(&app.state::<AudioState>().0, &diagnostic);
+        diagnostic.result(&result);
+        result
+    }).await.map_err(|_| "Consulta da fila indisponível.".to_string())?
+}
+
+fn read_queue_from_audio(audio: &Mutex<AudioEngine>, diagnostic: &diagnostics::DevSpan) -> Result<Vec<TrackMetadata>, String> {
+    diagnostic.phase("wait.audio");
+    let audio = audio.lock().map_err(|_| "Estado de reprodução indisponível.".to_string())?;
+    diagnostic.phase("queue.read");
+    Ok(audio.get_queue())
 }
 
 #[tauri::command]
@@ -2654,49 +2791,85 @@ fn clear_queue(state: State<AudioState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_window_title(title: String, window: Window) -> Result<(), String> {
-    window.set_title(&title).map_err(|e| e.to_string())
+fn set_window_title(title: String, window: Window, diagnostic_id: Option<u64>) -> Result<(), String> {
+    let mut diagnostic = diagnostics::DevSpan::ipc("window.title", diagnostic_id);
+    diagnostic.phase("window.native");
+    let result = window.set_title(&title).map_err(|e| e.to_string());
+    diagnostic.result(&result);
+    result
 }
 
 #[tauri::command]
-async fn list_local_directory(
-    path: String,
-    state: State<'_, AudioState>,
-) -> Result<Vec<audio::LocalItem>, String> {
-    list_local_directory_from_audio(path, &state.0).await
-}
-
-async fn list_local_directory_from_audio(
-    path: String,
-    audio: &Mutex<AudioEngine>,
-) -> Result<Vec<audio::LocalItem>, String> {
-    let socket_path = audio
-        .lock()
-        .map_err(|e| format!("Falha ao acessar conexão da biblioteca local: {e}"))?
-        .local_album_socket_path();
+async fn list_local_directory(path: String, app: AppHandle, diagnostic_id: Option<u64>) -> Result<Vec<audio::LocalItem>, String> {
+    let diagnostic = diagnostics::DevSpan::ipc("directory.local", diagnostic_id);
+    diagnostic.phase("executor.queued");
     tauri::async_runtime::spawn_blocking(move || {
+        list_local_directory_blocking(path, &app.state::<AudioState>().0, diagnostic)
+    }).await.map_err(|_| "Consulta de diretório indisponível.".to_string())?
+}
+
+#[cfg(test)]
+async fn list_local_directory_from_audio(path: String, audio: &Mutex<AudioEngine>) -> Result<Vec<audio::LocalItem>, String> {
+    list_local_directory_blocking(path, audio, diagnostics::DevSpan::new("directory.test"))
+}
+fn list_local_directory_blocking(path: String, audio: &Mutex<AudioEngine>, mut diagnostic: diagnostics::DevSpan) -> Result<Vec<audio::LocalItem>, String> {
+    let result = (|| {
+        diagnostic.phase("wait.audio");
+        let socket_path = audio.lock().map_err(|_| "Conexão da biblioteca local indisponível.".to_string())?.local_album_socket_path();
+        diagnostic.phase("mpd.directory");
         AudioEngine::list_directory_at(&socket_path, &path)
-    })
-    .await
-    .map_err(|e| format!("Falha na tarefa de listagem da biblioteca local: {e}"))?
+    })();
+    diagnostic.result(&result);
+    result
 }
 
 #[tauri::command]
-async fn get_local_album_tracks(
+async fn get_local_album_tracks(album_id: String, app: AppHandle, diagnostic_id: Option<u64>) -> Result<Vec<audio::LocalAlbumDiscTracks>, String> {
+    let diagnostic = diagnostics::DevSpan::ipc("tracks.local", diagnostic_id);
+    diagnostic.phase("executor.queued");
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut diagnostic = diagnostic;
+        let result = (|| {
+            diagnostic.phase("wait.audio");
+            let socket_path = app.state::<AudioState>().0.lock()
+                .map_err(|_| "Conexão da biblioteca local indisponível.".to_string())?.local_album_socket_path();
+            diagnostic.phase("mpd.tracks");
+            AudioEngine::get_local_album_tracks_at(&socket_path, &album_id)?
+                .ok_or_else(|| "Álbum local não encontrado no catálogo atual.".to_string())
+        })();
+        diagnostic.result(&result);
+        result
+    }).await.map_err(|_| "Consulta de faixas indisponível.".to_string())?
+}
+
+#[tauri::command]
+async fn get_local_album_doctor(
     album_id: String,
-    state: State<'_, AudioState>,
-) -> Result<Vec<audio::LocalAlbumDiscTracks>, String> {
-    let socket_path = state
+    config_state: State<'_, ConfigState>,
+    audio_state: State<'_, AudioState>,
+) -> Result<library_doctor::Report, library_doctor::DoctorError> {
+    let local_folders = config_state
         .0
         .lock()
-        .map_err(|e| format!("Falha ao acessar conexão da biblioteca local: {e}"))?
+        .map_err(|_| library_doctor::DoctorError::StateUnavailable)?
+        .local_folders
+        .clone();
+    let socket_path = audio_state
+        .0
+        .lock()
+        .map_err(|_| library_doctor::DoctorError::StateUnavailable)?
         .local_album_socket_path();
+    // Both shared locks are released before catalog and filesystem I/O.
     tauri::async_runtime::spawn_blocking(move || {
-        AudioEngine::get_local_album_tracks_at(&socket_path, &album_id)?
-            .ok_or_else(|| "Álbum local não encontrado no catálogo atual.".to_string())
+        library_doctor::inspect_album_at(
+            &socket_path,
+            &MpdSupervisor::library_dir(),
+            &album_id,
+            &local_folders,
+        )
     })
     .await
-    .map_err(|e| format!("Falha na tarefa de consulta das faixas do álbum local: {e}"))?
+    .map_err(|_| library_doctor::DoctorError::TaskFailed)?
 }
 
 #[tauri::command]
@@ -2919,8 +3092,37 @@ async fn update_local_track_tags(
     complete_local_tag_update(&refresh_path, write_result, |_| refresh_result)
 }
 
+// A navigation effect reads these even while Local is open. Local favorite
+// existence checks can enter NAS syscalls; never run them on the UI thread.
+static FAVORITES_READS: bounded_artwork_io::Reads = bounded_artwork_io::Reads::new(1);
+
 #[tauri::command]
-fn get_favorites() -> Result<Vec<FavoriteAlbum>, String> {
+async fn get_favorites(diagnostic_id: Option<u64>) -> Result<Vec<FavoriteAlbum>, String> {
+    run_favorites_io(&FAVORITES_READS, "favorites.read", diagnostic_id, load_favorites).await
+}
+
+async fn run_favorites_io<T: Send + 'static>(
+    reads: &'static bounded_artwork_io::Reads,
+    operation: &'static str,
+    diagnostic_id: Option<u64>,
+    load: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let mut diagnostic = diagnostics::DevSpan::ipc(operation, diagnostic_id);
+    diagnostic.phase("admission.try");
+    let admission = reads.try_acquire().ok_or_else(|| "favorites_busy".to_string());
+    diagnostic.result(&admission);
+    let permit = admission?;
+    diagnostic.phase("executor.queued");
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        diagnostic.phase("filesystem.favorites");
+        let result = load();
+        diagnostic.result(&result);
+        result
+    }).await.map_err(|_| "Consulta dos favoritos indisponível.".to_string())?
+}
+
+fn load_favorites() -> Result<Vec<FavoriteAlbum>, String> {
     let config = match AppConfig::load() {
         Ok(config) => Some(config),
         Err(error) => {
@@ -2935,9 +3137,11 @@ fn get_favorites() -> Result<Vec<FavoriteAlbum>, String> {
 }
 
 #[tauri::command]
-fn toggle_favorite(album: FavoriteAlbum) -> Result<bool, String> {
-    let config = AppConfig::load()?;
-    FavoriteAlbum::toggle(album, &config)
+async fn toggle_favorite(album: FavoriteAlbum, diagnostic_id: Option<u64>) -> Result<bool, String> {
+    run_favorites_io(&FAVORITES_READS, "favorites.toggle", diagnostic_id, move || {
+        let config = AppConfig::load()?;
+        FavoriteAlbum::toggle(album, &config)
+    }).await
 }
 
 #[tauri::command]
@@ -3324,35 +3528,57 @@ async fn play_playlist(
 }
 
 #[tauri::command]
-async fn get_local_cover(
-    path: String,
-    config_state: State<'_, ConfigState>,
-) -> Result<Option<String>, String> {
-    let local_folders = config_state
-        .0
-        .lock()
-        .map_err(|_| "Configuração indisponível.".to_string())?
-        .local_folders
-        .clone();
-    let lib_dir = supervisor::MpdSupervisor::library_dir();
-    let socket_path = MpdSupervisor::socket_path().to_string_lossy().into_owned();
+async fn get_local_cover(path: String, app: AppHandle, diagnostic_id: Option<u64>) -> Result<Option<String>, String> {
+    let mut diagnostic = diagnostics::DevSpan::ipc("cover.local", diagnostic_id);
+    diagnostic.phase("admission.try");
+    let admission = bounded_artwork_io::COVER_READS.acquire();
+    diagnostic.result(&admission);
+    let permit = admission?;
+    diagnostic.phase("executor.queued");
     tauri::async_runtime::spawn_blocking(move || {
-        AudioEngine::get_local_cover_at(&socket_path, &lib_dir, &path, &local_folders)
-    })
-    .await
-    .map_err(|e| format!("Falha na tarefa de capa local: {e}"))?
+        let _permit = permit;
+        let result = (|| {
+            diagnostic.phase("wait.config");
+            let local_folders = app.state::<ConfigState>().0.lock()
+                .map_err(|_| "Configuração indisponível.".to_string())?.local_folders.clone();
+            let lib_dir = MpdSupervisor::library_dir();
+            let socket_path = MpdSupervisor::socket_path().to_string_lossy().into_owned();
+            diagnostic.phase("filesystem");
+            AudioEngine::get_local_cover_at(&socket_path, &lib_dir, &path, &local_folders)
+        })();
+        diagnostic.result(&result);
+        result
+    }).await.map_err(|_| "Consulta de capa local indisponível.".to_string())?
+}
+
+#[tauri::command]
+async fn get_online_album_metadata_details(
+    mbid: String,
+) -> Result<online_metadata::ReleaseDetails, online_metadata::SearchError> {
+    online_metadata::lookup(mbid).await
+}
+
+#[tauri::command]
+async fn search_online_album_metadata(
+    request: online_metadata::SearchRequest,
+) -> Result<online_metadata::SearchResult, online_metadata::SearchError> {
+    online_metadata::search(request).await
 }
 
 #[tauri::command]
 async fn get_online_album_cover(
     request: online_artwork::OnlineAlbumCoverRequest,
     config_state: State<'_, ConfigState>,
+    cache_only: Option<bool>,
 ) -> Result<Option<String>, String> {
     let enabled = config_state
         .0
         .lock()
         .map_err(|_| "Configuração indisponível.".to_string())?
         .online_artwork_enabled;
+    if cache_only == Some(true) {
+        return online_artwork::cached_cover(request, enabled).await;
+    }
     online_artwork::get_online_album_cover(request, enabled).await
 }
 
@@ -3567,6 +3793,18 @@ async fn save_config(
         .clone();
 
     validate_config_save_scope(&observed_cfg, &new_config)?;
+
+    if observed_cfg.first_run || local_folders_changed(&observed_cfg, &new_config) {
+        // Admission precedes operation reservation, staging, MPD commands and commit.
+        // Canonicalization/read_dir stay off the async command thread.
+        let admission_current = observed_cfg.clone();
+        let admission_next = new_config.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            validate_local_folder_admission(&admission_current, &admission_next)
+        })
+        .await
+        .map_err(|_| "Local folder admission unavailable".to_string())??;
+    }
 
     if !observed_cfg.first_run
         && is_local_folders_only_change(&observed_cfg, &new_config)
@@ -3882,7 +4120,7 @@ async fn save_config(
 
     if resume_analyzer {
         if let Ok(mut analyzer) = analyzer_state.0.lock() {
-            if analyzer.has_window_session() && app.get_webview_window("now-playing").is_some() {
+            if analyzer.owner_is_present(|host| app.get_webview_window(host).is_some()) {
                 if let Err(error) = analyzer.start(app) {
                     eprintln!(
                         "[Analyzer] Configuration applied, but analyzer could not resume: {}",
@@ -4092,27 +4330,46 @@ fn rollback_first_run_completion(
     }
 }
 
+// Names come from the same configured/validated virtual roots exposed by the browser.
+// An unresolved source remains unnamed; never fall back to a physical folder path.
+fn label_local_album_sources(albums: &mut [audio::LocalAlbum], sources: &[supervisor::LocalLibrarySource]) {
+    for album in albums {
+        album.source_label = album.source_id.as_ref().and_then(|id| {
+            sources.iter().find(|source| &source.id == id).map(|source| source.label.clone())
+        });
+    }
+}
+
 #[tauri::command]
-async fn get_local_albums(
-    state: State<'_, AudioState>,
-    config_state: State<'_, ConfigState>,
-) -> Result<Vec<audio::LocalAlbum>, String> {
-    let socket_path = state.0.lock()
-        .map_err(|e| format!("Falha ao acessar conexão da biblioteca local: {e}"))?
-        .local_album_socket_path();
-    let local_folders = config_state.0.lock()
-        .map_err(|e| format!("Falha ao acessar pastas da biblioteca local: {e}"))?
-        .local_folders
-        .clone();
+async fn get_local_albums(app: AppHandle, diagnostic_id: Option<u64>) -> Result<Vec<audio::LocalAlbum>, String> {
+    let diagnostic = diagnostics::DevSpan::ipc("catalog.local", diagnostic_id);
+    diagnostic.phase("executor.queued");
     tauri::async_runtime::spawn_blocking(move || {
-        let source_ids = MpdSupervisor::local_library_sources(&local_folders)?
-            .into_iter()
-            .map(|source| source.id)
-            .collect();
-        AudioEngine::get_local_albums_at(&socket_path, &source_ids)
-    })
-        .await
-        .map_err(|e| format!("Falha na tarefa de consulta da biblioteca local: {e}"))?
+        let mut diagnostic = diagnostic;
+        let result = (|| {
+            diagnostic.phase("wait.audio");
+            let socket_path = app.state::<AudioState>().0.lock()
+                .map_err(|_| "Conexão da biblioteca local indisponível.".to_string())?.local_album_socket_path();
+            diagnostic.phase("wait.config");
+            let local_folders = app.state::<ConfigState>().0.lock()
+                .map_err(|_| "Pastas da biblioteca local indisponíveis.".to_string())?.local_folders.clone();
+            diagnostic.phase("filesystem.roots");
+            let sources = {
+                let _roots = diagnostics::DevSpan::new("catalog.roots");
+                MpdSupervisor::local_library_sources(&local_folders)?
+            };
+            let source_ids = sources.iter().map(|source| source.id.clone()).collect();
+            diagnostic.phase("mpd.catalog");
+            let mut albums = {
+                let _mpd = diagnostics::DevSpan::new("catalog.mpd");
+                AudioEngine::get_local_albums_at(&socket_path, &source_ids)?
+            };
+            label_local_album_sources(&mut albums, &sources);
+            Ok(albums)
+        })();
+        diagnostic.result(&result);
+        result
+    }).await.map_err(|_| "Consulta da biblioteca local indisponível.".to_string())?
 }
 
 #[tauri::command]
@@ -4261,9 +4518,47 @@ async fn get_plex_albums(
     section_key: String,
     sort_by: String,
     state: State<'_, PlexState>,
-) -> Result<Vec<PlexAlbum>, String> {
+) -> Result<plex::PlexAlbumCatalog, plex::PlexAlbumCatalogError> {
     let client = state.0.lock().unwrap().clone();
     client.get_albums(&section_key, &sort_by).await
+}
+
+#[tauri::command]
+async fn get_plex_discover(server_id: String, section_key: String, language: String, state: State<'_, PlexState>) -> Result<plex::PlexDiscoverPage, String> {
+    let client = state.0.lock().map_err(|_| "PLEX_DISCOVER_UNAVAILABLE")?.clone();
+    client.get_discover(&server_id, &section_key, &language).await
+}
+#[tauri::command]
+async fn get_plex_library_mix(server_id: String, section_key: String, language: String, limit: usize, decade: Option<u32>, style: Option<plex::PlexStyleSelection>, state: State<'_, PlexState>) -> Result<plex::PlexLibraryMixPage, String> {
+    let client = state.0.lock().map_err(|_| "PLEX_DISCOVER_UNAVAILABLE")?.clone();
+    if let Some(selection) = style { if decade.is_some() { return Err("PLEX_DISCOVER_INVALID".into()); } return client.get_library_style_mix(&server_id,&section_key,&language,limit,&selection).await; }
+    match decade { Some(value) => client.get_library_decade_mix(&server_id, &section_key, &language, limit, value).await, None => client.get_library_mix(&server_id, &section_key, &language, limit).await }
+}
+#[tauri::command]
+async fn get_plex_library_mix_styles(server_id: String, section_key: String, language: String, state: State<'_, PlexState>) -> Result<plex::PlexMixStyles, String> {
+    let client = state.0.lock().map_err(|_| "PLEX_DISCOVER_UNAVAILABLE")?.clone();
+    client.get_library_mix_styles(&server_id,&section_key,&language).await
+}
+#[tauri::command]
+async fn get_plex_library_mix_years(server_id: String, section_key: String, language: String, state: State<'_, PlexState>) -> Result<plex::PlexMixYears, String> {
+    let client = state.0.lock().map_err(|_| "PLEX_DISCOVER_UNAVAILABLE")?.clone();
+    client.get_library_mix_years(&server_id, &section_key, &language).await
+}
+#[tauri::command]
+async fn get_plex_discover_recent(server_id: String, section_key: String, language: String, window_size: usize, state: State<'_, PlexState>) -> Result<plex::PlexDiscoverRecent, String> {
+    let client = state.0.lock().map_err(|_| "PLEX_DISCOVER_UNAVAILABLE")?.clone();
+    client.get_discover_recent(&server_id, &section_key, &language, window_size).await
+}
+#[tauri::command]
+async fn get_plex_discover_children(server_id: String, section_key: String, kind: String, rating_key: String, language: String, state: State<'_, PlexState>) -> Result<plex::PlexDiscoverHub, String> {
+    let client = state.0.lock().map_err(|_| "PLEX_DISCOVER_UNAVAILABLE")?.clone();
+    client.get_discover_children(&server_id, &section_key, &kind, &rating_key, &language).await
+}
+
+#[tauri::command]
+async fn get_plex_discover_artist(server_id: String, section_key: String, rating_key: String, language: String, state: State<'_, PlexState>) -> Result<plex::PlexDiscoverArtistContent, String> {
+    let client = state.0.lock().map_err(|_| "PLEX_DISCOVER_UNAVAILABLE")?.clone();
+    client.get_discover_artist(&server_id,&section_key,&rating_key,&language).await
 }
 
 #[tauri::command]
@@ -4282,6 +4577,20 @@ async fn get_collection_albums(
 ) -> Result<Vec<PlexAlbum>, String> {
     let client = state.0.lock().unwrap().clone();
     client.get_collection_albums(&rating_key).await
+}
+
+#[tauri::command]
+async fn get_artist_portrait(
+    server_id: String,
+    rating_key: String,
+    state: State<'_, PlexState>,
+) -> Result<Option<plex::PlexImageRef>, String> {
+    let client = state
+        .0
+        .lock()
+        .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
+        .clone();
+    client.get_artist_portrait(&server_id, &rating_key).await
 }
 
 #[tauri::command]
@@ -4475,6 +4784,12 @@ pub fn run() {
     let plex_client = PlexClient::from_config(&initial_config);
 
     let app = tauri::Builder::default()
+        .setup(|app| {
+            if let Err(reason) = system_tray::install(app.handle()) {
+                eprintln!("[Tray] Optional system tray disabled: {reason}.");
+            }
+            Ok(())
+        })
         .manage(AudioState(Mutex::new(audio_engine)))
         .manage(AnalyzerState(Mutex::new(audio_analyzer)))
         .manage(PlexState(Mutex::new(plex_client)))
@@ -4487,9 +4802,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_playback_status,
             get_mpd_status_snapshot,
+            claim_audio_analyzer_host,
+            release_audio_analyzer_host,
             start_audio_analyzer,
             stop_audio_analyzer,
             toggle_playback,
+            change_playback_option,
             next_track,
             previous_track,
             seek_playback,
@@ -4502,6 +4820,9 @@ pub fn run() {
             set_window_title,
             list_local_directory,
             get_local_album_tracks,
+            get_local_album_doctor,
+            search_online_album_metadata,
+            get_online_album_metadata_details,
             resolve_local_library_path,
             get_local_track_tags,
             get_local_album_tag_inspection,
@@ -4540,7 +4861,15 @@ pub fn run() {
             resolve_player_plex_navigation,
             get_plex_albums,
             get_plex_collections,
+            get_plex_discover,
+            get_plex_discover_recent,
+            get_plex_library_mix,
+            get_plex_library_mix_years,
+            get_plex_library_mix_styles,
+            get_plex_discover_children,
+            get_plex_discover_artist,
             get_collection_albums,
+            get_artist_portrait,
             get_artist_albums,
             get_artist_top_tracks,
             get_album_tracks,
@@ -4556,7 +4885,7 @@ pub fn run() {
                 if window.label() == "now-playing" {
                     if let Some(state) = window.app_handle().try_state::<AnalyzerState>() {
                         if let Ok(mut analyzer) = state.0.lock() {
-                            if let Err(error) = analyzer.stop_for_window_close(window.app_handle()) {
+                            if let Err(error) = analyzer.stop_for_host_close(window.label(), window.app_handle()) {
                                 eprintln!(
                                     "[Analyzer] Window cleanup failed: {}",
                                     crate::diagnostics::error_summary(&error)
@@ -4572,6 +4901,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Erro ao compilar o contexto do Tauri");
 
+    diagnostics::install_main_thread_probe(app.handle().clone());
     let restore_started = AtomicBool::new(false);
     app.run(move |app_handle, event| {
         match event {
@@ -4611,6 +4941,95 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn favorites_pending_io_preserves_executor_capacity_and_recovers_after_failure() {
+        static READS: bounded_artwork_io::Reads = bounded_artwork_io::Reads::new(1);
+        let (entered, started) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let pending = tauri::async_runtime::spawn(run_favorites_io(&READS, "favorites.test", None, move || {
+            entered.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            Err::<Vec<FavoriteAlbum>, _>("controlled filesystem failure".to_string())
+        }));
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (responded, response) = mpsc::channel();
+        tauri::async_runtime::spawn(async move { responded.send(()).unwrap(); });
+        response.recv_timeout(Duration::from_secs(2)).expect("async executor must remain responsive during filesystem work");
+        for _ in 0..100 {
+            let busy = tauri::async_runtime::block_on(run_favorites_io(&READS, "favorites.test", None, || {
+                panic!("a pending physical read must keep its slot")
+            }));
+            assert_eq!(busy, Err::<(), _>("favorites_busy".to_string()));
+        }
+        release.send(()).unwrap();
+        let failure = tauri::async_runtime::block_on(pending).unwrap();
+        assert_eq!(failure.unwrap_err(), "controlled filesystem failure");
+        let recovered = tauri::async_runtime::block_on(run_favorites_io(&READS, "favorites.test", None, || Ok(42)));
+        assert_eq!(recovered, Ok(42));
+    }
+
+    #[test]
+    fn favorites_abandoned_waiter_keeps_physical_io_admission_until_worker_exits() {
+        static READS: bounded_artwork_io::Reads = bounded_artwork_io::Reads::new(1);
+        let (entered, started) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let pending = tauri::async_runtime::spawn(run_favorites_io(&READS, "favorites.test", None, move || {
+            entered.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(())
+        }));
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        pending.abort();
+        assert!(tauri::async_runtime::block_on(pending).is_err());
+        assert!(READS.try_acquire().is_none(), "abandoning IPC must not free executing I/O");
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(permit) = READS.try_acquire() { drop(permit); break; }
+            assert!(Instant::now() < deadline, "physical completion must restore admission");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn queue_read_waits_off_executor_and_preserves_state_without_transport() {
+        let audio = Arc::new(Mutex::new(AudioEngine::new("unused-synthetic-socket", "")));
+        let held = audio.lock().unwrap();
+        let before = held.get_queue();
+        let worker_audio = audio.clone();
+        let (entered, started) = mpsc::channel();
+        let pending = tauri::async_runtime::spawn_blocking(move || {
+            entered.send(()).unwrap();
+            read_queue_from_audio(&worker_audio, &diagnostics::DevSpan::new("queue.test"))
+        });
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (responded, response) = mpsc::channel();
+        tauri::async_runtime::spawn(async move { responded.send(()).unwrap(); });
+        response.recv_timeout(Duration::from_secs(2)).expect("lock waiter must not block the async executor");
+        drop(held);
+        let queue = tauri::async_runtime::block_on(pending).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(queue).unwrap(), serde_json::to_value(before).unwrap());
+        assert!(audio.try_lock().is_ok());
+    }
+
+    #[test]
+    fn local_album_origin_labels_use_only_configured_source_names() {
+        let album = |source: Option<&str>| serde_json::from_value::<audio::LocalAlbum>(serde_json::json!({
+            "id": "album", "title": "Title", "artist": "Artist", "year": null,
+            "folder_path": "/physical/private/folder", "source_id": source,
+            "track_count": 1, "discs": []
+        })).unwrap();
+        let mut albums = vec![album(Some("internal-root")), album(Some("unresolved")), album(None)];
+        let sources = vec![supervisor::LocalLibrarySource { id: "internal-root".into(), label: "Configured library".into() }];
+        label_local_album_sources(&mut albums, &sources);
+        assert_eq!(albums[0].source_label.as_deref(), Some("Configured library"));
+        assert_eq!(albums[1].source_label, None);
+        assert_eq!(albums[2].source_label, None);
+        assert_eq!(albums[0].source_id.as_deref(), Some("internal-root"));
+        label_local_album_sources(&mut albums, &[]);
+        assert!(albums.iter().all(|album| album.source_label.is_none()));
+    }
 
     static NEXT_LOCAL_PATH_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -5677,6 +6096,65 @@ mod tests {
     }
 
     #[test]
+    fn overlap_admission_first_setup_and_no_effects_on_refusal() {
+        let fixture = LocalPathFixture::new();
+        let parent = fixture.root.join("music");
+        let child = parent.join("reggae");
+        fs::create_dir_all(&child).unwrap();
+        let current = AppConfig {
+            first_run: true,
+            local_folders: vec![
+                parent.to_string_lossy().into_owned(),
+                child.to_string_lossy().into_owned(),
+            ],
+            ..AppConfig::default()
+        };
+        let mut proposed = current.clone();
+        proposed.first_run = false;
+        let before = fs::read_dir(&fixture.root).unwrap().count();
+        assert_eq!(
+            validate_local_folder_admission(&current, &proposed),
+            Err(local_media::mirror::NEW_SOURCE_OVERLAP.into())
+        );
+        assert_eq!(fs::read_dir(&fixture.root).unwrap().count(), before);
+        assert!(!fixture.root.join("library.next").exists());
+        // The real command invokes admission before reservation/effects.
+        let command = include_str!("lib.rs")
+            .split("async fn save_config(")
+            .nth(1)
+            .unwrap()
+            .split("fn uncertain_config_save_message")
+            .next()
+            .unwrap();
+        let admission = command
+            .find("validate_local_folder_admission(&admission_current")
+            .unwrap();
+        for effect in [
+            "operations.reserve()",
+            "transaction_state.begin()",
+            "supervisor.start(&new_config)",
+        ] {
+            assert!(admission < command.find(effect).unwrap());
+        }
+    }
+
+    #[test]
+    fn overlap_admission_unrelated_preferences_do_not_inspect_old_roots() {
+        let current = AppConfig {
+            first_run: false,
+            local_folders: vec![
+                "/nonexistent-fixture/parent".into(),
+                "/nonexistent-fixture/parent/child".into(),
+            ],
+            ..AppConfig::default()
+        };
+        let mut proposed = current.clone();
+        proposed.replay_gain = "album".into();
+        assert!(validate_local_folder_admission(&current, &proposed).is_ok());
+        assert!(validate_local_folder_admission(&current, &current).is_ok());
+    }
+
+    #[test]
     fn managed_folders_route_accepts_only_local_folders_changes() {
         let mut current = AppConfig::default();
         current.first_run = false;
@@ -5819,6 +6297,7 @@ mod tests {
 
     fn playback_with_mpd_volume(value: i32) -> PlaybackStatus {
         PlaybackStatus {
+            options: None,
             state: "stop".to_string(),
             elapsed: 0.0,
             duration: 0.0,
@@ -9705,6 +10184,96 @@ mod tests {
             vec![("update \"Added\"", "ACK [5@0] {update} simulated failure\n")],
             "update MPD direcionado",
         );
+    }
+
+    #[test]
+    fn local_index_gap_diagnostic_in_memory_audit_and_completion_have_no_completeness_proof() {
+        // Socket-free boundary check. Update completion is injected as successful;
+        // this is not a protocol/decoder or full Settings Save execution.
+        for catalog in [vec!["file: Existing/old.flac".to_string()], Vec::new()] {
+            let audit = AudioEngine::audit_raw_local_catalog(&catalog).unwrap();
+            assert!(audit.is_clean());
+            assert_eq!(audit.total_files, catalog.len());
+            let committed = Cell::new(false);
+            let state = Arc::new(config_save_operation::Coordinator::new());
+            let (_, operation) = state.reserve().unwrap();
+            let result = complete_published_mirror_refresh(
+                || Ok(()), // The real audit above did not reject this synthetic response.
+                || -> Result<(), String> {
+                    panic!("unexpected capture in boundary check");
+                },
+                || panic!("unexpected stop in boundary check"),
+                || panic!("unexpected rollback in boundary check"),
+                |_| panic!("unexpected restore in boundary check"),
+                || panic!("unexpected rejected cleanup in boundary check"),
+                || {
+                    committed.set(true);
+                    Ok(())
+                },
+                || Ok(()),
+            );
+            assert!(committed.get());
+            operation.finish(result, false);
+            let outcome = state.snapshot().unwrap().unwrap();
+            assert_eq!(outcome.phase, config_save_operation::Phase::Completed);
+            assert!(outcome.error.is_none());
+        }
+    }
+
+    #[test]
+    fn local_index_gap_diagnostic_synthetic_partial_and_empty_catalogs_allow_commit() {
+        // Scripted protocol responses, NOT observations of a real MPD decoder.
+        // Neither a missing newly added source nor an entirely empty catalog
+        // fails today's syntax-only audit after a completed update.
+        for catalog in ["file: Existing/old.flac\nOK\n", "OK\n"] {
+            let (socket, server) = fake_restorative_rescan_mpd(vec![
+                ("update \"Added\"", "updating_db: 107\nOK\n"),
+                ("status", "state: stop\nOK\n"),
+                ("listall", catalog),
+            ]);
+            let state = Arc::new(config_save_operation::Coordinator::new());
+            let (_, operation) = state.reserve().unwrap();
+            let committed = Cell::new(false);
+            let cleaned = Cell::new(false);
+            let result = complete_published_mirror_refresh(
+                || {
+                    request_refresh_and_audit_traced(
+                        &socket,
+                        &local_media::mirror::ManagedRefreshPlan::Targeted {
+                            directories: vec!["Added".to_string()],
+                            changed_files: 2,
+                        },
+                        None,
+                        Some(&operation),
+                    )
+                },
+                || -> Result<(), String> {
+                    panic!("unexpected capture in diagnostic success");
+                },
+                || panic!("unexpected stop in diagnostic success"),
+                || panic!("unexpected rollback in diagnostic success"),
+                |_| panic!("unexpected restore in diagnostic success"),
+                || panic!("unexpected rejected cleanup in diagnostic success"),
+                || {
+                    committed.set(true);
+                    Ok(())
+                },
+                || {
+                    cleaned.set(true);
+                    Ok(())
+                },
+            );
+            server.join().unwrap();
+            assert_eq!(result, Ok(()));
+            assert!(committed.get() && cleaned.get());
+            operation.finish(result, false);
+            let outcome = state.snapshot().unwrap().unwrap();
+            assert_eq!(outcome.phase, config_save_operation::Phase::Completed);
+            assert!(outcome.error.is_none());
+            // The operation is terminal, so a fresh explicit retry is admissible.
+            let (_, retry) = state.reserve().unwrap();
+            retry.finish(Ok(()), false);
+        }
     }
 
     #[test]

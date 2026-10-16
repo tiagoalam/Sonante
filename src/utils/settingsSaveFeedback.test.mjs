@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import ts from "typescript";
 
 const modal = readFileSync(new URL("../components/SettingsModal.tsx", import.meta.url), "utf8");
 const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
@@ -23,7 +24,34 @@ test("App keeps local Save pending and confirms success only after backend compl
   assert.match(app, /finally \{\s*if \(isCurrent\(\)\) finishConfigSave\(\)/);
   assert.match(app, /t\(localSavePhase === "preparing"/);
   assert.match(app, /onSaveFinished=\{finishConfigSave\}/);
-  assert.match(app, /onClick=\{\(\) => \{ if \(!configSaveInProgressRef\.current\) setShowSettings\(true\); \}\}/);
+  // Exercise the normal Preferences action, including its contextual destination.
+  const tree = ts.createSourceFile("App.tsx", app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const actions = [];
+  const visit = node => {
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(tree) === "SidebarNavItem"
+      && node.attributes.properties.some(prop => prop.name?.getText(tree) === "diagnosticAction" && prop.initializer?.text === "settings")) {
+      actions.push(node.attributes.properties.find(prop => prop.name?.getText(tree) === "onClick").initializer.expression);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  assert.equal(actions.length, 1, "the real sidebar Preferences action must exist exactly once");
+  const js = ts.transpileModule(`const handler = ${actions[0].getText(tree)};`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText;
+  for (const previousPage of ["local", "plex"]) {
+    let page = previousPage, opened = false;
+    const effects = [], busy = { current: true };
+    const click = new Function("configSaveInProgressRef", "setSettingsInitialPage", "setShowSettings", `${js}; return handler;`)(
+      busy, value => { page = value; effects.push(["page", value]); }, value => { opened = value; effects.push(["open", value]); },
+    );
+    click();
+    assert.equal(page, previousPage); assert.equal(opened, false); assert.deepEqual(effects, [], "a pending Save fences navigation");
+    busy.current = false;
+    click();
+    assert.equal(page, "general"); assert.equal(opened, true);
+    assert.deepEqual(effects, [["page", "general"], ["open", true]], "a fresh normal opening chooses General before opening");
+  }
 });
 
 test("Save status messages exist in pt-BR and en", () => {

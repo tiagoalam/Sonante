@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 version="$1"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 shopt -s nullglob
 packages=(src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/rpm/*.rpm)
 test "${#packages[@]}" = 2
@@ -18,6 +19,9 @@ for package in "${packages[@]}"; do
       for dep in mpd alsa-utils xdg-utils xdg-desktop-portal libasound2 libwebkit2gtk-4.1-0 libssl3; do
         [[ "$depends" == *"$dep"* ]]
       done
+      if ! printf '%s\n' "$depends" | tr ',' '\n' | grep -Eq '^[[:space:]]*libwebkit2gtk-4\.1-0 \(>= 2\.40\)[[:space:]]*$'; then
+        echo 'DEB must require libwebkit2gtk-4.1-0 (>= 2.40)' >&2; exit 1
+      fi
       ;;
     *.rpm)
       rpm -K "$package"
@@ -31,6 +35,9 @@ for package in "${packages[@]}"; do
       for dep in mpd alsa-utils xdg-utils xdg-desktop-portal alsa-lib webkit2gtk4.1 openssl-libs 'libssl.so.3()(64bit)'; do
         [[ "$depends" == *"$dep"* ]]
       done
+      # --requires renders a literal name and a real comparison identically.
+      rpm -qp --queryformat '[%{REQUIRENAME}\t%{REQUIREFLAGS}\t%{REQUIREVERSION}\n]' "$package" |
+        python3 "$script_dir/inspect-rpm-requires.py"
       ;;
   esac
   [[ "$contents" == *usr/bin/sonante* ]]

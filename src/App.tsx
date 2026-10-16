@@ -1,5 +1,11 @@
+import { useLocalPlaybackArtwork } from "./utils/useLocalPlaybackArtwork";
+import { createLocalAlbumPlayback } from "./utils/localAlbumPlayback";
+import { localLibrarySourceOptions, validLocalLibrarySourceSelection, filterLocalAlbumsByScope } from "./utils/localLibraryScope";
+import { NowPlayingHost } from "./components/NowPlayingHost";
+import { NowPlayingHosting, capturePagePresentation } from "./utils/nowPlayingHosting";
+import { claimAudioAnalyzerHost, closeDetachedWindow, exchangeDetachedHost, onDetachedWindowClosed, releaseAudioAnalyzerHost, REINCORPORATE_EVENT, NAVIGATE_EVENT } from "./services/nowPlayingWindow";
 import { configuredSignalRoute } from "./utils/signalPath";
-import { logError } from "./utils/frontendDiagnostics";
+import { logError, installInteractionProbe, recordInteractionState } from "./utils/frontendDiagnostics";
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo, useSyncExternalStore, memo } from "react";
 import {
   Disc3,
@@ -20,13 +26,25 @@ import {
   ListMusic,
   ExternalLink,
   ListPlus,
+  Compass,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlayerBar } from "./components/PlayerBar";
 import { AlbumView } from "./components/AlbumView";
 import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
-import { LocalBrowserView, localAlbumCatalog } from "./components/LocalBrowserView";
+import { ExploreView } from "./components/ExploreView";
+import { discoverPush, type DiscoverPage } from "./utils/discoverNavigation";
+import { playPlexAlbum } from "./utils/plexAlbumPlayback";
+import { PlexDiscoverView } from "./components/PlexDiscoverView";
+import { PlexDiscoverSession } from "./utils/plexDiscover";
+import { mixPlaybackMetadata } from "./utils/plexLibraryMix";
+import { playlistsService, isDuplicatePlaylistNameError } from "./services/playlists";
+import { discoverLanguage } from "./utils/plexDiscoverPresentation";
+import type { ExploreContext, ExploreEntry, ExploreSourceState } from "./utils/explore";
+import { exploreEntryIsCurrent } from "./utils/explore";
+import { PlexCatalogCoordinator } from "./utils/plexCatalogCoordinator";
+import { LocalBrowserView, localAlbumCatalog, type LocalSubview } from "./components/LocalBrowserView";
 import { localCatalogActivity } from "./utils/localAlbumCatalog";
 import { localArtworkEnrichment, localArtworkResolver } from "./utils/localArtworkSession";
 import { artworkReadBlocked } from "./utils/localArtwork";
@@ -34,6 +52,7 @@ import { createMainSectionPreference, type MainSection } from "./utils/appBootst
 import { FavoritesView } from "./components/FavoritesView";
 import { PlaylistsView } from "./components/PlaylistsView";
 import { PlaylistPickerModal } from "./components/PlaylistPickerModal";
+import type { SettingsPage } from "./components/SettingsPages";
 import { SettingsModal, QueueClearConfirmationDialog, formatConfigError } from "./components/SettingsModal";
 import { AboutModal } from "./components/AboutModal";
 import { WelcomeWizard } from "./components/WelcomeWizard";
@@ -320,13 +339,21 @@ const PlexAlbumCard = memo<{
 PlexAlbumCard.displayName = "PlexAlbumCard";
 
 export function App() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const localCatalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [mediaSource, setMediaSource] = useState<MainSection | null>(null);
   const [playerNavigation, setPlayerNavigation] = useState<PlayerNavigationSession | null>(null);
   const playerTarget = playerNavigation?.target ?? null;
+  const [exploreDetail, setExploreDetail] = useState<ExploreEntry | null>(null);
+  const [exploreSourceId, setExploreSourceId] = useState<string | null>(null);
+  const exploreDetailReturnRef = useRef<HTMLElement | null>(null);
+  const [exploreLocalSubview, setExploreLocalSubview] = useState<LocalSubview>("browser");
+  const [localSubview, setLocalSubview] = useState<LocalSubview>("browser");
+  const [playerLocalSubview, setPlayerLocalSubview] = useState<{ revision: number; view: LocalSubview } | null>(null);
+  const playerSubview = playerLocalSubview?.revision === playerNavigation?.revision ? playerLocalSubview?.view ?? "browser" : "browser";
+  const changePlayerLocalSubview = (view: LocalSubview) => setPlayerLocalSubview({ revision: playerNavigation?.revision ?? 0, view });
   const playerReturnSection = playerNavigation?.returnSection ?? null;
   const setPlayerTarget = (target: PlayerNavigationTarget | null) => {
     setPlayerNavigation(previous => previous && target ? { ...previous, target, revision: previous.revision + 1 } : null);
@@ -348,12 +375,51 @@ export function App() {
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
   const [loadingLibraries, setLoadingLibraries] = useState(true);
   const [selectedLibrary, setSelectedLibrary] = useState<PlexLibrary | null>(null);
+  const [discoverSelection, setDiscoverSelection] = useState<string | null>(null);
+  const [plexArea, setPlexArea] = useState<"library" | "discover">("library");
+  const [discoverPages, setDiscoverPages] = useState<DiscoverPage[]>([]);
+  const discoverTop = discoverPages[discoverPages.length - 1];
+  const discoverAlbum = discoverTop?.album ? discoverTop : null;
+  const discoverArtist = discoverTop?.artist ? discoverTop : null;
+  const setDiscoverAlbum = (page: { identity: unknown; album: PlexAlbum } | null) => setDiscoverPages(pages => page ? discoverPush(pages, page) : pages.slice(0, -1));
+  const setDiscoverArtist = (page: { identity: unknown; artist: SelectedArtist }) => setDiscoverPages(pages => discoverPush(pages, page));
+  const plexDiscover = useMemo(() => new PlexDiscoverSession(plexService.getDiscover, plexService.getDiscoverChildren, plexService.getDiscoverRecent, Math.random, plexService.getDiscoverArtist, plexService.getLibraryMix, plexService.getLibraryMixYears, plexService.getLibraryMixStyles), []);
+  const [playlistRevision, setPlaylistRevision] = useState(0);
+  const loadDiscoverArtist = useCallback((artist: SelectedArtist) => plexDiscover.loadArtist(artist), [plexDiscover]);
+  const closeDiscoverArtist = useCallback(() => { plexDiscover.cancelArtist(); setDiscoverPages(pages => pages.slice(0, -1)); }, [plexDiscover]);
+  // Opaque identities prevent credential values from reaching cards, errors or persisted navigation.
+  const plexConnectionIdentity = useMemo(() => ({}), [config?.plex_server_id, config?.plex_url, config?.plex_token]);
+  const plexBrowserIdentity = useMemo(() => ({}), [plexConnectionIdentity, selectedLibrary?.key]);
+  const [plexLibrariesIdentity, setPlexLibrariesIdentity] = useState<unknown>(null);
+  const [plexLibrariesError, setPlexLibrariesError] = useState(false);
+  const [plexDiscoveryAttempt, setPlexDiscoveryAttempt] = useState(0);
+  const plexCatalog = useMemo(() => new PlexCatalogCoordinator(
+    libraryId => plexService.getAlbums(libraryId, "added"), error => logError("plex.albums-load", error)), []);
+  const plexBrowserCatalog = useSyncExternalStore(plexCatalog.subscribe, plexCatalog.getSnapshot);
+  useEffect(() => {
+    plexCatalog.setContext(plexConnectionIdentity, config?.plex_server_id ?? "");
+    return () => { plexCatalog.invalidate(plexConnectionIdentity); };
+  }, [plexCatalog, plexConnectionIdentity]);
+
+  const [plexAlbumLoad, setPlexAlbumLoad] = useState<{ identity: unknown; phase: "loading" | "ready" | "error" } | null>(null);
+  // Discover's selector never changes the traditional Plex library browser.
+  const discoverSelectionId = discoverSelection ?? selectedLibrary?.key ?? "";
+  const discoverLocale = discoverLanguage(i18n.resolvedLanguage ?? i18n.language);
+  const discoverIdentity = useMemo(() => ({}), [plexConnectionIdentity, discoverSelectionId, discoverLocale]);
+  const discoverScope = useMemo(() => plexLibrariesIdentity === plexConnectionIdentity && config?.plex_server_id
+    && (discoverSelectionId === "all" ? libraries.length > 0 : libraries.some(l => l.key === discoverSelectionId))
+    ? { identity: discoverIdentity, serverId: config.plex_server_id, libraryId: discoverSelectionId, language: discoverLocale, libraries } : null,
+    [libraries, plexLibrariesIdentity, plexConnectionIdentity, discoverIdentity, discoverSelectionId, discoverLocale, config?.plex_server_id]);
+  useLayoutEffect(() => { plexDiscover.setContext(discoverScope); setDiscoverPages([]); }, [plexDiscover, discoverScope]);
+
   const [plexViewMode, setPlexViewMode] = useState<"albums" | "artists" | "years" | "genres" | "collections">("albums");
   const [hasCollections, setHasCollections] = useState(false);
   const [plexSortMode, setPlexSortMode] = useState<PlexAlbumSortMode>("added_recent");
   const [selectedPlexGenre, setSelectedPlexGenre] = useState<string | null>(null);
   const [plexArtistSortMode, setPlexArtistSortMode] = useState<PlexArtistSortMode>("artist_asc");
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>("general");
+  const [localFoldersDraft, setLocalFoldersDraft] = useState<AppConfig | null>(null);
   const queueClearFlowRef = useRef(createQueueClearConfirmationFlow());
   const [queueClearConfirmation, setQueueClearConfirmation] = useState<QueueClearConfirmation | null>(null);
   const configSaveInProgressRef = useRef(false);
@@ -367,7 +433,7 @@ export function App() {
     kind: "success" | "error";
     detail?: string;
     reloadFailed?: boolean;
-    refusal?: "fullRescan" | "planChanged" | "queueChanged" | "queueCheckRequired";
+    refusal?: "fullRescan" | "planChanged" | "queueChanged" | "queueCheckRequired" | "overlap";
     stagingCleanupFailed?: boolean;
     uncertain?: boolean;
     statusUnavailable?: boolean;
@@ -410,6 +476,7 @@ export function App() {
       backend: "unavailable",
     },
     is_updating: false,
+    options: null,
   });
   const [mpdHealth, setMpdHealth] = useState<MpdHealth>({ state: "starting" });
   const isPlaybackAvailable = mpdHealth.state === "available";
@@ -419,6 +486,15 @@ export function App() {
   const plexGridRef = useRef<VirtualAlbumGridHandle>(null);
   const plexArtistListRef = useRef<VirtualListHandle>(null);
   const [plexScrollContainer, setPlexScrollContainer] = useState<HTMLDivElement | null>(null);
+
+  useEffect(() => installInteractionProbe(() => localArtworkResolver.getDiagnostics()), []);
+  useLayoutEffect(() => {
+    recordInteractionState({ section: mediaSource, health: mpdHealth.state, bootstrap: !config || mediaSource === null,
+      settings: showSettings, about: showAbout, wizard: !!config?.first_run,
+      queueConfirmation: !!queueClearConfirmation, playlistPicker: !!playlistItems,
+      saveBlocked: localCatalog.saveBlocked, catalogLoading: localCatalog.loading, catalogAlbums: localCatalog.albums.length });
+  }, [mediaSource, mpdHealth.state, config?.first_run, showSettings, showAbout,
+    queueClearConfirmation, playlistItems, localCatalog.saveBlocked, localCatalog.loading, localCatalog.albums.length]);
 
   const statusRef = useRef(playbackStatus);
   useLayoutEffect(() => {
@@ -430,6 +506,21 @@ export function App() {
   useEffect(() => {
     localArtworkEnrichment.setOnlineEnabled(config?.online_artwork_enabled ?? false);
   }, [config?.online_artwork_enabled]);
+  const queueArtworkRevision = useRef({ albums: localCatalog.albums, revision: localCatalogRevision, value: 0 });
+  if (queueArtworkRevision.current.albums !== localCatalog.albums || queueArtworkRevision.current.revision !== localCatalogRevision) {
+    queueArtworkRevision.current = { albums: localCatalog.albums, revision: localCatalogRevision, value: queueArtworkRevision.current.value + 1 };
+  }
+  const queueArtwork = useMemo(() => ({
+    blocked: !config || config.first_run || !!configSavePhase || showSettings || showAbout
+      || playbackStatus.is_updating || localCatalog.loading || localCatalog.saveBlocked || localCatalog.mpdBusy || !!localCatalog.error,
+    onlineEnabled: config?.online_artwork_enabled ?? false,
+    generation: queueArtworkRevision.current.value,
+  }), [config?.first_run, !!config, configSavePhase, showSettings, showAbout, playbackStatus.is_updating,
+    localCatalog.loading, localCatalog.saveBlocked, localCatalog.mpdBusy, localCatalog.error, config?.online_artwork_enabled, queueArtworkRevision.current.value]);
+  const ensurePlaybackArtworkCatalog = useCallback(() => localAlbumCatalog.ensureLoaded(false, true), []);
+  const presentationPlayback = useLocalPlaybackArtwork(playbackStatus, localCatalog, isPlaybackAvailable,
+    Boolean(config && !config.first_run && !showSettings && !showAbout),
+    config?.online_artwork_enabled ?? false, ensurePlaybackArtworkCatalog);
   useEffect(() => {
     statusRef.current = playbackStatus;
   }, [playbackStatus]);
@@ -437,11 +528,40 @@ export function App() {
   useEffect(() => {
     playbackAvailableRef.current = isPlaybackAvailable;
   }, [isPlaybackAvailable]);
+  const nowPlayingTitleRef = useRef(t("nowPlaying.windowTitle"));
+  nowPlayingTitleRef.current = t("nowPlaying.windowTitle");
+  const hostingRef = useRef<NowPlayingHosting | null>(null);
+  if (!hostingRef.current) hostingRef.current = new NowPlayingHosting({
+    beforeEmbed: () => { if (previousPageRef.current && !previousEmbeddedRef.current) restorePageRef.current = capturePagePresentation(previousPageRef.current, document.activeElement); },
+    claim: claimAudioAnalyzerHost, open: () => openNowPlayingWindow(nowPlayingTitleRef.current),
+    activate: async (runtime, owner) => { await exchangeDetachedHost("activate", runtime, owner); },
+    suspend: async () => { await exchangeDetachedHost("suspend"); }, close: closeDetachedWindow,
+    stop: releaseAudioAnalyzerHost, id: () => window.crypto.randomUUID(),
+  });
+  const nowPlayingHosting = hostingRef.current;
+  const hosting = useSyncExternalStore(nowPlayingHosting.subscribe, nowPlayingHosting.getSnapshot);
+  const nowPlayingEmbedded = hosting.mode === "embedded";
+  const previousPageRef = useRef<HTMLDivElement>(null);
+  const restorePageRef = useRef<(() => void) | null>(null);
+  const previousEmbeddedRef = useRef(false);
+  const showNowPlaying = () => {
+    if (!hosting.busy && !nowPlayingEmbedded && previousPageRef.current)
+      restorePageRef.current = capturePagePresentation(previousPageRef.current, document.activeElement);
+    setShowQueue(false);
+    void nowPlayingHosting.show();
+  };
+  useLayoutEffect(() => {
+    if (nowPlayingEmbedded) setShowQueue(false);
+    if (previousEmbeddedRef.current && !nowPlayingEmbedded) { restorePageRef.current?.(); restorePageRef.current = null; }
+    previousEmbeddedRef.current = nowPlayingEmbedded;
+  }, [nowPlayingEmbedded]);
+  useEffect(() => onDetachedWindowClosed(nowPlayingHosting.detachedClosed), [nowPlayingHosting]);
   const nowPlayingReadyRef = useRef(false);
   const nowPlayingSnapshotRef = useRef({
     route: configuredSignalRoute(config),
     health: mpdHealth,
-    playback: playbackStatus,
+    playback: presentationPlayback,
+    queueArtwork,
   });
 
   const publishCurrentNowPlayingSnapshot = useCallback(() => {
@@ -457,7 +577,11 @@ export function App() {
   }, []);
 
   // Listagens Plex
-  const [albums, setAlbums] = useState<PlexAlbum[]>([]);
+  const [loadedBrowserAlbums, setAlbums] = useState<PlexAlbum[]>([]);
+  // Reuse the confirmed traditional Plex browser catalog.
+  const albums = plexBrowserCatalog.identity === plexConnectionIdentity
+    ? plexBrowserCatalog.libraries.find(item => item.library.key === selectedLibrary?.key && item.phase === "complete")?.albums ?? loadedBrowserAlbums
+    : [];
   const [collections, setCollections] = useState<PlexCollection[]>([]);
 
   // Navegação interna Plex
@@ -518,6 +642,28 @@ export function App() {
     );
   };
 
+  const navigateFromNowPlaying = async (view: "album" | "artist") => {
+    if (nowPlayingHosting.getSnapshot().busy) return;
+    if (nowPlayingHosting.getSnapshot().mode === "detached") await nowPlayingHosting.reincorporate();
+    if (nowPlayingHosting.getSnapshot().mode === "embedded") await nowPlayingHosting.collapse();
+    if (nowPlayingHosting.getSnapshot().mode === "closed") navigateFromPlayer(view);
+  };
+  const nowPlayingNavigationRef = useRef(navigateFromNowPlaying);
+  nowPlayingNavigationRef.current = navigateFromNowPlaying;
+  useEffect(() => {
+    let disposed = false;
+    const cleanups: Array<() => void> = [];
+    const register = async <T,>(name: string, fn: (data: T) => void) => {
+      const cleanup = await listen<T>(name, event => { if (!disposed) fn(event.payload); });
+      if (disposed) cleanup(); else cleanups.push(cleanup);
+    };
+    void Promise.all([
+      register<{ runtime: string }>(REINCORPORATE_EVENT, data => { if (nowPlayingHosting.isDetachedRuntime(data.runtime)) void nowPlayingHosting.reincorporate(); }),
+      register<{ runtime: string; view: "album" | "artist" }>(NAVIGATE_EVENT, data => { if (nowPlayingHosting.isDetachedRuntime(data.runtime) && (data.view === "album" || data.view === "artist")) void nowPlayingNavigationRef.current(data.view); }),
+    ]).catch(err => logError("app.now-playing-listener", err));
+    return () => { disposed = true; cleanups.forEach(fn => fn()); };
+  }, [nowPlayingHosting]);
+
   const refreshPlexFavorites = useCallback(() => {
     favoritesService
       .getFavorites()
@@ -553,6 +699,7 @@ export function App() {
     const refusal = reason === "LOCAL_SOURCE_FULL_RESCAN_REQUIRED" ? "fullRescan"
       : reason === "LOCAL_SOURCE_TARGETED_PLAN_CHANGED" ? "planChanged"
       : !uncertain && reason === "LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE" ? "queueChanged"
+      : !uncertain && reason === "LOCAL_SOURCE_NEW_OVERLAP" ? "overlap"
       : !uncertain && queueClearBinding(detail) ? "queueCheckRequired" : undefined;
     logError("settings.local-folders-save", error);
     let reloadFailed = false;
@@ -669,6 +816,11 @@ export function App() {
         queueClearFlowRef.current.discard();
         monitor.acceptanceFailed();
         await reportLocalFoldersSaveFailure(error, false, isCurrent);
+        if (isCurrent() && formatConfigError(error) === "LOCAL_SOURCE_NEW_OVERLAP") {
+          setLocalFoldersDraft({ ...proposal, local_folders: [...proposal.local_folders] });
+          setSettingsInitialPage("local");
+          setShowSettings(true);
+        }
         if (isCurrent()) finishConfigSave();
       }
     })();
@@ -679,6 +831,7 @@ export function App() {
     if (configSaveInProgressRef.current) return;
     if (!queueClearFlowRef.current.cancel(operationId)) return;
     setQueueClearConfirmation(null);
+    setSettingsInitialPage("general");
     setShowSettings(true);
   };
 
@@ -755,10 +908,11 @@ export function App() {
     nowPlayingSnapshotRef.current = {
       route: configuredSignalRoute(config),
       health: mpdHealth,
-      playback: playbackStatus,
+      playback: presentationPlayback,
+      queueArtwork,
     };
     publishCurrentNowPlayingSnapshot();
-  }, [config, mpdHealth, playbackStatus, publishCurrentNowPlayingSnapshot]);
+  }, [config, mpdHealth, presentationPlayback, queueArtwork, publishCurrentNowPlayingSnapshot]);
 
   // Atualiza favoritos Plex ao alternar a fonte de mídia
   useEffect(() => {
@@ -821,6 +975,8 @@ export function App() {
   // Atalhos de Teclado Globais
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (nowPlayingHosting.getSnapshot().mode === "embedded" && !showSettings && !showAbout) return;
+      if ((showSettings || showAbout) && e.key === "Escape") e.preventDefault();
       const activeEl = document.activeElement;
       const isInput =
         activeEl?.tagName === "INPUT" ||
@@ -829,22 +985,33 @@ export function App() {
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
-        if (playerTarget) return; // The previous search field is hidden while visiting the player target.
+        if (playerTarget || (centralSection === "plex" && plexArea === "discover")) return; // The library search field is hidden in these views.
         searchInputRef.current?.focus();
         searchInputRef.current?.select();
         return;
       }
 
       if (e.key === "Escape") {
+        // The Local dialog owns Escape, including draft/result confirmations and Apply guards.
+        if (document.querySelector("[data-local-tag-dialog-open]")) return;
         playerNavigationRequests.invalidate();
         if (showAbout) {
           setShowAbout(false);
         } else if (showSettings) {
           setShowSettings(false);
+          setLocalFoldersDraft(null);
         } else if (showQueue) {
           setShowQueue(false);
         } else if (playerTarget) {
           closePlayerNavigation();
+        } else if (exploreDetail) {
+          closeExploreAlbum();
+        } else if (discoverAlbum) {
+          setDiscoverAlbum(null);
+        } else if (discoverArtist) {
+          closeDiscoverArtist();
+        } else if (centralSection === "plex" && plexArea === "discover" && plexDiscover.getSnapshot().detail) {
+          plexDiscover.back();
         } else if (searchQuery) {
           setSearchQuery("");
         } else if (activeEl instanceof HTMLElement) {
@@ -853,7 +1020,11 @@ export function App() {
         return;
       }
 
+      if (activeEl instanceof HTMLElement && activeEl.closest("[data-now-playing-queue-content]")) return;
       if (isInput) return;
+      // Space activates a Discover card and arrows scroll its shelf; neither is
+      // a playback shortcut while keyboard focus belongs to this navigation.
+      if (activeEl instanceof HTMLElement && activeEl.closest("[data-plex-discover]")) return;
 
       if (!playbackAvailableRef.current) return;
 
@@ -892,7 +1063,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showSettings, showAbout, showQueue, searchQuery, playerTarget]);
+  }, [showSettings, showAbout, showQueue, searchQuery, playerTarget, exploreDetail, discoverAlbum, discoverArtist, closeDiscoverArtist, centralSection, plexArea, plexDiscover]);
 
   // Carregar ou Limpar Bibliotecas do Plex
   useEffect(() => {
@@ -915,12 +1086,16 @@ export function App() {
     }
 
     let disposed = false;
+    setPlexLibrariesError(false);
+    setLibraries([]);
+    setSelectedLibrary(null);
     setLoadingLibraries(true);
     plexService
       .getLibraries()
       .then((libs) => {
         if (disposed) return;
         mainSectionPreference.plexDiscoveryFinished(libs.length > 0);
+        setPlexLibrariesIdentity(plexConnectionIdentity);
         setLibraries(libs);
         if (libs.length > 0) {
           setSelectedLibrary(libs[0]);
@@ -931,6 +1106,8 @@ export function App() {
       .catch((err) => {
         if (!disposed) {
           mainSectionPreference.plexDiscoveryFinished(false);
+          setPlexLibrariesIdentity(plexConnectionIdentity);
+          setPlexLibrariesError(true);
           logError("plex.libraries-load", err);
         }
       })
@@ -941,17 +1118,19 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [config?.plex_token]);
+  }, [plexConnectionIdentity, plexDiscoveryAttempt]);
 
   // Carregar o catálogo base e as coleções da biblioteca ativa uma única vez.
   useEffect(() => {
-    if (!selectedLibrary) {
+    if (!selectedLibrary || plexLibrariesIdentity !== plexConnectionIdentity) {
       setAlbums([]);
       setCollections([]);
       setHasCollections(false);
       setLoading(false);
       return;
     }
+    // Discover requests its own bounded hubs; the full catalog belongs to the library browser.
+    if (centralSection !== "plex" || plexArea !== "library") return;
     const generation = plexLibraryRequestGenerationRef.current + 1;
     plexLibraryRequestGenerationRef.current = generation;
     let disposed = false;
@@ -966,18 +1145,22 @@ export function App() {
     setSelectedPlexGenre(null);
     setSearchQuery("");
     setSearchResults(null);
-    setAlbums([]);
+    // Keep valid same-context inventory on failure; never display another scope.
+    if (plexAlbumLoad && plexAlbumLoad.identity !== plexBrowserIdentity) setAlbums([]);
     setCollections([]);
     setHasCollections(false);
     setLoading(true);
+    setPlexAlbumLoad({ identity: plexBrowserIdentity, phase: "loading" });
     void Promise.allSettled([
-      plexService.getAlbums(selectedLibrary.key, "added"),
+      plexCatalog.loadLibrary(selectedLibrary),
       plexService.getCollections(selectedLibrary.key),
     ]).then(([albumResult, collectionResult]) => {
       if (disposed || generation !== plexLibraryRequestGenerationRef.current) return;
       if (albumResult.status === "fulfilled") {
         setAlbums(albumResult.value);
+        setPlexAlbumLoad({ identity: plexBrowserIdentity, phase: "ready" });
       } else {
+        setPlexAlbumLoad({ identity: plexBrowserIdentity, phase: "error" });
         logError("plex.albums-load", albumResult.reason);
       }
       if (collectionResult.status === "fulfilled") {
@@ -998,14 +1181,14 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [selectedLibrary]);
+  }, [selectedLibrary, plexLibrariesIdentity, plexConnectionIdentity, plexBrowserIdentity, plexCatalog, centralSection, plexArea]);
 
   // Busca Plex
   useEffect(() => {
     const q = searchQuery.trim();
     const generation = plexSearchRequestGenerationRef.current + 1;
     plexSearchRequestGenerationRef.current = generation;
-    if (q.length === 0 || centralSection !== "plex") {
+    if (q.length === 0 || centralSection !== "plex" || plexArea !== "library") {
       setSearchResults(null);
       setIsSearching(false);
       return;
@@ -1032,7 +1215,7 @@ export function App() {
         plexSearchRequestGenerationRef.current += 1;
       }
     };
-  }, [searchQuery, selectedLibrary, centralSection]);
+  }, [searchQuery, selectedLibrary, centralSection, plexArea]);
 
   const handleSelectCollection = async (col: PlexCollection) => {
     setActiveCollection(col);
@@ -1051,18 +1234,7 @@ export function App() {
     e.stopPropagation();
     if (!playbackAvailableRef.current) return;
     try {
-      const tracks = await plexService.getAlbumTracks(album.rating_key);
-      const metaTracks = tracks.map((t) => ({
-        title: t.title,
-        artist: album.artist,
-        album: album.title,
-        plex_image: t.thumb || album.thumb || null,
-        media_locator: t.media_locator,
-        duration: t.duration_ms ? t.duration_ms / 1000 : undefined,
-      }));
-      if (metaTracks.length > 0) {
-        audioService.playTracks(metaTracks, 0);
-      }
+      await playPlexAlbum(album, plexService.getAlbumTracks, audioService.playTracks, () => playbackAvailableRef.current);
     } catch (err) {
       logError("plex.quick-play", err);
     }
@@ -1121,6 +1293,9 @@ export function App() {
     playerNavigationRequests.invalidate();
     setPlayerNavigation(null);
     setPlayerNavigationError(false);
+    setExploreDetail(null);
+    setDiscoverPages([]);
+    plexDiscover.cancelArtist();
     setLocalSelectedArtist(null);
     setActiveAlbum(null);
     setActiveCollection(null);
@@ -1132,6 +1307,17 @@ export function App() {
     setSelectedPlexGenre(null);
     setSearchQuery("");
     setSearchResults(null);
+  };
+
+  const navigateLocalSubview = (view: LocalSubview) => {
+    if (playerTarget?.kind === "local") {
+      changePlayerLocalSubview(view);
+      return;
+    }
+    setLocalSubview(view);
+    if (!playerTarget && centralSection === "local") return;
+    resetAllNavigation();
+    mainSectionPreference.navigate("local");
   };
 
   const handlePlexLibraryChange = (libraryKey: string) => {
@@ -1157,6 +1343,57 @@ export function App() {
   };
 
   const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
+  const localExploreConfigured = Boolean(config?.local_folders.length);
+  const localExploreState: ExploreSourceState = !localExploreConfigured ? "not_configured"
+    : mpdHealth.state === "starting" ? "loading"
+    : !isPlaybackAvailable || playbackStatus.is_updating || localCatalog.saveBlocked || localCatalog.mpdBusy || localCatalog.error ? "unavailable"
+    : !localCatalog.loaded ? "loading" : localCatalog.albums.length ? "ready" : "empty";
+  const exploreSourceOptions = useMemo(() => localLibrarySourceOptions(localCatalog.albums), [localCatalog.albums]);
+  const activeExploreSourceId = validLocalLibrarySourceSelection(exploreSourceId, exploreSourceOptions);
+  const exploreAlbums = useMemo(() => filterLocalAlbumsByScope(localCatalog.albums, activeExploreSourceId, ""), [localCatalog.albums, activeExploreSourceId]);
+  useLayoutEffect(() => {
+    setExploreDetail(null); exploreDetailReturnRef.current = null;
+  }, [activeExploreSourceId]);
+  useEffect(() => { if (exploreSourceId !== activeExploreSourceId && localCatalog.loaded) setExploreSourceId(activeExploreSourceId); }, [exploreSourceId, activeExploreSourceId, localCatalog.loaded]);
+  const exploreContext: ExploreContext = {
+    local: { albums: exploreAlbums, state: localExploreState === "ready" && !exploreAlbums.length ? "empty" : localExploreState, sourceId: activeExploreSourceId },
+  };
+  const exploreLive = useRef({ context: exploreContext, visible: false });
+  exploreLive.current = { context: exploreContext, visible: centralSection === "explore" && !playerTarget && !exploreDetail && !showSettings && !showAbout };
+  const exploreEntryCurrent = (entry: ExploreEntry) => {
+    const current = exploreLive.current.context;
+    return exploreEntryIsCurrent(current, entry);
+  };
+  const explorePlayback = useMemo(() => createLocalAlbumPlayback(
+    audioService.getLocalAlbumTracks, album => localArtworkResolver.resolveLocalOnly(album), audioService.playTracks,
+  ), []);
+  useLayoutEffect(() => () => explorePlayback.cancel(), [explorePlayback, exploreAlbums, activeExploreSourceId,
+    centralSection, playerTarget, exploreDetail, showSettings, showAbout, isPlaybackAvailable, playbackStatus.is_updating,
+    localCatalog.albums, localCatalog.loaded, localCatalog.loading, localCatalog.saveBlocked, localCatalog.mpdBusy, localCatalog.error]);
+  const playExploreAlbum = (entry: ExploreEntry, current: () => boolean) => {
+    const version = localAlbumCatalog.getSnapshot().albums;
+    const scope = exploreLive.current.context.local.albums;
+    const saveGeneration = configSaveGenerationRef.current;
+    return explorePlayback.play(entry.album, () => {
+      const catalog = localAlbumCatalog.getSnapshot();
+      return playbackAvailableRef.current && !configSaveInProgressRef.current && configSaveGenerationRef.current === saveGeneration
+        && exploreLive.current.visible && current() && exploreEntryCurrent(entry)
+        && exploreLive.current.context.local.albums === scope && catalog.albums === version && catalog.albums.includes(entry.album)
+        && catalog.loaded && !catalog.loading && !catalog.saveBlocked && !catalog.mpdBusy && !catalog.error;
+    });
+  };
+  const openExploreAlbum = (entry: ExploreEntry) => {
+    if (!exploreLive.current.visible || !exploreEntryCurrent(entry)) return;
+    exploreDetailReturnRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setExploreLocalSubview("browser");
+    setExploreDetail(entry);
+  };
+  const closeExploreAlbum = () => {
+    if (document.querySelector("[data-local-tag-dialog-open]")) return;
+    setExploreDetail(null);
+    requestAnimationFrame(() => exploreDetailReturnRef.current?.focus({ preventScroll: true }));
+  };
+
   const plexLibraryOptions = useMemo(() => libraries.length > 0
     ? libraries.map((library) => ({ value: library.key, label: library.title }))
     : [{
@@ -1282,7 +1519,7 @@ export function App() {
       onChangeCapture={() => playerNavigationRequests.invalidate()}>
       <div className="min-h-0 flex-1 flex overflow-hidden">
         {/* Barra Lateral */}
-        <aside className="flex min-h-0 w-56 shrink-0 flex-col overflow-hidden border-r border-[#262626] bg-[#181818] p-3">
+        <aside data-sonante-sidebar inert={hosting.busy ? true : undefined} onClickCapture={() => { if (nowPlayingEmbedded && !hosting.busy) void nowPlayingHosting.collapse(); }} className="flex min-h-0 w-56 shrink-0 flex-col overflow-hidden border-r border-[#262626] bg-[#181818] p-3">
           <div className="mb-7 flex shrink-0 items-center gap-2.5 px-3 py-3">
             <Sparkles className="shrink-0 text-[#E5A00D]" size={21} />
             <h1 className="truncate text-base font-black tracking-[0.14em] text-[#E5A00D]">SONANTE</h1>
@@ -1294,14 +1531,11 @@ export function App() {
                 {t("sidebar.musicGroup")}
               </h2>
               <nav aria-label={t("sidebar.musicGroup")} className="space-y-1">
-                <SidebarNavItem
+                <SidebarNavItem diagnosticAction="local"
                   icon={Folder}
                   label={t("sidebar.local")}
                   active={mediaSource === "local"}
-                  onClick={() => {
-                    resetAllNavigation();
-                    mainSectionPreference.navigate("local");
-                  }}
+                  onClick={() => navigateLocalSubview("browser")}
                   trailing={!isPlaybackAvailable ? (
                     <span
                       className="flex items-center text-[#C9A45D]"
@@ -1319,15 +1553,24 @@ export function App() {
                     </span>
                   )}
                 />
-                <SidebarNavItem
+                <div className="ml-6 border-l border-[#333333] pl-2">
+                  <SidebarNavItem diagnosticAction="explore" icon={Compass} label={t("explore.title")} active={mediaSource === "explore"}
+                    onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("explore"); }} />
+                </div>
+                <SidebarNavItem diagnosticAction="plex"
                   icon={Server}
                   label={t("sidebar.plex")}
-                  active={mediaSource === "plex"}
+                  active={mediaSource === "plex" && plexArea === "library"}
                   onClick={() => {
+                    setPlexArea("library");
                     resetAllNavigation();
                     mainSectionPreference.navigate("plex");
                   }}
                 />
+                <div className="ml-6 border-l border-[#333333] pl-2">
+                  <SidebarNavItem diagnosticAction="plex" icon={Compass} label={t("discover.menu")} active={mediaSource === "plex" && plexArea === "discover"}
+                    onClick={() => { resetAllNavigation(); setPlexArea("discover"); mainSectionPreference.navigate("plex"); }} />
+                </div>
               </nav>
             </section>
 
@@ -1336,7 +1579,7 @@ export function App() {
                 {t("sidebar.collectionGroup")}
               </h2>
               <nav aria-label={t("sidebar.collectionGroup")} className="space-y-1">
-                <SidebarNavItem
+                <SidebarNavItem diagnosticAction="favorites"
                   icon={Heart}
                   label={t("sidebar.favorites")}
                   active={mediaSource === "favorites"}
@@ -1345,7 +1588,7 @@ export function App() {
                     mainSectionPreference.navigate("favorites");
                   }}
                 />
-                <SidebarNavItem
+                <SidebarNavItem diagnosticAction="playlists"
                   icon={ListMusic}
                   label={t("sidebar.playlists")}
                   active={mediaSource === "playlists"}
@@ -1359,12 +1602,12 @@ export function App() {
           </div>
 
           <nav aria-label={t("sidebar.utilitiesGroup")} className="mt-auto shrink-0 space-y-1 pt-4">
-            <SidebarNavItem
+            <SidebarNavItem diagnosticAction="settings"
               icon={Settings}
               label={t("sidebar.preferences")}
-              onClick={() => { if (!configSaveInProgressRef.current) setShowSettings(true); }}
+              onClick={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("general"); setShowSettings(true); } }}
             />
-            <SidebarNavItem
+            <SidebarNavItem diagnosticAction="about"
               icon={Info}
               label={t("sidebar.about")}
               onClick={() => setShowAbout(true)}
@@ -1372,10 +1615,33 @@ export function App() {
           </nav>
         </aside>
 
+        <div ref={previousPageRef} data-now-playing-previous-page className={nowPlayingEmbedded ? "hidden" : "contents"} inert={nowPlayingEmbedded ? true : undefined}>
         {/* Painel Central */}
         <div className={playerTarget ? "hidden" : "contents"}>
-        {centralSection === "playlists" ? (
-          <PlaylistsView isPlaybackAvailable={isPlaybackAvailable} />
+        {centralSection === "explore" ? (
+          <div className="contents">
+            <div className={exploreDetail ? "hidden" : "contents"}>
+              <ExploreView context={exploreContext} active={!exploreDetail && !playerTarget}
+                configurationReady={config !== null} onConfigure={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("local"); setShowSettings(true); } }}
+                canRetryLocal={isPlaybackAvailable && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy}
+                retryLocal={() => { if (isPlaybackAvailable && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy) localAlbumCatalog.requestRefresh(); }}
+                onlineArtworkEnabled={config?.online_artwork_enabled ?? false}
+                artworkBlocked={!isPlaybackAvailable || artworkReadBlocked(playbackStatus.is_updating, localCatalog)}
+                sourceSelector={<ToolbarSelect value={activeExploreSourceId ?? ""}
+                  options={[{ value: "", label: t("explore.allLibraries") }, ...exploreSourceOptions.map(source => ({ value: source.id, label: source.label }))]}
+                  label={t("explore.selectSource")} disabled={!localCatalog.loaded || localExploreState !== "ready" && localExploreState !== "empty" || !isPlaybackAvailable || !!playerTarget}
+                  onChange={value => { setExploreDetail(null); setExploreSourceId(value || null); }} />}
+                ensureLocal={() => localAlbumCatalog.ensureLoaded(playbackStatus.is_updating, localExploreConfigured && isPlaybackAvailable)}
+                isCurrent={exploreEntryCurrent} onOpen={openExploreAlbum} onPlay={playExploreAlbum} isPlaybackAvailable={isPlaybackAvailable} />
+            </div>
+            {exploreDetail?.source === "local" && <LocalBrowserView initialAlbumId={exploreDetail.album.id}
+              subview={exploreLocalSubview} onSubviewChange={setExploreLocalSubview}
+              albumNavigationAvailable={exploreEntryCurrent(exploreDetail)} onAlbumNavigationBack={closeExploreAlbum}
+              catalogRefreshRevision={localCatalogRevision} isPlaybackAvailable={isPlaybackAvailable} isLibraryUpdating={playbackStatus.is_updating}
+              onlineArtworkEnabled={config?.online_artwork_enabled ?? false} configuredLocalFolders={config?.local_folders ?? []} />}
+          </div>
+        ) : centralSection === "playlists" ? (
+          <PlaylistsView isPlaybackAvailable={isPlaybackAvailable} refreshKey={playlistRevision} />
         ) : centralSection === "favorites" ? (
           <FavoritesView
             onFavoritesChanged={refreshPlexFavorites}
@@ -1383,6 +1649,7 @@ export function App() {
           />
         ) : centralSection === "local" ? (
           <LocalBrowserView
+            subview={localSubview} onSubviewChange={setLocalSubview}
             initialArtist={localSelectedArtist}
             onClearInitialArtist={() => setLocalSelectedArtist(null)}
             importPreview={importPreview}
@@ -1402,14 +1669,47 @@ export function App() {
               {t("plex.disconnectedDesc")}
             </p>
             <button
-              onClick={() => { if (!configSaveInProgressRef.current) setShowSettings(true); }}
+              onClick={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("plex"); setShowSettings(true); } }}
               className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer"
             >
               <ExternalLink size={15} />
               <span>{t("plex.connectBtn")}</span>
             </button>
           </main>
-	  ) : activeAlbum ? (
+        ) : plexArea === "discover" ? (
+          <div data-plex-discover className="contents">
+            <div className={(discoverAlbum?.identity === discoverIdentity || discoverArtist?.identity === discoverIdentity) ? "hidden" : "contents"}>
+              <PlexDiscoverView session={plexDiscover} scope={discoverScope} active={!discoverAlbum && !discoverArtist && !playerTarget}
+                onSaveMix={async (name, items) => {
+                  try { await playlistsService.createWithItems(name, items); }
+                  catch (cause) { throw isDuplicatePlaylistNameError(cause) ? "playlists.duplicateName" : "playlists.createAndAddError"; }
+                  setPlaylistRevision(value => value + 1);
+                }}
+                onPlayAlbum={(album, current) => playPlexAlbum(album, plexService.getAlbumTracks, audioService.playTracks, () => current() && playbackAvailableRef.current)}
+                isPlaybackAvailable={isPlaybackAvailable} onPlayMix={async tracks => {
+                  if (!playbackAvailableRef.current || !discoverScope || !plexDiscover.isScope(discoverScope)) throw new Error("PLEX_DISCOVER_CONTEXT");
+                  await audioService.playTracks(mixPlaybackMetadata(tracks), 0);
+                }}
+                selection={discoverSelectionId} libraries={libraries} librariesLoading={loadingLibraries} librariesError={plexLibrariesError}
+                onRetryLibraries={() => setPlexDiscoveryAttempt(attempt => attempt + 1)}
+                onLibraryChange={setDiscoverSelection} onLibrary={() => { setDiscoverPages([]); plexDiscover.cancelArtist(); setPlexArea("library"); }}
+                onOpenArtist={artist => { if (discoverScope && plexDiscover.isScope(discoverScope)) setDiscoverArtist({ identity: discoverIdentity, artist }); }}
+                onOpenAlbum={album => { if (discoverScope && plexDiscover.isScope(discoverScope)) setDiscoverAlbum({ identity: discoverIdentity, album }); }} />
+            </div>
+            {discoverPages.map((page, index) => page.identity === discoverIdentity && <div key={index} className={index === discoverPages.length - 1 ? "contents" : "hidden"}>
+              {page.artist ? <ArtistView artist={page.artist} requestIdentity={discoverIdentity} loadContent={loadDiscoverArtist}
+                active={index === discoverPages.length - 1 && !playerTarget} onBack={closeDiscoverArtist}
+                onSelectAlbum={album => { if (discoverScope && plexDiscover.isScope(discoverScope)) setDiscoverAlbum({ identity: discoverIdentity, album }); }}
+                status={playbackStatus} isPlaybackAvailable={isPlaybackAvailable} />
+              : <AlbumView album={page.album} active={index === discoverPages.length - 1 && !playerTarget}
+                onBack={() => setDiscoverAlbum(null)} onToggleFavorite={refreshPlexFavorites} isPlaybackAvailable={isPlaybackAvailable}
+                onSelectArtist={artist => {
+                  if (!discoverScope || !plexDiscover.isScope(discoverScope)) return;
+                  setDiscoverArtist({ identity: discoverIdentity, artist: { ...artist, server_id: page.album.server_id, library_id: page.album.library_id } });
+                }} />}
+            </div>)}
+          </div>
+        ) : activeAlbum ? (
           <AlbumView
             album={activeAlbum}
             onBack={() => setActiveAlbum(null)}
@@ -1425,6 +1725,7 @@ export function App() {
         ) : activeArtist ? (
           <ArtistView
             artist={activeArtist}
+            requestIdentity={plexConnectionIdentity}
             onBack={() => setActiveArtist(null)}
             onSelectAlbum={(alb) => setActiveAlbum(alb)}
             status={playbackStatus}
@@ -2006,6 +2307,7 @@ export function App() {
             {playerTarget.kind === "local" ? (
               <LocalBrowserView
                 key={`${playerNavigation?.revision}:${playerTarget.view}:${playerTarget.albumId}`}
+                subview={playerSubview} onSubviewChange={changePlayerLocalSubview}
                 playerTarget={playerTarget}
                 onPlayerNavigationBack={closePlayerNavigation}
                 catalogRefreshRevision={localCatalogRevision}
@@ -2029,6 +2331,7 @@ export function App() {
               <ArtistView
                 key={`${playerNavigation?.revision}:${playerTarget.artist.rating_key}`}
                 artist={playerTarget.artist}
+                requestIdentity={plexConnectionIdentity}
                 onBack={closePlayerNavigation}
                 onSelectAlbum={album => setPlayerTarget({ ...playerTarget, album, view: "album", returnToArtist: true })}
                 status={playbackStatus}
@@ -2037,8 +2340,16 @@ export function App() {
             )}
           </div>
         )}
+        </div>
+        {nowPlayingEmbedded && <div className="flex-1 min-h-0 min-w-0" data-now-playing-embedded>
+          <NowPlayingHost snapshot={{ route: configuredSignalRoute(config), health: mpdHealth, playback: presentationPlayback, queueArtwork }} owner={hosting.owner} embedded busy={hosting.busy} hostingError={hosting.error}
+            onReady={nowPlayingHosting.hostReady} onCollapse={() => void nowPlayingHosting.collapse()} onDetach={() => void nowPlayingHosting.detach()}
+            onNavigate={view => void navigateFromNowPlaying(view)} />
+        </div>}
       </div>
 
+      {!nowPlayingEmbedded && hosting.error && <p role="alert" className="px-6 py-2 text-xs text-red-200">{t("nowPlaying.transitionFailed")}</p>}
+      <div hidden={nowPlayingEmbedded} data-now-playing-player-bar>
       {playerNavigationError && (
         <div role="alert" className="flex items-center justify-between gap-4 border-t border-[#383838] bg-[#211D14] px-6 py-2 text-xs text-[#D7AD52]">
           <span>{t("player.navigationUnavailable")}</span>
@@ -2048,18 +2359,15 @@ export function App() {
 
       <PlayerBar
         route={configuredSignalRoute(config)}
-        status={playbackStatus}
+        status={presentationPlayback}
         health={mpdHealth}
-        onOpenNowPlaying={() => {
-          openNowPlayingWindow(t("nowPlaying.windowTitle")).catch((err) => {
-            logError("now-playing.open", err);
-          });
-        }}
+        onOpenNowPlaying={showNowPlaying}
         onToggleQueue={() => setShowQueue(!showQueue)}
         isQueueOpen={showQueue}
         onNavigateToArtist={() => navigateFromPlayer("artist")}
         onNavigateToAlbum={() => navigateFromPlayer("album")}
       />
+      </div>
       {(configSavePhase || configSaveNotice) && (
         <div
           role={configSaveNotice?.kind === "error" ? "alert" : "status"}
@@ -2082,6 +2390,7 @@ export function App() {
                   : configSaveNotice?.kind === "success" ? t("settings.libraryUpdateSucceeded")
                   : configSaveNotice?.uncertain ? t("settings.librarySaveUncertain")
                   : configSaveNotice?.refusal === "fullRescan" ? t("settings.fullIndexRequired")
+                  : configSaveNotice?.refusal === "overlap" ? t("settings.localFolderOverlap")
                   : configSaveNotice?.refusal === "planChanged" ? t("settings.libraryChangedBeforeSave")
                   : configSaveNotice?.refusal === "queueChanged" ? t("settings.queueClearStale")
                   : configSaveNotice?.refusal === "queueCheckRequired" ? t("settings.queueClearCheckRequired")
@@ -2117,15 +2426,19 @@ export function App() {
       )}
 
       <QueueDrawer
-        isOpen={showQueue}
+        isOpen={showQueue && !nowPlayingEmbedded}
         onClose={() => setShowQueue(false)}
-        status={playbackStatus}
+        status={presentationPlayback}
+        artworkContext={queueArtwork}
         isPlaybackAvailable={isPlaybackAvailable}
       />
 
       {showSettings && (
         <SettingsModal
-          onClose={() => setShowSettings(false)}
+          initialPage={settingsInitialPage}
+          initialDraft={localFoldersDraft}
+          initialFolderOverlap={Boolean(localFoldersDraft)}
+          onClose={() => { setShowSettings(false); setLocalFoldersDraft(null); }}
           isLibraryUpdating={playbackStatus.is_updating}
           onLibraryRescanned={() => setLocalCatalogRevision((revision) => revision + 1)}
           onSaveStarted={(audioRestartExpected) => {

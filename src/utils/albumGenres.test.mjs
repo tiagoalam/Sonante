@@ -103,7 +103,7 @@ test("UI wiring restricts genres to album data and keeps confirmed source identi
   assert.match(app, /derivePlexArtists\(albums\)/);
   assert.match(app, /derivePlexYearNavigation\(albums\)/);
   assert.match(app, /visibleSearchAlbums\.map/);
-  assert.equal((app.match(/configuredLocalFolders=\{config\?\.local_folders \?\? \[\]\}/g) ?? []).length, 2);
+  assert.equal((app.match(/configuredLocalFolders=\{config\?\.local_folders \?\? \[\]\}/g) ?? []).length, 3);
   assert.match(local, /items=\{sortedAlbums\}/);
   assert.match(app, /items=\{sortedPlexAlbums\}/);
 });
@@ -153,12 +153,13 @@ function navigationFixture() {
     selectedAlbum: null, selectedArtist: null, selectedDecade: null, selectedYear: null,
     unknownYearSelected: false, activeAlbum: null, activeArtist: null, activeCollection: null,
     fallbackPlexArtist: null, selectedPlexDecade: null, selectedPlexYear: null,
-    selectedPlexUnknownYear: false, selectedLibrary: { key: "one" },
+    selectedPlexUnknownYear: false, exploreDetail: null, selectedLibrary: { key: "one" },
   };
   const scope = () => ({
     ...state, activeGenre: state.selectedGenre, activePlexGenre: state.selectedPlexGenre,
-    playerTarget: null, playerNavigationRequests: { invalidate() {} },
+    initialAlbumId: undefined, playerTarget: null, playerNavigationRequests: { invalidate() {} },
     plexLibraryRequestGenerationRef: { current: 1 }, plexSearchRequestGenerationRef: { current: 1 },
+    setDiscoverPages() {}, plexDiscover: { cancelArtist() {} },
     libraries: [{ key: "one" }, { key: "two" }],
     onClearInitialArtist() {}, onPlayerNavigationBack() {}, setAlbumLocations() {}, setAlbumCover() {},
     setAlbums() {}, setCollections() {}, setHasCollections() {}, setLoading() {},
@@ -259,7 +260,7 @@ test("Local genre page reuses the virtual grid and real album identities, isolat
   const base = { VirtualAlbumGrid: grid, LocalAlbumCard: props => React.createElement("span", null, props.album.id),
     activeGenre: "jazz", genreAlbums: [album], activeSourceId: "opaque", albumSearch: "", albumSortMode: "album-asc",
     scrollContainer: {}, favoriteIds: new Set(), handleToggleFavoriteLocal() {}, handleSelectAlbum() {}, handlePlayEntireAlbum() {},
-    isPlaybackAvailable: true, onlineArtworkEnabled: false, isLibraryUpdating: false, emptyCatalogState: "ready", genreOptions: deriveAlbumGenres([album]), setSelectedGenre() {} };
+    metadataMode: false, isPlaybackAvailable: true, onlineArtworkEnabled: false, isLibraryUpdating: false, emptyCatalogState: "ready", genreOptions: deriveAlbumGenres([album]), setSelectedGenre() {} };
   assert.match(renderToStaticMarkup(renderGenreBranch(localSource, "viewMode", ') : viewMode === "years" ? (', base)), /opaque\/cue/);
   assert.equal(calls[0].items[0], album);
   assert.equal(calls[0].getItemKey(album), album.id);

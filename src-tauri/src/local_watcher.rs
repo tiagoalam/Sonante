@@ -767,16 +767,46 @@ mod tests {
         let watcher = test_watcher(&root, count.clone());
 
         let path = root.join("track.flac");
+        let mut file = File::create(&path).unwrap();
         for payload in [b"a".as_slice(), b"ab", b"abc", b"finished"] {
-            fs::write(&path, payload).unwrap();
+            file.write_all(payload).unwrap();
+            file.flush().unwrap();
             thread::sleep(Duration::from_millis(15));
+            assert_eq!(count.load(Ordering::SeqCst), 0);
         }
+        drop(file);
         wait_for_count(&count, 1);
         thread::sleep(Duration::from_millis(120));
         assert_eq!(count.load(Ordering::SeqCst), 1);
 
         watcher.join();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completed_events_share_a_debounce_window_but_later_batches_are_distinct() {
+        let started = Instant::now();
+        let debounce = Duration::from_millis(80);
+        let mut pending = PendingChanges::default();
+
+        // Completed events (e.g. CLOSE_WRITE) mark dirty and touch the timer.
+        pending.dirty = true;
+        pending.touch(started);
+        assert!(!pending.ready(started + Duration::from_millis(79), debounce));
+        pending.touch(started + Duration::from_millis(60));
+        assert!(!pending.ready(started + debounce, debounce));
+        assert!(!pending.ready(started + Duration::from_millis(139), debounce));
+        assert!(pending.ready(started + Duration::from_millis(140), debounce));
+
+        // run_watcher clears a reconciled batch; elapsed time alone cannot repeat it.
+        pending.clear();
+        assert!(!pending.ready(started + Duration::from_millis(221), debounce));
+        pending.dirty = true;
+        pending.touch(started + Duration::from_millis(221));
+        assert!(!pending.ready(started + Duration::from_millis(300), debounce));
+        assert!(pending.ready(started + Duration::from_millis(301), debounce));
+        pending.clear();
+        assert!(!pending.ready(started + Duration::from_millis(381), debounce));
     }
 
     #[test]

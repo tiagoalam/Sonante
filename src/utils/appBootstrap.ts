@@ -5,12 +5,12 @@ export function initialMediaSource(config: Pick<AppConfig, "plex_token"> | null)
   return config.plex_token?.trim() ? "plex" : "local";
 }
 
-export type MainSection = "local" | "plex" | "favorites" | "playlists";
+export type MainSection = "local" | "plex" | "favorites" | "playlists" | "explore";
 export const MAIN_SECTION_STORAGE_KEY = "sonante.lastMainSection";
 type SectionStorage = Pick<Storage, "getItem" | "setItem">;
 
 function isMainSection(value: unknown): value is MainSection {
-  return value === "local" || value === "plex" || value === "favorites" || value === "playlists";
+  return value === "local" || value === "plex" || value === "favorites" || value === "playlists" || value === "explore";
 }
 
 function browserStorage(): SectionStorage | null {

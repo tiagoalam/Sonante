@@ -244,7 +244,7 @@ test("cards and selected album retain covers, invalidate obsolete reads and resu
   assert.match(view, /catalog\.albums !== version \|\| !catalog\.albums\.includes\(album\)/);
   assert.match(view, /if \(!selectedAlbum \|\| artworkBlocked\) return/);
   assert.match(view, /if \(active && cover\) setAlbumCover\(cover\)/);
-  assert.equal((view.match(/getLocalAlbumCover\([^\n]+, \(\) => active\)/g) ?? []).length, 2, "both cards and album details must invalidate their consumer on cleanup");
+  assert.equal((view.match(/getLocalAlbumCover\([^\n]+, \(\) => active && (?:readEnabledRef|browserReads)\.current\)/g) ?? []).length, 2, "both cards and album details must invalidate their consumer on cleanup");
   assert.match(view, /return \(\) => \{ active = false; \};\s*\}, \[selectedAlbum, artworkBlocked\]/);
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   assert.match(app, /localArtworkResolver\.setContext\(blocked, localCatalog\.albums\)/);

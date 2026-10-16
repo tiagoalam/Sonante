@@ -11,8 +11,12 @@ export function wizardPlexConnectionReady(config: AppConfig): boolean {
   } catch { return false; }
 }
 
-export function wizardSaveErrorKey(error: unknown): string {
+export type WizardSaveErrorKey = "settings.localFolderOverlap" | "wizard.configPersistenceUncertain"
+  | "wizard.deviceBusy" | "wizard.deviceUnavailable" | "wizard.saveError";
+
+export function wizardSaveErrorKey(error: unknown): WizardSaveErrorKey {
   const message = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+  if (message === "LOCAL_SOURCE_NEW_OVERLAP") return "settings.localFolderOverlap";
   if (message.startsWith("CONFIG_PERSISTENCE_UNCERTAIN:")) return "wizard.configPersistenceUncertain";
   if (message === "ALSA_PREFLIGHT_OUTPUT_BUSY") return "wizard.deviceBusy";
   if (message === "ALSA_PREFLIGHT_OUTPUT_UNAVAILABLE") return "wizard.deviceUnavailable";

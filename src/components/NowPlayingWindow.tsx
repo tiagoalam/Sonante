@@ -1,442 +1,58 @@
-import { SignalPath } from "./SignalPath";
-import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useRef, useState } from "react";
 import { emitTo, listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import {
-  Disc3,
-  Maximize2,
-  Minimize2,
-  Pause,
-  Play,
-  SkipBack,
-  SkipForward,
-  Volume2,
-  VolumeX,
-  X,
-} from "lucide-react";
-import { useTranslation } from "react-i18next";
-
-import { audioService } from "../services/audio";
-import {
-  ANALYZER_STATUS_EVENT,
-  AUDIO_LEVEL_EVENT,
-  NOW_PLAYING_READY_EVENT,
-  NOW_PLAYING_SNAPSHOT_EVENT,
-  startAudioAnalyzer,
-  stopAudioAnalyzer,
-} from "../services/nowPlayingWindow";
-import type { AnalyzerStatus, AudioLevelFrame, NowPlayingSnapshot } from "../types/audio";
-import { PlexImage } from "./PlexImage";
-import { VisualizerPanel } from "./visualizer/VisualizerPanel";
-
-const formatTime = (seconds: number): string => {
-  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.floor(seconds % 60);
-  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
-};
-
-const zeroLevels = (): AudioLevelFrame => ({
-  leftRms: 0,
-  rightRms: 0,
-  leftPeak: 0,
-  rightPeak: 0,
-  spectrum: [],
-});
+import type { AnalyzerOwner, NowPlayingSnapshot } from "../types/audio";
+import { NowPlayingHost } from "./NowPlayingHost";
+import { analyzerOwnerMatches } from "../utils/nowPlayingHosting";
+import { logError } from "../utils/frontendDiagnostics";
+import { HOST_REQUEST_EVENT, HOST_REPLY_EVENT, NAVIGATE_EVENT, NOW_PLAYING_READY_EVENT, NOW_PLAYING_SNAPSHOT_EVENT, REINCORPORATE_EVENT } from "../services/nowPlayingWindow";
 
 export const NowPlayingWindow: React.FC = () => {
-  const { t } = useTranslation();
+  const runtime = useRef(window.crypto.randomUUID()).current;
   const [snapshot, setSnapshot] = useState<NowPlayingSnapshot | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [isSeeking, setIsSeeking] = useState(false);
-  const [seekValue, setSeekValue] = useState(0);
-  const [previousVolume, setPreviousVolume] = useState(100);
-  const [controlFailed, setControlFailed] = useState(false);
-  const [levels, setLevels] = useState<AudioLevelFrame>(zeroLevels);
-  const [analyzerAvailable, setAnalyzerAvailable] = useState(false);
-  const [analyzerReason, setAnalyzerReason] = useState<string | null>(null);
-  const isSeekingRef = useRef(false);
-  const levelTimeoutRef = useRef<number | undefined>(undefined);
-
-  const status = snapshot?.playback;
-  const health = snapshot?.health;
-  const isAvailable = health?.state === "available";
-  const hasTrack = Boolean(status?.current_media && status.title);
-  const isVolumeAvailable = Boolean(
-    isAvailable && status?.volume.available && status.volume.writable,
-  );
-  const isMuted = Boolean(status?.volume.muted || status?.volume.value === 0);
-
-  useEffect(() => {
-    isSeekingRef.current = isSeeking;
-  }, [isSeeking]);
-
-  useEffect(() => {
-    if (status && !isSeekingRef.current) setSeekValue(status.elapsed);
-  }, [status?.elapsed]);
-
+  const snapshotRef = useRef<NowPlayingSnapshot | null>(null);
+  const [owner, setOwner] = useState<AnalyzerOwner | null>(null);
+  const currentOwner = useRef<AnalyzerOwner | null>(null);
+  currentOwner.current = owner;
+  const [waiting, setWaiting] = useState(false);
+  const lastTransition = useRef(0);
+  const readyOwner = useRef<AnalyzerOwner | null>(null);
+  const requests = useRef(new Map<string, AnalyzerOwner>());
+  const reply = (requestId: string, ok: boolean) => emitTo("main", HOST_REPLY_EVENT, { requestId, runtime, ok }).catch(err => logError("now-playing.open", err));
   useEffect(() => {
     let disposed = false;
-    let startRequested = false;
-    const sessionId = window.crypto.randomUUID();
     const cleanups: Array<() => void> = [];
-
-    void Promise.all([
-      listen<NowPlayingSnapshot>(NOW_PLAYING_SNAPSHOT_EVENT, (event) => {
-        if (!disposed) {
-          setSnapshot(event.payload);
-          setControlFailed(false);
-        }
-      }),
-      listen<AudioLevelFrame>(AUDIO_LEVEL_EVENT, (event) => {
-        if (disposed) return;
-        setLevels(event.payload);
-        window.clearTimeout(levelTimeoutRef.current);
-        levelTimeoutRef.current = window.setTimeout(() => {
-          setLevels(zeroLevels());
-        }, 150);
-      }),
-      listen<AnalyzerStatus>(ANALYZER_STATUS_EVENT, (event) => {
-        if (disposed) return;
-        setAnalyzerAvailable(event.payload.available);
-        setAnalyzerReason(event.payload.reason);
-        if (!event.payload.available) {
-          setLevels(zeroLevels());
-        }
-      }),
-    ]).then(async (listeners) => {
-      if (disposed) {
-        listeners.forEach((cleanup) => cleanup());
-        return;
-      }
-      cleanups.push(...listeners);
-      await emitTo("main", NOW_PLAYING_READY_EVENT);
-      // O handshake pode terminar depois do cleanup (fechamento ou StrictMode).
-      if (disposed) return;
-      startRequested = true;
-      await startAudioAnalyzer(sessionId);
-    }).catch((err) => {
-      if (!disposed) logError("now-playing.analyzer-start", err);
-    });
-
-    void getCurrentWindow()
-      .isFullscreen()
-      .then((value) => {
-        if (!disposed) setIsFullscreen(value);
-      })
-      .catch((err) => {
-        if (!disposed) logError("now-playing.fullscreen-status", err);
-      });
-
-    return () => {
-      disposed = true;
-      window.clearTimeout(levelTimeoutRef.current);
-      cleanups.forEach((cleanup) => cleanup());
-      if (startRequested) {
-        void stopAudioAnalyzer(sessionId).catch((err) => {
-          logError("now-playing.analyzer-stop", err);
-        });
-      }
+    const register = async <T,>(event: string, handler: (data: T) => void) => {
+      const cleanup = await listen<T>(event, data => { if (!disposed) handler(data.payload); });
+      if (disposed) cleanup(); else cleanups.push(cleanup);
     };
-  }, []);
-
-  useEffect(() => {
-    if (status?.state !== "play" || !isAvailable || !analyzerAvailable) {
-      window.clearTimeout(levelTimeoutRef.current);
-      setLevels(zeroLevels());
-    }
-  }, [status?.state, isAvailable, analyzerAvailable]);
-
-  const runControl = async (control: () => Promise<void>) => {
-    if (!isAvailable) return;
-    try {
-      await control();
-      setControlFailed(false);
-    } catch (err) {
-      setControlFailed(true);
-      logError("now-playing.control", err);
-    }
-  };
-
-  const handleSeekCommit = (value: number) => {
-    setIsSeeking(false);
-    void runControl(() => audioService.seek(value));
-  };
-
-  const handleToggleMute = () => {
-    if (!status || !isVolumeAvailable) return;
-    const currentVolume = status.volume.value;
-    if (!isMuted && currentVolume > 0) {
-      setPreviousVolume(currentVolume);
-      void runControl(() => audioService.setVolume(0));
-    } else {
-      const restoredVolume = currentVolume > 0 ? currentVolume : previousVolume;
-      void runControl(() => audioService.setVolume(restoredVolume > 0 ? restoredVolume : 100));
+    void Promise.all([
+      register<NowPlayingSnapshot>(NOW_PLAYING_SNAPSHOT_EVENT, data => { snapshotRef.current = data; setSnapshot(data); if (readyOwner.current) ready(readyOwner.current); }),
+      register<{ action: string; requestId: string; runtime?: string; owner?: AnalyzerOwner; transition: number }>(HOST_REQUEST_EVENT, data => {
+        if (data.runtime && data.runtime !== runtime) { void reply(data.requestId, false); return; }
+        if (data.action === "ready") { void reply(data.requestId, true); return; }
+        if (!Number.isSafeInteger(data.transition) || data.transition <= 0 || data.transition < lastTransition.current) { void reply(data.requestId, false); return; }
+        lastTransition.current = data.transition;
+        if (data.action === "suspend") {
+          requests.current.clear(); readyOwner.current = null; currentOwner.current = null; setOwner(null); setWaiting(true); void reply(data.requestId, true); return;
+        }
+        if (data.action === "activate" && data.owner?.host === "now-playing") {
+          if (analyzerOwnerMatches(readyOwner.current, data.owner)) void reply(data.requestId, true);
+          else { requests.current.set(data.requestId, data.owner); currentOwner.current = data.owner; setOwner(data.owner); setWaiting(false); }
+        } else void reply(data.requestId, false);
+      }),
+    ]).then(() => { if (!disposed) return emitTo("main", NOW_PLAYING_READY_EVENT, { runtime }); })
+      .catch(err => { if (!disposed) logError("now-playing.open", err); });
+    return () => { disposed = true; cleanups.forEach(fn => fn()); requests.current.clear(); };
+  }, [runtime]);
+  const ready = (next: AnalyzerOwner) => {
+    if (!analyzerOwnerMatches(currentOwner.current, next)) return;
+    readyOwner.current = next;
+    if (!snapshotRef.current) return;
+    for (const [id, expected] of requests.current) if (analyzerOwnerMatches(next, expected)) {
+      requests.current.delete(id); void reply(id, true);
     }
   };
-
-  const handleFullscreen = async () => {
-    try {
-      const nextValue = !(await getCurrentWindow().isFullscreen());
-      await getCurrentWindow().setFullscreen(nextValue);
-      setIsFullscreen(nextValue);
-    } catch (err) {
-      logError("now-playing.fullscreen-toggle", err);
-    }
-  };
-
-  const volumeBackend = status?.volume.backend ?? "unavailable";
-  const volumeBackendLabel = t(`player.volumeBackend.${volumeBackend}`);
-  const volumeStatus =
-    isAvailable && status?.volume.available && volumeBackend !== "unavailable"
-      ? `${status.volume.value}% · ${volumeBackendLabel}`
-      : volumeBackendLabel;
-  const analyzerInactiveLabel = analyzerReason
-    ? t(`nowPlaying.analyzerReason.${analyzerReason}`, {
-        defaultValue: t("nowPlaying.vuUnavailable"),
-      })
-    : t("nowPlaying.vuUnavailable");
-
-  return (
-    <main className="relative h-screen w-screen overflow-hidden bg-[#0B0B0B] text-white select-none">
-      <div className="absolute inset-0 overflow-hidden" aria-hidden="true">
-        {hasTrack && status?.plex_image ? (
-          <PlexImage
-            image={status.plex_image}
-            alt=""
-            className="h-full w-full scale-110 object-cover opacity-35 blur-3xl"
-          />
-        ) : hasTrack && status?.thumb ? (
-          <img
-            src={status.thumb}
-            alt=""
-            className="h-full w-full scale-110 object-cover opacity-35 blur-3xl"
-          />
-        ) : (
-          <div className="h-full w-full bg-[radial-gradient(circle_at_35%_25%,rgba(229,160,13,0.18),transparent_42%)]" />
-        )}
-      </div>
-      <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(8,8,8,0.78),rgba(8,8,8,0.9)_58%,rgba(8,8,8,0.72))]" />
-
-      <div
-        className={`relative z-10 flex h-full min-h-0 flex-col ${
-          isFullscreen ? "p-5 lg:px-8 lg:py-6" : "p-5 sm:p-7 lg:p-10"
-        }`}
-      >
-        <header className="flex items-center justify-between gap-4">
-          <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-[#E5A00D]">
-              Sonante
-            </p>
-            <h1 className="mt-1 text-sm font-semibold text-white/75">
-              {t("nowPlaying.title")}
-            </h1>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void handleFullscreen()}
-              className="rounded-full border border-white/15 bg-black/25 p-2.5 text-white/75 backdrop-blur-md transition hover:border-white/30 hover:text-white"
-              title={
-                isFullscreen
-                  ? t("nowPlaying.exitFullscreen")
-                  : t("nowPlaying.enterFullscreen")
-              }
-            >
-              {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                void getCurrentWindow().close().catch((err) => {
-                  logError("now-playing.close", err);
-                });
-              }}
-              className="rounded-full border border-white/15 bg-black/25 p-2.5 text-white/75 backdrop-blur-md transition hover:border-white/30 hover:text-white"
-              title={t("nowPlaying.close")}
-            >
-              <X size={18} />
-            </button>
-          </div>
-        </header>
-
-        <section
-          className={`mx-auto grid min-h-0 w-full flex-1 items-center gap-8 overflow-x-hidden overflow-y-auto md:grid-cols-[minmax(0,0.75fr)_minmax(0,1.25fr)] ${
-            isFullscreen
-              ? "max-w-[1500px] py-3 lg:gap-16"
-              : "max-w-6xl py-6 lg:gap-14"
-          }`}
-        >
-          <div
-            className={`mx-auto flex w-full min-w-0 flex-col gap-3 ${
-              isFullscreen ? "max-w-[min(44vh,500px)]" : "max-w-[min(58vh,560px)]"
-            }`}
-          >
-            <div className="aspect-square w-full shrink-0 overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 shadow-2xl shadow-black/50">
-              {hasTrack && status?.plex_image ? (
-                <PlexImage
-                  image={status.plex_image}
-                  alt={status.album || status.title}
-                  className="h-full w-full object-cover"
-                  fallback={<Disc3 size={80} className="text-white/15" />}
-                />
-              ) : hasTrack && status?.thumb ? (
-                <img
-                  src={status.thumb}
-                  alt={status.album || status.title}
-                  className="h-full w-full object-cover"
-                />
-              ) : (
-                <div className="flex h-full w-full items-center justify-center">
-                  <Disc3 size={96} className="text-white/15" />
-                </div>
-              )}
-            </div>
-            {status && <SignalPath route={snapshot?.route ?? null} status={status} health={health ?? { state: "starting" }} />}
-          </div>
-
-          <div
-            className={`flex min-w-0 flex-col ${
-              isFullscreen ? "min-h-0 self-stretch justify-start" : "justify-center"
-            }`}
-          >
-            {!status ? (
-              <p className="text-sm text-white/55">{t("nowPlaying.waitingForStatus")}</p>
-            ) : (
-              <>
-                <h2 className="line-clamp-2 text-3xl font-black leading-tight tracking-tight sm:text-4xl lg:text-5xl">
-                  {hasTrack ? status.title : t("player.noTrack")}
-                </h2>
-                <p className="mt-3 truncate text-lg font-medium text-white/70 sm:text-xl">
-                  {hasTrack ? status.artist || "Sonante" : "Sonante"}
-                </p>
-                {hasTrack && status.album && (
-                  <p className="mt-1 truncate text-sm text-white/45 sm:text-base">{status.album}</p>
-                )}
-
-                {!isAvailable && (
-                  <div className="mt-5 rounded-xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100/80">
-                    {health?.state === "unavailable"
-                      ? t("player.engineUnavailable")
-                      : t("player.engineTransitioning")}
-                    {hasTrack && (
-                      <span className="ml-2 text-amber-100/50">
-                        · {t("player.lastKnown")}
-                      </span>
-                    )}
-                  </div>
-                )}
-                {controlFailed && (
-                  <p className="mt-4 text-sm text-red-200/80">{t("nowPlaying.controlFailed")}</p>
-                )}
-
-                <div className={isFullscreen ? "mt-5" : "mt-8"}>
-                  <input
-                    type="range"
-                    min={0}
-                    max={isAvailable && status.duration > 0 ? status.duration : 100}
-                    step={0.5}
-                    value={isAvailable ? (isSeeking ? seekValue : status.elapsed) : 0}
-                    disabled={!isAvailable || status.duration <= 0}
-                    onPointerDown={() => setIsSeeking(true)}
-                    onChange={(event) => setSeekValue(Number(event.target.value))}
-                    onPointerUp={(event) => handleSeekCommit(Number(event.currentTarget.value))}
-                    className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-white/15 accent-[#E5A00D] disabled:cursor-default disabled:opacity-35"
-                  />
-                  <div className="mt-2 flex justify-between font-mono text-xs text-white/45">
-                    <span>{isAvailable ? formatTime(isSeeking ? seekValue : status.elapsed) : "--:--"}</span>
-                    <span>{isAvailable ? formatTime(status.duration) : "--:--"}</span>
-                  </div>
-                </div>
-
-                <VisualizerPanel
-                  levels={levels}
-                  active={Boolean(analyzerAvailable && isAvailable && status.state === "play")}
-                  inactiveLabel={!analyzerAvailable ? analyzerInactiveLabel : undefined}
-                  fullscreen={isFullscreen}
-                />
-
-                <div
-                  className={`flex items-center justify-center gap-7 ${
-                    isFullscreen ? "mt-5" : "mt-7"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    disabled={!isAvailable}
-                    onClick={() => void runControl(audioService.previous)}
-                    className="text-white/65 transition hover:text-white disabled:cursor-not-allowed disabled:opacity-25"
-                    title={t("player.previous")}
-                  >
-                    <SkipBack size={26} />
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!isAvailable}
-                    onClick={() => void runControl(audioService.togglePlay)}
-                    className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-xl transition hover:bg-[#E5A00D] active:scale-95 disabled:cursor-not-allowed disabled:opacity-25"
-                    title={status.state === "play" ? t("player.pause") : t("player.play")}
-                  >
-                    {status.state === "play" ? (
-                      <Pause size={27} fill="currentColor" />
-                    ) : (
-                      <Play size={27} className="ml-1" fill="currentColor" />
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!isAvailable}
-                    onClick={() => void runControl(audioService.next)}
-                    className="text-white/65 transition hover:text-white disabled:cursor-not-allowed disabled:opacity-25"
-                    title={t("player.next")}
-                  >
-                    <SkipForward size={26} />
-                  </button>
-                </div>
-
-                <div
-                  className={`mx-auto flex w-full max-w-sm flex-col items-center gap-2 ${
-                    isFullscreen ? "mt-5" : "mt-8"
-                  }`}
-                >
-                  <div className="flex w-full items-center gap-3">
-                    <button
-                      type="button"
-                      disabled={!isVolumeAvailable}
-                      onClick={handleToggleMute}
-                      className="text-white/60 transition hover:text-white disabled:cursor-not-allowed disabled:opacity-25"
-                      title={
-                        isVolumeAvailable
-                          ? isMuted
-                            ? t("player.unmute")
-                            : t("player.mute")
-                          : undefined
-                      }
-                    >
-                      {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
-                    </button>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={isVolumeAvailable ? status.volume.value : 0}
-                      disabled={!isVolumeAvailable}
-                      onChange={(event) =>
-                        void runControl(() =>
-                          audioService.setVolume(Number(event.target.value)),
-                        )
-                      }
-                      className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-white/15 accent-[#E5A00D] disabled:cursor-default disabled:opacity-35"
-                    />
-                  </div>
-                  <span className="text-[10px] text-white/40">{volumeStatus}</span>
-                </div>
-              </>
-            )}
-          </div>
-        </section>
-      </div>
-    </main>
-  );
+  return <NowPlayingHost snapshot={snapshot} owner={owner} embedded={false} busy={waiting} onReady={ready}
+    onReincorporate={() => { if (waiting || !owner) return; setWaiting(true); void emitTo("main", REINCORPORATE_EVENT, { runtime }).catch(err => { setWaiting(false); logError("now-playing.open", err); }); }}
+    onNavigate={view => { if (!waiting) void emitTo("main", NAVIGATE_EVENT, { runtime, view }).catch(err => logError("now-playing.open", err)); }} />;
 };

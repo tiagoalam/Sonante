@@ -22,7 +22,7 @@ import {
   Radio,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { SettingsPages } from "./SettingsPages";
+import { SettingsPages, type SettingsPage } from "./SettingsPages";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
 import { AppConfig, ConfigSaveOperation } from "../types/config";
 import { AudioDevice } from "../types/audio";
@@ -35,7 +35,9 @@ import { refreshCatalogAfterSuccessfulCheck, refreshCatalogAfterSuccessfulRescan
 import { createDeviceAvailabilityQuery, newPhysicalOutputChoice, shouldCheckContextualDevice, type AvailabilityQueryState } from "../utils/deviceAvailability";
 
 interface Props {
+  initialPage?: SettingsPage;
   initialDraft?: AppConfig | null;
+  initialFolderOverlap?: boolean;
   onClose: () => void;
   onSaved: (audioRestartExpected: boolean) => void;
   onSaveStarted: (audioRestartExpected: boolean) => boolean;
@@ -67,7 +69,9 @@ export const formatConfigError = (error: unknown): string => {
 };
 
 export const SettingsModal: React.FC<Props> = ({
+  initialPage,
   initialDraft,
+  initialFolderOverlap,
   onClose,
   onSaved,
   onSaveStarted,
@@ -334,6 +338,10 @@ export const SettingsModal: React.FC<Props> = ({
     } catch (err) {
       const diagnostic = formatConfigError(err);
       logError("settings.save", err);
+      if (diagnostic === "LOCAL_SOURCE_NEW_OVERLAP") {
+        alert(t("settings.localFolderOverlap"));
+        return; // Keep this draft and the confirmed baseline for correction.
+      }
       try {
         const confirmedConfig = await configService.getConfig();
         originalConfigRef.current = { ...confirmedConfig, local_folders: [...confirmedConfig.local_folders] };
@@ -407,7 +415,9 @@ export const SettingsModal: React.FC<Props> = ({
           </button>
         </div>
 
+        {initialFolderOverlap && <div role="alert" className="px-6 py-3 text-sm text-amber-300">{t("settings.localFolderOverlap")}</div>}
         <SettingsPages
+          initialPage={initialPage}
           general={<>
             {/* Idioma da interface */}
             <div className="space-y-3">

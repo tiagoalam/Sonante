@@ -1,7 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
-import { MpdStatusSnapshot, PlaybackStatus, TrackMetadata } from "../types/audio";
+import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+import { MpdStatusSnapshot, PlaybackStatus, PlaybackOptions, PlaybackOptionAction, TrackMetadata } from "../types/audio";
 import { LocalItem, LocalAlbum, LocalAlbumDiscTracks } from "../types/local";
 import type { OnlineCacheStatus } from "../utils/localArtwork";
+
+import { diagnosticInvoke } from "../utils/frontendDiagnostics";
+const invoke = <T>(command: string, args?: Record<string, unknown>): Promise<T> =>
+  diagnosticInvoke<T>(nativeInvoke<T>, command, args);
 
 const onlineArtworkRequest = (album: LocalAlbum) => ({
   album_id: album.id,
@@ -14,6 +18,8 @@ export const audioService = {
   getStatus: (): Promise<PlaybackStatus> => invoke<PlaybackStatus>("get_playback_status"),
   getMpdStatusSnapshot: (): Promise<MpdStatusSnapshot> =>
     invoke<MpdStatusSnapshot>("get_mpd_status_snapshot"),
+  changePlaybackOption: (action: PlaybackOptionAction, expected: PlaybackOptions): Promise<PlaybackOptions> =>
+    invoke<PlaybackOptions>("change_playback_option", { action, expected }),
   togglePlay: (): Promise<void> => invoke<void>("toggle_playback"),
   next: (): Promise<void> => invoke<void>("next_track"),
   previous: (): Promise<void> => invoke<void>("previous_track"),
@@ -33,6 +39,8 @@ export const audioService = {
     invoke<string | null>("get_local_cover", { path }),
   getOnlineAlbumCover: (album: LocalAlbum): Promise<string | null> =>
     invoke<string | null>("get_online_album_cover", { request: onlineArtworkRequest(album) }),
+  getCachedOnlineAlbumCover: (album: LocalAlbum): Promise<string | null> =>
+    invoke<string | null>("get_online_album_cover", { request: onlineArtworkRequest(album), cacheOnly: true }),
   getOnlineCoverCacheStatus: (album: LocalAlbum): Promise<OnlineCacheStatus> =>
     invoke<OnlineCacheStatus>("get_online_cover_cache_status", { request: onlineArtworkRequest(album) }),
   getLocalAlbums: (): Promise<LocalAlbum[]> => invoke<LocalAlbum[]>("get_local_albums"),

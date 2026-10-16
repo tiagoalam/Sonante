@@ -54,6 +54,10 @@ export class LocalArtworkResolver {
     return this.coverSources.get(albumId) ?? null;
   }
 
+  getDiagnostics(): { active: number; queued: number; inFlight: number; blocked: boolean } {
+    return { active: this.active, queued: this.queued.length, inFlight: this.inFlight.size, blocked: this.blocked };
+  }
+
   setContext(blocked: boolean, catalog: readonly LocalAlbum[]): void {
     if (this.blocked === blocked && this.catalog === catalog) return;
     this.blocked = blocked;
@@ -150,10 +154,12 @@ export class LocalArtworkResolver {
   }
 
   // Playback must never wait for an online request already in flight.
-  async resolveLocalOnly(album: LocalAlbum): Promise<string | null> {
+  async resolveLocalOnly(album: LocalAlbum, blocked: CurrentFlag = false): Promise<string | null> {
     const cached = this.get(album.id);
     if (cached) return cached;
-    const cover = await lookupAlbumArtwork(album, this.getLocalCover, this.getOnlineCover, false, false);
+    if (current(blocked)) return null;
+    const cover = await lookupAlbumArtwork(album, this.getLocalCover, this.getOnlineCover, false, blocked);
+    if (current(blocked)) return null;
     if (cover) this.publish(album.id, cover, "local");
     return this.get(album.id) ?? cover;
   }

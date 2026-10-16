@@ -30,7 +30,8 @@ import { favoritesService } from "../services/favorites";
 import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
 import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDiscs";
-import { LocalAlbumCatalog, emptyLocalAlbumCatalogState, localCatalogActivity } from "../utils/localAlbumCatalog";
+import { localAlbumCatalog } from "../utils/localAlbumCatalogSession";
+import { emptyLocalAlbumCatalogState, localCatalogActivity } from "../utils/localAlbumCatalog";
 import { albumLocationSources } from "../utils/localAlbumLocations";
 import { localArtworkEnrichment, localArtworkResolver } from "../utils/localArtworkSession";
 import {
@@ -64,6 +65,11 @@ import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./VirtualAlbumGri
 import { VirtualList, type VirtualListHandle } from "./VirtualList";
 import { AlbumArtworkPlaceholder } from "./AlbumArtworkPlaceholder";
 import { ToolbarSelect } from "./ToolbarSelect";
+import { LocalMetadataView } from "./LocalMetadataView";
+import { LocalAlbumTagEditorModal } from "./LocalAlbumTagEditorModal";
+import { LibraryDoctorModal } from "./LibraryDoctorModal";
+import { libraryDoctorAvailable } from "../utils/libraryDoctor";
+import type { DoctorReviewContext } from "../utils/libraryDoctorReview";
 import { LocalTagEditorModal } from "./LocalTagEditorModal";
 import type { LocalTrackTags } from "../types/localTags";
 import { createAlbumTracksLoader, type AlbumTracksState } from "../utils/localAlbumTracks";
@@ -72,7 +78,7 @@ import { validAlbumGenre } from "../utils/albumGenres";
 import { deriveLocalGenreFamilies, filterLocalAlbumsByFamily } from "../utils/localGenreFamilies";
 import { AlbumGenreGrid } from "./AlbumGenreGrid";
 
-export const localAlbumCatalog = new LocalAlbumCatalog(audioService.getLocalAlbums);
+export { localAlbumCatalog } from "../utils/localAlbumCatalogSession";
 
 async function getLocalAlbumCover(album: LocalAlbum, onlineEnabled: boolean | (() => boolean), libraryUpdating: boolean | (() => boolean), consumerActive: () => boolean = () => true): Promise<string | null> {
   const version = localAlbumCatalog.getSnapshot().albums;
@@ -96,11 +102,14 @@ const LocalAlbumCard: React.FC<{
   isPlaybackAvailable: boolean;
   onlineArtworkEnabled: boolean;
   isLibraryUpdating: boolean;
-}> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable, onlineArtworkEnabled, isLibraryUpdating }) => {
+  readEnabled: boolean;
+}> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable, onlineArtworkEnabled, isLibraryUpdating, readEnabled }) => {
   const { t } = useTranslation();
   const [cover, setCover] = useState<string | null>(() => localArtworkResolver.get(album.id));
   const cardRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
+  const readEnabledRef = useRef(readEnabled);
+  readEnabledRef.current = readEnabled;
   const onlineEnabledRef = useRef(onlineArtworkEnabled);
   const libraryUpdatingRef = useRef(isLibraryUpdating);
   onlineEnabledRef.current = onlineArtworkEnabled;
@@ -133,13 +142,13 @@ const LocalAlbumCard: React.FC<{
   }, [album.folder_path]);
 
   useEffect(() => {
-    if (!visible || cover) return;
+    if (!readEnabled || !visible || cover) return;
     let active = true;
-    getLocalAlbumCover(album, () => onlineEnabledRef.current, () => libraryUpdatingRef.current, () => active)
+    getLocalAlbumCover(album, () => onlineEnabledRef.current, () => libraryUpdatingRef.current, () => active && readEnabledRef.current)
       .then((found) => { if (active && found) setCover(found); })
       .catch((error) => logError("artwork.album-load", error));
     return () => { active = false; };
-  }, [album, visible, cover, onlineArtworkEnabled, isLibraryUpdating]);
+  }, [album, visible, cover, onlineArtworkEnabled, isLibraryUpdating, readEnabled]);
 
   return (
     <div ref={cardRef} onClick={onClick} className="group flex flex-col cursor-pointer relative">
@@ -191,7 +200,14 @@ const LocalAlbumCard: React.FC<{
   );
 };
 
+export type LocalSubview = "browser" | "metadata";
+
 export interface LocalBrowserViewProps {
+  subview?: LocalSubview;
+  onSubviewChange?: (subview: LocalSubview) => void;
+  initialAlbumId?: string;
+  albumNavigationAvailable?: boolean;
+  onAlbumNavigationBack?: () => void;
   playerTarget?: Extract<PlayerNavigationTarget, { kind: "local" }>;
   onPlayerNavigationBack?: () => void;
   importPreview?: readonly PreviewAlbum[];
@@ -205,6 +221,11 @@ export interface LocalBrowserViewProps {
 }
 
 export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
+  subview = "browser",
+  onSubviewChange,
+  initialAlbumId,
+  albumNavigationAvailable = true,
+  onAlbumNavigationBack,
   playerTarget,
   onPlayerNavigationBack,
   importPreview = [],
@@ -220,6 +241,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const catalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
   const artworkStatus = useSyncExternalStore(localArtworkEnrichment.subscribe, localArtworkEnrichment.getSnapshot);
   const albums = catalog.albums;
+  const initialAlbum = useMemo(() => initialAlbumId ? albums.find(album => album.id === initialAlbumId) ?? null : null, [initialAlbumId, albums]);
+  const detailUnavailable = !!initialAlbumId && (!albumNavigationAvailable || !initialAlbum);
+  const metadataMode = subview === "metadata" || detailUnavailable;
+  const browserReads = useRef(!metadataMode);
+  browserReads.current = !metadataMode;
+  const [metadataAlbumId, setMetadataAlbumId] = useState<string | null>(playerTarget?.albumId ?? initialAlbumId ?? null);
   const playerAlbum = useMemo(() => playerTarget
     ? albums.find(item => item.id === playerTarget.albumId) ?? null : null, [playerTarget, albums]);
   const [viewMode, setViewMode] = useState<"albums" | "artists" | "years" | "genres" | "folders">(playerTarget?.view === "artist" ? "artists" : "albums");
@@ -228,13 +255,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const [albumSearch, setAlbumSearch] = useState("");
   const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
   const [artistSearch, setArtistSearch] = useState("");
-  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(playerAlbum?.source_id ?? null);
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(playerAlbum?.source_id ?? initialAlbum?.source_id ?? null);
   const [albumSortMode, setAlbumSortMode] = useState<LocalAlbumSortMode>("album-asc");
   const [artistSortMode, setArtistSortMode] = useState<LocalArtistSortMode>("artist-asc");
   const [selectedDecade, setSelectedDecade] = useState<number | null>(null);
   const [selectedYear, setSelectedYear] = useState<number | null>(null);
   const [unknownYearSelected, setUnknownYearSelected] = useState(false);
-  const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(playerTarget?.view === "album" ? playerAlbum : null);
+  const [selectedAlbum, setSelectedAlbum] = useState<LocalAlbum | null>(playerTarget?.view === "album" ? playerAlbum : initialAlbum);
   const [albumLocations, setAlbumLocations] = useState<{
     album: LocalAlbum;
     paths: { label: string | null; absolutePath: string }[];
@@ -244,8 +271,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const tracksLoader = useMemo(() => createAlbumTracksLoader(createPlayerAlbumLookup(
     playerTarget, () => localAlbumCatalog.getSnapshot().albums, audioService.getLocalAlbumTracks,
   ), setTrackState, () => localAlbumCatalog.waitForMpd()), []);
-  const catalogConfirmed = catalog.loaded && !catalog.loading && !catalog.error && !catalog.mpdBusy && !catalog.saveBlocked && !isLibraryUpdating;
-  const artworkBlocked = artworkReadBlocked(isLibraryUpdating, catalog);
+  const catalogConfirmed = !detailUnavailable && catalog.loaded && !catalog.loading && !catalog.error && !catalog.mpdBusy && !catalog.saveBlocked && !isLibraryUpdating;
+  const artworkBlocked = metadataMode || artworkReadBlocked(isLibraryUpdating, catalog);
   const tracksReady = catalogConfirmed && trackState.catalogVersion === albums && trackState.phase === "ready" && trackState.albumId === selectedAlbum?.id;
   const { tracks: albumTracks, sections: albumSections } = useMemo(
     () => flattenAlbumDiscs(tracksReady ? trackState.groups : []), [tracksReady, trackState.groups],
@@ -261,7 +288,23 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const observedCatalogRefreshRevision = useRef(catalogRefreshRevision);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
+  const [tagEditorAlbum, setTagEditorAlbum] = useState<LocalAlbum | null>(null);
+  const [doctorReviewContext, setDoctorReviewContext] = useState<DoctorReviewContext | null>(null);
+  const [doctorAlbum, setDoctorAlbum] = useState<LocalAlbum | null>(null);
+  const doctorSelectedAlbum = useRef<string | undefined>(undefined);
+  // Keep the dialog's identity stable across Local subviews; selection is blocked while it is open.
+  doctorSelectedAlbum.current = doctorAlbum?.id ?? (metadataMode ? metadataAlbumId ?? undefined : selectedAlbum?.id);
+  const libraryUpdatingForTags = useRef(isLibraryUpdating);
+  libraryUpdatingForTags.current = isLibraryUpdating;
+  const albumTagEditingAvailable = (albumId: string) => {
+    const current = localAlbumCatalog.getSnapshot();
+    return !detailUnavailable && current.loaded && !current.loading && !current.error && !current.mpdBusy
+      && !current.saveBlocked && !libraryUpdatingForTags.current
+      && current.albums.some((album) => album.id === albumId);
+  };
   const [tagEditorTrack, setTagEditorTrack] = useState<LocalItem | null>(null);
+  const tagEditorOpen = useRef(false);
+  tagEditorOpen.current = Boolean(tagEditorAlbum || tagEditorTrack);
   const [scrollContainer, setScrollContainer] = useState<HTMLDivElement | null>(null);
 
   const [currentPath, setCurrentPath] = useState<string>("");
@@ -289,6 +332,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     if (!initialCatalogMountHandled.current) {
       initialCatalogMountHandled.current = true;
       // A player destination uses the already loaded catalogue; it must not rebuild it.
+      if (initialAlbumId) return;
+      if (metadataMode && localAlbumCatalog.getSnapshot().loaded) return;
       if (!playerTarget) localAlbumCatalog.setUpdating(isLibraryUpdating, true);
     }
   }, []);
@@ -304,22 +349,22 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   }, [catalogRefreshRevision]);
 
   useEffect(() => {
-    if (!artworkBlocked) {
+    if (!artworkBlocked && !initialAlbumId) {
       localArtworkEnrichment.setCatalog(catalog.albums);
     }
-  }, [catalog.albums, artworkBlocked]);
+  }, [catalog.albums, artworkBlocked, initialAlbumId]);
 
   useEffect(() => {
-    if (!selectedAlbum) return;
+    if (!selectedAlbum || metadataMode) return;
     const cached = localArtworkResolver.get(selectedAlbum.id);
     if (cached) setAlbumCover(cached);
     return localArtworkResolver.subscribe(selectedAlbum.id, setAlbumCover);
-  }, [selectedAlbum]);
+  }, [selectedAlbum, metadataMode]);
 
   useEffect(() => {
     if (!selectedAlbum || artworkBlocked) return;
     let active = true;
-    void getLocalAlbumCover(selectedAlbum, () => onlineEnabledRef.current, () => libraryUpdatingRef.current, () => active)
+    void getLocalAlbumCover(selectedAlbum, () => onlineEnabledRef.current, () => libraryUpdatingRef.current, () => active && browserReads.current)
       .then(cover => { if (active && cover) setAlbumCover(cover); })
       .catch(error => logError("artwork.album-load", error));
     return () => { active = false; };
@@ -336,15 +381,20 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   useEffect(() => {
     if (!playerTarget) return;
     const album = playerAlbum;
-    if (!album) { onPlayerNavigationBack?.(); return; }
+    if (!album) {
+      // Keep an in-flight batch and its results mounted until the user closes the editor.
+      if (!tagEditorAlbum && !tagEditorTrack && !doctorAlbum && !metadataMode) onPlayerNavigationBack?.();
+      return;
+    }
+    if (!browserReads.current) return;
     setSelectedSourceId(album.source_id ?? null);
     setSelectedAlbum(playerTarget.view === "album" ? album : null);
     setSelectedArtist(playerTarget.view === "artist" ? album.artist : null);
     setViewMode(playerTarget.view === "artist" ? "artists" : "albums");
-  }, [playerTarget, playerAlbum]);
+  }, [playerTarget, playerAlbum, tagEditorAlbum]);
 
   useEffect(() => {
-    if (!selectedAlbum) return;
+    if (!selectedAlbum || metadataMode || albumLocations?.album === selectedAlbum) return;
     let active = true;
     const album = selectedAlbum;
     const sources = albumLocationSources(album);
@@ -364,10 +414,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     return () => {
       active = false;
     };
-  }, [selectedAlbum]);
+  }, [selectedAlbum, metadataMode]);
 
   useEffect(() => {
-    if (viewMode === "folders") {
+    if (!metadataMode && viewMode === "folders") {
       setLoadingFolders(true);
       audioService.listLocalDirectory(currentPath)
         .then((data) => {
@@ -376,7 +426,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         .catch(error => logError("local.directory-list", error))
         .finally(() => setLoadingFolders(false));
     }
-  }, [currentPath, viewMode]);
+  }, [currentPath, viewMode, metadataMode]);
 
   useEffect(() => { setFolderCover(null); }, [currentPath]);
   useEffect(() => {
@@ -422,10 +472,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   };
 
   useEffect(() => {
+    if (metadataMode) return;
+    if (trackState.phase === "ready" && trackState.albumId === selectedAlbum?.id && trackState.catalogVersion === albums && catalogConfirmed) return;
     const exists = selectedAlbum && albums.some(album => album.id === selectedAlbum.id);
     tracksLoader.select(exists ? selectedAlbum.id : null, catalogConfirmed, albums);
     return () => tracksLoader.cancel();
-  }, [selectedAlbum?.id, albums, catalogConfirmed, tracksLoader]);
+  }, [selectedAlbum?.id, albums, catalogConfirmed, tracksLoader, metadataMode]);
 
   useEffect(() => {
     if (!selectedAlbum) return;
@@ -616,6 +668,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
   const showContextBack = Boolean(
     playerTarget
+    || initialAlbumId
     || selectedAlbum
     || selectedArtist
     || selectedDecade !== null
@@ -657,6 +710,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 : currentPath || t("localBrowser.root");
 
   const handleContextBack = () => {
+    if (initialAlbumId && (!selectedAlbum || selectedAlbum.id === initialAlbumId)) {
+      if (!tagEditorOpen.current && !doctorAlbum) onAlbumNavigationBack?.();
+      return;
+    }
     if (playerTarget && ((!selectedAlbum)
       || (playerTarget.view === "album" && selectedAlbum.id === playerTarget.albumId))) {
       onPlayerNavigationBack?.();
@@ -689,8 +746,40 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     onClearInitialArtist?.();
   };
 
+  const selectMetadataAlbum = (albumId: string) => {
+    if (tagEditorOpen.current || doctorAlbum || !localAlbumCatalog.getSnapshot().albums.some(album => album.id === albumId)) return;
+    setMetadataAlbumId(albumId);
+  };
+  const openMetadataEditor = (albumId: string) => {
+    if (tagEditorOpen.current || doctorAlbum || localAlbumCatalog.getSnapshot() !== catalog || !albumTagEditingAvailable(albumId)) return;
+    const album = catalog.albums.find(item => item.id === albumId);
+    if (!album) return;
+    tagEditorOpen.current = true;
+    setDoctorAlbum(null);
+    setDoctorReviewContext(null);
+    setTagEditorAlbum(album);
+  };
+  const diagnoseMetadataAlbum = (albumId: string) => {
+    if (tagEditorOpen.current || doctorAlbum || localAlbumCatalog.getSnapshot() !== catalog
+      || !libraryDoctorAvailable(localAlbumCatalog.getSnapshot(), libraryUpdatingRef.current, albumId)) return;
+    const album = catalog.albums.find(item => item.id === albumId);
+    if (album) setDoctorAlbum(album);
+  };
+
   return (
     <main className="flex-1 flex flex-col overflow-hidden bg-[#121212] select-none">
+      {detailUnavailable && <div role="status" className="space-y-3 p-6 text-sm text-[#BBBBBB]">
+        <p>{t("explore.detailUnavailable")}</p>
+        <button type="button" disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum)}
+          onClick={() => onAlbumNavigationBack?.()} className="rounded px-2 py-1 focus-visible:ring-1 focus-visible:ring-[#E5A00D]">{t("explore.back")}</button>
+      </div>}
+      <div className={metadataMode && !detailUnavailable ? "contents" : "hidden"}>
+        <LocalMetadataView catalog={catalog} updating={isLibraryUpdating} selectedAlbumId={metadataAlbumId}
+          dialogsOpen={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum)} onSelectAlbum={selectMetadataAlbum}
+          onDiagnose={diagnoseMetadataAlbum} onReview={openMetadataEditor}
+          onBack={() => { if (!tagEditorOpen.current && !doctorAlbum) onSubviewChange?.("browser"); }} />
+      </div>
+      <div className={metadataMode ? "hidden" : "contents"}>
       <div className="flex flex-wrap items-center justify-between gap-4 px-8 pt-8 pb-4">
         <div className="flex items-center space-x-3">
           {showContextBack && (
@@ -902,7 +991,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   </div>
                 )}
 
-                <div className="pt-2 flex items-center space-x-3">
+                <div className="pt-2 flex flex-wrap items-center gap-3">
                   <button
                     onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks.length ? albumTracks : undefined, 0)}
                     disabled={!isPlaybackAvailable || !tracksReady}
@@ -937,6 +1026,21 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       className={favoriteIds.has(selectedAlbum.folder_path) ? "text-[#E5A00D]" : "text-[#888888]"}
                       fill={favoriteIds.has(selectedAlbum.folder_path) ? "#E5A00D" : "none"}
                     />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum)}
+                    onClick={() => {
+                      if (!tagEditorOpen.current && !doctorAlbum) {
+                        setMetadataAlbumId(selectedAlbum.id);
+                        onSubviewChange?.("metadata");
+                      }
+                    }}
+                    className="flex items-center gap-1.5 rounded px-1 py-1 text-xs text-[#999999] transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:cursor-not-allowed disabled:opacity-40"
+                    title={t("localMetadata.review")}
+                  >
+                    <Pencil size={15} />
+                    <span>{t("localMetadata.review")}</span>
                   </button>
                 </div>
               </div>
@@ -1039,6 +1143,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 resetKey={JSON.stringify([activeSourceId, selectedArtist])}
                 renderItem={(album) => (
                   <LocalAlbumCard
+                    readEnabled={!metadataMode}
                     album={album}
                     isFavorite={favoriteIds.has(album.folder_path)}
                     onToggleFavorite={handleToggleFavoriteLocal}
@@ -1076,6 +1181,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 resetKey={JSON.stringify([localAlbumNavigationResetKey(activeSourceId, albumSearch, albumSortMode)])}
                 renderItem={(album) => (
                   <LocalAlbumCard
+                    readEnabled={!metadataMode}
                     album={album}
                     isFavorite={favoriteIds.has(album.folder_path)}
                     onToggleFavorite={handleToggleFavoriteLocal}
@@ -1138,6 +1244,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 resetKey={JSON.stringify([activeSourceId, "genre", activeGenre, albumSearch, albumSortMode])}
                 renderItem={(album) => (
                   <LocalAlbumCard
+                    readEnabled={!metadataMode}
                     album={album}
                     isFavorite={favoriteIds.has(album.folder_path)}
                     onToggleFavorite={handleToggleFavoriteLocal}
@@ -1176,6 +1283,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 resetKey={JSON.stringify([activeSourceId, selectedYear, unknownYearSelected])}
                 renderItem={(album) => (
                   <LocalAlbumCard
+                    readEnabled={!metadataMode}
                     album={album}
                     isFavorite={favoriteIds.has(album.folder_path)}
                     onToggleFavorite={handleToggleFavoriteLocal}
@@ -1344,6 +1452,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           </div>
         )}
       </div>
+      </div>
+      {(tagEditorAlbum || tagEditorTrack || doctorAlbum) && <span data-local-tag-dialog-open hidden />}
       {playlistItems && (
         <PlaylistPickerModal
           items={playlistItems}
@@ -1353,6 +1463,47 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               : t("playlists.addAlbum")
           }
           onClose={() => setPlaylistItems(null)}
+        />
+      )}
+      {tagEditorAlbum && (
+        <LocalAlbumTagEditorModal
+          albumId={tagEditorAlbum.id}
+          displayName={tagEditorAlbum.title}
+          available={catalogConfirmed && albums.some((album) => album.id === tagEditorAlbum.id)}
+          catalogVersion={catalog}
+          reviewContext={doctorReviewContext}
+          isAvailable={() => localAlbumCatalog.getSnapshot() === catalog && albumTagEditingAvailable(tagEditorAlbum.id)}
+          onBatchFinished={(result) => {
+            if (result?.tracks.some((track) => track.mpd_refresh.state === "accepted")) {
+              localAlbumCatalog.waitForMpd();
+            } else {
+              localAlbumCatalog.requestRefresh();
+            }
+          }}
+          onClose={() => { setTagEditorAlbum(null); setDoctorReviewContext(null); }}
+        />
+      )}
+      {doctorAlbum && doctorSelectedAlbum.current === doctorAlbum.id && !tagEditorAlbum && !tagEditorTrack && (
+        <LibraryDoctorModal
+          albumId={doctorAlbum.id}
+          displayName={doctorAlbum.title}
+          available={catalogConfirmed && albums.some(album => album.id === doctorAlbum.id)}
+          catalogVersion={catalog}
+          isAvailable={() => localAlbumCatalog.getSnapshot() === catalog
+            && doctorSelectedAlbum.current === doctorAlbum.id
+            && !tagEditorOpen.current
+            && libraryDoctorAvailable(localAlbumCatalog.getSnapshot(), libraryUpdatingRef.current, doctorAlbum.id)}
+          onReview={context => {
+            if (tagEditorOpen.current || context.albumId !== doctorAlbum.id
+              || doctorSelectedAlbum.current !== context.albumId || localAlbumCatalog.getSnapshot() !== catalog
+              || !albumTagEditingAvailable(context.albumId)) return false;
+            tagEditorOpen.current = true;
+            setDoctorAlbum(null);
+            setDoctorReviewContext(context);
+            setTagEditorAlbum(doctorAlbum);
+            return true;
+          }}
+          onClose={() => setDoctorAlbum(null)}
         />
       )}
       {tagEditorTrack && (

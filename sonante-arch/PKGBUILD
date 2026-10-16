@@ -1,6 +1,6 @@
 # Maintainer: Tiago Alam <tiagoalam@protonmail.com>
 pkgname=sonante
-pkgver=0.4.9
+pkgver=0.4.13
 pkgrel=1
 pkgdesc="Linux desktop audio player for local and Plex libraries"
 arch=('x86_64')
@@ -18,6 +18,7 @@ depends=(
 )
 makedepends=('git' 'npm' 'rust')
 optdepends=(
+    'libappindicator: optional system tray indicator'
     'webp-pixbuf-loader: display WebP sidecar album covers'
     'wireplumber: control Shared volume through PipeWire using wpctl'
     'xdg-desktop-portal-gtk: GTK file chooser when no desktop portal backend is installed'

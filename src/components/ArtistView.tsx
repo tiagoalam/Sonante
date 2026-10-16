@@ -1,5 +1,5 @@
 import { logError } from "../utils/frontendDiagnostics";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, Play, Pause, Disc3, ChevronDown, ChevronUp, User, ListPlus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlexAlbum, PlexTrack, SelectedArtist } from "../types/plex";
@@ -16,6 +16,9 @@ interface Props {
   onSelectAlbum: (album: PlexAlbum) => void;
   status: PlaybackStatus;
   isPlaybackAvailable: boolean;
+  requestIdentity?: object;
+  active?: boolean;
+  loadContent?: (artist: SelectedArtist) => Promise<{ albums: PlexAlbum[]; topTracks: PlexTrack[] }>;
 }
 
 export const ArtistView: React.FC<Props> = ({
@@ -24,27 +27,52 @@ export const ArtistView: React.FC<Props> = ({
   onSelectAlbum,
   status,
   isPlaybackAvailable,
+  requestIdentity,
+  active = true,
+  loadContent,
 }) => {
   const { t } = useTranslation();
-  const [albums, setAlbums] = useState<PlexAlbum[]>([]);
-  const [topTracks, setTopTracks] = useState<PlexTrack[]>([]);
+  const [loadedAlbums, setAlbums] = useState<PlexAlbum[]>([]);
+  const [loadedTracks, setTopTracks] = useState<PlexTrack[]>([]);
   const [visibleTracksCount, setVisibleTracksCount] = useState<number>(5);
   const [loading, setLoading] = useState(true);
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
+  const [loadedFor, setLoadedFor] = useState<{ key: string; identity: unknown } | null>(null);
+  const [loadError, setLoadError] = useState<{ key: string; identity: unknown } | null>(null);
+  const key = JSON.stringify([artist.server_id, artist.library_id, artist.rating_key]);
+  const current = loadedFor?.key === key && loadedFor.identity === requestIdentity;
+  const failed = loadError?.key === key && loadError.identity === requestIdentity;
+  const albums = current ? loadedAlbums : [], topTracks = current ? loadedTracks : [];
+  const viewport = useRef<HTMLElement>(null), scroll = useRef(0), returnAlbum = useRef<HTMLButtonElement | null>(null);
+  const lastContext = useRef({ key, identity: requestIdentity });
+  useLayoutEffect(() => {
+    if (lastContext.current.key !== key || lastContext.current.identity !== requestIdentity) { scroll.current = 0; returnAlbum.current = null; lastContext.current = { key, identity: requestIdentity }; }
+    if (active && viewport.current) {
+      viewport.current.scrollTop = scroll.current;
+      if (returnAlbum.current) returnAlbum.current.focus({ preventScroll: true });
+      else if (loadContent) viewport.current.querySelector<HTMLElement>("[data-artist-heading]")?.focus({ preventScroll: true });
+      returnAlbum.current = null;
+    }
+  }, [active, key, requestIdentity, loadContent]);
 
   useEffect(() => {
+    let cancelled = false;
+    scroll.current = 0; returnAlbum.current = null;
     setLoading(true);
-    Promise.all([
-      plexService.getArtistAlbums(artist.rating_key),
-      plexService.getArtistTopTracks(artist.rating_key),
-    ])
-      .then(([fetchedAlbums, fetchedTracks]) => {
+    setAlbums([]); setTopTracks([]); setLoadedFor(null); setLoadError(null); setVisibleTracksCount(5); setPlaylistItems(null);
+    Promise.resolve().then(() => { if (cancelled) throw "PLEX_DISCOVER_CONTEXT"; return loadContent ? loadContent(artist) : Promise.all([
+        plexService.getArtistAlbums(artist.rating_key), plexService.getArtistTopTracks(artist.rating_key),
+      ]).then(([albums, topTracks]) => ({ albums, topTracks })); })
+      .then(({ albums: fetchedAlbums, topTracks: fetchedTracks }) => {
+        if (cancelled) return;
         setAlbums(fetchedAlbums);
         setTopTracks(fetchedTracks);
+        setLoadedFor({ key, identity: requestIdentity });
       })
-      .catch(error => logError("artist.load", error))
-      .finally(() => setLoading(false));
-  }, [artist.rating_key]);
+      .catch(error => { if (!cancelled) { setLoadError({ key, identity: requestIdentity }); logError("artist.load", error); } })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [key, requestIdentity, loadContent]);
 
   const formatTime = (ms: number) => {
     const totalSeconds = Math.floor(ms / 1000);
@@ -62,10 +90,10 @@ export const ArtistView: React.FC<Props> = ({
     );
   };
 
-  const artistThumb = albums.find((a) => a.thumb)?.thumb;
+  const artistThumb = loadContent ? artist.thumb : artist.thumb ?? albums.find((a) => a.thumb)?.thumb;
 
   const handlePlayTrack = async (index: number) => {
-    if (!isPlaybackAvailable) return;
+    if (!active || !current || !isPlaybackAvailable) return;
     const track = topTracks[index];
     if (!track) return;
 
@@ -100,7 +128,9 @@ export const ArtistView: React.FC<Props> = ({
   });
 
   return (
-    <main className="flex-1 flex flex-col overflow-y-auto bg-gradient-to-b from-[#1C1812] via-[#121212] to-[#121212] select-none p-8">
+    <main ref={viewport} onScroll={event => { if (active) scroll.current = event.currentTarget.scrollTop; }}
+      onKeyDown={event => { if ((event.target as HTMLElement).closest?.("[data-artist-album]")) event.stopPropagation(); }}
+      className="flex-1 flex min-h-0 flex-col overflow-y-auto bg-gradient-to-b from-[#1C1812] via-[#121212] to-[#121212] select-none p-8">
       {/* Botão de Retorno */}
       <button
         onClick={onBack}
@@ -114,7 +144,7 @@ export const ArtistView: React.FC<Props> = ({
       <div className="flex items-end space-x-6 pb-8 border-b border-[#252525]">
         <div className="w-44 h-44 rounded-full bg-[#1C1C1C] overflow-hidden shadow-2xl shrink-0 border-2 border-[#2B2B2B]">
           {artistThumb ? (
-            <PlexImage image={artistThumb} alt={artist.name} className="w-full h-full object-cover" />
+            <PlexImage image={artistThumb} cacheScope={requestIdentity} alt={artist.name} className="w-full h-full object-cover" />
           ) : (
             <div className="w-full h-full flex items-center justify-center text-[#444444]">
               <User size={64} />
@@ -126,7 +156,7 @@ export const ArtistView: React.FC<Props> = ({
           <span className="text-[11px] font-bold text-[#E5A00D] tracking-widest uppercase">
             {t("artistView.artist")}
           </span>
-          <h2 className="text-4xl font-black text-white tracking-tight leading-tight">
+          <h2 data-artist-heading tabIndex={-1} className="text-4xl font-black text-white tracking-tight leading-tight outline-none">
             {artist.name}
           </h2>
           <div className="flex items-center space-x-3 text-xs text-[#777777] pt-1">
@@ -137,7 +167,7 @@ export const ArtistView: React.FC<Props> = ({
         </div>
       </div>
 
-      {loading ? (
+      {failed ? <p role="alert" className="mt-8 text-sm text-[#D8B980]">{t("artistView.loadError")}</p> : loading || !current ? (
         <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
           {t("artistView.loading")}
         </div>
@@ -189,7 +219,7 @@ export const ArtistView: React.FC<Props> = ({
 
                       <div className="w-8 h-8 rounded bg-[#202020] overflow-hidden mr-3">
                         {track.thumb ? (
-                          <PlexImage image={track.thumb} alt="" className="w-full h-full object-cover" />
+                          <PlexImage image={track.thumb} cacheScope={requestIdentity} alt="" className="w-full h-full object-cover" />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-[#444444]">
                             <Disc3 size={14} />
@@ -214,6 +244,7 @@ export const ArtistView: React.FC<Props> = ({
                         </span>
                         <button
                           type="button"
+                          disabled={!active || !current}
                           onClick={(event) => {
                             event.stopPropagation();
                             setPlaylistItems([toPlaylistItem(track)]);
@@ -260,15 +291,17 @@ export const ArtistView: React.FC<Props> = ({
             </h3>
             <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
               {albums.map((alb) => (
-                <div
+                <button type="button" data-artist-album={alb.rating_key}
                   key={alb.rating_key}
-                  onClick={() => onSelectAlbum(alb)}
-                  className="group flex flex-col cursor-pointer"
+                  disabled={!active || !current}
+                  onClick={event => { if (!active || !current) return; returnAlbum.current = event.currentTarget; onSelectAlbum(alb); }}
+                  className="group flex flex-col cursor-pointer text-left rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E5A00D]"
                 >
                   <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md border border-[#262626] group-hover:border-[#E5A00D]/50 transition-all">
                     {alb.thumb ? (
                       <PlexImage
                         image={alb.thumb}
+                        cacheScope={requestIdentity}
                         alt={alb.title}
                         className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
                         loading="lazy"
@@ -288,13 +321,13 @@ export const ArtistView: React.FC<Props> = ({
                   {alb.year && (
                     <span className="text-[11px] text-[#666666] mt-0.5">{alb.year}</span>
                   )}
-                </div>
+                </button>
               ))}
             </div>
           </div>
         </div>
       )}
-      {playlistItems && (
+      {playlistItems && active && current && (
         <PlaylistPickerModal
           items={playlistItems}
           title={t("playlists.addTrack")}

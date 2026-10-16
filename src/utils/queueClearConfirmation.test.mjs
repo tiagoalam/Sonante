@@ -224,11 +224,11 @@ test("disposal prevents an in-flight terminal read from offering confirmation", 
 function appConfirmationHandlers(flow) {
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const source = app.slice(app.indexOf("const cancelQueueClear"), app.indexOf("// Carga inicial de configurações e dispositivos"));
-  const effects = { opened: false, confirmation: "pending", saves: [] };
+  const effects = { opened: false, page: "plex", confirmation: "pending", saves: [] };
   const handlers = new Function("configSaveInProgressRef", "queueClearFlowRef", "setQueueClearConfirmation",
-    "setShowSettings", "startLocalFoldersSave", stripTypeScriptTypes(source) + "\nreturn { cancelQueueClear, confirmQueueClear };")(
+    "setShowSettings", "setSettingsInitialPage", "startLocalFoldersSave", stripTypeScriptTypes(source) + "\nreturn { cancelQueueClear, confirmQueueClear };")(
     { current: false }, { current: flow }, value => { effects.confirmation = value; },
-    value => { effects.opened = value; }, (config, authorization) => { effects.saves.push({ config, authorization }); },
+    value => { effects.opened = value; }, value => { effects.page = value; }, (config, authorization) => { effects.saves.push({ config, authorization }); },
   );
   return { ...handlers, effects };
 }
@@ -242,6 +242,7 @@ test("App cancellation discards the removal proposal and reopens Settings withou
   assert.equal(app.effects.opened, false, "stale cancellation cannot affect another operation");
   app.cancelQueueClear("1");
   assert.equal(app.effects.opened, true);
+  assert.equal(app.effects.page, "general");
   assert.equal(app.effects.confirmation, null);
   assert.deepEqual(app.effects.saves, []);
   assert.equal(flow.isPending(), false);
@@ -265,10 +266,11 @@ test("App confirmation still submits the exact proposal and backend authorizatio
 test("Settings Cancel, X and Escape unmount edits and reopening loads persisted config", () => {
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const modal = readFileSync(new URL("../components/SettingsModal.tsx", import.meta.url), "utf8");
-  assert.doesNotMatch(app, /settingsDraft|setSettingsDraft|initialDraft=/);
-  assert.match(app, /\{showSettings && \(\s*<SettingsModal\s+onClose=\{\(\) => setShowSettings\(false\)\}/);
+  // Overlap refusal alone may restore a draft; explicit cancellation must clear it.
+  assert.match(app, /onClose=\{\(\) => \{ setShowSettings\(false\); setLocalFoldersDraft\(null\); \}\}/);
+  assert.match(app, /else if \(showSettings\) \{\s*setShowSettings\(false\);\s*setLocalFoldersDraft\(null\)/);
   assert.match(app, /e\.key === "Escape"[\s\S]*?else if \(showSettings\) \{\s*setShowSettings\(false\)/);
-  assert.match(app, /onClick=\{\(\) => \{ if \(!configSaveInProgressRef\.current\) setShowSettings\(true\); \}\}/);
+  assert.match(app, /onClick=\{\(\) => \{ if \(!configSaveInProgressRef\.current\) \{ setSettingsInitialPage\("general"\); setShowSettings\(true\); \} \}\}/);
   assert.match(modal, /Promise\.all\(\[configService\.getConfig\(\), configService\.getAudioDevices\(\)\]\)/);
   assert.match(modal, /setConfig\(initialDraft \?[^;]+: cfg\)/);
   const buttons = [...modal.matchAll(/<button\b[^>]*onClick=\{onClose\}[^>]*>([\s\S]*?)<\/button>/g)].map(match => match[1]);
@@ -280,12 +282,11 @@ test("confirmation wiring discards cancelled edits, uses an accessible dialog an
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const modal = readFileSync(new URL("../components/SettingsModal.tsx", import.meta.url), "utf8");
   assert.match(app, /queueClearFlowRef\.current\.accepted\(response\.operation\.id\);\s*monitor\.accepted/);
-  assert.doesNotMatch(app, /settingsDraft|initialDraft=/);
   assert.match(app, /startLocalFoldersSave\(request\.config, request\.authorization\)/);
   const cancel = app.slice(app.indexOf("const cancelQueueClear"), app.indexOf("const confirmQueueClear"));
-  assert.doesNotMatch(cancel, /saveConfig|startLocalFoldersSave|setConfig\(/);
+  assert.doesNotMatch(cancel, /saveConfig|startLocalFoldersSave|setConfig\(|setLocalFoldersDraft/);
   assert.match(cancel, /queueClearFlowRef\.current\.cancel\(operationId\)/);
-  assert.match(cancel, /setQueueClearConfirmation\(null\);\s*setShowSettings\(true\)/);
+  assert.match(cancel, /setQueueClearConfirmation\(null\);\s*setSettingsInitialPage\("general"\);\s*setShowSettings\(true\)/);
   assert.match(modal, /role="alertdialog"[\s\S]*?aria-modal="true"[\s\S]*?aria-labelledby=\{titleId\}[\s\S]*?aria-describedby=\{descriptionId\}/);
   assert.match(modal, /cancelRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key === "Escape"/);

@@ -1,0 +1,128 @@
+{
+  "MediaContainer": {
+    "librarySectionID": 7,
+    "Hub": [
+      {
+        "hubIdentifier": "music.recent.played.91",
+        "context": "hub.music.recent.played",
+        "type": "artist",
+        "title": "Synthetic server played music",
+        "key": "/library/sections/7/all?sort=lastViewedAt%3Adesc&type=8&viewCount%3E=1",
+        "Metadata": [
+          {
+            "type": "artist",
+            "ratingKey": "100",
+            "title": "Synthetic same-name artist",
+            "librarySectionID": 7,
+            "lastViewedAt": 1700000000,
+            "addedAt": 1600000000
+          },
+          {
+            "type": "artist",
+            "ratingKey": "101",
+            "title": "Synthetic same-name artist",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999999,
+            "addedAt": 1600000001
+          },
+          {
+            "type": "artist",
+            "ratingKey": "102",
+            "title": "Synthetic artist 2 🎵",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999998,
+            "addedAt": 1600000002
+          },
+          {
+            "type": "artist",
+            "ratingKey": "103",
+            "title": "Synthetic artist 3 🎵",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999997,
+            "addedAt": 1600000003
+          },
+          {
+            "type": "artist",
+            "ratingKey": "104",
+            "title": "Synthetic artist 4 🎵",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999996,
+            "addedAt": 1600000004
+          },
+          {
+            "type": "artist",
+            "ratingKey": "105",
+            "title": "Synthetic artist 5 🎵",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999995,
+            "addedAt": 1600000005
+          },
+          {
+            "type": "artist",
+            "ratingKey": "106",
+            "title": "Synthetic artist 6 🎵",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999994,
+            "addedAt": 1600000006
+          },
+          {
+            "type": "artist",
+            "ratingKey": "107",
+            "title": "Synthetic artist 7 🎵",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999993,
+            "addedAt": 1600000007
+          },
+          {
+            "type": "artist",
+            "ratingKey": "108",
+            "title": "Synthetic artist 8 🎵",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999992,
+            "addedAt": 1600000008
+          },
+          {
+            "type": "artist",
+            "ratingKey": "109",
+            "title": "Synthetic artist 9 🎵",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999991,
+            "addedAt": 1600000009
+          },
+          {
+            "type": "artist",
+            "ratingKey": "110",
+            "title": "Synthetic artist 10 🎵",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999990,
+            "addedAt": 1600000010
+          },
+          {
+            "type": "artist",
+            "ratingKey": "111",
+            "title": "Synthetic artist 11 🎵",
+            "librarySectionID": 7,
+            "lastViewedAt": 1699999989,
+            "addedAt": 1600000011
+          }
+        ]
+      },
+      {
+        "hubIdentifier": "custom.artist.group.92",
+        "context": null,
+        "type": "artist",
+        "title": "Synthetic server played music",
+        "key": "/library/sections/7/all?type=8&genre=Synthetic&year=2000&ratingKey=300&country=Synthetic",
+        "Metadata": [
+          {
+            "type": "artist",
+            "ratingKey": "999",
+            "title": "Synthetic unknown group artist",
+            "librarySectionID": 7,
+            "lastViewedAt": 1700001000
+          }
+        ]
+      }
+    ]
+  }
+}

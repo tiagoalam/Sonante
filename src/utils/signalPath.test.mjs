@@ -75,11 +75,14 @@ test("both variants use translated reported metadata and detailed view has compa
       assert.match(html, /96 kHz/); assert.match(html, /24-bit/);
       assert.doesNotMatch(html, /<details|<summary/);
       assert.match(html, /<ol/);
+      assert.match(html, /np-signal-format/); assert.match(html, /width="24"/);
+      for (const key of ["rate", "depth", "channels"]) assert.ok(html.includes(t(`signalPath.${key}`)));
+      assert.match(html, /<dd[^>]*>2<\/dd>/);
       assert.match(html, /role="tooltip"/);
       assert.match(html, /group-focus-within\/signal-help:block/);
       assert.ok(html.includes(t("signalPath.help")));
       assert.ok(html.includes(mode === "shared" ? "grid-cols-5" : "grid-cols-4"));
-      assert.doesNotMatch(html, /flex-col items-center gap-1 rounded-lg|py-2/);
+      assert.doesNotMatch(html, /flex-col items-center gap-1 rounded-lg/);
       assert.equal(html.includes(`${t("signalPath.endpointShort")}:`), mode === "direct");
       assert.ok(html.includes(mode === "shared" ? "ALSA default" : "ALSA hw"));
       assert.ok(html.includes(t("signalPath.reported")));
@@ -103,7 +106,9 @@ test("snapshot route follows confirmed config and shared presentation leaves pla
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const snapshotEffect = app.slice(app.indexOf("nowPlayingSnapshotRef.current = {"), app.indexOf("// Atualiza favoritos Plex"));
   assert.match(snapshotEffect, /route: configuredSignalRoute\(config\)/);
-  assert.match(snapshotEffect, /\[config, mpdHealth, playbackStatus,/);
+  assert.match(snapshotEffect, /playback: presentationPlayback,/);
+  assert.match(snapshotEffect, /queueArtwork,/);
+  assert.match(snapshotEffect, /\[config, mpdHealth, presentationPlayback, queueArtwork, publishCurrentNowPlayingSnapshot\]/);
   assert.doesNotMatch(snapshotEffect, /settingsDraft|setInterval|setTimeout|invoke/);
   const before = { route: configuredSignalRoute(config), playback: status, health };
   const draft = { ...config, audio_output_type: "pipewire" };
@@ -111,8 +116,9 @@ test("snapshot route follows confirmed config and shared presentation leaves pla
   const after = { ...before, route: configuredSignalRoute(draft) };
   assert.equal(JSON.parse(JSON.stringify(after)).route.mode, "shared");
   const window = readFileSync(new URL("../components/NowPlayingWindow.tsx", import.meta.url), "utf8");
-  assert.match(window, /listen<NowPlayingSnapshot>\(NOW_PLAYING_SNAPSHOT_EVENT/);
-  assert.match(window, /<SignalPath route=\{snapshot\?\.route \?\? null\}/);
+  assert.match(window, /register<NowPlayingSnapshot>\(NOW_PLAYING_SNAPSHOT_EVENT/);
+  const presentation = readFileSync(new URL("../components/NowPlayingPresentation.tsx", import.meta.url), "utf8");
+  assert.match(presentation, /<SignalPath route=\{props.snapshot\?\.route \?\? null\}/);
   const player = readFileSync(new URL("../components/PlayerBar.tsx", import.meta.url), "utf8");
   assert.match(player, /<footer className="h-28 /);
   for (const callback of ["handlePlayToggle", "handleSeekCommit", "handleNext", "handlePrevious", "handleVolumeChange", "onToggleQueue", "onNavigateToAlbum", "onNavigateToArtist"]) assert.ok(player.includes(callback));
@@ -138,7 +144,10 @@ test("Now Playing receives route changes through the existing snapshot event and
   const dependencies = {
     react: { ...hooks, default: hooks, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons,
     "react-i18next": { useTranslation: () => ({ t }) },
-    "./SignalPath": { SignalPath }, "./PlexImage": { PlexImage: () => null },
+    "./SignalPath": { SignalPath }, "./TrackArtwork": { TrackArtwork: () => null },
+    "./NowPlayingQueue": { NowPlayingQueue: () => null }, "./nowPlaying.css": {},
+    "../utils/nowPlayingHosting": { analyzerOwnerMatches: () => true },
+    "./NowPlayingHost": { NowPlayingHost: ({ snapshot }) => snapshot ? React.createElement(SignalPath, { route: snapshot.route, status: snapshot.playback, health: snapshot.health, horizontal: true }) : null },
     "./visualizer/VisualizerPanel": { VisualizerPanel: () => null },
     "../utils/frontendDiagnostics": { logError() { assert.fail("Unexpected diagnostic"); } },
     "../services/audio": { audioService: Object.fromEntries(["togglePlay", "next", "previous", "seek", "setVolume"].map(key => [key, () => { playbackCalls.push(key); }])) },
@@ -152,6 +161,11 @@ test("Now Playing receives route changes through the existing snapshot event and
       startAudioAnalyzer: async () => {}, stopAudioAnalyzer: async () => {},
     },
   };
+  const presentationSource = readFileSync(new URL("../components/NowPlayingPresentation.tsx", import.meta.url), "utf8");
+  const presentationJs = ts.transpileModule(presentationSource, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS } }).outputText;
+  const presentationExports = {};
+  new Function("require", "exports", presentationJs)(id => { assert.ok(id in dependencies, id); return dependencies[id]; }, presentationExports);
+  dependencies["./NowPlayingPresentation"] = presentationExports;
   const exports = {};
   new Function("require", "exports", js)(id => { assert.ok(id in dependencies, id); return dependencies[id]; }, exports);
   const originalWindow = globalThis.window;
@@ -168,30 +182,12 @@ test("Now Playing receives route changes through the existing snapshot event and
     listeners.snapshot({ payload: { health, playback, route: configuredSignalRoute(config) } });
     const direct = render();
     assert.match(direct, /ALSA hw/);
-    assert.ok(direct.indexOf('aria-label="Signal Path"') < direct.indexOf("<h2"), "Signal Path precedes the right-hand title");
-    const coverColumn = nodes(tree).find(node => node.type === "div" && node.props.className?.includes("max-w-[min(58vh,560px)]"));
-    assert.ok(coverColumn);
-    const coverChildren = React.Children.toArray(coverColumn.props.children);
-    assert.equal(coverChildren[0].type, "div");
-    assert.match(coverChildren[0].props.className, /aspect-square w-full shrink-0/);
-    assert.equal(coverChildren[1].type, SignalPath, "Panel is directly below the cover inside the same width-limited column");
-    assert.equal(nodes(tree).filter(node => node.type === SignalPath).length, 1);
-    const grid = nodes(tree).find(node => node.type === "section" && node.props.className.includes("grid"));
-    assert.match(grid.props.className, /overflow-x-hidden/);
-    assert.match(grid.props.className, /minmax\(0,0\.75fr\).*minmax\(0,1\.25fr\)/);
     listeners.snapshot({ payload: { health, playback: { ...playback, state: "pause", current_media: { kind: "plex" } }, route: configuredSignalRoute({ ...config, audio_output_type: "pipewire" }) } });
     const paused = render();
     assert.match(paused, /ALSA default/); assert.match(paused, /Paused/); assert.ok(paused.includes(t("player.source.plex")));
     listeners.snapshot({ payload: { health: { state: "unavailable", reason: "socket_unavailable" }, playback, route: configuredSignalRoute(config) } });
     const unavailable = render();
     assert.match(unavailable, /MPD unavailable/); assert.doesNotMatch(unavailable, /96 kHz|24-bit/);
-    const fullscreenButton = nodes(tree).find(node => node.type === "button" && node.props.title === t("nowPlaying.enterFullscreen"));
-    assert.ok(fullscreenButton);
-    fullscreenButton.props.onClick();
-    for (let i = 0; i < 5; i++) await Promise.resolve();
-    const fullscreenHtml = render();
-    assert.match(fullscreenHtml, /max-w-\[min\(44vh,500px\)\]/);
-    assert.doesNotMatch(fullscreenHtml, /grid-rows-\[minmax\(0,1fr\)\]/);
     assert.deepEqual(playbackCalls, []);
   } finally {
     cleanups.forEach(cleanup => cleanup?.());

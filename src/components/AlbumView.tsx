@@ -1,5 +1,5 @@
 import { logError } from "../utils/frontendDiagnostics";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   Play,
@@ -22,6 +22,7 @@ import type { NewPlaylistItem } from "../types/playlist";
 
 interface Props {
   album: PlexAlbum;
+  active?: boolean;
   onBack: () => void;
   onSelectArtist?: (artist: SelectedArtist) => void;
   onToggleFavorite?: () => void;
@@ -30,6 +31,7 @@ interface Props {
 
 export const AlbumView: React.FC<Props> = ({
   album,
+  active = true,
   onBack,
   onSelectArtist,
   onToggleFavorite,
@@ -40,6 +42,18 @@ export const AlbumView: React.FC<Props> = ({
   const [loading, setLoading] = useState(true);
   const [isFavorite, setIsFavorite] = useState(false);
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
+
+  const viewport = useRef<HTMLDivElement>(null), scroll = useRef(0), artistLink = useRef<HTMLButtonElement>(null);
+  const returning = useRef(false), returnFocus = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (!active) { returning.current = true; return; }
+    if (viewport.current) {
+      viewport.current.scrollTop = scroll.current;
+      if (returning.current) (returnFocus.current ?? artistLink.current)?.focus({ preventScroll: true });
+      else if (onSelectArtist) viewport.current.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
+      returning.current = false;
+    }
+  }, [active]);
 
   const albumKey = String(album.rating_key || "");
 
@@ -85,7 +99,7 @@ export const AlbumView: React.FC<Props> = ({
   };
 
   const handlePlayTracks = (startIndex: number = 0) => {
-    if (!isPlaybackAvailable) return;
+    if (!active || !isPlaybackAvailable) return;
     const metaTracks = tracks.map((t) => ({
       title: t.title,
       artist: album.artist,
@@ -133,7 +147,7 @@ export const AlbumView: React.FC<Props> = ({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-8 space-y-8">
+      <div ref={viewport} onFocusCapture={event => { if (active) returnFocus.current = event.target as HTMLElement; }} onScroll={event => { if (active) scroll.current = event.currentTarget.scrollTop; }} className="flex-1 overflow-y-auto p-8 space-y-8">
         <div className="flex items-end space-x-6">
           <div className="w-56 h-56 rounded-xl bg-[#202020] border border-[#2B2B2B] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
             {album.thumb ? (
@@ -153,18 +167,19 @@ export const AlbumView: React.FC<Props> = ({
               <span>{t("albumView.plexAlbum")}</span>
             </span>
 
-            <h1 className="text-3xl font-black text-white">{album.title}</h1>
+            <h1 tabIndex={-1} className="text-3xl font-black text-white">{album.title}</h1>
 
             <div className="flex items-center space-x-2 text-sm text-[#CCCCCC]">
               {album.artist_rating_key && onSelectArtist ? (
-                <button
+                <button type="button" ref={artistLink}
                   onClick={() =>
                     onSelectArtist({
                       rating_key: album.artist_rating_key!,
                       name: album.artist,
+                      server_id: album.server_id, library_id: album.library_id,
                     })
                   }
-                  className="font-medium hover:text-[#E5A00D] transition-colors cursor-pointer flex items-center space-x-1.5"
+                  className="rounded font-medium focus-visible:outline focus-visible:outline-[#E5A00D] hover:text-[#E5A00D] transition-colors cursor-pointer flex items-center space-x-1.5"
                 >
                   <User size={15} />
                   <span>{album.artist}</span>

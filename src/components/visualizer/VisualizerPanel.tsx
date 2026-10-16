@@ -60,9 +60,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
 
   return (
     <section
-      className={`relative flex flex-col overflow-hidden rounded-[1.35rem] border border-white/10 bg-[#050708]/95 px-11 pb-5 pt-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.045),0_24px_70px_rgba(0,0,0,0.32)] sm:px-14 ${
-        fullscreen ? "mt-4 min-h-0 flex-1" : "mt-5 min-h-[300px]"
-      }`}
+      className="np-visualizer relative flex flex-col rounded-2xl border border-white/10 bg-[#050708]/95 px-10 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.045),0_16px_40px_rgba(0,0,0,0.25)]"
       aria-label={modeLabel}
     >
       <span className="absolute left-3 top-3 h-1.5 w-1.5 rounded-full bg-white/15 shadow-[0_0_0_1px_rgba(0,0,0,0.8)]" />
@@ -79,9 +77,9 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
         <ChevronLeft size={20} />
       </button>
 
-      <div className="mb-4 flex min-h-7 items-center justify-between gap-4 border-b border-white/[0.06] pb-3 font-mono uppercase">
+      <div className="mb-2 flex shrink-0 min-h-5 items-center justify-between gap-2 border-b border-white/[0.06] pb-2 font-mono uppercase">
         <div className="min-w-0">
-          <p className="truncate text-[10px] font-semibold tracking-[0.24em] text-white/60">
+          <p className="truncate text-[10px] font-semibold tracking-[0.12em] text-white/60">
             {modeLabel}
           </p>
           {!active && inactiveLabel && (
@@ -96,11 +94,11 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col justify-center">
+      <div className="np-visualizer-graphs flex min-h-0 flex-1 flex-col justify-center">
         {mode === "combo" && (
           <>
             <VuHorizontal levels={levels} active={active} />
-            <div className="mt-4 border-t border-white/[0.06] pt-4">
+            <div className="np-combo-spectrum min-h-0 flex-1 mt-2 border-t border-white/[0.06] pt-2">
               <SpectrumNeon
                 spectrum={levels.spectrum}
                 active={active}

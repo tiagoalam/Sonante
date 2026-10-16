@@ -20,12 +20,14 @@ const artworkCache = new PlexArtworkCache(
 interface PlexImageProps
   extends Omit<React.ImgHTMLAttributes<HTMLImageElement>, "src" | "onError"> {
   image: PlexImageRef;
+  cacheScope?: object;
   fallback?: React.ReactNode;
   onLoadError?: () => void;
 }
 
 export const PlexImage: React.FC<PlexImageProps> = ({
   image,
+  cacheScope,
   fallback = null,
   onLoadError,
   ...imgProps
@@ -38,15 +40,15 @@ export const PlexImage: React.FC<PlexImageProps> = ({
   const [visibleImageKey, setVisibleImageKey] = useState<string | null>(null);
   const onLoadErrorRef = useRef(onLoadError);
   onLoadErrorRef.current = onLoadError;
-  const imageKey = plexImageCacheKey(image);
+  const imageKey = plexImageCacheKey(image, cacheScope);
 
   useLayoutEffect(() => {
-    visibilityGateRef.current.reset(image);
+    visibilityGateRef.current.reset(image, cacheScope);
     setObjectUrl(null);
     setFailed(false);
 
     // Pin an already loaded image and present it before paint, without waiting for intersection.
-    const cached = artworkCache.acquireCached(image);
+    const cached = artworkCache.acquireCached(image, cacheScope);
     if (cached) {
       leaseRef.current = cached;
       setObjectUrl(cached.objectUrl);
@@ -58,7 +60,7 @@ export const PlexImage: React.FC<PlexImageProps> = ({
 
     const node = containerRef.current;
     if (!node || !("IntersectionObserver" in window)) {
-      if (visibilityGateRef.current.markVisible(image)) {
+      if (visibilityGateRef.current.markVisible(image, cacheScope)) {
         setVisibleImageKey(imageKey);
       }
       return;
@@ -68,7 +70,7 @@ export const PlexImage: React.FC<PlexImageProps> = ({
       (entries) => {
         if (
           entries.some((entry) => entry.isIntersecting) &&
-          visibilityGateRef.current.markVisible(image)
+          visibilityGateRef.current.markVisible(image, cacheScope)
         ) {
           setVisibleImageKey(imageKey);
           observer.disconnect();
@@ -83,20 +85,20 @@ export const PlexImage: React.FC<PlexImageProps> = ({
   useEffect(() => {
     if (
       visibleImageKey !== imageKey ||
-      !visibilityGateRef.current.canAcquire(image)
+      !visibilityGateRef.current.canAcquire(image, cacheScope)
     ) {
       return;
     }
 
     let active = true;
-    const lease = artworkCache.acquire(image);
+    const lease = artworkCache.acquire(image, cacheScope);
     leaseRef.current = lease;
     void lease.promise.then(
       (url) => {
-        if (active && visibilityGateRef.current.canAcquire(image)) setObjectUrl(url);
+        if (active && visibilityGateRef.current.canAcquire(image, cacheScope)) setObjectUrl(url);
       },
       () => {
-        if (active && visibilityGateRef.current.canAcquire(image)) {
+        if (active && visibilityGateRef.current.canAcquire(image, cacheScope)) {
           setFailed(true);
           onLoadErrorRef.current?.();
         }

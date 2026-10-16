@@ -22,7 +22,7 @@ import {
   LoaderCircle,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { AppConfig } from "../types/config";
+import { AppConfig, type ConfigSaveOperation } from "../types/config";
 import { AudioDevice } from "../types/audio";
 import { PlexServerResource } from "../types/plex";
 import { audioService } from "../services/audio";
@@ -30,28 +30,30 @@ import { configService } from "../services/config";
 import { plexService } from "../services/plex";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
 import { createDeviceAvailabilityQuery, shouldCheckContextualDevice, type AvailabilityQueryState } from "../utils/deviceAvailability";
-import { wizardPlexConnectionReady, wizardSaveErrorKey } from "../utils/welcomeWizard";
+import { wizardPlexConnectionReady, wizardSaveErrorKey, type WizardSaveErrorKey } from "../utils/welcomeWizard";
 
 interface Props {
   initialConfig: AppConfig;
   devices: AudioDevice[];
   onFinish: (newConfig: AppConfig) => void;
+  onCancel?: () => void;
+  onSaveAccepted?: (operation: ConfigSaveOperation) => void;
 }
 
-export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinish }) => {
+export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinish, onCancel, onSaveAccepted }) => {
   const { t, i18n } = useTranslation();
   const titleId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const [step, setStep] = useState<number>(1);
-  const [config, setConfig] = useState<AppConfig>({ ...initialConfig });
+  const [step, setStep] = useState<number>(onCancel ? 2 : 1);
+  const [config, setConfig] = useState<AppConfig>({ ...initialConfig, local_folders: [...initialConfig.local_folders] });
 
-  const [useLocal, setUseLocal] = useState<boolean>(true);
-  const [usePlex, setUsePlex] = useState<boolean>(false);
+  const [useLocal, setUseLocal] = useState<boolean>(onCancel ? initialConfig.local_folders.length > 0 || !initialConfig.plex_token.trim() : true);
+  const [usePlex, setUsePlex] = useState<boolean>(onCancel ? Boolean(initialConfig.plex_token.trim()) : false);
   const [isFinishing, setIsFinishing] = useState<boolean>(false);
   const [isPickingFolder, setIsPickingFolder] = useState(false);
   const pickingFolderRef = useRef(false);
   const finishingRef = useRef(false);
-  const [completionError, setCompletionError] = useState<string | null>(null);
+  const [completionError, setCompletionError] = useState<WizardSaveErrorKey | "wizard.plexNotReady" | "wizard.folderError" | null>(null);
   const [availability, setAvailability] = useState<AvailabilityQueryState>({ checking: false, results: [], failed: false });
   const availabilityQueryRef = useRef<ReturnType<typeof createDeviceAvailabilityQuery> | null>(null);
   const [showAvailabilityHelp, setShowAvailabilityHelp] = useState(false);
@@ -211,6 +213,22 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
     }));
   };
 
+  const completionErrorMessage = (error: NonNullable<typeof completionError>): string => {
+    switch (error) {
+      case "settings.localFolderOverlap": return t("settings.localFolderOverlap");
+      case "wizard.configPersistenceUncertain": return t("wizard.configPersistenceUncertain");
+      case "wizard.deviceBusy": return t("wizard.deviceBusy");
+      case "wizard.deviceUnavailable": return t("wizard.deviceUnavailable");
+      case "wizard.saveError": return t("wizard.saveError");
+      case "wizard.plexNotReady": return t("wizard.plexNotReady");
+      case "wizard.folderError": return t("wizard.folderError");
+      default: {
+        const unsupported: never = error;
+        throw new Error(`Unsupported wizard completion error type: ${typeof unsupported}`);
+      }
+    }
+  };
+
   const handleComplete = async () => {
     if (finishingRef.current || availability.checking) return;
     if (plexRequired && !plexReady) {
@@ -227,6 +245,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
         first_run: false,
       };
       const response = await configService.saveConfig(finalConfig);
+      if (response.status === "accepted" && onSaveAccepted) { onSaveAccepted(response.operation); return; }
       if (response.status !== "completed") throw new Error(t("settings.librarySaveUncertain"));
       onFinish(finalConfig);
     } catch (err) {
@@ -272,7 +291,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0C0C0C] select-none p-3 sm:p-6 text-white font-sans">
-      <div role="dialog" aria-modal="true" aria-labelledby={titleId} className="bg-[#161616] border border-[#2B2B2B] rounded-2xl w-full max-w-4xl h-[min(820px,94dvh)] min-h-0 flex flex-col shadow-2xl overflow-hidden">
+      <div role="dialog" onKeyDown={event => { if (event.key === "Escape" && !finishingRef.current && onCancel) { event.preventDefault(); onCancel(); } }} aria-modal="true" aria-labelledby={titleId} className="bg-[#161616] border border-[#2B2B2B] rounded-2xl w-full max-w-4xl h-[min(820px,94dvh)] min-h-0 flex flex-col shadow-2xl overflow-hidden">
         {/* Topo do Wizard */}
         <div className="px-4 sm:px-8 py-4 border-b border-[#242424] flex flex-wrap gap-3 items-center justify-between bg-[#191919] shrink-0">
           <div className="flex items-center space-x-3">
@@ -286,6 +305,8 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
           </div>
 
           <div className="flex items-center space-x-3">
+            {onCancel && <button type="button" disabled={isFinishing} onClick={onCancel}
+              className="rounded-lg px-3 py-2 text-xs text-[#AAAAAA] hover:text-white focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:opacity-40">{t("settings.cancel")}</button>}
             {/* Alternador de Idioma */}
             <div className="flex items-center space-x-1 bg-[#121212] border border-[#282828] rounded-lg p-0.5 text-[11px]">
               <Languages size={12} className="text-[#777777] ml-1.5 mr-0.5" />
@@ -673,7 +694,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
             </div>
           )}
 
-          {completionError && <p role="alert" className="mt-4 text-xs text-[#FF8686]">{t(`wizard.${completionError.slice("wizard.".length)}`)}</p>}
+          {completionError && <p role="alert" className="mt-4 text-xs text-[#FF8686]">{completionErrorMessage(completionError)}</p>}
         </div>
         {/* Rodapé */}
         <div className="px-4 sm:px-6 py-4 border-t border-[#242424] flex items-center justify-between shrink-0">

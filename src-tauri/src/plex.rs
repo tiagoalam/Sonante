@@ -1,3 +1,6 @@
+#[path = "plex_discover.rs"]
+mod discover;
+pub use discover::{PlexDiscoverPage, PlexDiscoverRecent, PlexDiscoverHub, PlexDiscoverArtistContent, PlexLibraryMixPage, PlexMixYears, PlexMixStyles, PlexStyleSelection};
 use crate::audio::MediaLocator;
 use crate::config::AppConfig;
 use reqwest::{header::CONTENT_TYPE, RequestBuilder, StatusCode};
@@ -5,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const PLEX_CLIENT_ID: &str = "sonante-audio-player";
 const PLEX_PRODUCT_NAME: &str = "Sonante";
@@ -1393,6 +1396,247 @@ mod tests {
         }]}})
     }
 
+    fn album_catalog_page(offset: usize, total: Option<usize>, ids: &[&str]) -> serde_json::Value {
+        let mut body = serde_json::json!({"MediaContainer": {"offset": offset, "size": ids.len(),
+            "Metadata": ids.iter().map(|id| serde_json::json!({"ratingKey": id, "title": id})).collect::<Vec<_>>()}});
+        if let Some(total) = total {
+            body["MediaContainer"]["totalSize"] = serde_json::json!(total);
+        }
+        body
+    }
+
+    fn fixture_album_catalog(
+        responses: Vec<MockResponse>,
+        change_after: Option<usize>,
+    ) -> (Result<PlexAlbumCatalog, PlexAlbumCatalogError>, Vec<String>) {
+        let client = media_client_for_test(&manager_config(
+            "http://127.0.0.1:9",
+            Some("fixture-machine-id"),
+        ));
+        let initial = client.connection_manager.snapshot().unwrap();
+        let mut responses = responses.into_iter();
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let recorded = paths.clone();
+        let manager = client.connection_manager.clone();
+        let result = tauri::async_runtime::block_on(read_album_catalog(
+            "1",
+            "added",
+            initial,
+            move |path| {
+                recorded.lock().unwrap().push(path);
+                let response = responses
+                    .next()
+                    .expect("unexpected additional catalog request");
+                let index = recorded.lock().unwrap().len();
+                let snapshot = manager.snapshot().unwrap();
+                let connection = ResolvedPlexConnection {
+                    server_id: "fixture-machine-id".to_string(),
+                    base_url: String::new(),
+                    token: String::new(),
+                    generation: snapshot.generation,
+                };
+                if change_after == Some(index) {
+                    manager.update_config(&AppConfig::default());
+                }
+                std::future::ready(if response.status_line.starts_with("200 ") {
+                    serde_json::from_str(&response.body)
+                        .map(|json| (json, connection))
+                        .map_err(|_| PlexError::invalid_response("consultar os álbuns"))
+                } else {
+                    Err(PlexError::from_status(
+                        "consultar os álbuns",
+                        StatusCode::from_u16(
+                            response
+                                .status_line
+                                .split(' ')
+                                .next()
+                                .unwrap()
+                                .parse()
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                    ))
+                })
+            },
+            || client.connection_manager.snapshot(),
+        ));
+        let paths = paths.lock().unwrap().clone();
+        (result, paths)
+    }
+
+    #[test]
+    fn album_catalog_empty_and_multiple_pages_are_complete_only_after_verified_termination() {
+        for pages in [
+            vec![album_catalog_page(0, Some(0), &[])],
+            vec![
+                album_catalog_page(0, Some(3), &["1", "2"]),
+                album_catalog_page(2, Some(3), &["3"]),
+            ],
+            vec![
+                album_catalog_page(0, None, &["1"]),
+                album_catalog_page(1, None, &[]),
+            ],
+        ] {
+            let expected = pages
+                .iter()
+                .map(|p| p["MediaContainer"]["size"].as_u64().unwrap() as usize)
+                .sum::<usize>();
+            let page_count = pages.len();
+            let (result, paths) = fixture_album_catalog(
+                pages
+                    .into_iter()
+                    .map(|p| MockResponse::json("200 OK", p))
+                    .collect(),
+                None,
+            );
+            let catalog = result.unwrap();
+            assert_eq!(catalog.completeness, AlbumCatalogCompleteness::Complete);
+            assert_eq!(catalog.total, expected);
+            assert_eq!(catalog.albums.len(), expected);
+            assert_eq!(catalog.server_id, "fixture-machine-id");
+            assert_eq!(catalog.library_id, "1");
+            assert_eq!(paths.len(), page_count);
+            assert!(paths[0].contains("X-Plex-Container-Start=0&X-Plex-Container-Size=200"));
+            if expected == 3 {
+                assert!(paths[1].contains("X-Plex-Container-Start=2&"));
+            }
+        }
+    }
+
+    #[test]
+    fn album_catalog_rejects_repetition_no_progress_duplicate_ids_and_inconsistent_totals() {
+        for pages in [
+            vec![
+                album_catalog_page(0, Some(2), &["1"]),
+                album_catalog_page(0, Some(2), &["1"]),
+            ],
+            vec![
+                album_catalog_page(0, Some(2), &["1"]),
+                album_catalog_page(1, Some(2), &[]),
+            ],
+            vec![
+                album_catalog_page(0, Some(2), &["1"]),
+                album_catalog_page(1, Some(2), &["1"]),
+            ],
+            vec![
+                album_catalog_page(0, Some(2), &["1"]),
+                album_catalog_page(1, Some(3), &["2"]),
+            ],
+            vec![album_catalog_page(0, Some(2), &["1", "1"])],
+            vec![album_catalog_page(0, Some(1), &["1", "2"])],
+            vec![album_catalog_page(
+                0,
+                Some(MAX_ALBUM_PAGES * ALBUM_PAGE_SIZE + 1),
+                &["1"],
+            )],
+            vec![album_catalog_page(0, Some(1), &[""])],
+        ] {
+            let (result, _) = fixture_album_catalog(
+                pages
+                    .into_iter()
+                    .map(|p| MockResponse::json("200 OK", p))
+                    .collect(),
+                None,
+            );
+            let error = result.unwrap_err();
+            assert_ne!(error.completeness, AlbumCatalogCompleteness::Complete);
+            assert!(error.message.contains("inválida"));
+        }
+    }
+
+    #[test]
+    fn album_catalog_missing_or_malformed_pagination_is_not_an_empty_success() {
+        for body in [
+            serde_json::json!({"MediaContainer": {"Metadata": []}}),
+            serde_json::json!({"MediaContainer": {"offset": 0, "size": "0"}}),
+            serde_json::json!({"MediaContainer": {"offset": 0, "size": 1, "totalSize": 1}}),
+            serde_json::json!({"MediaContainer": {"offset": 0, "size": 0, "totalSize": -1}}),
+            serde_json::json!({"MediaContainer": {"offset": 0, "size": 0, "Metadata": null}}),
+            serde_json::json!({"unexpected": true}),
+        ] {
+            let (result, _) = fixture_album_catalog(vec![MockResponse::json("200 OK", body)], None);
+            let error = result.unwrap_err();
+            assert_eq!(error.completeness, AlbumCatalogCompleteness::Unknown);
+            assert_eq!(error.received, 0);
+        }
+    }
+
+    #[test]
+    fn album_catalog_http_auth_and_parse_failures_preserve_partial_classification() {
+        for status in [
+            "500 Internal Server Error",
+            "401 Unauthorized",
+            "403 Forbidden",
+            "200 OK",
+        ] {
+            for intermediate in [false, true] {
+                let mut responses = Vec::new();
+                if intermediate {
+                    responses.push(MockResponse::json(
+                        "200 OK",
+                        album_catalog_page(0, Some(2), &["1"]),
+                    ));
+                }
+                responses.push(MockResponse {
+                    status_line: status,
+                    content_type: "application/json",
+                    body: "not json".to_string(),
+                    delay: Duration::ZERO,
+                });
+                let (result, _) = fixture_album_catalog(responses, None);
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.completeness,
+                    if intermediate {
+                        AlbumCatalogCompleteness::Partial
+                    } else {
+                        AlbumCatalogCompleteness::Unknown
+                    }
+                );
+                assert_eq!(error.received, usize::from(intermediate));
+                if status != "200 OK" {
+                    assert!(error.message.contains(status.split(' ').next().unwrap()));
+                }
+                assert!(!error.message.contains("TEST_SECRET"));
+            }
+        }
+    }
+
+    #[test]
+    fn album_catalog_discards_a_final_page_after_connection_context_changes() {
+        let (result, paths) = fixture_album_catalog(
+            vec![
+                MockResponse::json("200 OK", album_catalog_page(0, Some(2), &["1"])),
+                MockResponse::json("200 OK", album_catalog_page(1, Some(2), &["2"])),
+            ],
+            Some(2),
+        );
+        let error = result.unwrap_err();
+        assert_eq!(error.completeness, AlbumCatalogCompleteness::Partial);
+        assert_eq!(error.received, 1);
+        assert!(error.message.contains("configuração Plex mudou"));
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn album_catalog_without_a_terminal_page_stops_at_the_request_budget() {
+        let responses = (0..MAX_ALBUM_PAGES)
+            .map(|offset| {
+                MockResponse::json(
+                    "200 OK",
+                    album_catalog_page(offset, None, &[&(offset + 1).to_string()]),
+                )
+            })
+            .collect();
+        let (result, paths) = fixture_album_catalog(responses, None);
+        let error = result.unwrap_err();
+        assert_eq!(paths.len(), MAX_ALBUM_PAGES);
+        assert_eq!(error.received, MAX_ALBUM_PAGES);
+        assert_eq!(error.completeness, AlbumCatalogCompleteness::Partial);
+        assert!(error.message.contains("limite de páginas"));
+        assert!(serde_json::to_value(error).unwrap().get("albums").is_none());
+    }
+
     #[test]
     fn plex_catalog_genres_use_existing_album_responses_and_preserve_legacy_contract() {
         let mut body = serde_json::json!({"MediaContainer": {"Metadata": [
@@ -1401,11 +1645,16 @@ mod tests {
             {"ratingKey": "3", "Genre": [{"tag": null}, {"tag": 42}, {"tag": ""}, {"tag": "TEST_ACCOUNT_TOKEN"}, {"tag": "https://private/?X-Plex-Token=SECRET"}]},
             {"ratingKey": "4", "Genre": "Rock"}
         ]}});
+        body["MediaContainer"]["offset"] = serde_json::json!(0);
+        body["MediaContainer"]["size"] = serde_json::json!(4);
+        body["MediaContainer"]["totalSize"] = serde_json::json!(4);
         body["MediaContainer"]["Hub"] = serde_json::json!([{
             "type": "album", "Metadata": body["MediaContainer"]["Metadata"].clone()
         }]);
         let (client, _server) = availability_client_for_test("200 OK", body);
-        let albums = tauri::async_runtime::block_on(client.get_albums("1", "added")).unwrap();
+        let albums = tauri::async_runtime::block_on(client.get_albums("1", "added"))
+            .unwrap()
+            .albums;
         assert_eq!(albums[0].genres, ["Rock", "Jazz"]);
         for album in &albums[1..] {
             assert!(album.genres.is_empty());
@@ -1425,6 +1674,112 @@ mod tests {
         let restored: PlexAlbum = serde_json::from_value(legacy).unwrap();
         assert_eq!(restored.rating_key, albums[0].rating_key);
         assert!(restored.genres.is_empty());
+    }
+
+    fn portrait_fixture(
+        body: serde_json::Value,
+        change: bool,
+        failure: bool,
+    ) -> Result<Option<PlexImageRef>, String> {
+        let client = media_client_for_test(&manager_config(
+            "http://127.0.0.1:9",
+            Some("fixture-machine-id"),
+        ));
+        tauri::async_runtime::block_on(read_artist_portrait(
+            "fixture-machine-id",
+            "artist-3",
+            |path| {
+                assert_eq!(path, "/library/metadata/artist-3");
+                if change {
+                    client
+                        .connection_manager
+                        .update_config(&AppConfig::default());
+                }
+                std::future::ready(if failure {
+                    Err(PlexError::from_status(
+                        "resolver o retrato do artista",
+                        StatusCode::UNAUTHORIZED,
+                    ))
+                } else {
+                    Ok((body, navigation_connection()))
+                })
+            },
+            || client.connection_manager.snapshot(),
+        ))
+    }
+
+    #[test]
+    fn artist_portrait_exact_artist_and_absence_use_only_its_own_thumb() {
+        let body = serde_json::json!({"MediaContainer": {"Metadata": [{"type":"artist", "ratingKey":"artist-3",
+            "thumb":"/library/metadata/artist-3/thumb/123", "parentThumb":"/library/metadata/album-2/thumb/123"}]}});
+        let image = portrait_fixture(body.clone(), false, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            image,
+            PlexImageRef {
+                server_id: "fixture-machine-id".into(),
+                path: "/library/metadata/artist-3/thumb/123".into()
+            }
+        );
+        for absent in [serde_json::Value::Null, serde_json::json!("")] {
+            let mut no_photo = body.clone();
+            no_photo["MediaContainer"]["Metadata"][0]["thumb"] = absent;
+            assert_eq!(portrait_fixture(no_photo, false, false).unwrap(), None);
+        }
+        let mut no_photo = body;
+        no_photo["MediaContainer"]["Metadata"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("thumb");
+        assert_eq!(portrait_fixture(no_photo, false, false).unwrap(), None);
+    }
+
+    #[test]
+    fn artist_portrait_rejects_wrong_identity_album_artwork_credentials_and_invalid_metadata() {
+        let body = serde_json::json!({"MediaContainer": {"Metadata": [{"type":"artist", "ratingKey":"artist-3", "thumb":"/library/metadata/artist-3/thumb/1"}]}});
+        for (key, value) in [
+            ("type", "album"),
+            ("ratingKey", "other"),
+            ("thumb", "/library/metadata/album-2/thumb/1"),
+            ("thumb", "https://private/image?X-Plex-Token=SECRET"),
+            ("thumb", "/library/metadata/artist-3/thumb/1?token=SECRET"),
+            (
+                "thumb",
+                "/library/metadata/artist-3/thumb/1?value=TEST_ACCOUNT_TOKEN",
+            ),
+            (
+                "thumb",
+                "/library/metadata/artist-3/thumb/1?value=%54EST_ACCOUNT_TOKEN",
+            ),
+            ("thumb", "/library/metadata/artist-3/thumb/../private"),
+        ] {
+            let mut bad = body.clone();
+            bad["MediaContainer"]["Metadata"][0][key] = serde_json::json!(value);
+            let error = portrait_fixture(bad, false, false).unwrap_err();
+            assert!(
+                !error.contains("SECRET")
+                    && !error.contains("private")
+                    && !error.contains("TEST_ACCOUNT_TOKEN")
+            );
+        }
+        assert!(portrait_fixture(
+            serde_json::json!({"MediaContainer":{"Metadata":[]}}),
+            false,
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn artist_portrait_auth_failure_and_context_change_are_errors_not_absence() {
+        let body = serde_json::json!({"MediaContainer": {"Metadata": [{"type":"artist", "ratingKey":"artist-3"}]}});
+        assert!(portrait_fixture(body.clone(), false, true)
+            .unwrap_err()
+            .contains("401"));
+        assert!(portrait_fixture(body, true, false)
+            .unwrap_err()
+            .contains("configuração Plex mudou"));
     }
 
     fn navigation_connection() -> ResolvedPlexConnection {
@@ -2717,6 +3072,238 @@ pub struct PlexAlbum {
     pub thumb: Option<PlexImageRef>,
 }
 
+const ALBUM_PAGE_SIZE: usize = 200;
+const MAX_ALBUM_PAGES: usize = 1_000;
+const ALBUM_CATALOG_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AlbumCatalogCompleteness {
+    Complete,
+    Partial,
+    Unknown,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlexAlbumCatalog {
+    pub server_id: String,
+    pub library_id: String,
+    pub completeness: AlbumCatalogCompleteness,
+    pub total: usize,
+    pub albums: Vec<PlexAlbum>,
+}
+
+// Incomplete inventories are errors, never consumable album lists.
+#[derive(Debug, Serialize)]
+pub struct PlexAlbumCatalogError {
+    pub completeness: AlbumCatalogCompleteness,
+    pub received: usize,
+    pub message: String,
+}
+
+impl PlexAlbumCatalogError {
+    fn new(received: usize, message: String) -> Self {
+        Self {
+            completeness: if received == 0 {
+                AlbumCatalogCompleteness::Unknown
+            } else {
+                AlbumCatalogCompleteness::Partial
+            },
+            received,
+            message,
+        }
+    }
+}
+
+#[derive(Default)]
+struct AlbumCatalogPages {
+    albums: Vec<PlexAlbum>,
+    ids: HashSet<String>,
+    total: Option<usize>,
+}
+
+impl AlbumCatalogPages {
+    fn accept(
+        &mut self,
+        json: &serde_json::Value,
+        connection: &ResolvedPlexConnection,
+    ) -> Result<bool, String> {
+        let invalid =
+            || PlexError::invalid_response("validar a paginação dos álbuns").public_message();
+        let container =
+            media_container(json, "consultar os álbuns").map_err(|e| e.public_message())?;
+        let number = |key: &str| -> Result<Option<usize>, String> {
+            container
+                .get(key)
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|v| usize::try_from(v).ok())
+                        .ok_or_else(&invalid)
+                })
+                .transpose()
+        };
+        let offset = number("offset")?.ok_or_else(|| {
+            "Completude Plex desconhecida: resposta sem offset de paginação.".to_string()
+        })?;
+        let size = number("size")?.ok_or_else(|| {
+            "Completude Plex desconhecida: resposta sem size de paginação.".to_string()
+        })?;
+        let reported_total = number("totalSize")?;
+        if offset != self.albums.len() || size > ALBUM_PAGE_SIZE {
+            return Err(invalid());
+        }
+        if self
+            .total
+            .zip(reported_total)
+            .is_some_and(|(old, new)| old != new)
+        {
+            return Err(invalid());
+        }
+        let total = reported_total.or(self.total);
+        if total.is_some_and(|total| total > MAX_ALBUM_PAGES * ALBUM_PAGE_SIZE) {
+            return Err(invalid());
+        }
+        let end = offset.checked_add(size).ok_or_else(&invalid)?;
+        if total.is_some_and(|total| end > total || (size == 0 && end != total)) {
+            return Err(invalid());
+        }
+        let metadata = match container.get("Metadata") {
+            Some(value) => value.as_array().ok_or_else(&invalid)?.as_slice(),
+            None if size == 0 => &[],
+            None => return Err(invalid()),
+        };
+        if metadata.len() != size {
+            return Err(invalid());
+        }
+        let mut page_ids = HashSet::new();
+        let mut page = Vec::with_capacity(size);
+        for item in metadata {
+            let id = item["ratingKey"]
+                .as_str()
+                .filter(|id| navigation_rating_key(id))
+                .ok_or_else(&invalid)?;
+            if self.ids.contains(id) || !page_ids.insert(id.to_string()) {
+                return Err(invalid());
+            }
+            page.push(PlexAlbum {
+                rating_key: id.to_string(),
+                title: item["title"].as_str().unwrap_or("Desconhecido").to_string(),
+                artist: item["parentTitle"]
+                    .as_str()
+                    .unwrap_or("Vários Artistas")
+                    .to_string(),
+                artist_rating_key: item["parentRatingKey"].as_str().map(str::to_string),
+                year: item["year"]
+                    .as_u64()
+                    .and_then(|year| u32::try_from(year).ok()),
+                genres: plex_album_genres(item, connection),
+                thumb: item["thumb"]
+                    .as_str()
+                    .and_then(|path| PlexImageRef::from_connection(connection, path)),
+            });
+        }
+        self.total = total;
+        self.ids.extend(page_ids);
+        self.albums.extend(page);
+        // A short page alone proves nothing. Without totalSize, require an explicit
+        // empty page at the requested offset after traversing all preceding pages.
+        Ok(total == Some(end) || size == 0)
+    }
+}
+
+// Both the real client and fixture transport run this exact sequence.
+async fn read_album_catalog<F, Fut, S>(
+    section_key: &str,
+    sort_by: &str,
+    initial: PlexConnectionSnapshot,
+    mut request: F,
+    snapshot: S,
+) -> Result<PlexAlbumCatalog, PlexAlbumCatalogError>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<(serde_json::Value, ResolvedPlexConnection), PlexError>,
+    >,
+    S: Fn() -> Result<PlexConnectionSnapshot, PlexError>,
+{
+    let mut pages = AlbumCatalogPages::default();
+    let fail = |received, message| PlexAlbumCatalogError::new(received, message);
+    if !navigation_rating_key(section_key) {
+        return Err(fail(
+            0,
+            PlexError::invalid_response("consultar a biblioteca").public_message(),
+        ));
+    }
+    let started = Instant::now();
+    let mut server_id: Option<String> = None;
+    let sort = match sort_by {
+        "title" => "titleSort:asc",
+        "year" => "originallyAvailableAt:desc",
+        _ => "addedAt:desc",
+    };
+    for _ in 0..MAX_ALBUM_PAGES {
+        let current = snapshot().map_err(|e| fail(pages.albums.len(), e.public_message()))?;
+        if current.generation != initial.generation {
+            return Err(fail(
+                pages.albums.len(),
+                PlexError {
+                    operation: "consultar os álbuns",
+                    kind: PlexErrorKind::ConfigurationChanged,
+                }
+                .public_message(),
+            ));
+        }
+        if started.elapsed() >= ALBUM_CATALOG_TIMEOUT {
+            break;
+        }
+        let path = format!("/library/sections/{section_key}/all?type=9&sort={sort}&X-Plex-Container-Start={}&X-Plex-Container-Size={ALBUM_PAGE_SIZE}", pages.albums.len());
+        let (json, connection): (serde_json::Value, _) = request(path)
+            .await
+            .map_err(|e| fail(pages.albums.len(), e.public_message()))?;
+        let current = snapshot().map_err(|e| fail(pages.albums.len(), e.public_message()))?;
+        if connection.generation != initial.generation
+            || current.generation != initial.generation
+            || server_id
+                .as_ref()
+                .is_some_and(|id| id != &connection.server_id)
+            || initial
+                .identity
+                .as_ref()
+                .is_some_and(|id| id.machine_identifier != connection.server_id)
+        {
+            return Err(fail(
+                pages.albums.len(),
+                PlexError {
+                    operation: "consultar os álbuns",
+                    kind: PlexErrorKind::ConfigurationChanged,
+                }
+                .public_message(),
+            ));
+        }
+        if started.elapsed() >= ALBUM_CATALOG_TIMEOUT {
+            break;
+        }
+        server_id = Some(connection.server_id.clone());
+        let complete = pages
+            .accept(&json, &connection)
+            .map_err(|message| fail(pages.albums.len(), message))?;
+        if complete {
+            return Ok(PlexAlbumCatalog {
+                server_id: connection.server_id,
+                library_id: section_key.to_string(),
+                completeness: AlbumCatalogCompleteness::Complete,
+                total: pages.albums.len(),
+                albums: pages.albums,
+            });
+        }
+    }
+    Err(fail(
+        pages.albums.len(),
+        "Catálogo Plex incompleto: limite de páginas ou tempo atingido.".to_string(),
+    ))
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlexCollection {
     pub server_id: String,
@@ -2860,6 +3447,109 @@ fn navigation_album_thumb(
         }
         PlexImageRef::from_connection(connection, path)
     })
+}
+
+// Read one exact artist, never an album thumbnail or a nominal search match.
+async fn read_artist_portrait<F, Fut, S>(
+    server_id: &str,
+    rating_key: &str,
+    request: F,
+    snapshot: S,
+) -> Result<Option<PlexImageRef>, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<(serde_json::Value, ResolvedPlexConnection), PlexError>,
+    >,
+    S: Fn() -> Result<PlexConnectionSnapshot, PlexError>,
+{
+    let operation = "resolver o retrato do artista";
+    let invalid = || PlexError::invalid_response(operation).public_message();
+    if validate_plex_server_id(server_id).is_err() || !navigation_rating_key(rating_key) {
+        return Err(invalid());
+    }
+    let initial = snapshot().map_err(|error| error.public_message())?;
+    if initial
+        .identity
+        .as_ref()
+        .map(|identity| identity.machine_identifier.as_str())
+        != Some(server_id)
+    {
+        return Err(invalid());
+    }
+    let (json, connection) = request(format!(
+        "/library/metadata/{}",
+        urlencoding::encode(rating_key)
+    ))
+    .await
+    .map_err(|error| error.public_message())?;
+    let current = snapshot().map_err(|error| error.public_message())?;
+    if initial.generation != current.generation
+        || initial.generation != connection.generation
+        || connection.server_id != server_id
+        || current
+            .identity
+            .as_ref()
+            .map(|identity| identity.machine_identifier.as_str())
+            != Some(server_id)
+    {
+        return Err(PlexError {
+            operation,
+            kind: PlexErrorKind::ConfigurationChanged,
+        }
+        .public_message());
+    }
+    let container = media_container(&json, operation).map_err(|error| error.public_message())?;
+    if container
+        .get("machineIdentifier")
+        .is_some_and(|id| id.as_str() != Some(server_id))
+    {
+        return Err(invalid());
+    }
+    let items = container
+        .get("Metadata")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(&invalid)?;
+    if items.len() != 1
+        || items[0]["type"].as_str() != Some("artist")
+        || items[0]["ratingKey"].as_str() != Some(rating_key)
+    {
+        return Err(invalid());
+    }
+    let path = match items[0].get("thumb") {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(value) => value.as_str().ok_or_else(&invalid)?,
+    };
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let prefix = format!("/library/metadata/{rating_key}/thumb");
+    let suffix = path
+        .split('?')
+        .next()
+        .and_then(|path| path.strip_prefix(&prefix))
+        .ok_or_else(&invalid)?;
+    if !suffix.is_empty()
+        && !suffix.strip_prefix('/').is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return Err(invalid());
+    }
+    let decoded_path = urlencoding::decode(path).map_err(|_| invalid())?;
+    for token in [
+        connection.token.as_str(),
+        initial.account_token.as_str(),
+        current.account_token.as_str(),
+        current.resolved_token.as_deref().unwrap_or(""),
+    ] {
+        if !token.is_empty() && (path.contains(token) || decoded_path.contains(token)) {
+            return Err(invalid());
+        }
+    }
+    PlexImageRef::from_connection(&connection, path)
+        .map(Some)
+        .ok_or_else(invalid)
 }
 
 #[derive(Clone)]
@@ -3373,55 +4063,27 @@ impl PlexClient {
         Ok(libraries)
     }
 
-    pub async fn get_albums(&self, section_key: &str, sort_by: &str) -> Result<Vec<PlexAlbum>, String> {
-        let sort_param = match sort_by {
-            "title" => "titleSort:asc",
-            "year" => "originallyAvailableAt:desc",
-            _ => "addedAt:desc",
-        };
-
-        let path = format!(
-            "/library/sections/{}/all?type=9&sort={}",
-            section_key, sort_param
-        );
-
-        let operation = "consultar os álbuns";
-        let (json, connection): (serde_json::Value, _) = self
+    pub async fn get_albums(
+        &self,
+        section_key: &str,
+        sort_by: &str,
+    ) -> Result<PlexAlbumCatalog, PlexAlbumCatalogError> {
+        let initial = self
             .connection_manager
-            .request_json(&path, operation)
-            .await
-            .map_err(|error| error.public_message())?;
-        let container = media_container(&json, operation)
-            .map_err(|error| error.public_message())?;
-        let mut albums = Vec::new();
-
-        if let Some(meta) = container
-            .get("Metadata")
-            .and_then(serde_json::Value::as_array)
-        {
-            for item in meta {
-                let rating_key = item["ratingKey"].as_str().unwrap_or("").to_string();
-                let title = item["title"].as_str().unwrap_or("Desconhecido").to_string();
-                let artist = item["parentTitle"].as_str().unwrap_or("Vários Artistas").to_string();
-                let artist_rating_key = item["parentRatingKey"].as_str().map(|s| s.to_string());
-                let year = item["year"].as_u64().map(|y| y as u32);
-                let thumb = item["thumb"]
-                    .as_str()
-                    .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
-
-                albums.push(PlexAlbum {
-                    rating_key,
-                    title,
-                    artist,
-                    artist_rating_key,
-                    year,
-                    genres: plex_album_genres(item, &connection),
-                    thumb,
-                });
-            }
-        }
-
-        Ok(albums)
+            .snapshot()
+            .map_err(|e| PlexAlbumCatalogError::new(0, e.public_message()))?;
+        read_album_catalog(
+            section_key,
+            sort_by,
+            initial,
+            |path| async move {
+                self.connection_manager
+                    .request_json(&path, "consultar os álbuns")
+                    .await
+            },
+            || self.connection_manager.snapshot(),
+        )
+        .await
     }
 
     pub async fn get_collections(&self, section_key: &str) -> Result<Vec<PlexCollection>, String> {
@@ -3502,6 +4164,24 @@ impl PlexClient {
         }
 
         Ok(albums)
+    }
+
+    pub async fn get_artist_portrait(
+        &self,
+        server_id: &str,
+        rating_key: &str,
+    ) -> Result<Option<PlexImageRef>, String> {
+        read_artist_portrait(
+            server_id,
+            rating_key,
+            |path| async move {
+                self.connection_manager
+                    .request_json(&path, "resolver o retrato do artista")
+                    .await
+            },
+            || self.connection_manager.snapshot(),
+        )
+        .await
     }
 
     pub async fn get_artist_albums(&self, artist_rating_key: &str) -> Result<Vec<PlexAlbum>, String> {

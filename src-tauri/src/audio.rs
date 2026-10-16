@@ -256,6 +256,42 @@ pub struct LocalItem {
     pub duration: Option<f64>,
 }
 
+/// Presence of raw values in accepted MPD index rows, not a physical/semantic inspection.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct LocalAlbumMissingTags {
+    pub album: usize,
+    pub artist: usize,
+    pub album_artist: usize,
+    pub date: usize,
+    pub genre: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct LocalAlbumTagPresence {
+    pub evaluated_track_count: usize,
+    pub missing: LocalAlbumMissingTags,
+}
+
+impl LocalAlbumTagPresence {
+    fn observe(&mut self, present: [bool; 5]) {
+        self.evaluated_track_count += 1;
+        self.missing.album += usize::from(!present[0]);
+        self.missing.artist += usize::from(!present[1]);
+        self.missing.album_artist += usize::from(!present[2]);
+        self.missing.date += usize::from(!present[3]);
+        self.missing.genre += usize::from(!present[4]);
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.evaluated_track_count += other.evaluated_track_count;
+        self.missing.album += other.missing.album;
+        self.missing.artist += other.missing.artist;
+        self.missing.album_artist += other.missing.album_artist;
+        self.missing.date += other.missing.date;
+        self.missing.genre += other.missing.genre;
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LocalAlbum {
     pub id: String,
@@ -266,8 +302,12 @@ pub struct LocalAlbum {
     pub genres: Vec<String>,
     pub folder_path: String,
     pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
     pub track_count: usize,
     pub discs: Vec<LocalAlbumDisc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_presence: Option<LocalAlbumTagPresence>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -319,6 +359,8 @@ impl PlaybackDiagnostic {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlaybackStatus {
+    #[serde(default)]
+    pub options: Option<crate::playback_options::PlaybackOptions>,
     pub state: String,
     pub elapsed: f64,
     pub duration: f64,
@@ -399,6 +441,39 @@ struct PlaybackProgressStatus {
 
 const SHARED_PROGRESS_SAMPLE_DELAY: Duration = Duration::from_millis(80);
 const SHARED_MIN_PROGRESS: f64 = 0.02;
+
+// Seek-only budget: 4 samples over 960 ms; after the existing single recovery,
+// 2 more tail samples (880 ms including recovery's 80 ms). At most 11 status
+// queries + seekcur + pause 1/0. Reads/writes/sleeps use a 3 s deadline under
+// AudioState; mutex acquisition and the existing Unix connect are not timed here.
+const SHARED_SEEK_BUDGET: Duration = Duration::from_secs(3);
+const SEEK_TAIL_DELAY: Duration = Duration::from_millis(400);
+
+struct MpdDeadlineReader {
+    stream: UnixStream,
+    deadline: Option<Instant>,
+}
+
+fn mpd_deadline_timeout(deadline: Option<Instant>) -> Result<Duration, String> {
+    let remaining = deadline
+        .map(|end| end.saturating_duration_since(Instant::now()))
+        .unwrap_or(Duration::from_millis(500));
+    if remaining.is_zero() {
+        return Err("Prazo de confirmação do seek Shared esgotado.".into());
+    }
+    Ok(remaining.min(Duration::from_millis(500)))
+}
+
+impl Read for MpdDeadlineReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.deadline.is_some() {
+            let timeout = mpd_deadline_timeout(self.deadline)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::TimedOut, error))?;
+            self.stream.set_read_timeout(Some(timeout))?;
+        }
+        self.stream.read(buffer)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeviceSwitchSnapshot {
@@ -976,6 +1051,7 @@ struct AlbumCollector {
     year: Option<String>,
     genres: Vec<String>,
     track_count: usize,
+    tag_presence: LocalAlbumTagPresence,
     folder_path: String,
     track_uris: Vec<String>,
     tracks: Vec<(String, LocalItem)>,
@@ -1017,6 +1093,7 @@ impl AlbumCollector {
             crate::catalog_genres::add_genre(&mut self.genres, genre);
         }
         self.track_count += other.track_count;
+        self.tag_presence.merge(&other.tag_presence);
         self.track_uris.extend(other.track_uris);
         self.tracks.extend(other.tracks);
         for other_disc in other.discs {
@@ -1063,6 +1140,7 @@ impl AlbumCollector {
             crate::catalog_genres::add_genre(&mut self.genres, genre);
         }
         self.track_count += other.track_count;
+        self.tag_presence.merge(&other.tag_presence);
         self.track_uris.extend(other.track_uris);
         self.tracks.extend(other.tracks);
         if self.year.is_none() {
@@ -1563,8 +1641,11 @@ impl AudioEngine {
                     genres: col.genres,
                     folder_path: col.folder_path,
                     source_id,
+                    source_label: None,
                     track_count: col.track_count,
                     discs: col.discs,
+                    tag_presence: (col.tag_presence.evaluated_track_count == col.track_count)
+                        .then_some(col.tag_presence),
                 }
             })
             .collect();
@@ -1644,6 +1725,7 @@ impl AudioEngine {
         let mut cur_date = None;
         let mut cur_genres = Vec::new();
         let mut cur_duration = None;
+        let mut cur_presence = [false; 5];
 
         let commit_track = |collection: &mut LocalAlbumCollection,
                             file: &str,
@@ -1653,7 +1735,8 @@ impl AudioEngine {
                             album_artist: Option<String>,
                             date: Option<String>,
                             genres: Vec<String>,
-                            duration: Option<f64>| {
+                            duration: Option<f64>,
+                            present: [bool; 5]| {
             if file.is_empty() || !local_media::is_catalog_track_uri(file) {
                 return;
             }
@@ -1697,6 +1780,7 @@ impl AudioEngine {
                 year: date.clone(),
                 genres: Vec::new(),
                 track_count: 0,
+                tag_presence: LocalAlbumTagPresence::default(),
                 folder_path: physical_folder.clone(),
                 track_uris: Vec::new(),
                 tracks: Vec::new(),
@@ -1710,6 +1794,7 @@ impl AudioEngine {
                 entry.title = title.clone();
             }
             entry.track_count += 1;
+            entry.tag_presence.observe(present);
             entry.track_uris.push(file.to_string());
             entry.tracks.push((
                 disc_path.clone(),
@@ -1768,16 +1853,32 @@ impl AudioEngine {
                             cur_date.take(),
                             std::mem::take(&mut cur_genres),
                             cur_duration.take(),
+                            std::mem::replace(&mut cur_presence, [false; 5]),
                         );
                         cur_file = v.to_string();
                         found += 1;
                     }
                     "Title" if !cur_file.is_empty() => cur_title = Some(v.to_string()),
-                    "Album" if !cur_file.is_empty() => cur_album = Some(v.to_string()),
-                    "Artist" if !cur_file.is_empty() => cur_artist = Some(v.to_string()),
-                    "AlbumArtist" if !cur_file.is_empty() => cur_album_artist = Some(v.to_string()),
-                    "Genre" if !cur_file.is_empty() => crate::catalog_genres::add_genre(&mut cur_genres, v),
-                    "Date" if !cur_file.is_empty() => cur_date = Some(v.chars().take(4).collect::<String>()),
+                    "Album" if !cur_file.is_empty() => {
+                        cur_presence[0] |= !v.trim().is_empty();
+                        cur_album = Some(v.to_string());
+                    }
+                    "Artist" if !cur_file.is_empty() => {
+                        cur_presence[1] |= !v.trim().is_empty();
+                        cur_artist = Some(v.to_string());
+                    }
+                    "AlbumArtist" if !cur_file.is_empty() => {
+                        cur_presence[2] |= !v.trim().is_empty();
+                        cur_album_artist = Some(v.to_string());
+                    }
+                    "Genre" if !cur_file.is_empty() => {
+                        cur_presence[4] |= !v.trim().is_empty();
+                        crate::catalog_genres::add_genre(&mut cur_genres, v);
+                    }
+                    "Date" if !cur_file.is_empty() => {
+                        cur_presence[3] |= !v.trim().is_empty();
+                        cur_date = Some(v.chars().take(4).collect::<String>());
+                    }
                     "duration" | "Time" | "time" | "Duration" if !cur_file.is_empty() => {
                         if cur_duration.is_none() {
                             cur_duration = v.trim().parse::<f64>().ok();
@@ -1798,6 +1899,7 @@ impl AudioEngine {
             cur_date,
             cur_genres,
             cur_duration,
+            cur_presence,
         );
 
         Ok(found)
@@ -2583,6 +2685,7 @@ impl AudioEngine {
                     "[Persistence] Failed to validate queue cache permissions: {}",
                     crate::diagnostics::error_summary(&error)
                 );
+                return (Vec::new(), None);
             }
             if p.exists() {
                 match std::fs::File::open(&p) {
@@ -2685,6 +2788,15 @@ impl AudioEngine {
     }
 
     fn send_command_to_socket(socket_path: &str, command: &str) -> Result<Vec<String>, String> {
+        Self::send_command_to_socket_before(socket_path, command, None)
+    }
+
+    fn send_command_to_socket_before(
+        socket_path: &str,
+        command: &str,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<String>, String> {
+        mpd_deadline_timeout(deadline)?;
         let mut stream = UnixStream::connect(socket_path)
             .map_err(|e| format!("Falha ao conectar no socket MPD: {}", e))?;
 
@@ -2695,7 +2807,10 @@ impl AudioEngine {
             .set_write_timeout(Some(Duration::from_millis(500)))
             .map_err(|e| format!("Falha ao configurar timeout de escrita do MPD: {}", e))?;
 
-        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+        let mut reader = BufReader::new(MpdDeadlineReader {
+            stream: stream.try_clone().map_err(|e| e.to_string())?,
+            deadline,
+        });
         let mut welcome = String::new();
         let welcome_bytes = reader
             .read_line(&mut welcome)
@@ -2705,6 +2820,11 @@ impl AudioEngine {
         }
 
         let cmd = format!("{}\n", command);
+        if deadline.is_some() {
+            stream
+                .set_write_timeout(Some(mpd_deadline_timeout(deadline)?))
+                .map_err(|e| format!("Falha ao configurar prazo de escrita do MPD: {e}"))?;
+        }
         stream
             .write_all(cmd.as_bytes())
             .map_err(|e| format!("Falha ao enviar comando ao MPD: {}", e))?;
@@ -2712,7 +2832,10 @@ impl AudioEngine {
             .flush()
             .map_err(|e| format!("Falha ao concluir envio do comando ao MPD: {}", e))?;
 
-        Self::read_mpd_response(&mut reader)
+        match deadline {
+            Some(_) => Self::read_mpd_response_before(&mut reader, deadline),
+            None => Self::read_mpd_response(&mut reader),
+        }
     }
 
     pub fn get_local_cover_at(
@@ -2721,17 +2844,24 @@ impl AudioEngine {
         path: &str,
         local_folders: &[String],
     ) -> Result<Option<String>, String> {
-        let resolved = local_media::resolve_local_path(library_dir, path, local_folders)
-            .map_err(|error| error.to_string())?;
+        let resolved = {
+            let _diagnostic = crate::diagnostics::DevSpan::new("cover.resolve_root");
+            local_media::resolve_local_path(library_dir, path, local_folders)
+                .map_err(|error| error.to_string())?
+        };
         let full_path = resolved.physical_path;
-        let local_cover = if full_path.is_dir() {
-            find_folder_cover_path(&full_path)
-        } else {
-            full_path.parent().and_then(find_folder_cover_path)
+        let local_cover = {
+            let _diagnostic = crate::diagnostics::DevSpan::new("cover.folder");
+            if full_path.is_dir() {
+                find_folder_cover_path(&full_path)
+            } else {
+                full_path.parent().and_then(find_folder_cover_path)
+            }
         };
         if local_cover.is_some() {
             return Ok(local_cover);
         }
+        let _diagnostic = crate::diagnostics::DevSpan::new("cover.mpd");
         Self::embedded_cover_for_folder(socket_path, path)
     }
 
@@ -2933,12 +3063,21 @@ impl AudioEngine {
     }
 
     fn read_mpd_response<R: BufRead>(reader: &mut R) -> Result<Vec<String>, String> {
+        Self::read_mpd_response_before(reader, None)
+    }
+
+    fn read_mpd_response_before<R: BufRead>(
+        reader: &mut R,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<String>, String> {
         let mut lines = Vec::new();
         loop {
+            mpd_deadline_timeout(deadline)?;
             let mut line = String::new();
             let bytes = reader
                 .read_line(&mut line)
                 .map_err(|e| format!("Falha ao ler resposta do MPD: {}", e))?;
+            mpd_deadline_timeout(deadline)?;
             if bytes == 0 {
                 return Err("Conexão MPD encerrada antes da resposta final.".to_string());
             }
@@ -3796,6 +3935,75 @@ impl AudioEngine {
         })
     }
 
+    fn seek_progress(
+        lines: &[String],
+        expected_state: PlaybackState,
+        song_id: Option<u32>,
+    ) -> Result<(PlaybackProgressStatus, u32), String> {
+        let field = |prefix: &str| {
+            let mut values = lines.iter().filter_map(|line| line.strip_prefix(prefix));
+            let value = values.next();
+            if values.next().is_some() {
+                None
+            } else {
+                value
+            }
+        };
+        if lines.iter().any(|line| line.starts_with("error: ")) {
+            return Err("O MPD informou erro durante confirmação do seek Shared.".into());
+        }
+        if field("state: ").is_none() || field("elapsed: ").is_none() {
+            return Err("Status incompleto ou ambíguo durante confirmação do seek Shared.".into());
+        }
+        let progress = Self::parse_progress_status(lines.to_vec())?;
+        if progress.state != expected_state {
+            return Err(if progress.state == PlaybackState::Stopped {
+                "O MPD parou inesperadamente após o seek Shared."
+            } else {
+                "O MPD mudou de estado durante confirmação do seek Shared."
+            }
+            .into());
+        }
+        let id = field("songid: ")
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or("Identidade da faixa indisponível durante confirmação do seek Shared.")?;
+        if song_id.is_some_and(|expected| expected != id) {
+            return Err("A faixa mudou durante confirmação do seek Shared.".into());
+        }
+        Ok((progress, id))
+    }
+
+    fn seek_tail_continues<F, S>(
+        song_id: u32,
+        previous: PlaybackProgressStatus,
+        send: &mut F,
+        sleep: &mut S,
+    ) -> Result<(PlaybackProgressStatus, bool), String>
+    where
+        F: FnMut(&str) -> Result<Vec<String>, String>,
+        S: FnMut(Duration),
+    {
+        sleep(SEEK_TAIL_DELAY);
+        let first = Self::seek_progress(&send("status")?, PlaybackState::Playing, Some(song_id))?.0;
+        if first.elapsed < previous.elapsed {
+            return Err(
+                "A posição mudou inesperadamente durante confirmação do seek Shared.".into(),
+            );
+        }
+        sleep(SEEK_TAIL_DELAY);
+        let second =
+            Self::seek_progress(&send("status")?, PlaybackState::Playing, Some(song_id))?.0;
+        if second.elapsed < first.elapsed {
+            return Err(
+                "A posição mudou inesperadamente durante confirmação do seek Shared.".into(),
+            );
+        }
+        Ok((
+            second,
+            second.elapsed - first.elapsed >= SHARED_MIN_PROGRESS,
+        ))
+    }
+
     fn seek_with<F, S>(
         &mut self,
         seconds: f64,
@@ -3825,39 +4033,122 @@ impl AudioEngine {
             return Ok(());
         }
 
-        let pre_state = if is_shared {
-            Some(Self::parse_progress_status(send_command("status")?)?.state)
+        let pre = if is_shared {
+            let lines = send_command("status")?;
+            let state = Self::parse_progress_status(lines.clone())?.state;
+            let id = if state == PlaybackState::Playing {
+                Some(Self::seek_progress(&lines, PlaybackState::Playing, None)?.1)
+            } else {
+                None
+            };
+            Some((state, id))
         } else {
             None
         };
         send_command(&format!("seekcur {:.1}", seconds))?;
-        if pre_state != Some(PlaybackState::Playing) {
+        let Some((PlaybackState::Playing, Some(song_id))) = pre else {
             return Ok(());
-        }
+        };
 
         const TARGET_TOLERANCE: f64 = 2.0;
         sleep(SHARED_PROGRESS_SAMPLE_DELAY);
-        let first = Self::parse_progress_status(send_command("status")?)?;
+        let first = Self::seek_progress(
+            &send_command("status")?,
+            PlaybackState::Playing,
+            Some(song_id),
+        )?
+        .0;
         sleep(SHARED_PROGRESS_SAMPLE_DELAY);
-        let second = Self::parse_progress_status(send_command("status")?)?;
-        if first.state == PlaybackState::Stopped || second.state == PlaybackState::Stopped {
-            return Err("O MPD parou inesperadamente após o seek Shared.".to_string());
-        }
-        if first.state != PlaybackState::Playing || second.state != PlaybackState::Playing {
-            return Err("O MPD deixou o estado de reprodução durante o seek Shared.".to_string());
-        }
+        let second = Self::seek_progress(
+            &send_command("status")?,
+            PlaybackState::Playing,
+            Some(song_id),
+        )?
+        .0;
         let near_target = (first.elapsed - seconds).abs() <= TARGET_TOLERANCE
             && (second.elapsed - seconds).abs() <= TARGET_TOLERANCE;
-        if !near_target || second.elapsed - first.elapsed >= SHARED_MIN_PROGRESS {
+        if !near_target || second.elapsed < first.elapsed {
+            return Err("A posição não confirmou o seek Shared solicitado.".into());
+        }
+        let (mut last, continuous) =
+            Self::seek_tail_continues(song_id, second, send_command, sleep)?;
+        if continuous {
             return Ok(());
         }
-        Self::recover_shared_stall("o seek", send_command, sleep)
+        // Use the existing pause/resume exactly once. Validate identity/error
+        // and expected state immediately before each command, including pause 0.
+        Self::recover_shared_stall(
+            "o seek",
+            &mut |command: &str| {
+                if command.starts_with("pause ") {
+                    let state = if command == "pause 1" {
+                        PlaybackState::Playing
+                    } else {
+                        PlaybackState::Paused
+                    };
+                    let progress =
+                        Self::seek_progress(&send_command("status")?, state, Some(song_id))?.0;
+                    if progress.elapsed < last.elapsed {
+                        return Err("A posição mudou antes de recuperar o seek Shared.".into());
+                    }
+                    last = progress;
+                }
+                let lines = send_command(command)?;
+                if command == "status" {
+                    let progress =
+                        Self::seek_progress(&lines, PlaybackState::Playing, Some(song_id))?.0;
+                    if progress.elapsed < last.elapsed {
+                        return Err("A posição mudou durante recuperação do seek Shared.".into());
+                    }
+                    last = progress;
+                }
+                Ok(lines)
+            },
+            sleep,
+        )?;
+        if !Self::seek_tail_continues(song_id, last, send_command, sleep)?.1 {
+            return Err("A saída Shared permaneceu congelada após uma tentativa de pause/resume para o seek.".into());
+        }
+        Ok(())
+    }
+
+    fn seek_deadline(
+        started: Instant,
+        shared: bool,
+        status: &Result<Vec<String>, String>,
+    ) -> Option<Instant> {
+        (shared
+            && status.as_ref().ok().is_some_and(|lines| {
+                Self::parse_progress_status(lines.clone())
+                    .is_ok_and(|status| status.state == PlaybackState::Playing)
+            }))
+        .then_some(started + SHARED_SEEK_BUDGET)
     }
 
     pub fn seek(&mut self, seconds: f64, is_shared: bool) -> Result<(), String> {
         let socket_path = self.socket_path.clone();
-        let mut send_command = |command: &str| Self::send_command_to_socket(&socket_path, command);
-        self.seek_with(seconds, is_shared, &mut send_command, &mut std::thread::sleep)
+        let started = Instant::now();
+        let deadline = std::cell::Cell::new(None::<Instant>);
+        let mut pre_status = true;
+        let mut send_command = |command: &str| {
+            let result = Self::send_command_to_socket_before(&socket_path, command, deadline.get());
+            // Activate only after observing Shared Playing. Direct, paused,
+            // stopped and logical restored seeks retain their original I/O path.
+            if is_shared && pre_status && command == "status" {
+                pre_status = false;
+                deadline.set(Self::seek_deadline(started, is_shared, &result));
+            }
+            crate::diagnostics::now_playing_seek_command(command, &result);
+            result
+        };
+        self.seek_with(seconds, is_shared, &mut send_command, &mut |delay| {
+            std::thread::sleep(
+                deadline
+                    .get()
+                    .map(|end| delay.min(end.saturating_duration_since(Instant::now())))
+                    .unwrap_or(delay),
+            );
+        })
     }
 
     pub fn get_queue(&self) -> Vec<TrackMetadata> {
@@ -3988,6 +4279,14 @@ impl AudioEngine {
         }))
     }
 
+    pub fn change_playback_option(
+        &self,
+        action: crate::playback_options::PlaybackOptionAction,
+        expected: crate::playback_options::PlaybackOptions,
+    ) -> Result<crate::playback_options::PlaybackOptions, String> {
+        crate::playback_options::change(action, expected, |command| self.send_command(command))
+    }
+
     pub fn get_status(&self) -> Result<PlaybackStatus, String> {
         self.get_status_with_options(true, true)
     }
@@ -4001,7 +4300,51 @@ impl AudioEngine {
         include_artwork: bool,
         include_logical_resume: bool,
     ) -> Result<PlaybackStatus, String> {
-        let lines = self.send_command("status")?;
+        self.get_status_with_cover_lookup(include_artwork, include_logical_resume, |uri| {
+            self.resolve_cover(uri)
+        })
+    }
+
+    // Telemetry must never touch collection/NAS paths. Queue artwork is already
+    // resolved by the playback preparation path and can be copied without I/O.
+    pub(crate) fn get_telemetry_status(&self) -> Result<PlaybackStatus, String> {
+        self.get_telemetry_status_with(|command| self.send_command(command))
+    }
+
+    fn get_telemetry_status_with(
+        &self,
+        query: impl Fn(&str) -> Result<Vec<String>, String>,
+    ) -> Result<PlaybackStatus, String> {
+        self.get_status_with_io(true, true, |_| None, query)
+    }
+
+    fn get_status_with_cover_lookup(
+        &self,
+        include_artwork: bool,
+        include_logical_resume: bool,
+        cover: impl Fn(&str) -> Option<String>,
+    ) -> Result<PlaybackStatus, String> {
+        self.get_status_with_io(include_artwork, include_logical_resume, cover, |command| {
+            self.send_command(command)
+        })
+    }
+
+    fn get_status_with_io(
+        &self,
+        include_artwork: bool,
+        include_logical_resume: bool,
+        cover: impl Fn(&str) -> Option<String>,
+        query: impl Fn(&str) -> Result<Vec<String>, String>,
+    ) -> Result<PlaybackStatus, String> {
+        let lines = query("status")?;
+        let options = crate::playback_options::PlaybackOptions::from_status(&lines);
+        crate::diagnostics::now_playing_seek_telemetry(&lines);
+        crate::diagnostics::now_playing_mpd_error(
+            lines
+                .iter()
+                .filter_map(|line| line.strip_prefix("error: "))
+                .last(),
+        );
 
         let mut state = None;
         let mut elapsed = 0.0;
@@ -4046,6 +4389,7 @@ impl AudioEngine {
                         None => None,
                     };
                     return Ok(PlaybackStatus {
+                        options,
                         state: "pause".to_string(),
                         elapsed: resume.elapsed,
                         duration: track.duration.unwrap_or(0.0),
@@ -4057,7 +4401,7 @@ impl AudioEngine {
                         thumb: include_artwork
                             .then(|| {
                                 track.thumb.clone().or_else(|| {
-                                    local_uri.and_then(|uri| self.resolve_cover(uri))
+                                    local_uri.and_then(&cover)
                                 })
                             })
                             .flatten(),
@@ -4071,6 +4415,7 @@ impl AudioEngine {
                 }
             }
             return Ok(PlaybackStatus {
+                options,
                 state,
                 elapsed: 0.0,
                 duration: 0.0,
@@ -4087,7 +4432,7 @@ impl AudioEngine {
             });
         }
 
-        let song_lines = self.send_command("currentsong")?;
+        let song_lines = query("currentsong")?;
         let mut current_file = String::new();
         let mut current_song_index = None;
         let mut tag_title = String::new();
@@ -4182,12 +4527,13 @@ impl AudioEngine {
         }
 
         if include_artwork && thumb.is_none() && !current_file.is_empty() {
-            thumb = self.resolve_cover(&current_file);
+            thumb = cover(&current_file);
         }
 
         let current_media = self.current_media_for_queue_index(current_media_queue_index);
 
         Ok(PlaybackStatus {
+            options,
             state,
             elapsed,
             duration,
@@ -4216,6 +4562,62 @@ mod tests {
     use std::thread;
 
     static ALBUM_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn playback_options_status_preserves_stopped_restored_and_local_plex_identity() {
+        for plex in [false, true] {
+            let mut engine = engine_with_logical_resume();
+            engine.restored_resume.as_mut().unwrap().queue_index = 0;
+            if plex {
+                engine.queue[0] = plex_track();
+            }
+            let before_queue = serde_json::to_string(&engine.queue).unwrap();
+            let before_resume = engine.restored_resume;
+            for state in ["stop", "pause", "play"] {
+                let query = |command: &str| match command {
+                    "status" => {
+                        let mut lines = vec![
+                            format!("state: {state}"),
+                            "repeat: 1".into(),
+                            "single: 1".into(),
+                            "random: 1".into(),
+                        ];
+                        if state != "stop" {
+                            lines.extend([
+                                "song: 0".into(),
+                                "elapsed: 9".into(),
+                                "duration: 120".into(),
+                            ]);
+                        }
+                        Ok(lines)
+                    }
+                    "currentsong" => Ok(vec!["Pos: 0".into(), "file: fixture.flac".into()]),
+                    _ => panic!("unexpected queue/transport query"),
+                };
+                let status = engine
+                    .get_status_with_io(false, true, |_| None, query)
+                    .unwrap();
+                let options = status.options.unwrap();
+                assert!(options.repeat && options.random);
+                assert_eq!(options.single, crate::playback_options::SingleMode::On);
+                assert_eq!(
+                    status.current_media,
+                    engine.current_media_for_queue_index(Some(0))
+                );
+                if state == "stop" {
+                    assert_eq!(status.state, "pause");
+                    assert_eq!(status.elapsed, before_resume.unwrap().elapsed);
+                    let neutral = engine
+                        .get_status_with_io(false, false, |_| None, query)
+                        .unwrap();
+                    assert_eq!(neutral.state, "stop");
+                    assert_eq!(neutral.options, Some(options));
+                }
+            }
+            assert_eq!(serde_json::to_string(&engine.queue).unwrap(), before_queue);
+            assert_eq!(engine.restored_resume, before_resume);
+        }
+    }
 
     #[test]
     fn toggle_play_pause_characterizes_transport_commands_without_recovery() {
@@ -4546,6 +4948,7 @@ mod tests {
         Ok(vec![
             format!("state: {state}"),
             format!("elapsed: {elapsed}"),
+            "songid: 42".into(),
         ])
     }
 
@@ -8347,6 +8750,49 @@ mod tests {
     }
 
     #[test]
+    fn playback_error_observation_never_suppresses_auxiliary_or_primary_errors() {
+        let errors = [
+            "Failed to write to FIFO /private/fifo: Broken pipe",
+            "Failed to open \"Sonante Output\" (alsa); Failed to open ALSA device \"hw:private\": Invalid argument",
+        ];
+        let engine = engine_with_track("local/fixture.flac");
+        let queue_before = serde_json::to_string(&engine.queue).unwrap();
+        let mut snapshots = Vec::new();
+        for error in errors {
+            let status = engine
+                .get_status_with_io(
+                    true,
+                    true,
+                    |_| None,
+                    |command| {
+                        Ok(match command {
+                            "status" => vec![
+                                "state: play".into(),
+                                "song: 0".into(),
+                                "elapsed: 17".into(),
+                                format!("error: {error}"),
+                            ],
+                            "currentsong" => vec!["Pos: 0".into()],
+                            _ => panic!("observation must only read status/current song"),
+                        })
+                    },
+                )
+                .unwrap();
+            assert_eq!(status.state, "play");
+            assert_eq!(status.elapsed, 17.0);
+            assert_eq!(
+                status.playback_error,
+                Some(PlaybackDiagnostic::PlaybackError)
+            );
+            snapshots.push(status);
+        }
+        assert_eq!(snapshots[0].current_media, snapshots[1].current_media);
+        assert_eq!(serde_json::to_string(&engine.queue).unwrap(), queue_before);
+        // The fixture accepts status/currentsong only: no clearerror, transport,
+        // queue or output commands are permitted by an observation.
+    }
+
+    #[test]
     fn playback_error_is_safe_in_play_pause_and_stop_for_local_and_plex() {
         for state in ["play", "pause", "stop"] {
             for plex in [false, true] {
@@ -8578,6 +9024,74 @@ mod tests {
         let _engine = AudioEngine::new("/no-test-mpd", "/no-test-music");
     }
 
+    // A rejected cache must never be opened or migrated through its link.
+    #[test]
+    fn rejected_queue_cache_symlink_is_not_loaded_or_migrated() {
+        use std::os::unix::fs::symlink;
+        let path = get_queue_cache_path().unwrap(); // cfg(test): private temp, never HOME
+        let target = path.with_file_name("synthetic-cache-target.json");
+        let queue = engine_with_track("Synthetic/track.flac").queue;
+        let bytes = serde_json::to_vec(&queue).unwrap(); // legacy payload would request migration
+        crate::persistence::atomic_write_private(&target, &bytes, "synthetic cache").unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(
+            crate::persistence::prepare_private_file_for_load(&path, "queue_cache.json").is_err()
+        );
+        let (loaded, resume) = AudioEngine::load_queue_cache();
+        assert!(loaded.is_empty());
+        assert!(resume.is_none());
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&target).unwrap();
+    }
+
+    #[test]
+    fn queue_cache_load_absent_then_regular_preserves_resume_without_rewrite_or_play() {
+        let path = get_queue_cache_path().unwrap();
+        assert!(!path.exists());
+        let (queue, resume) = AudioEngine::load_queue_cache();
+        assert!(queue.is_empty() && resume.is_none());
+        assert!(!path.exists(), "absence must not create a cache file");
+        let queue = engine_with_track("Synthetic/regular.flac").queue;
+        let resume = PlaybackResumeSnapshot {
+            queue_index: 0,
+            elapsed: 17.5,
+            state: PlaybackState::Paused,
+        };
+        let bytes = AudioEngine::encode_queue_cache_with_resume(&queue, Some(&resume)).unwrap();
+        crate::persistence::atomic_write_private(&path, &bytes, "queue_cache.json").unwrap();
+        // new() only loads/arms startup state; no socket or playback is started.
+        let engine = AudioEngine::new("/no-test-mpd", "/no-test-music");
+        assert_eq!(engine.queue.len(), 1);
+        assert_eq!(engine.queue[0].uri, "Synthetic/regular.flac");
+        assert_eq!(engine.restored_resume.as_ref(), Some(&resume));
+        assert!(engine.startup_queue_pending());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn queue_cache_load_rejects_non_regular_entry_without_replacing_it() {
+        let path = get_queue_cache_path().unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        let sentinel = path.join("synthetic-sentinel");
+        std::fs::write(&sentinel, b"preserved fixture").unwrap();
+        assert!(
+            crate::persistence::prepare_private_file_for_load(&path, "queue_cache.json").is_err()
+        );
+        let (queue, resume) = AudioEngine::load_queue_cache();
+        assert!(queue.is_empty() && resume.is_none());
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserved fixture");
+        std::fs::remove_file(sentinel).unwrap();
+        std::fs::remove_dir(path).unwrap();
+    }
+
     #[test]
     fn resume_cache_roundtrip_and_invalid_cursor_preserve_queue() {
         let queue = engine_with_track("Álbum/uma faixa.flac").queue;
@@ -8715,6 +9229,95 @@ mod tests {
         assert_eq!(status.plex_image, engine.queue[0].plex_image);
         assert_eq!(status.current_media, engine.current_media_for_queue_index(Some(0)));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn telemetry_preserves_cached_artwork_media_and_pause_play_without_filesystem_lookup() {
+        for state in ["pause", "play"] {
+            let mut engine = engine_with_track("UnavailableNAS/faixa.flac");
+            engine.queue[0].thumb = Some("data:image/png;base64,cached".into());
+            let query = |command: &str| -> Result<Vec<String>, String> {
+                Ok(if command == "status" {
+                    vec![
+                        format!("state: {state}"),
+                        "song: 0".into(),
+                        "elapsed: 1.0".into(),
+                        "duration: 10.0".into(),
+                    ]
+                } else {
+                    assert_eq!(command, "currentsong");
+                    vec!["file: UnavailableNAS/faixa.flac".into(), "Pos: 0".into()]
+                })
+            };
+            let status = engine.get_telemetry_status_with(query).unwrap();
+            assert_eq!(status.state, state);
+            assert_eq!(
+                status.thumb.as_deref(),
+                Some("data:image/png;base64,cached")
+            );
+            assert_eq!(status.elapsed, 1.0);
+            assert!(status.current_media.is_some());
+            engine.queue[0].thumb = None;
+            let status = engine.get_telemetry_status_with(query).unwrap();
+            assert!(status.thumb.is_none());
+            assert_eq!(status.state, state);
+            // Normal artwork lookup is separately injected; telemetry bypasses it.
+            let reads = std::cell::Cell::new(0);
+            engine
+                .get_status_with_io(
+                    true,
+                    true,
+                    |_| {
+                        reads.set(reads.get() + 1);
+                        None
+                    },
+                    query,
+                )
+                .unwrap();
+            assert!(reads.get() > 0);
+        }
+    }
+    #[test]
+    fn telemetry_failure_recovery_and_logical_resume_do_not_play_or_restart() {
+        let mut engine = engine_with_track("UnavailableNAS/faixa.flac");
+        for error in [
+            "controlled timeout",
+            "ACK [5@0] {status} unavailable",
+            "connection reset",
+        ] {
+            assert_eq!(
+                engine
+                    .get_telemetry_status_with(|command| {
+                        assert_eq!(command, "status");
+                        Err(error.into())
+                    })
+                    .unwrap_err(),
+                error
+            );
+        }
+        engine.restored_resume = Some(PlaybackResumeSnapshot {
+            queue_index: 0,
+            elapsed: 16.0,
+            state: PlaybackState::Paused,
+        });
+        let status = engine
+            .get_telemetry_status_with(|command| {
+                assert_eq!(command, "status");
+                Ok(vec!["state: stop".into(), "volume: 70".into()])
+            })
+            .unwrap();
+        assert_eq!(status.state, "pause");
+        assert_eq!(status.elapsed, 16.0);
+        assert!(status.current_media.is_some());
+        assert!(status.thumb.is_none());
+        engine.restored_resume = None;
+        let status = engine
+            .get_telemetry_status_with(|command| {
+                assert_eq!(command, "status");
+                Ok(vec!["state: stop".into()])
+            })
+            .unwrap();
+        assert_eq!(status.state, "stop");
     }
 
     #[test]
@@ -9257,6 +9860,56 @@ mod tests {
     }
 
     #[test]
+    fn seek_rejection_preserves_ack_without_recovery_or_queue_mutation() {
+        for shared in [false, true] {
+            let mut engine = engine_with_track("local/fixture.flac");
+            let before = serde_json::to_string(&engine.queue).unwrap();
+            let mut responses = Vec::new();
+            if shared {
+                responses.push(seek_status("play", 57.4));
+            }
+            responses.push(Err("ACK [50@0] {seekcur} Not seekable".into()));
+            let (result, commands, sleeps) = scripted_seek(&mut engine, 62.5, shared, responses);
+            assert_eq!(result.unwrap_err(), "ACK [50@0] {seekcur} Not seekable");
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|cmd| cmd.starts_with("seekcur"))
+                    .count(),
+                1
+            );
+            assert!(!commands
+                .iter()
+                .any(|cmd| cmd.starts_with("pause") || cmd == "play" || cmd == "clearerror"));
+            assert_eq!(serde_json::to_string(&engine.queue).unwrap(), before);
+            assert!(sleeps.is_empty());
+        }
+    }
+
+    #[test]
+    fn seek_stopped_shared_refusal_and_invalid_target_never_force_playback() {
+        let mut engine = engine_with_track("local/fixture.flac");
+        let (result, commands, sleeps) = scripted_seek(
+            &mut engine,
+            62.5,
+            true,
+            vec![
+                seek_status("stop", 0.0),
+                Err("ACK [55@0] {seekcur} Not playing".into()),
+            ],
+        );
+        assert!(result.is_err());
+        assert_eq!(commands, vec!["status", "seekcur 62.5"]);
+        assert!(sleeps.is_empty());
+        for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+            let (result, commands, sleeps) = scripted_seek(&mut engine, invalid, true, vec![]);
+            assert!(result.is_err());
+            assert!(commands.is_empty());
+            assert!(sleeps.is_empty());
+        }
+    }
+
+    #[test]
     fn shared_paused_seek_does_not_resume_or_poll_after_seek() {
         let mut engine = engine_with_track("local/faixa.flac");
         let (result, commands, sleeps) = scripted_seek(
@@ -9270,110 +9923,177 @@ mod tests {
         assert!(sleeps.is_empty());
     }
 
+    fn seek_recovery_fixture(
+        target: f64,
+        early: [f64; 2],
+        tail: f64,
+    ) -> Vec<Result<Vec<String>, String>> {
+        vec![
+            seek_status("play", 11.337),
+            Ok(vec![]),
+            seek_status("play", early[0]),
+            seek_status("play", early[1]),
+            seek_status("play", tail),
+            seek_status("play", tail),
+            seek_status("play", tail),
+            Ok(vec![]),
+            seek_status("pause", tail),
+            Ok(vec![]),
+            seek_status("play", target + 0.935),
+            seek_status("play", target + 1.574),
+            seek_status("play", target + 2.075),
+            seek_status("play", target + 3.079),
+        ]
+    }
+
     #[test]
     fn shared_playing_seek_with_progress_needs_no_recovery() {
-        let mut engine = engine_with_track("local/faixa.flac");
-        let (result, commands, sleeps) = scripted_seek(
-            &mut engine,
-            114.0,
-            true,
-            vec![
-                seek_status("play", 57.4),
-                Ok(vec![]),
-                seek_status("play", 113.98),
-                seek_status("play", 114.06),
-            ],
-        );
-        result.unwrap();
-        assert_eq!(commands, vec!["status", "seekcur 114.0", "status", "status"]);
-        assert_eq!(sleeps, vec![Duration::from_millis(80); 2]);
+        // Healthy/irregular/coarse updates: early samples alone never confirm.
+        for samples in [[113.98, 114.06, 114.5, 114.9], [114.0, 114.0, 114.0, 114.5]] {
+            let mut engine = engine_with_track("local/faixa.flac");
+            let mut script = vec![seek_status("play", 57.4), Ok(vec![])];
+            script.extend(samples.into_iter().map(|value| seek_status("play", value)));
+            let (result, commands, sleeps) = scripted_seek(&mut engine, 114.0, true, script);
+            result.unwrap();
+            assert_eq!(
+                commands,
+                [
+                    "status",
+                    "seekcur 114.0",
+                    "status",
+                    "status",
+                    "status",
+                    "status"
+                ]
+            );
+            assert_eq!(sleeps.iter().sum::<Duration>(), Duration::from_millis(960));
+        }
     }
 
     #[test]
     fn shared_playing_frozen_seek_recovers_once_with_pause_resume() {
         let mut engine = engine_with_track("local/faixa.flac");
+        let before = engine.queue.clone();
         let (result, commands, sleeps) = scripted_seek(
             &mut engine,
             114.0,
             true,
-            vec![
-                seek_status("play", 57.4),
-                Ok(vec![]),
-                seek_status("play", 113.98),
-                seek_status("play", 113.98),
-                Ok(vec![]),
-                Ok(vec![]),
-                seek_status("play", 113.98),
-                seek_status("play", 114.07),
-            ],
+            seek_recovery_fixture(114.0, [113.98, 113.98], 113.98),
         );
         result.unwrap();
         assert_eq!(
             commands,
-            vec![
+            [
                 "status",
                 "seekcur 114.0",
                 "status",
                 "status",
+                "status",
+                "status",
+                "status",
                 "pause 1",
+                "status",
                 "pause 0",
                 "status",
                 "status",
+                "status",
+                "status"
             ]
         );
-        assert_eq!(commands.iter().filter(|command| command.as_str() == "pause 1").count(), 1);
-        assert_eq!(sleeps, vec![Duration::from_millis(80); 3]);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|cmd| cmd.as_str() == "pause 1")
+                .count(),
+            1
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|cmd| cmd.as_str() == "status")
+                .count(),
+            11
+        );
+        assert_eq!(sleeps.iter().sum::<Duration>(), Duration::from_millis(1840));
+        assert_eq!(engine.queue, before);
+    }
+
+    #[test]
+    fn shared_seek_received_sequences_recover_once_and_require_tail_continuity() {
+        // Received early/tail data; songid and the successful post-recovery
+        // continuation are synthetic. Only player1's recovery was observed.
+        for (target, early, tail) in [
+            (43.0, [43.456, 43.456], 43.456),
+            (106.5, [106.568, 106.659], 106.956),
+            (133.0, [133.022, 133.091], 133.456),
+        ] {
+            let mut engine = engine_with_track("local/fixture.flac");
+            let (result, commands, _) = scripted_seek(
+                &mut engine,
+                target,
+                true,
+                seek_recovery_fixture(target, early, tail),
+            );
+            result.unwrap();
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|cmd| cmd.starts_with("seekcur"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|cmd| cmd.as_str() == "pause 1")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|cmd| cmd.as_str() == "pause 0")
+                    .count(),
+                1
+            );
+            assert!(!commands
+                .iter()
+                .any(|cmd| cmd == "play" || cmd == "clearerror" || cmd.contains("output")));
+        }
     }
 
     #[test]
     fn shared_seek_recovery_failures_are_explicit_and_bounded() {
-        for (responses, expected_command) in [
-            (
-                vec![
-                    seek_status("play", 57.4),
-                    Ok(vec![]),
-                    seek_status("play", 113.98),
-                    seek_status("play", 113.98),
-                    Err("ACK [5@0] {pause} failure".to_string()),
-                ],
-                "pause 1",
-            ),
-            (
-                vec![
-                    seek_status("play", 57.4),
-                    Ok(vec![]),
-                    seek_status("play", 113.98),
-                    seek_status("play", 113.98),
-                    Ok(vec![]),
-                    Err("ACK [5@0] {pause} failure".to_string()),
-                ],
-                "pause 0",
-            ),
-        ] {
+        for (index, expected_command) in [(7, "pause 1"), (9, "pause 0")] {
+            let mut script = seek_recovery_fixture(114.0, [113.98, 113.98], 113.98);
+            script[index] = Err("ACK [5@0] {pause} failure".into());
+            script.truncate(index + 1);
             let mut engine = engine_with_track("local/faixa.flac");
-            let (result, commands, _) = scripted_seek(&mut engine, 114.0, true, responses);
-            assert!(result.is_err());
+            let (result, commands, _) = scripted_seek(&mut engine, 114.0, true, script);
+            assert!(result.unwrap_err().contains("ACK [5@0]"));
             assert_eq!(commands.last().map(String::as_str), Some(expected_command));
         }
-
+        // A second brief advance followed by a frozen tail is failure, not a
+        // second recovery or an OK based only on the recovery's first 80 ms.
+        let mut script = seek_recovery_fixture(114.0, [113.98, 113.98], 113.98);
+        script[12] = seek_status("play", 115.6);
+        script[13] = seek_status("play", 115.6);
         let mut engine = engine_with_track("local/faixa.flac");
-        let (result, commands, _) = scripted_seek(
-            &mut engine,
-            114.0,
-            true,
-            vec![
-                seek_status("play", 57.4),
-                Ok(vec![]),
-                seek_status("play", 113.98),
-                seek_status("play", 113.98),
-                Ok(vec![]),
-                Ok(vec![]),
-                seek_status("play", 113.98),
-                seek_status("play", 113.98),
-            ],
-        );
+        let (result, commands, _) = scripted_seek(&mut engine, 114.0, true, script);
         assert!(result.unwrap_err().contains("permaneceu congelada"));
-        assert_eq!(commands.iter().filter(|command| command.as_str() == "pause 1").count(), 1);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|cmd| cmd.as_str() == "pause 1")
+                .count(),
+            1
+        );
+        // The existing recovery's own failed progress check remains explicit.
+        let mut script = seek_recovery_fixture(114.0, [113.98, 113.98], 113.98);
+        script[11] = script[10].clone();
+        script.truncate(12);
+        let (result, _, _) = scripted_seek(&mut engine, 114.0, true, script);
+        assert!(result.unwrap_err().contains("permaneceu congelada"));
     }
 
     #[test]
@@ -9387,11 +10107,205 @@ mod tests {
                 seek_status("play", 57.4),
                 Ok(vec![]),
                 seek_status("stop", 113.98),
-                seek_status("stop", 113.98),
             ],
         );
         assert!(result.unwrap_err().contains("parou inesperadamente"));
-        assert!(!commands.iter().any(|command| command.starts_with("pause")));
+        assert!(!commands.iter().any(|cmd| cmd.starts_with("pause")));
+    }
+
+    #[test]
+    fn shared_seek_state_identity_and_error_changes_never_authorize_resume() {
+        for index in [2, 3, 4, 5, 6, 8, 10, 11, 12, 13] {
+            for change in [
+                "pause",
+                "play",
+                "stop",
+                "songid",
+                "error",
+                "missing_id",
+                "position",
+            ] {
+                let mut script = seek_recovery_fixture(114.0, [113.98, 113.98], 113.98);
+                let mut lines = script[index].clone().unwrap();
+                match change {
+                    "pause" => lines[0] = "state: pause".into(),
+                    "play" => lines[0] = "state: play".into(),
+                    "stop" => lines[0] = "state: stop".into(),
+                    "songid" => lines[2] = "songid: 99".into(),
+                    "error" => lines.push("error: synthetic failure".into()),
+                    "missing_id" => {
+                        lines.pop();
+                    }
+                    "position" => lines[1] = "elapsed: 10.0".into(),
+                    _ => unreachable!(),
+                }
+                // pause is the expected state immediately before our pause 0.
+                if index == 8 && change == "pause" {
+                    continue;
+                }
+                if change == "play" && index != 8 {
+                    continue;
+                }
+                // Position checking compares adjacent samples: the first seek
+                // sample is compared to the target, the tail to its predecessor.
+                if change == "position" && index == 2 {
+                    continue;
+                }
+                script[index] = Ok(lines);
+                script.truncate(index + 1);
+                let mut engine = engine_with_track("local/faixa.flac");
+                let (result, commands, _) = scripted_seek(&mut engine, 114.0, true, script);
+                assert!(result.is_err(), "index={index} change={change}");
+                if index <= 6 {
+                    assert!(!commands.iter().any(|cmd| cmd.starts_with("pause")));
+                }
+                if index == 8 {
+                    assert!(!commands.iter().any(|cmd| cmd == "pause 0"));
+                }
+                assert!(
+                    commands
+                        .iter()
+                        .filter(|cmd| cmd.as_str() == "pause 1")
+                        .count()
+                        <= 1
+                );
+                assert!(
+                    commands
+                        .iter()
+                        .filter(|cmd| cmd.as_str() == "pause 0")
+                        .count()
+                        <= 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_seek_incomplete_error_or_changed_position_is_not_recovered() {
+        for lines in [
+            vec!["state: play".into(), "elapsed: 1.0".into()],
+            vec![
+                "state: play".into(),
+                "elapsed: 1.0".into(),
+                "songid: 42".into(),
+                "error: synthetic".into(),
+            ],
+        ] {
+            let mut engine = engine_with_track("local/faixa.flac");
+            let (result, commands, _) = scripted_seek(&mut engine, 114.0, true, vec![Ok(lines)]);
+            assert!(result.is_err());
+            assert_eq!(commands, ["status"]);
+        }
+        for samples in [[90.0, 90.1], [114.1, 114.0]] {
+            let mut engine = engine_with_track("local/faixa.flac");
+            let (result, commands, _) = scripted_seek(
+                &mut engine,
+                114.0,
+                true,
+                vec![
+                    seek_status("play", 57.4),
+                    Ok(vec![]),
+                    seek_status("play", samples[0]),
+                    seek_status("play", samples[1]),
+                ],
+            );
+            assert!(result.is_err());
+            assert!(!commands.iter().any(|cmd| cmd.starts_with("pause")));
+        }
+    }
+
+    #[test]
+    fn shared_seek_io_failures_do_not_become_success_or_retries() {
+        for index in [2, 3, 4, 5, 6, 8, 10, 11, 12, 13] {
+            let mut script = seek_recovery_fixture(114.0, [113.98, 113.98], 113.98);
+            script[index] = Err("timeout fixture".into());
+            script.truncate(index + 1);
+            let mut engine = engine_with_track("local/faixa.flac");
+            let (result, commands, _) = scripted_seek(&mut engine, 114.0, true, script);
+            assert!(result.unwrap_err().contains("timeout fixture"));
+            assert_eq!(commands.len(), index + 1);
+        }
+    }
+
+    #[test]
+    fn shared_seek_deadline_is_checked_for_commands_and_buffered_responses() {
+        let started = Instant::now();
+        assert_eq!(
+            AudioEngine::seek_deadline(started, true, &seek_status("play", 1.0)),
+            Some(started + SHARED_SEEK_BUDGET)
+        );
+        for state in ["pause", "stop"] {
+            assert_eq!(
+                AudioEngine::seek_deadline(started, true, &seek_status(state, 1.0)),
+                None
+            );
+        }
+        assert_eq!(
+            AudioEngine::seek_deadline(started, false, &seek_status("play", 1.0)),
+            None
+        );
+        assert_eq!(
+            AudioEngine::seek_deadline(started, true, &Err("timeout fixture".into())),
+            None
+        );
+        let expired = Some(Instant::now() - Duration::from_secs(1));
+        assert!(mpd_deadline_timeout(expired).is_err());
+        assert_eq!(
+            mpd_deadline_timeout(None).unwrap(),
+            Duration::from_millis(500)
+        );
+        assert!(
+            mpd_deadline_timeout(Some(Instant::now() + Duration::from_millis(20))).unwrap()
+                <= Duration::from_millis(20)
+        );
+        let mut reader = std::io::Cursor::new(b"state: play\nOK\n");
+        assert!(AudioEngine::read_mpd_response_before(&mut reader, expired)
+            .unwrap_err()
+            .contains("Prazo"));
+        assert_eq!(reader.position(), 0);
+        assert_eq!(
+            AudioEngine::read_mpd_response(&mut reader).unwrap(),
+            ["state: play"]
+        );
+        assert!(
+            AudioEngine::send_command_to_socket_before("/missing/socket", "pause 0", expired)
+                .unwrap_err()
+                .contains("Prazo")
+        );
+    }
+
+    #[test]
+    fn shared_seek_expired_budget_before_resume_does_not_unpause() {
+        let mut script = seek_recovery_fixture(114.0, [113.98, 113.98], 113.98);
+        script[8] = Err("Prazo de confirmação do seek Shared esgotado.".into());
+        script.truncate(9);
+        let mut engine = engine_with_track("local/faixa.flac");
+        let (result, commands, _) = scripted_seek(&mut engine, 114.0, true, script);
+        assert!(result.unwrap_err().contains("Prazo"));
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|cmd| cmd.as_str() == "pause 1")
+                .count(),
+            1
+        );
+        assert!(!commands.iter().any(|cmd| cmd == "pause 0" || cmd == "play"));
+    }
+
+    #[test]
+    fn shared_seek_restored_same_position_never_contacts_mpd() {
+        let mut engine = engine_with_track("local/faixa.flac");
+        engine.restored_resume = Some(PlaybackResumeSnapshot {
+            queue_index: 0,
+            elapsed: 114.0,
+            state: PlaybackState::Paused,
+        });
+        let before = engine.restored_resume;
+        let (result, commands, sleeps) = scripted_seek(&mut engine, 114.0, true, vec![]);
+        result.unwrap();
+        assert!(commands.is_empty());
+        assert!(sleeps.is_empty());
+        assert_eq!(engine.restored_resume, before);
     }
 
     #[test]
@@ -9494,6 +10408,7 @@ mod tests {
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
         };
         let status = PlaybackStatus {
+            options: None,
             state: "play".to_string(),
             elapsed: 1.0,
             duration: 120.0,
@@ -10350,4 +11265,107 @@ mod tests {
             .unwrap_err()
             .contains("antes da resposta final"));
     }
+
+    #[test]
+    fn catalog_tag_presence_raw_values_precede_fallback_and_transformations() {
+        let map = AudioEngine::canonical_local_album_collectors(collect_album_pages(vec![album_test_lines(&[
+            "file: Synthetic/Fallback/one.flac",
+            "file: Synthetic/Blank/two.flac", "Album:   ", "Artist: ", "AlbumArtist:   ", "Date:    ", "Genre:   ",
+            "file: Synthetic/Raw/three.flac", "Album: Raw", "Artist: A", "AlbumArtist: A", "Date:     2004", "Genre: bad\nvalue",
+        ])]));
+        let fallback = &map[&album_id("Synthetic/Fallback", "Fallback")];
+        assert_eq!(fallback.title, "Fallback");
+        assert_eq!(fallback.display_artist(), "Artista Desconhecido");
+        assert_eq!(fallback.tag_presence.evaluated_track_count, 1);
+        assert_eq!(fallback.tag_presence.missing, LocalAlbumMissingTags { album: 1, artist: 1, album_artist: 1, date: 1, genre: 1 });
+        let blank = &map[&album_id("Synthetic/Blank", "   ")];
+        assert_eq!(blank.title, "  ");
+        assert_eq!(blank.year.as_deref(), Some("   "));
+        assert_eq!(blank.tag_presence, fallback.tag_presence);
+        let raw = &map[&album_id("Synthetic/Raw", "Raw")];
+        assert_eq!(raw.year.as_deref(), Some("    "));
+        assert!(raw.genres.is_empty());
+        assert_eq!(raw.tag_presence.missing, LocalAlbumMissingTags::default());
+    }
+
+    #[test]
+    fn catalog_tag_presence_counts_each_field_once_per_accepted_track_and_resets_pages() {
+        let collection = collect_album_pages(vec![album_test_lines(&[
+            "file: S/Album/one.flac", "Album: Album", "Album:   ", "Album: Album",
+            "Artist:   ", "Artist: A", "AlbumArtist: A", "Date: 2001-03-04", "Genre: Jazz", "Genre: Rock", "Genre: ",
+        ]), album_test_lines(&[
+            "file: ../rejected.flac", "Album: Album", "Artist: A", "AlbumArtist: A", "Date: 2001", "Genre: Jazz",
+            "file: S/Album/two.flac", "Album: Album", "Artist: ", "Genre:   ",
+        ])]);
+        let map = AudioEngine::canonical_local_album_collectors(collection);
+        let album = &map[&album_id("S/Album", "Album")];
+        assert_eq!(album.track_count, 2);
+        assert_eq!(album.tag_presence.evaluated_track_count, 2);
+        assert_eq!(album.tag_presence.missing, LocalAlbumMissingTags { album: 0, artist: 1, album_artist: 1, date: 1, genre: 1 });
+        assert_eq!(album.genres, ["Jazz", "Rock"]);
+    }
+
+    #[test]
+    fn catalog_tag_presence_adds_title_variants_discs_and_collection_pages() {
+        let mut first = Vec::new();
+        for i in 0..4 {
+            first.extend([format!("file: S/Box/CD1/{i}.flac"), "Album: Box".into(), "Artist: A".into(), "Date: 2001-01-02".into(), "Genre: Jazz".into()]);
+        }
+        let variant = album_test_lines(&["file: S/Box/CD1/five.flac", "Album: Typo", "Artist: A", "AlbumArtist: A", "Genre: Rock"]);
+        let mut second = Vec::new();
+        for i in 0..3 {
+            second.extend([format!("file: S/Box/CD2/{i}.flac"), "Album: Box".into(), "Artist: A".into(), "AlbumArtist: A".into(), "Date: 2002".into()]);
+        }
+        let albums = AudioEngine::finalize_local_album_collection(collect_album_pages(vec![first, variant, second]), &HashSet::from(["S".into()]));
+        assert_eq!(albums.len(), 1);
+        let album = &albums[0];
+        assert_eq!(album.id, album_id("S/Box", "Box"));
+        assert_eq!(album.title, "Box");
+        assert_eq!(album.track_count, 8);
+        assert_eq!(album.discs.iter().map(|disc| disc.track_count).collect::<Vec<_>>(), [5, 3]);
+        assert_eq!(album.year.as_deref(), Some("2001"));
+        assert_eq!(album.genres, ["Jazz", "Rock"]);
+        let evidence = album.tag_presence.as_ref().unwrap();
+        assert_eq!(evidence.evaluated_track_count, 8);
+        assert_eq!(evidence.missing, LocalAlbumMissingTags { album: 0, artist: 0, album_artist: 4, date: 1, genre: 3 });
+    }
+
+    #[test]
+    fn catalog_tag_presence_keeps_only_canonical_physical_or_cue_evidence() {
+        for (physical, cue, split_cue, choose_cue) in [(1, 2, false, true), (2, 3, false, false), (1, 1, false, false), (0, 3, false, true), (2, 0, false, false), (1, 2, true, false)] {
+            let mut physical_page = Vec::new();
+            for i in 0..physical {
+                physical_page.extend([format!("file: S/Album/{i}.flac"), "Album: Album".into(), "Artist: A".into(), "AlbumArtist: A".into(), "Date: 2001".into()]);
+            }
+            let mut cue_page = Vec::new();
+            for i in 0..cue {
+                let sheet = if split_cue { i } else { 0 };
+                cue_page.extend([format!("file: S/Album/image{sheet}.cue/track{:04}", i + 1), "Album: Album".into(), "Genre: CueGenre".into()]);
+            }
+            let albums = AudioEngine::finalize_local_album_collection(collect_album_pages(vec![physical_page, cue_page]), &HashSet::new());
+            let album = &albums[0];
+            let count = if choose_cue { cue } else { physical };
+            assert_eq!(album.track_count, count);
+            let evidence = album.tag_presence.as_ref().unwrap();
+            assert_eq!(evidence.evaluated_track_count, count);
+            assert_eq!(evidence.missing, if choose_cue { LocalAlbumMissingTags { album: 0, artist: cue, album_artist: cue, date: cue, genre: 0 } }
+                else { LocalAlbumMissingTags { album: 0, artist: 0, album_artist: 0, date: 0, genre: physical } });
+            // Existing display union still includes discarded CUE genres; it is not presence evidence.
+            if cue > 0 { assert_eq!(album.genres, ["CueGenre"]); }
+        }
+    }
+
+    #[test]
+    fn catalog_tag_presence_payload_is_optional_and_serializes_raw_missing_counts() {
+        let old = r#"{"id":"legacy","title":"Fallback","artist":"Displayed","year":"2001","folder_path":"S/Album","source_id":null,"track_count":1,"discs":[]}"#;
+        let legacy: LocalAlbum = serde_json::from_str(old).unwrap();
+        assert!(legacy.tag_presence.is_none());
+        assert!(serde_json::to_value(legacy).unwrap().get("tag_presence").is_none());
+        let albums = AudioEngine::finalize_local_album_collection(collect_album_pages(vec![album_test_lines(&["file: S/Fallback/one.flac"])]), &HashSet::new());
+        let json = serde_json::to_value(&albums[0]).unwrap();
+        assert_eq!(json["tag_presence"], serde_json::json!({"evaluated_track_count":1,"missing":{"album":1,"artist":1,"album_artist":1,"date":1,"genre":1}}));
+        let roundtrip: LocalAlbum = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.tag_presence, albums[0].tag_presence);
+    }
+
 }
