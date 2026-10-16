@@ -15,15 +15,15 @@ Sonante is a desktop music player built for people who want to **listen to, navi
 | **Local music** | Multiple local folders and mounted shares; album, artist, year, genre, and folder browsing; source selection and incremental library updates. |
 | **Plex** | Account authorization, server/library selection, album and artist navigation, years, genres, collections, and remote playback. |
 | **Playback** | Queue management, play/pause, next/previous, seek, session restoration without automatic playback, and desktop media-key integration through MPRIS2. |
-| **Collection tools** | Local and Plex favorites, named playlists, availability-aware playlist playback, and an individual-track FLAC tag editor. |
+| **Collection tools** | Local and Plex favorites, named playlists, availability-aware playlist playback, local album diagnostics, and reviewed FLAC tag editing with per-file results. |
 | **Artwork & browsing** | Local and Plex album artwork, virtualized grids for large catalogs, and artwork caching with bounded work. |
-| **Audio controls** | Shared and Direct output choices, device availability checks, ReplayGain settings, an explanatory Signal Path, and a separate Now Playing window with visualization. |
+| **Audio controls** | Shared and Direct output choices, device availability checks, ReplayGain settings, an explanatory Signal Path, and a shared Now Playing layout with visualization, an artwork queue, embedded, detached, and fullscreen modes. |
 
 Sonante is designed for substantial, imperfect real-world libraries: multiple storage locations, multi-disc albums, CUE-based albums, varying metadata, and sources that may temporarily become unavailable.
 
 ## Installation
 
-Download Sonante v0.4.9 from [GitHub Releases](https://github.com/tiagoalam/Sonante/releases/tag/v0.4.9). Prebuilt packages are available for **Debian/Ubuntu (DEB), Fedora (RPM), and Arch Linux/Manjaro (`.pkg.tar.zst`)**, for x86_64. Choose the package for your distribution.
+Download Sonante v0.4.13 from [GitHub Releases](https://github.com/tiagoalam/Sonante/releases/tag/v0.4.13). Prebuilt packages are available for **Debian/Ubuntu (DEB), Fedora (RPM), and Arch Linux/Manjaro (`.pkg.tar.zst`)**, for x86_64. Choose the package for your distribution.
 
 ### Debian / Ubuntu — DEB
 
@@ -31,7 +31,7 @@ Download the `.deb` package and `SHA256SUMS-ubuntu.txt` from the release page, t
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS-ubuntu.txt
-sudo apt install ./Sonante_0.4.9_amd64.deb
+sudo apt install ./Sonante_0.4.13_amd64.deb
 ```
 
 ### Fedora — RPM
@@ -40,7 +40,7 @@ Download the `.rpm` package and `SHA256SUMS-ubuntu.txt` from the release page:
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS-ubuntu.txt
-sudo dnf install ./Sonante-0.4.9-1.x86_64.rpm
+sudo dnf install ./Sonante-0.4.13-1.x86_64.rpm
 ```
 
 The required MPD and native libraries must be available from your configured repositories. Sonante does not add third-party repositories.
@@ -51,7 +51,7 @@ Download the `.pkg.tar.zst` package and `SHA256SUMS-arch.txt` from the release p
 
 ```bash
 sha256sum -c SHA256SUMS-arch.txt
-sudo pacman -U ./sonante-0.4.9-1-x86_64.pkg.tar.zst
+sudo pacman -U ./sonante-0.4.13-1-x86_64.pkg.tar.zst
 ```
 
 Package installation does **not** enable a system-wide MPD service. Sonante manages a private MPD process for its own session.
@@ -90,13 +90,25 @@ Sonante presents multiple configured roots through a managed virtual library ind
 
 Local browsing includes **Albums, Artists, Years, Genres, and Folders**. Album handling also accounts for multi-disc layouts and supported physical/virtual CUE representations. The interface is designed to remain usable with large catalogs through pagination and virtualized rendering.
 
-**Tag editing:** the current editor can inspect supported local-track metadata and edit **individual FLAC files** using a temporary-file-and-replace approach with conflict checks. Editing metadata intentionally changes the selected physical file. Plex tracks, virtual CUE tracks, and unsupported formats are not writable through this editor. **Batch album tag editing is not part of v0.4.9.**
+**Tag editing:** inspect and edit supported physical FLAC tracks individually or review album-level changes before applying them. Writes are performed independently per file, with results shown for each file; a later failure does not undo earlier writes. Plex tracks, virtual CUE tracks, and unsupported formats are not writable through this editor.
+
+**Library Doctor:** inspect a local album for metadata inconsistencies and review the evidence. Diagnosis does not change files or automatically select corrections.
+
+New folder selections reject overlapping parent/child roots, including canonical aliases. Existing overlapping configurations remain readable; Sonante does not automatically merge or migrate their references.
 
 ### Plex libraries
 
 Plex connectivity is associated with a server's stable identity, not just a temporary URL. Sonante can use validated server connections and resolve playback references when needed. It offers **Albums, Artists, Years, Genres, and Collections**, along with favorites and playlists spanning supported local and Plex items.
 
 Artwork requests are handled through the backend; authenticated Plex URLs and access tokens are not exposed as frontend image URLs. A missing or unreachable Plex source is reported as unavailable rather than being treated as a permanently empty collection.
+
+## Explore, Discover, and Now Playing
+
+**Local → Explore** offers suggestions scoped to one local source or all local libraries, independently of the Local browser selection.
+
+**Plex → Discover** offers library-aware shelves and finite mixes of up to 100 tracks: Library Mix, Decade Mix (using the album release year), and Style Mix. Open a mix to preview it, play it, generate another selection, or save that exact selection as a named playlist. Sources and availability remain associated with their original libraries.
+
+**Now Playing** can fill the main content area or open as a detached window with fullscreen support. The queue opens on the right with album artwork and can be hidden. Repeat queue, repeat track, and shuffle controls share the MPD playback state across player presentations.
 
 ## Audio: what Shared and Direct mean
 
@@ -134,12 +146,12 @@ Configuration directories and sensitive files are created with restrictive Linux
 
 Development requires **Node.js 22**, npm, a stable Rust toolchain, and the native development dependencies for Tauri 2, GTK 3, WebKitGTK 4.1, ALSA, and OpenSSL. See the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/) and the [CI workflow](https://github.com/tiagoalam/Sonante/blob/main/.github/workflows/ci.yml) for the Ubuntu build environment.
 
-To build **v0.4.9** from its release tag without installing a system package:
+To build **v0.4.13** from its release tag without installing a system package:
 
 ```bash
 git clone https://github.com/tiagoalam/Sonante.git
 cd Sonante
-git checkout v0.4.9
+git checkout v0.4.13
 npm ci
 npm run tauri -- build --no-bundle -- --locked
 ```
@@ -162,13 +174,13 @@ cargo check --manifest-path src-tauri/Cargo.toml --locked
 python3 -m unittest discover -s tests -p 'packaging_test.py'
 ```
 
-The CI also checks packaging versions, native ELF requirements, and package contents. The Arch package is built using an Arch environment; **AppImage is not a validated distribution target for v0.4.9**.
+The CI also checks packaging versions, native ELF requirements, and package contents. The Arch package is built using an Arch environment; **AppImage is not a validated distribution target for v0.4.13**.
 
 ## Project status and scope
 
 Sonante prioritizes **reliable playback, conservative MPD lifecycle management, safe library changes, and clear audio reporting** over claiming support for every possible codec or audio feature. Platform and hardware behavior must be tested rather than inferred from a successful build.
 
-The current local tag editor handles single FLAC tracks, not batch album edits; availability of codecs, network sources, and DAC capabilities depends on your system. Sonante v0.4.9 provides DEB, RPM, and Arch packages for x86_64. Compatibility depends on the distribution, its available dependencies, and the selected audio hardware.
+Local tag editing is limited to supported physical FLAC files and reports independent per-file results; availability of codecs, network sources, and DAC capabilities depends on your system. Sonante v0.4.13 provides DEB, RPM, and Arch packages for x86_64. Compatibility depends on the distribution, its available dependencies, and the selected audio hardware.
 
 Bug reports and reproducible feedback can be submitted through [GitHub Issues](https://github.com/tiagoalam/Sonante/issues).
 
