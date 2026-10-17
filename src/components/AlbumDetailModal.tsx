@@ -1,10 +1,13 @@
+import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
+import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useState } from "react";
-import { X, Play, Clock, Disc3 } from "lucide-react";
+import { X, Play, Clock, Disc3, Info } from "lucide-react";
 import { PlexAlbum, PlexTrack } from "../types/plex";
 import { plexService } from "../services/plex";
 import { audioService } from "../services/audio";
 import { useTranslation } from "react-i18next";
+import { PlexFileInfoModal } from "./PlexFileInfoModal";
 import { PlexImage } from "./PlexImage";
 
 interface Props {
@@ -16,14 +19,20 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
   const { t } = useTranslation();
   const [tracks, setTracks] = useState<PlexTrack[]>([]);
   const [loading, setLoading] = useState(true);
+  const infoAlbumKey = JSON.stringify([album.server_id ?? null, album.library_id ?? null, album.rating_key]);
+  const [fileInfoTrack, setFileInfoTrack] = useState<{ albumKey: string; track: PlexTrack } | null>(null);
 
   useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setFileInfoTrack(null);
     plexService
       .getAlbumTracks(album.rating_key)
-      .then(setTracks)
-      .catch(error => logError("plex.album-tracks", error))
-      .finally(() => setLoading(false));
-  }, [album.rating_key]);
+      .then(value => { if (current) setTracks(value); })
+      .catch(error => { if (current) logError("plex.album-tracks", error); })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [album.rating_key, album.server_id, album.library_id]);
 
   const formatDuration = (ms: number) => {
     const totalSecs = Math.floor(ms / 1000);
@@ -32,6 +41,7 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
+  const request = usePlaybackAttempt(infoAlbumKey, "plex.album-play");
   const playAll = (startIndex = 0) => {
     const metaTracks = tracks.map((track) => ({
       title: track.title,
@@ -42,13 +52,14 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
       duration: track.duration_ms ? track.duration_ms / 1000 : undefined,
     }));
     if (metaTracks.length > 0) {
-      audioService.playTracks(metaTracks, startIndex);
+      void request.run(intent => audioService.playTracks(metaTracks, startIndex, intent));
     }
   };
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-8 animate-fade-in">
       <div className="bg-[#181818] border border-[#2B2B2B] rounded-xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+        <PlaybackRequestNotice failure={request.failure} />
         {/* Cabeçalho do Álbum */}
         <div className="p-6 bg-[#202020] border-b border-[#2A2A2A] flex items-center justify-between">
           <div className="flex items-center space-x-5">
@@ -111,12 +122,16 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
                 <div className="flex items-center space-x-3 text-xs text-[#777777] font-mono">
                   <Clock size={12} />
 		  <span>{formatDuration(track.duration_ms || 0)}</span>
+                  <button type="button" data-plex-file-info onClick={event => { event.stopPropagation(); setFileInfoTrack({ albumKey: infoAlbumKey, track }); }}
+                    onKeyDown={event => event.stopPropagation()} title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: track.title })}
+                    className="rounded-md p-1.5 hover:bg-[#2A2A2A] hover:text-[#E5A00D]"><Info size={14} aria-hidden="true" /></button>
                 </div>
               </div>
             ))
           )}
         </div>
       </div>
+      {!loading && fileInfoTrack?.albumKey === infoAlbumKey && tracks.includes(fileInfoTrack.track) && <PlexFileInfoModal track={fileInfoTrack.track} onClose={() => setFileInfoTrack(null)} />}
     </div>
   );
 };

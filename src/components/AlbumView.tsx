@@ -1,3 +1,5 @@
+import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
+import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
@@ -9,6 +11,7 @@ import {
   Sparkles,
   Heart,
   ListPlus,
+  Info,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlexAlbum, PlexTrack, SelectedArtist } from "../types/plex";
@@ -17,6 +20,7 @@ import { plexService } from "../services/plex";
 import { audioService } from "../services/audio";
 import { PlexImage } from "./PlexImage";
 import { favoritesService } from "../services/favorites";
+import { PlexFileInfoModal } from "./PlexFileInfoModal";
 import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
 
@@ -42,11 +46,13 @@ export const AlbumView: React.FC<Props> = ({
   const [loading, setLoading] = useState(true);
   const [isFavorite, setIsFavorite] = useState(false);
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
+  const infoAlbumKey = JSON.stringify([album.server_id ?? null, album.library_id ?? null, album.rating_key]);
+  const [fileInfoTrack, setFileInfoTrack] = useState<{ albumKey: string; track: PlexTrack } | null>(null);
 
   const viewport = useRef<HTMLDivElement>(null), scroll = useRef(0), artistLink = useRef<HTMLButtonElement>(null);
   const returning = useRef(false), returnFocus = useRef<HTMLElement | null>(null);
   useLayoutEffect(() => {
-    if (!active) { returning.current = true; return; }
+    if (!active) { setFileInfoTrack(null); returning.current = true; return; }
     if (viewport.current) {
       viewport.current.scrollTop = scroll.current;
       if (returning.current) (returnFocus.current ?? artistLink.current)?.focus({ preventScroll: true });
@@ -58,20 +64,23 @@ export const AlbumView: React.FC<Props> = ({
   const albumKey = String(album.rating_key || "");
 
   useEffect(() => {
+    let current = true;
+    setFileInfoTrack(null);
     setLoading(true);
     plexService
       .getAlbumTracks(albumKey)
-      .then(setTracks)
-      .catch(error => logError("plex.album-tracks", error))
-      .finally(() => setLoading(false));
+      .then(value => { if (current) setTracks(value); })
+      .catch(error => { if (current) logError("plex.album-tracks", error); })
+      .finally(() => { if (current) setLoading(false); });
 
     favoritesService
       .getFavorites()
       .then((favs) => {
-        setIsFavorite(favs.some((f) => f.source === "plex" && String(f.id) === albumKey));
+        if (current) setIsFavorite(favs.some((f) => f.source === "plex" && String(f.id) === albumKey));
       })
-      .catch(error => logError("favorites.load", error));
-  }, [albumKey]);
+      .catch(error => { if (current) logError("favorites.load", error); });
+    return () => { current = false; };
+  }, [albumKey, album.server_id, album.library_id]);
 
   const handleToggleFav = async () => {
     if (!albumKey) return;
@@ -98,6 +107,7 @@ export const AlbumView: React.FC<Props> = ({
     }
   };
 
+  const request = usePlaybackAttempt(infoAlbumKey + String(active), "plex.album-play");
   const handlePlayTracks = (startIndex: number = 0) => {
     if (!active || !isPlaybackAvailable) return;
     const metaTracks = tracks.map((t) => ({
@@ -110,7 +120,7 @@ export const AlbumView: React.FC<Props> = ({
     }));
 
     if (metaTracks.length > 0) {
-      audioService.playTracks(metaTracks, startIndex);
+      void request.run(intent => audioService.playTracks(metaTracks, startIndex, intent));
     }
   };
 
@@ -137,6 +147,7 @@ export const AlbumView: React.FC<Props> = ({
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#121212] overflow-hidden select-none">
+      <PlaybackRequestNotice failure={request.failure} />
       <div className="p-8 pb-4 border-b border-[#222222] flex items-center">
         <button
           onClick={onBack}
@@ -292,12 +303,18 @@ export const AlbumView: React.FC<Props> = ({
                   >
                     <ListPlus size={15} />
                   </button>
+                  <button type="button" data-plex-file-info onClick={event => { event.stopPropagation(); setFileInfoTrack({ albumKey: infoAlbumKey, track }); }}
+                    onKeyDown={event => event.stopPropagation()} title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: track.title })}
+                    className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]">
+                    <Info size={14} aria-hidden="true" />
+                  </button>
                 </div>
               </div>
             ))
           )}
         </div>
       </div>
+      {active && !loading && fileInfoTrack?.albumKey === infoAlbumKey && tracks.includes(fileInfoTrack.track) && <PlexFileInfoModal track={fileInfoTrack.track} onClose={() => setFileInfoTrack(null)} />}
       {playlistItems && (
         <PlaylistPickerModal
           items={playlistItems}

@@ -1,3 +1,4 @@
+import { beginPlaybackIntent, playbackIntentToken, type PlaybackIntent } from "../utils/playbackIntent";
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
@@ -27,6 +28,6 @@ export const playlistsService = {
     invoke<Playlist>("reorder_playlist_items", { playlistId, orderedItemIds }),
   resolveItems: (playlistId: string): Promise<PlaylistItemAvailability[]> =>
     invoke<PlaylistItemAvailability[]>("resolve_playlist_items", { playlistId }),
-  play: (playlistId: string, startItemId?: string, shuffle = false): Promise<{ skipped_count: number }> =>
-    invoke<{ skipped_count: number }>("play_playlist", { playlistId, startItemId, shuffle }),
+  play: async (playlistId: string, startItemId?: string, shuffle = false, intent: PlaybackIntent = beginPlaybackIntent()): Promise<{ skipped_count: number }> =>
+    invoke<{ skipped_count: number }>("play_playlist", { playlistId, startItemId, shuffle, intent: await playbackIntentToken(intent) }),
 };

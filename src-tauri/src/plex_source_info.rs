@@ -39,7 +39,11 @@ fn parse(json: &Value, rating: &str, part_key: &str) -> Option<SourceAudioFacts>
     if metadata.len() > 4 { return None; }
     let tracks: Vec<_> = metadata.iter().filter(|t| t["ratingKey"].as_str() == Some(rating)).collect();
     if tracks.len() != 1 || tracks[0]["type"].as_str() != Some("track") { return None; }
-    let medias = tracks[0].get("Media")?.as_array()?;
+    parse_item(tracks[0], rating, part_key)
+}
+fn parse_item(track: &Value, rating: &str, part_key: &str) -> Option<SourceAudioFacts> {
+    if track["ratingKey"].as_str() != Some(rating) || track["type"].as_str() != Some("track") { return None; }
+    let medias = track.get("Media")?.as_array()?;
     if medias.len() > 16 { return None; }
     let mut found = None;
     for media in medias {
@@ -84,6 +88,57 @@ fn parse(json: &Value, rating: &str, part_key: &str) -> Option<SourceAudioFacts>
     let dsd_level = if sample_type == "dsd" { match sample_rate { Some(2_822_400) => Some(64), Some(5_644_800) => Some(128), Some(11_289_600) => Some(256), _ => None } } else { None };
     Some(SourceAudioFacts { provenance: "plex", codec, compression, sample_type,
         sample_rate, bit_depth, dsd_level, revision: None })
+}
+
+// Optional display data from an already-loaded track response. No network,
+// streaming or file-path inference; only fixed labels and bounded numbers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlexFileInfo {
+    pub container: Option<String>,
+    pub codec: Option<String>,
+    pub compression: Option<String>,
+    pub sample_type: Option<String>,
+    pub sample_rate: Option<u32>,
+    pub bit_depth: Option<u8>,
+    pub dsd_level: Option<u16>,
+    pub channels: Option<u8>,
+    pub bitrate_kbps: Option<u32>,
+}
+pub(super) fn track_file_info(track: &Value, rating: &str, part_key: &str) -> Option<PlexFileInfo> {
+    if track["ratingKey"].as_str() != Some(rating) || track["type"].as_str() != Some("track") { return None; }
+    let medias = track.get("Media")?.as_array()?;
+    if medias.len() > 16 { return None; }
+    let mut chosen = None;
+    for media in medias {
+        let parts = media.get("Part")?.as_array()?;
+        if parts.len() > 16 { return None; }
+        for part in parts.iter().filter(|p| p["key"].as_str() == Some(part_key)) {
+            if chosen.is_some() { return None; }
+            chosen = Some((media, part));
+        }
+    }
+    let (media, part) = chosen?;
+    let streams = part.get("Stream").and_then(Value::as_array);
+    if streams.is_some_and(|v| v.len() > 32 || v.iter().any(|s| uint(&s["streamType"], 4).is_none())) { return None; }
+    let audio: Vec<_> = streams.into_iter().flatten().filter(|s| uint(&s["streamType"], 4) == Some(2)).collect();
+    if audio.len() > 1 { return None; }
+    let stream = audio.first().copied();
+    let facts = parse_item(track, rating, part_key);
+    let container = part.get("container").or_else(|| media.get("container")).and_then(Value::as_str).and_then(|s| match s {
+        "flac" => Some("FLAC"), "wav" => Some("WAV"), "aiff" => Some("AIFF"), "mp3" => Some("MP3"),
+        "mp4" | "m4a" => Some("MP4/M4A"), "ogg" => Some("Ogg"), "opus" => Some("Opus"),
+        "dsf" => Some("DSF"), "dff" => Some("DSDIFF"), "wv" => Some("WavPack"), "mpc" => Some("Musepack"), _ => None,
+    }).map(str::to_owned);
+    let stream_channels = stream.and_then(|s| uint(&s["channels"],64));
+    let media_channels = uint(&media["audioChannels"],64);
+    let channels = if stream_channels.zip(media_channels).is_some_and(|(a,b)|a!=b) { None } else { stream_channels.or(media_channels).map(|v|v as u8) };
+    let bitrate_kbps = stream.and_then(|s| uint(&s["bitrate"],1_000_000)).or_else(||uint(&media["bitrate"],1_000_000)).map(|v|v as u32);
+    if facts.is_none() && container.is_none() && channels.is_none() && bitrate_kbps.is_none() { return None; }
+    Some(PlexFileInfo {
+        container, codec:facts.as_ref().map(|v|v.codec.to_owned()), compression:facts.as_ref().map(|v|v.compression.to_owned()),
+        sample_type:facts.as_ref().map(|v|v.sample_type.to_owned()), sample_rate:facts.as_ref().and_then(|v|v.sample_rate),
+        bit_depth:facts.as_ref().and_then(|v|v.bit_depth), dsd_level:facts.as_ref().and_then(|v|v.dsd_level), channels,bitrate_kbps,
+    })
 }
 
 fn album_parse(json: &Value, library: &str, album: &str) -> Option<Vec<SourceAudioFacts>> {
@@ -302,4 +357,43 @@ mod tests {
         println!("fixture_plex_facts={}", serde_json::to_string(&facts).unwrap());
     }
 
+}
+
+#[cfg(test)]
+mod file_info_tests {
+    use super::*;
+    use serde_json::json;
+    fn track() -> Value {
+        json!({"type":"track","ratingKey":"42","Media":[{"audioCodec":"flac","audioChannels":2,"bitrate":3100,"container":"flac",
+            "Part":[{"key":"/chosen","file":"/private/music.flac","Stream":[{"streamType":2,"codec":"flac","samplingRate":"96000","bitDepth":"24","channels":2,"bitrate":"3000"}]}]}]})
+    }
+    #[test]
+    fn album_track_info_uses_selected_part_and_only_declared_metadata() {
+        let info = track_file_info(&track(),"42","/chosen").unwrap();
+        assert_eq!(info.codec.as_deref(),Some("FLAC"));assert_eq!(info.container.as_deref(),Some("FLAC"));
+        assert_eq!(info.sample_rate,Some(96000));assert_eq!(info.bit_depth,Some(24));assert_eq!(info.channels,Some(2));assert_eq!(info.bitrate_kbps,Some(3000));
+        assert!(track_file_info(&track(),"other","/chosen").is_none());assert!(track_file_info(&track(),"42","/other").is_none());
+        let mut duplicate=track();let part=duplicate["Media"][0]["Part"][0].clone();duplicate["Media"][0]["Part"].as_array_mut().unwrap().push(part);
+        assert!(track_file_info(&duplicate,"42","/chosen").is_none());
+    }
+    #[test]
+    fn dsd_lossy_and_missing_metadata_keep_their_meaning() {
+        let mut dsd=track();dsd["Media"][0]["audioCodec"]=json!("dsd_msbf");let part=&mut dsd["Media"][0]["Part"][0];part["container"]=json!("dsf");part["Stream"][0]["codec"]=json!("dsd_msbf");part["Stream"][0]["samplingRate"]=json!(705600);
+        let info=track_file_info(&dsd,"42","/chosen").unwrap();assert_eq!(info.sample_rate,Some(5644800));assert_eq!(info.dsd_level,Some(128));assert_eq!(info.sample_type.as_deref(),Some("dsd"));assert_eq!(info.container.as_deref(),Some("DSF"));
+        let mut lossy=track();lossy["Media"][0]["audioCodec"]=json!("mp3");lossy["Media"][0]["Part"][0]["Stream"][0]["codec"]=json!("mp3");assert_eq!(track_file_info(&lossy,"42","/chosen").unwrap().sample_type.as_deref(),Some("not_applicable"));
+        let empty=json!({"type":"track","ratingKey":"42","Media":[{"Part":[{"key":"/chosen"}]}]});assert!(track_file_info(&empty,"42","/chosen").is_none());
+        let mut partial=track();partial["Media"][0]["Part"][0].as_object_mut().unwrap().remove("Stream");let info=track_file_info(&partial,"42","/chosen").unwrap();assert_eq!(info.sample_rate,None);assert_eq!(info.bit_depth,None);assert_eq!(info.channels,Some(2));
+    }
+    #[test]
+    fn untrusted_metadata_never_leaks_paths_tokens_or_invents_ambiguous_channels() {
+        let mut j=track();j["Media"][0]["container"]=json!("/private/file?X-Plex-Token=SECRET");j["Media"][0]["audioCodec"]=json!("SECRET");j["Media"][0]["Part"][0]["Stream"][0]["codec"]=json!("SECRET");
+        j["Media"][0]["Part"][0]["Stream"][0]["channels"]=json!(1);
+        let info=track_file_info(&j,"42","/chosen").unwrap();assert_eq!(info.channels,None);assert_eq!(info.codec,None);let text=serde_json::to_string(&info).unwrap();for private in ["SECRET","private","X-Plex","chosen"] {assert!(!text.contains(private));}
+        let audio=j["Media"][0]["Part"][0]["Stream"][0].clone();j["Media"][0]["Part"][0]["Stream"].as_array_mut().unwrap().push(audio);assert!(track_file_info(&j,"42","/chosen").is_none());
+    }
+    #[test]
+    fn legacy_track_dtos_without_audio_info_still_deserialize() {
+        let track: super::super::PlexTrack=serde_json::from_value(json!({"rating_key":"42","title":"Synthetic","album_title":null,"artist":null,"thumb":null,"track_index":1,"duration_ms":120000,"media_locator":{"kind":"plex","server_id":"server","part_key":"/chosen","rating_key":"42"}})).unwrap();
+        assert!(track.audio_info.is_none());assert!(serde_json::to_value(track).unwrap().get("audio_info").is_none());
+    }
 }

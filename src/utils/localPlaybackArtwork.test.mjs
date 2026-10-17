@@ -1,3 +1,4 @@
+import * as playbackIntents from "./playbackIntent.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -9,7 +10,7 @@ import { logError } from "./frontendDiagnostics.ts";
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
 const compile = (file, deps) => {
   const js = ts.transpileModule(read(file), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
-  const exports = {}; new Function("require", "exports", js)(id => { assert.ok(id in deps, id); return deps[id]; }, exports); return exports;
+  const exports = {}; new Function("require", "exports", js)(id => { if(id === "../utils/playbackIntent") return playbackIntents; assert.ok(id in deps, id); return deps[id]; }, exports); return exports;
 };
 const appSource = read("App.tsx"), ast = ts.createSourceFile("App.tsx", appSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let projection, snapshotEffect;

@@ -1,3 +1,5 @@
+import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
+import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useState } from "react";
 import {
@@ -114,6 +116,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
     }
   };
 
+  const request = usePlaybackAttempt(JSON.stringify([selectedAlbum?.id, activeTab, search, isPlaybackAvailable]));
   const handlePlayAll = (startIndex = 0) => {
     if (!isPlaybackAvailable) return;
     if (!selectedAlbum || tracks.length === 0) return;
@@ -126,7 +129,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
       uri: t.uri,
       media_locator: t.media_locator,
     }));
-    audioService.playTracks(meta, startIndex);
+    void request.run(intent => audioService.playTracks(meta, startIndex, intent));
   };
 
   const handleQuickPlayCard = async (e: React.MouseEvent, fav: FavoriteAlbum) => {
@@ -137,7 +140,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
       return;
     }
 
-    try {
+    await request.run(async intent => {
       if (fav.source === "local") {
         const items = await audioService.listLocalDirectory(fav.path_or_key);
         const files = items.filter((i) => i.item_type === "file");
@@ -148,7 +151,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
           thumb: fav.thumb || null,
           uri: f.path,
         }));
-        if (meta.length > 0) audioService.playTracks(meta, 0);
+        if (meta.length > 0) await audioService.playTracks(meta, 0, intent);
       } else {
         const plexTracks = await plexService.getAlbumTracks(fav.path_or_key);
         const meta = plexTracks.map((t) => ({
@@ -158,11 +161,9 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
           plex_image: fav.plex_image || null,
           media_locator: t.media_locator,
         }));
-        if (meta.length > 0) audioService.playTracks(meta, 0);
+        if (meta.length > 0) await audioService.playTracks(meta, 0, intent);
       }
-    } catch (err) {
-      logError("favorites.quick-play", err);
-    }
+    });
   };
 
   const formatDuration = (secs?: number) => {
@@ -200,6 +201,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
 
   return (
     <main className="flex-1 flex flex-col overflow-hidden bg-[#121212] select-none">
+      <PlaybackRequestNotice failure={request.failure} />
       <div className="flex items-center justify-between p-8 pb-4 border-b border-[#222222]">
         <div className="flex items-center space-x-3">
           {selectedAlbum && (

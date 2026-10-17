@@ -1,3 +1,5 @@
+import { usePlaybackAttempt } from "./utils/usePlaybackAttempt";
+import { PlaybackRequestNotice } from "./components/PlaybackRequestNotice";
 import { usePlayerSourceInfo } from "./utils/usePlayerSourceInfo";
 import { useLocalPlaybackArtwork } from "./utils/useLocalPlaybackArtwork";
 import { createLocalAlbumPlayback } from "./utils/localAlbumPlayback";
@@ -944,7 +946,7 @@ export function App() {
         if (snapshot.health.state === "available" && snapshot.playback) {
           localAlbumCatalog.onMpdStatus(snapshot.playback.is_updating);
           setMpdHealth(snapshot.health);
-          setPlaybackStatus(snapshot.playback);
+          setPlaybackStatus({ ...snapshot.playback, output_observation: snapshot.output_observation ?? null, engine_evidence: snapshot.engine_evidence ?? null });
         } else if (snapshot.health.state === "available") {
           setMpdHealth({ state: "unavailable", reason: "protocol_unavailable" });
         } else {
@@ -1240,15 +1242,12 @@ export function App() {
     }
   };
 
+  const appPlayback = usePlaybackAttempt(JSON.stringify([centralSection, mediaSource, selectedLibrary?.key, searchQuery, plexArea, activeAlbum?.rating_key, showSettings, showAbout, !!playerTarget]));
   const handlePlayQuick = useCallback(async (e: React.MouseEvent, album: PlexAlbum) => {
     e.stopPropagation();
     if (!playbackAvailableRef.current) return;
-    try {
-      await playPlexAlbum(album, plexService.getAlbumTracks, audioService.playTracks, () => playbackAvailableRef.current);
-    } catch (err) {
-      logError("plex.quick-play", err);
-    }
-  }, []);
+    await appPlayback.run(intent => playPlexAlbum(album, plexService.getAlbumTracks, audioService.playTracks, () => playbackAvailableRef.current, intent));
+  }, [appPlayback]);
 
   const handleTogglePlexCardFav = useCallback(async (e: React.MouseEvent, album: PlexAlbum) => {
     e.stopPropagation();
@@ -1698,10 +1697,10 @@ export function App() {
                   catch (cause) { throw isDuplicatePlaylistNameError(cause) ? "playlists.duplicateName" : "playlists.createAndAddError"; }
                   setPlaylistRevision(value => value + 1);
                 }}
-                onPlayAlbum={(album, current) => playPlexAlbum(album, plexService.getAlbumTracks, audioService.playTracks, () => current() && playbackAvailableRef.current)}
+                onPlayAlbum={(album, current) => appPlayback.run(intent => playPlexAlbum(album, plexService.getAlbumTracks, audioService.playTracks, () => current() && playbackAvailableRef.current, intent))}
                 isPlaybackAvailable={isPlaybackAvailable} onPlayMix={async tracks => {
                   if (!playbackAvailableRef.current || !discoverScope || !plexDiscover.isScope(discoverScope)) throw new Error("PLEX_DISCOVER_CONTEXT");
-                  await audioService.playTracks(mixPlaybackMetadata(tracks), 0);
+                  await appPlayback.run(intent => audioService.playTracks(mixPlaybackMetadata(tracks), 0, intent));
                 }}
                 selection={discoverSelectionId} libraries={libraries} librariesLoading={loadingLibraries} librariesError={plexLibrariesError}
                 onRetryLibraries={() => setPlexDiscoveryAttempt(attempt => attempt + 1)}
@@ -2025,7 +2024,7 @@ export function App() {
                                     duration: track.duration_ms ? track.duration_ms / 1000 : undefined,
                                   },
                                 ];
-                                audioService.playTracks(meta, 0);
+                                void appPlayback.run(intent => audioService.playTracks(meta, 0, intent));
                               }}
                               aria-disabled={!isPlaybackAvailable}
                               className={`flex items-center justify-between p-2.5 rounded-lg transition-colors group ${
@@ -2370,6 +2369,7 @@ export function App() {
         </div>
       )}
 
+      <PlaybackRequestNotice failure={appPlayback.failure} />
       <PlayerBar
         route={configuredSignalRoute(config)}
         status={presentationPlayback}

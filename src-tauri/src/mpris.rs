@@ -1383,6 +1383,7 @@ mod tests {
 
     fn audio_status(state: &str, current_media: Option<CurrentMedia>) -> AudioPlaybackStatus {
         AudioPlaybackStatus {
+            processing: None,
             options: None,
             state: state.into(),
             elapsed: 12.5,

@@ -21,6 +21,7 @@ const hooks={
 };
 function effect(fn,deps,layout){const index=host.cursor++,h=host,slot=h.slots[index]??={};if(!equal(slot.deps,deps)){(layout?h.layouts:h.effects).push(()=>{slot.cleanup?.();slot.deps=deps;slot.cleanup=fn();});}}
 const deps={react:{__esModule:true,...React,...hooks,default:React},'react/jsx-runtime':await import('react/jsx-runtime'),'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,
+  '../utils/usePlaybackAttempt':{usePlaybackAttempt:()=>({failure:null,run:action=>action({current:()=>true})})},'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},
  '../utils/frontendDiagnostics':{logError(){}},'../services/plex':{plexService:service},'../services/audio':{audioService:{playTracks:async()=>plays++,togglePlay:async()=>plays++}},
  './PlexImage':{PlexImage:()=>React.createElement('div',{'data-synthetic-image':true})},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null}};
 const compile=source=>ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2020}}).outputText;

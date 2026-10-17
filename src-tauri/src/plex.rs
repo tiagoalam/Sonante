@@ -2,6 +2,7 @@
 mod discover;
 #[path = "plex_source_info.rs"]
 mod source_info;
+pub use source_info::PlexFileInfo;
 pub use discover::{PlexDiscoverPage, PlexDiscoverRecent, PlexDiscoverHub, PlexDiscoverArtistContent, PlexLibraryMixPage, PlexMixYears, PlexMixStyles, PlexStyleSelection};
 use crate::audio::MediaLocator;
 use crate::config::AppConfig;
@@ -3332,6 +3333,8 @@ pub struct PlexTrack {
     pub track_index: u32,
     pub duration_ms: u64,
     pub media_locator: MediaLocator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_info: Option<PlexFileInfo>,
 }
 
 /// Navigation only: artwork is a safe server-relative reference, never a playback URL or file path.
@@ -4029,6 +4032,7 @@ impl PlexClient {
         let part_key = part["key"].as_str().filter(|key| !key.is_empty())?;
 
         Some(PlexTrack {
+            audio_info: source_info::track_file_info(item, &rating_key, part_key),
             rating_key: rating_key.clone(),
             title,
             album_title,

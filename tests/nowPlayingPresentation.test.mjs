@@ -1,3 +1,4 @@
+import * as playbackIntents from "../src/utils/playbackIntent.ts";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -9,10 +10,11 @@ import * as icons from 'lucide-react';
 import i18next from 'i18next';
 import { nowPlayingWindowBounds, queueItemArtwork, queueItemIsCurrent, queueVisibleRange, QueuePreviewReader, playConfirmedQueuePosition } from '../src/utils/nowPlayingPresentation.ts';
 import { analyzerOwnerMatches } from '../src/utils/nowPlayingHosting.ts';
-import { signalPathInformation } from '../src/utils/signalPath.ts';
+import { routeConditions } from '../src/utils/routeConditions.ts';
+import { signalPathInformation, requiresDeviceVolumeControl } from '../src/utils/signalPath.ts';
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(l=>[l,{translation:JSON.parse(readFileSync(new URL(`../src/locales/${l}.json`,import.meta.url)))}]))});
 globalThis.window={localStorage:{getItem:()=>null,setItem(){}},screen:{availWidth:1920,availHeight:1040},crypto:{randomUUID:()=> 'synthetic-session'},setTimeout,clearTimeout,addEventListener(){},removeEventListener(){}};
-const dependencies={'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{signalPathInformation},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
+const dependencies={'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
 const compile=(file,extra={})=>{const js=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',js)(name=>{assert.ok(name in extra||name in dependencies,name);return extra[name]??dependencies[name];},ex);return ex;};
 dependencies['./PlexImage']={PlexImage:({alt,className})=>React.createElement('div',{'data-plex-artwork':true,'aria-label':alt,className})};
 dependencies['./TrackArtwork']=compile('components/TrackArtwork.tsx');
@@ -31,7 +33,7 @@ const nodes=(tree,pred)=>Array.isArray(tree)?tree.flatMap(n=>nodes(n,pred)):!tre
 test('presentation renders long metadata, all controls and confirmed horizontal signal in both languages/window modes',async()=>{
  for(const lng of ['en','pt-BR']){await i18n.changeLanguage(lng);for(const fullscreen of [false,true]){
   const html=renderToStaticMarkup(React.createElement(View,{...props,fullscreen,queueOpen:true,queue:React.createElement('aside',{id:'now-playing-queue'},'Synthetic queue')}));
-  assert.match(html,/Synthetic artist/);assert.match(html,/Synthetic album/);assert.match(html,/96000|96/);assert.match(html,/PipeWire/);assert.match(html,/aria-controls="now-playing-queue"/);assert.match(html,/aria-expanded="true"/);assert.doesNotMatch(html,/nowPlaying\.|player\.seek|bit-perfect/i);
+  assert.match(html,/Synthetic artist/);assert.match(html,/Synthetic album/);assert.match(html,/aria-haspopup="dialog"/);assert.match(html,/96 kHz/);assert.match(html,/24-bit/);assert.match(html,/np-signal-stages/);assert.doesNotMatch(html,/data-route-conditions|data-alsa-observation/);assert.match(html,/aria-controls="now-playing-queue"/);assert.match(html,/aria-expanded="true"/);assert.doesNotMatch(html,/nowPlaying\.|player\.seek/i);assert.match(html,/data-signal-summary/);assert.doesNotMatch(html,/data-bitperfect/);
   for(const label of [i18n.t('player.previous'),i18n.t('player.pause'),i18n.t('player.next'),i18n.t('nowPlaying.seek'),i18n.t('signalPath.volume')])assert.ok(html.includes(label),label);
  }}await i18n.changeLanguage('en');
 });
@@ -271,7 +273,7 @@ test('embedded and detached hosting actions resolve in pt-BR/en without changing
    const html=renderToStaticMarkup(React.createElement(View,{...props,embedded,hostingError:true,controlsDisabled:true}));
    assert.ok(html.includes(i18n.t(embedded?'nowPlaying.detach':'nowPlaying.reincorporate')));
    assert.ok(html.includes(i18n.t(embedded?'nowPlaying.collapse':'nowPlaying.close')));
-   assert.match(html,/96|96000/);assert.doesNotMatch(html,/nowPlaying\.|bit-perfect/i);
+   assert.match(html,/96 kHz/);assert.match(html,/24-bit/);assert.match(html,/np-signal-stages/);assert.doesNotMatch(html,/data-route-conditions|data-alsa-observation/);assert.doesNotMatch(html,/nowPlaying\./i);assert.match(html,/data-signal-summary/);assert.doesNotMatch(html,/data-bitperfect/);
   }
  }await i18n.changeLanguage('en');
 });
@@ -394,4 +396,17 @@ test('analyzer start rejection produces an explanatory failure state without ret
  const effects=[],values=[],calls=[];const hooks={...React,default:React,useState:initial=>[initial,value=>values.push(value)],useEffect:fn=>effects.push(fn),useRef:initial=>({current:initial})};
  const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{listen:async()=>()=>{}},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{AUDIO_LEVEL_EVENT:'level',ANALYZER_STATUS_EVENT:'analyzer',startAudioAnalyzer:async()=>{calls.push('start');throw new Error('synthetic');},stopAudioAnalyzer:async()=>calls.push('stop')}});
  NowPlayingHost({snapshot,owner,embedded:true,onReady(){}});const cleanup=effects[2]();await flush();assert.ok(values.includes('initial_reconcile_failed'));assert.deepEqual(calls,['start']);cleanup();await flush();assert.deepEqual(calls,['start','stop']);
+});
+
+test('Now Playing retains Direct PCM volume and hides only gradual software DSD gain while preserving mute',async()=>{
+ for(const lng of ['en','pt-BR']){await i18n.changeLanguage(lng);
+  for(const embedded of [false,true])for(const [mode,audio_format,backend,slider] of [
+   ['direct','96000:24:2','mpd_software',true],['direct','dsd64:2','mpd_software',false],
+   ['direct','705600:dsd:2','mpd_software',false],['direct','dsd128:2','alsa_hardware',true],['shared','dsd64:2','pipewire',true]]){
+   let muted=0;const tree=View({...props,embedded,onMute:()=>{muted++},snapshot:{...snapshot,route:{mode,endpoint:mode==='direct'?'hw:Fixture,0':'default'},playback:{...snapshot.playback,audio_format,volume:{...snapshot.playback.volume,backend}}}});
+   const ranges=nodes(tree,n=>n.type==='input'&&n.props['aria-label']===i18n.t('signalPath.volume'));assert.equal(ranges.length,slider?1:0);
+   const mute=nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('player.mute'))[0];assert.ok(mute);mute.props.onClick();assert.equal(muted,1);
+   if(!slider)assert.ok(renderToStaticMarkup(tree).includes(i18n.t('player.volumeOnDevice')));
+  }
+ }await i18n.changeLanguage('en');
 });

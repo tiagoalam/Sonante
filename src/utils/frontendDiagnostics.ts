@@ -1,5 +1,6 @@
 // DevTools diagnostics only. UI errors remain unchanged.
 const operations = [
+  "player.request", "plex.album-play",
   "app.bootstrap", "app.now-playing-listener", "app.window-title",
   "artist.load", "artist.play", "artwork.album-load",
   "artwork.folder-load", "artwork.local-enrich", "audio.health",

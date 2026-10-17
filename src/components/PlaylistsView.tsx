@@ -1,3 +1,4 @@
+import { beginPlaybackIntent, isPlaybackSuperseded, playbackFailure } from "../utils/playbackIntent";
 import { logError, logWarning } from "../utils/frontendDiagnostics";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -229,25 +230,29 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
   const formatDate = (timestamp: number) =>
     new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium" }).format(timestamp);
 
+  const preparation = useRef<{ playlistId: string; intent: ReturnType<typeof beginPlaybackIntent> } | null>(null);
+  useEffect(() => () => { const owned = preparation.current; if (owned?.playlistId === selectedId) owned.intent.cancel(); }, [selectedId]);
   const playPlaylist = async (playlistId: string, startItemId?: string, shuffle = false) => {
     if (!isPlaybackAvailable || playRequestInFlight.current) return;
+    const intent = beginPlaybackIntent(); preparation.current = { playlistId, intent };
     playRequestInFlight.current = true;
     setPreparingPlayback(true);
     setError(null);
     setPlaybackFeedback(null);
     try {
-      const result = await playlistsService.play(playlistId, startItemId, shuffle);
-      if (selectedIdRef.current === playlistId && result.skipped_count > 0) {
+      const result = await playlistsService.play(playlistId, startItemId, shuffle, intent);
+      if (intent.current() && selectedIdRef.current === playlistId && result.skipped_count > 0) {
         setPlaybackFeedback(t("playlists.skippedCount", { count: result.skipped_count }));
       }
     } catch (cause) {
+      if (isPlaybackSuperseded(cause) || !await intent.confirmCurrent()) return;
       logError("playlists.play", cause);
       const message = String(cause);
       if (selectedIdRef.current === playlistId) setError(t(message.includes("playlist_no_playable_items")
         ? "playlists.noPlayableItems"
         : message.includes("playlist_selected_item_unavailable")
           ? "playlists.selectedItemUnavailable"
-          : "playlists.playError"));
+          : playbackFailure(cause) === "failed" ? "playlists.playError" : `player.requestError.${playbackFailure(cause)}`));
     } finally {
       playRequestInFlight.current = false;
       setPreparingPlayback(false);

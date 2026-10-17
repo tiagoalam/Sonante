@@ -1,3 +1,4 @@
+import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useMemo, useState, useRef, useSyncExternalStore } from "react";
 import { createPlayerAlbumLookup, type PlayerNavigationTarget } from "../utils/playerNavigation";
@@ -501,26 +502,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     initialAlbumId, playerTarget, albums, catalogRefreshRevision, configuredLocalFolders,
     isPlaybackAvailable, catalogConfirmed,
   ]);
-  const currentPlaybackContext = useRef(playbackContext);
-  currentPlaybackContext.current = playbackContext;
-  const playbackAttempt = useRef<object | null>(null);
-  const [playbackFailure, setPlaybackFailure] = useState<{ context: object; attempt: object } | null>(null);
-  useEffect(() => () => { playbackAttempt.current = null; }, []);
-  const runLocalPlayback = async (action: () => Promise<void>) => {
-    const attempt = {};
-    playbackAttempt.current = attempt;
-    setPlaybackFailure(null);
-    try {
-      await action();
-    } catch (error) {
-      logError("local.album-play", error);
-      if (currentPlaybackContext.current === playbackContext && playbackAttempt.current === attempt) {
-        setPlaybackFailure({ context: playbackContext, attempt });
-      }
-    }
-  };
+  const localPlayback = usePlaybackAttempt(playbackContext, "local.album-play");
+  const runLocalPlayback = localPlayback.run;
+  const playbackFailure = localPlayback.failure;
 
-  const handlePlayEntireAlbum = (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => runLocalPlayback(async () => {
+  const handlePlayEntireAlbum = (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => runLocalPlayback(async intent => {
     if (!isPlaybackAvailable || !catalogConfirmed || (trackItems && !tracksReady)) return;
     const files = trackItems ?? flattenAlbumDiscs(await loadAlbumDiscTracks(album)).tracks;
     const cov = (selectedAlbum?.id === album.id ? albumCover : null) || await localArtworkResolver.resolveLocalOnly(album);
@@ -535,7 +521,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 	duration: f.duration,
     }));
     if (meta.length > 0) {
-      await audioService.playTracks(meta, startIdx);
+      await audioService.playTracks(meta, startIdx, intent);
     }
   });
 
@@ -958,9 +944,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           <span>{t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}</span>
         </div>
       )}
-      {playbackFailure?.context === playbackContext && playbackFailure.attempt === playbackAttempt.current && (
+      {playbackFailure && (
         <div role="alert" className="px-8 py-2 text-xs text-red-400 border-b border-[#222222]">
-          {t("localBrowser.playRequestError")}
+          {t(`player.requestError.${playbackFailure}`)}
         </div>
       )}
       {catalog.error && (
@@ -1430,7 +1416,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 			      duration: item.duration,
                             },
                           ];
-                          void runLocalPlayback(() => audioService.playTracks(meta, 0));
+                          void runLocalPlayback(intent => audioService.playTracks(meta, 0, intent));
                         }
                       }}
                       aria-disabled={!isDir && !isPlaybackAvailable}

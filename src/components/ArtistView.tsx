@@ -1,3 +1,5 @@
+import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
+import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, Play, Pause, Disc3, ChevronDown, ChevronUp, User, ListPlus } from "lucide-react";
@@ -40,6 +42,7 @@ export const ArtistView: React.FC<Props> = ({
   const [loadedFor, setLoadedFor] = useState<{ key: string; identity: unknown } | null>(null);
   const [loadError, setLoadError] = useState<{ key: string; identity: unknown } | null>(null);
   const key = JSON.stringify([artist.server_id, artist.library_id, artist.rating_key]);
+  const request = usePlaybackAttempt(key + String(active), "player.request", requestIdentity);
   const current = loadedFor?.key === key && loadedFor.identity === requestIdentity;
   const failed = loadError?.key === key && loadError.identity === requestIdentity;
   const albums = current ? loadedAlbums : [], topTracks = current ? loadedTracks : [];
@@ -110,11 +113,7 @@ export const ArtistView: React.FC<Props> = ({
       media_locator: t.media_locator,
     }));
 
-    try {
-      await audioService.playTracks(metaTracks, index);
-    } catch (err) {
-      logError("artist.play", err);
-    }
+    await request.run(intent => audioService.playTracks(metaTracks, index, intent));
   };
 
   const toPlaylistItem = (track: PlexTrack): NewPlaylistItem => ({
@@ -131,6 +130,7 @@ export const ArtistView: React.FC<Props> = ({
     <main ref={viewport} onScroll={event => { if (active) scroll.current = event.currentTarget.scrollTop; }}
       onKeyDown={event => { if ((event.target as HTMLElement).closest?.("[data-artist-album]")) event.stopPropagation(); }}
       className="flex-1 flex min-h-0 flex-col overflow-y-auto bg-gradient-to-b from-[#1C1812] via-[#121212] to-[#121212] select-none p-8">
+      <PlaybackRequestNotice failure={request.failure} />
       {/* Botão de Retorno */}
       <button
         onClick={onBack}

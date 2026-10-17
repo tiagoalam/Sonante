@@ -64,9 +64,9 @@ export class QueuePreviewReader {
         this.state = { items, phase: "ready" };
         this.publish(this.state);
       }
-    } catch {
+    } catch (error) {
       if (this.active && epoch === this.epoch) {
-        this.state = { ...this.state, phase: "error" };
+        this.state = { items: error === "PLAYBACK_QUEUE_UNCERTAIN" ? [] : this.state.items, phase: "error" };
         this.publish(this.state);
       }
     } finally {

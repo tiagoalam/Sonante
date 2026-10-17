@@ -2,6 +2,7 @@ import { SourceAudioBadges } from "./SourceAudioBadges";
 import type { PlayerSourceInfo } from "../types/sourceAudio";
 import { currentMediaKey } from "../utils/playerNavigation";
 import { PlaybackOptionsControls } from "./PlaybackOptionsControls";
+import { requiresDeviceVolumeControl } from "../utils/signalPath";
 import { SignalPath } from "./SignalPath";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useState, useRef } from "react";
@@ -138,6 +139,7 @@ export const PlayerBar: React.FC<Props> = ({
   const displayArtist = isNoTrack
     ? "Sonante"
     : status.artist || (status.album ? status.album : "Sonante");
+  const deviceVolume = requiresDeviceVolumeControl(route, status);
   const isVolumeAvailable =
     isAvailable && status.volume.available && status.volume.writable;
   const isMuted = status.volume.muted || status.volume.value === 0;
@@ -328,7 +330,7 @@ export const PlayerBar: React.FC<Props> = ({
               {isVolumeAvailable && isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
             </button>
 
-            <input
+            {!deviceVolume && <input
               type="range"
               min={0}
               max={100}
@@ -336,11 +338,11 @@ export const PlayerBar: React.FC<Props> = ({
               disabled={!isVolumeAvailable}
               onChange={(e) => handleVolumeChange(parseInt(e.target.value, 10))}
               className="w-24 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-35 disabled:cursor-not-allowed"
-            />
+            />}
           </div>
 
-          <span title={volumeStatusLabel} className="max-w-full truncate text-[9px] leading-none text-[#777777] pr-0.5">
-            {volumeStatusLabel}
+          <span title={deviceVolume ? t("player.volumeOnDevice") : volumeStatusLabel} className="max-w-full truncate text-[9px] leading-none text-[#777777] pr-0.5">
+            {deviceVolume ? t("player.volumeOnDeviceShort") : volumeStatusLabel}
           </span>
         </div>
 

@@ -49,7 +49,19 @@ export interface PlexCollection {
   thumb?: PlexImageRef;
 }
 
+export interface PlexFileInfo {
+  container: string | null;
+  codec: string | null;
+  compression: "lossy" | "lossless" | "uncompressed" | "hybrid" | "unknown" | null;
+  sample_type: "integer" | "float" | "dsd" | "not_applicable" | null;
+  sample_rate: number | null;
+  bit_depth: number | null;
+  dsd_level: number | null;
+  channels: number | null;
+  bitrate_kbps: number | null;
+}
 export interface PlexTrack {
+  audio_info?: PlexFileInfo | null;
   rating_key: string;
   title: string;
   album_title?: string;

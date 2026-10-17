@@ -23,6 +23,7 @@ pub struct MpdSupervisor {
     health: MpdHealth,
     shared_volume_backend: Option<SharedVolumeBackend>,
     volume_backend: VolumeBackend,
+    engine_evidence: Option<crate::mpd_engine::EngineEvidence>,
 }
 
 pub struct LibrarySyncResult {
@@ -85,6 +86,7 @@ impl MpdSupervisor {
             health: MpdHealth::Starting,
             shared_volume_backend: None,
             volume_backend: VolumeBackend::Unavailable,
+            engine_evidence: None,
         }
     }
 
@@ -99,6 +101,7 @@ impl MpdSupervisor {
             health: MpdHealth::Starting,
             shared_volume_backend: None,
             volume_backend: VolumeBackend::Unavailable,
+            engine_evidence: None,
         }
     }
 
@@ -118,8 +121,19 @@ impl MpdSupervisor {
         self.shared_volume_backend
     }
 
+    // Identity only: no probe, open, wait, signal or lifecycle transition.
+    pub(crate) fn observed_process_pid(&self) -> Option<u32> {
+        if self.health != MpdHealth::Available || !self.owns_runtime_files { return None; }
+        self.process.as_ref().map(Child::id)
+    }
+
     pub(crate) fn volume_backend(&self) -> VolumeBackend {
         self.volume_backend
+    }
+
+    pub(crate) fn engine_evidence_for_pid(&self, pid: u32) -> Option<crate::mpd_engine::EngineEvidence> {
+        if self.observed_process_pid()? != pid { return None; }
+        self.engine_evidence.clone()
     }
 
     pub fn sonante_config_dir() -> PathBuf {
@@ -405,6 +419,7 @@ impl MpdSupervisor {
         &self,
         cfg: &AppConfig,
         shared_volume_backend: Option<SharedVolumeBackend>,
+        engine: &crate::mpd_engine::MpdEngine,
     ) -> Result<(PathBuf, VolumeBackend, LibrarySyncResult), String> {
         let dir = crate::persistence::ensure_sonante_config_dir()?;
 
@@ -450,6 +465,7 @@ impl MpdSupervisor {
             &mixer_selection,
             shared_volume_backend,
         )?;
+        let audio_output_section = engine.configure_output(audio_output_section, is_shared)?;
 
         // Sem state_file: o MPD inicia em modo neutro/stop sem tocar sozinho
         let audio_buffer_size = cfg.audio_buffer_size_kb.to_string();
@@ -638,6 +654,9 @@ decoder {{
     }
 
     fn start_inner(&mut self, cfg: &AppConfig) -> Result<LibrarySyncResult, String> {
+        // Resolve/validate an explicit development engine before stopping
+        // the current owned MPD. No override keeps the established path.
+        let engine = crate::mpd_engine::MpdEngine::resolve()?;
         let is_shared = cfg.audio_output_type == "pipewire"
             || cfg.audio_output_type == "shared"
             || cfg.alsa_device == "default";
@@ -667,7 +686,7 @@ decoder {{
         }
 
         let (conf_path, volume_backend, library_sync) =
-            self.ensure_config_file(cfg, shared_volume_backend)?;
+            self.ensure_config_file(cfg, shared_volume_backend, &engine)?;
         self.prepare_runtime_files()?;
 
         println!(
@@ -680,7 +699,7 @@ decoder {{
             cfg.audio_buffer_size_kb
         );
 
-        let child = match Command::new("mpd")
+        let child = match Command::new(engine.program())
             .arg("--no-daemon")
             .arg(&conf_path)
             .spawn()
@@ -695,7 +714,11 @@ decoder {{
             }
         };
 
+        let engine_identity = engine.verify_child(&child);
         self.process = Some(child);
+        if let Err(error) = engine_identity {
+            return Err(self.cleanup_after_start_failure(error));
+        }
 
         self.wait_for_startup(50, Duration::from_millis(50))?;
         if let Err(error) = crate::analyzer::set_output_enabled(
@@ -710,6 +733,7 @@ decoder {{
         }
         self.shared_volume_backend = shared_volume_backend;
         self.volume_backend = volume_backend;
+        self.engine_evidence = engine.evidence(is_shared);
         Ok(library_sync)
     }
 
@@ -1100,6 +1124,7 @@ decoder {{
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
+        self.engine_evidence = None;
         self.health = MpdHealth::Stopping;
         self.volume_backend = VolumeBackend::Unavailable;
         if let Some(mut child) = self.process.take() {
@@ -1657,6 +1682,28 @@ mod tests {
         assert_eq!(fs::read_to_string(library.join("Music")).unwrap(), "keep");
         assert_eq!(fs::canonicalize(library.join("Music (2)")).unwrap(), folder);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn engine_evidence_requires_the_owned_available_pid_and_is_cleared_on_stop() {
+        let (dir,socket,pidfile)=test_runtime_paths("engine-evidence");
+        let mut supervisor=MpdSupervisor::new_with_runtime_paths(&socket,&pidfile);
+        let child=spawn_sleeping_child();let pid=child.id();
+        supervisor.set_process_for_test(child,true);
+        supervisor.engine_evidence=Some(crate::mpd_engine::EngineEvidence::Identified {
+            evidence_id:"mpd-pcm-eof-20261017",scope:"pcm24_96000_stereo_gapless",pcm_eof_flush:true,
+        });
+        supervisor.health=MpdHealth::Starting;
+        assert!(supervisor.engine_evidence_for_pid(pid).is_none());
+        supervisor.mark_available();
+        assert!(supervisor.engine_evidence_for_pid(pid).is_some());
+        assert!(supervisor.engine_evidence_for_pid(pid+1).is_none());
+        supervisor.owns_runtime_files=false;
+        assert!(supervisor.engine_evidence_for_pid(pid).is_none());
+        supervisor.stop().unwrap();
+        assert!(supervisor.engine_evidence.is_none());
+        assert!(supervisor.engine_evidence_for_pid(pid).is_none());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn spawn_sleeping_child() -> Child {

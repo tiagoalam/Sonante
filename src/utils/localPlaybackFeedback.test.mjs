@@ -32,7 +32,7 @@ const artwork={get:()=>null,subscribe:()=>()=>{},resolveLocalOnly:(...a)=>coverR
 const replacements={
  react:{__esModule:true,...React,...hooks,default:React},'react/jsx-runtime':await import('react/jsx-runtime'),'react-i18next':{useTranslation:()=>({t:language.t.bind(language),i18n:language})},'lucide-react':icons,
  '../services/audio':{audioService},'../services/favorites':{favoritesService:{getFavorites:async()=>[]}},
- '../utils/frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})},
+ '../utils/frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})}, './frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})},
  '../utils/localAlbumCatalogSession':{localAlbumCatalog:catalog},
  '../utils/localArtworkSession':{localArtworkResolver:artwork,localArtworkEnrichment:{subscribe:()=>()=>{},getSnapshot:()=>({active:0,queued:0,inFlight:0,blocked:false}),setCatalog(){}}},
 };
@@ -76,9 +76,9 @@ for(const lng of ['pt-BR','en']){
  test(`Local real component catches album and folder rejections with one translated private alert (${lng})`,async()=>{
   language=i18n;const h=setup();try{
    await h.settle();h.click(language.t('localBrowser.playAlbum'));await flush();assert.equal(requests.length,1);requests[0].reject(sensitive);await flush();
-   let alerts=h.alerts();assert.equal(alerts.length,1);assert.ok(alerts[0].includes(language.t('localBrowser.playRequestError')));for(const raw of ['ACK','SECRET','/private','https://'])assert.ok(!alerts[0].includes(raw));assert.equal(logs.length,1);
+   let alerts=h.alerts();assert.equal(alerts.length,1);assert.ok(alerts[0].includes(language.t('player.requestError.failed')));for(const raw of ['ACK','SECRET','/private','https://'])assert.ok(!alerts[0].includes(raw));assert.equal(logs.length,1);
    await h.folders();assert.equal(h.alerts().length,0);assert.equal(h.folderClick(),undefined);await flush();assert.equal(requests.length,2);requests[1].reject(sensitive);await flush();
-   alerts=h.alerts();assert.equal(alerts.length,1);assert.ok(alerts[0].includes(language.t('localBrowser.playRequestError')));assert.equal(logs.length,2);assert.deepEqual(requests[1].args[1],0);
+   alerts=h.alerts();assert.equal(alerts.length,1);assert.ok(alerts[0].includes(language.t('player.requestError.failed')));assert.equal(logs.length,2);assert.deepEqual(requests[1].args[1],0);
   }finally{h.close();}
  });
  test(`Local success and a new attempt clear previous feedback without duplicate commands (${lng})`,async()=>{

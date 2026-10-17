@@ -7,6 +7,7 @@ import {renderToStaticMarkup} from 'react-dom/server';
 import * as icons from 'lucide-react';
 import i18next from 'i18next';
 import {sourceAudioBadge,albumAudioBadge,PlayerSourceReader} from './sourceAudio.ts';
+import {requiresDeviceVolumeControl} from './signalPath.ts';
 import {currentMediaKey} from './playerNavigation.ts';
 const flush=async()=>{for(let i=0;i<40;i++)await Promise.resolve();};
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{resolve,reject,promise};};
@@ -49,7 +50,7 @@ test('source unavailable/mismatched results never publish or retry until identit
 });
 
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(lng=>[lng,{translation:JSON.parse(readFileSync(new URL(`../locales/${lng}.json`,import.meta.url)))}]))});
-const deps={react:{...React,default:React},'react/jsx-runtime':await import('react/jsx-runtime'),'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,'../utils/sourceAudio':{sourceAudioBadge,albumAudioBadge},'../utils/playerNavigation':{currentMediaKey}};
+const deps={'../utils/signalPath':{requiresDeviceVolumeControl},react:{...React,default:React},'react/jsx-runtime':await import('react/jsx-runtime'),'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,'../utils/sourceAudio':{sourceAudioBadge,albumAudioBadge},'../utils/playerNavigation':{currentMediaKey}};
 const compile=(path,extra={})=>{const out={};new Function('require','exports',ts.transpileModule(readFileSync(new URL(path,import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2020}}).outputText)(name=>{assert.ok(name in extra||name in deps,name);return extra[name]??deps[name];},out);return out;};
 const {SourceAudioBadges}=compile('../components/SourceAudioBadges.tsx');deps['./SourceAudioBadges']={SourceAudioBadges};
 const hooks={...React,default:React,useEffect(){},useState:v=>[v,()=>{}],useRef:v=>({current:v})};

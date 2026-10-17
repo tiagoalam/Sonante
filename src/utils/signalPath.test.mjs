@@ -7,23 +7,24 @@ import * as icons from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import i18next from "i18next";
-import { configuredSignalRoute, parseReportedMpdFormat, signalPathInformation } from "./signalPath.ts";
+import { routeConditions } from "./routeConditions.ts";
+import { configuredSignalRoute, parseReportedMpdFormat, signalPathInformation, requiresDeviceVolumeControl } from "./signalPath.ts";
 import { currentMediaKey } from "./playerNavigation.ts";
 
 const config = { first_run: false, audio_output_type: "alsa", alsa_device: "hw:CARD=Fixture,DEV=0", plex_token: "secret-token", local_folders: ["/home/private/music"] };
 const status = { state: "play", audio_format: "96000:24:2", current_media: { kind: "local", uri: "private.cue/track0001" }, volume: { backend: "mpd_software" } };
 const health = { state: "available" };
 const resource = language => JSON.parse(readFileSync(new URL(`../locales/${language}.json`, import.meta.url)));
-function signalComponent(t) {
+function signalComponent(t, view="SignalPath") {
   const source = readFileSync(new URL("../components/SignalPath.tsx", import.meta.url), "utf8");
   const js = ts.transpileModule(source, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS } }).outputText;
   const exports = {};
   const dependencies = {
     react: { ...React, default: React }, "react/jsx-runtime": jsx, "lucide-react": icons,
-    "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": { signalPathInformation },
+    "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": { signalPathInformation, requiresDeviceVolumeControl }, "../utils/routeConditions": { routeConditions },
   };
   new Function("require", "exports", js)(id => { assert.ok(id in dependencies, id); return dependencies[id]; }, exports);
-  return exports.SignalPath;
+  return exports[view];
 }
 
 test("confirmed route is minimal and never publishes arbitrary PCM names or configuration secrets", () => {
@@ -74,14 +75,11 @@ test("both variants use translated reported metadata and detailed view has compa
       const html = renderToStaticMarkup(React.createElement(SignalPath, { route, status, health }));
       assert.ok(html.includes(t(`signalPath.${mode}`)));
       assert.match(html, /96 kHz/); assert.match(html, /24-bit/);
-      assert.doesNotMatch(html, /<details|<summary/);
+      assert.doesNotMatch(html, /data-route-conditions/); assert.match(html, /aria-haspopup="dialog"/);
       assert.match(html, /<ol/);
       assert.match(html, /np-signal-format/); assert.match(html, /width="24"/);
       for (const key of ["rate", "depth", "channels"]) assert.ok(html.includes(t(`signalPath.${key}`)));
       assert.match(html, /<dd[^>]*>2<\/dd>/);
-      assert.match(html, /role="tooltip"/);
-      assert.match(html, /group-focus-within\/signal-help:block/);
-      assert.ok(html.includes(t("signalPath.help")));
       assert.ok(html.includes(mode === "shared" ? "grid-cols-5" : "grid-cols-4"));
       assert.doesNotMatch(html, /flex-col items-center gap-1 rounded-lg/);
       assert.equal(html.includes(`${t("signalPath.endpointShort")}:`), mode === "direct");
@@ -93,9 +91,9 @@ test("both variants use translated reported metadata and detailed view has compa
       const stopped = renderToStaticMarkup(React.createElement(SignalPath, { route, status: { ...status, state: "stop" }, health }));
       assert.ok(stopped.includes(t("signalPath.stopped"))); assert.doesNotMatch(stopped, /96 kHz|24-bit/);
       assert.doesNotMatch(html, /secret-token|private\.cue|\/home\/private/);
-      const compact = renderToStaticMarkup(React.createElement(SignalPath, { route, status, health, compact: true }));
-      assert.match(compact, /tabindex="0"/); assert.match(compact, /aria-label=/);
-      assert.doesNotMatch(compact, /<button|<input|<details/);
+      const compact = renderToStaticMarkup(React.createElement(signalComponent(t,"SignalPath"), { route, status, health, compact: true }));
+      assert.match(compact, /aria-haspopup="dialog"/); assert.match(compact, /aria-label=/);
+      assert.match(compact, /<button/); assert.match(compact, /96 kHz/); assert.match(compact, /24-bit/); assert.doesNotMatch(compact, /<input|<details/);
       const unavailable = renderToStaticMarkup(React.createElement(SignalPath, { route, status, health: { state: "unavailable" } }));
       assert.ok(unavailable.includes(t("signalPath.unavailable"))); assert.doesNotMatch(unavailable, /96 kHz|24-bit/);
       assert.deepEqual(Object.keys(resource("en").signalPath).sort(), Object.keys(resource("pt-BR").signalPath).sort());
@@ -145,6 +143,7 @@ test("Now Playing receives route changes through the existing snapshot event and
   const dependencies = {
     react: { ...hooks, default: hooks, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons,
     "react-i18next": { useTranslation: () => ({ t }) },
+    "../utils/signalPath": { requiresDeviceVolumeControl },
     "./SignalPath": { SignalPath }, "./TrackArtwork": { TrackArtwork: () => null },
     "./SourceAudioBadges": { SourceAudioBadges: () => null }, "../utils/playerNavigation": { currentMediaKey },
     "./NowPlayingQueue": { NowPlayingQueue: () => null }, "./nowPlaying.css": {},
@@ -198,37 +197,20 @@ test("Now Playing receives route changes through the existing snapshot event and
   }
 });
 
-test("compact signal uses at most two discreet lines and keeps absent/unknown formats in help", async () => {
-  for (const language of ["en", "pt-BR"]) {
-    const i18n = i18next.createInstance();
-    await i18n.init({ lng: language, resources: { [language]: { translation: resource(language) } }, interpolation: { escapeValue: false } });
-    const t = i18n.t.bind(i18n), SignalPath = signalComponent(t);
-    const cases = [
-      [status, health, t("signalPath.pcmCompact", { rate: 96, bits: 24 })],
-      [{ ...status, state: "pause" }, health, `${t("player.source.local")} · ${t("signalPath.paused")}`],
-      [{ ...status, state: "stop" }, health, `${t("player.source.local")} · ${t("signalPath.stopped")}`],
-      [{ ...status, audio_format: "" }, health, t("player.source.local")],
-      [{ ...status, audio_format: "invalid" }, health, t("player.source.local")],
-      [status, { state: "unavailable" }, t("signalPath.unavailable")],
-      [{ ...status, current_media: null, audio_format: "" }, health, null],
-    ];
-    for (const [playback, mpdHealth, expected] of cases) {
-      const tree = SignalPath({ route: { mode: "direct", endpoint: "hw:Fixture,0" }, status: playback, health: mpdHealth, compact: true });
-      const visible = React.Children.toArray(tree.props.children).filter(node => node.props.role !== "tooltip");
-      assert.ok(visible.length <= 2);
-      assert.equal(visible[0].props.children, t("signalPath.direct"));
-      assert.equal(visible[1]?.props.children ?? null, expected);
-      for (const node of visible) {
-        assert.notEqual(node.props.children, t("signalPath.noSignal"));
-        assert.match(node.props.className, /truncate/); assert.ok(node.props.title);
-      }
-      assert.match(tree.props.className, /group\/compact-signal/);
-      assert.ok(tree.props["aria-label"].includes(t("signalPath.title")));
-      assert.equal(tree.props["aria-description"], t("signalPath.help"));
-    }
+test("compact route restores mode and audio format while keeping diagnostics in the dialog",async()=>{
+ for(const language of ["en","pt-BR"]){
+  const i18n=i18next.createInstance();await i18n.init({lng:language,resources:{[language]:{translation:resource(language)}}});
+  const t=i18n.t.bind(i18n),Main=signalComponent(t,"SignalPath");
+  for(const state of ["play","pause","stop"]){
+   const html=renderToStaticMarkup(React.createElement(Main,{route:{mode:'direct',endpoint:'hw:Fixture,0'},status:{...status,state},health,compact:true}));
+   assert.match(html,/data-signal-summary/);assert.match(html,/aria-haspopup="dialog"/);
+   assert.doesNotMatch(html,/hw:Fixture|<dialog|data-route-conditions/);
+   if(state==="play") { assert.match(html,/96 kHz/); assert.match(html,/24-bit/); }
+   if(state==="stop") assert.doesNotMatch(html,/kHz|24-bit/);
+   if(state!=="play")assert.ok(html.includes(t(`signalPath.${state==='pause'?'paused':'stopped'}`)));
   }
+ }
 });
-
 
 test("reported DSD short and byte-rate forms are normalized independently of routes or source codec", () => {
  for (const level of [32,64,128,256,512,1024]) {
@@ -251,7 +233,7 @@ test("DSD report appears in compact and detailed SignalPath without PCM depth, H
    for(const props of [{},{horizontal:true},{compact:true}]){
     const html=renderToStaticMarkup(React.createElement(SignalPath,{route,status:playback,health,...props}));
     assert.ok(html.includes(`DSD${level}`));assert.ok(html.includes(`${44100*level/1e6} MHz`));
-    assert.ok(html.includes(t("signalPath.help"))||!props.compact);
+
     assert.ok(!html.includes(t("signalPath.unknownFormat")));assert.doesNotMatch(html,/Hi-Res|1-bit|16-bit|24-bit|48 kHz|data-source-audio/);
     if(!props.compact){assert.ok(html.includes(t("signalPath.reported")));assert.ok(html.includes(t("signalPath.format")));assert.ok(!html.includes(t("signalPath.depth")));assert.match(html,/<dd[^>]*>2<\/dd>/);}
    }
@@ -260,4 +242,60 @@ test("DSD report appears in compact and detailed SignalPath without PCM depth, H
    }
   }
  }
+});
+
+test("observed ALSA containers stay separate from MPD input and never certify bit-perfect, DoP or native DSD", async () => {
+  const observation = { state: "observed", configured_endpoint: config.alsa_device, card: 2, device: 0, subdevice: 0, format: "S32_LE", rate: 192000, channels: 2 };
+  for (const language of ["en", "pt-BR"]) {
+    const instance = i18next.createInstance();
+    await instance.init({ lng: language, resources: { [language]: { translation: resource(language) } }, fallbackLng: false });
+    const t = instance.t.bind(instance), SignalPath = signalComponent(t,"SignalPathDetails");
+    for (const kind of ["local", "plex"]) for (const horizontal of [false, true]) {
+      const playback = { ...status, current_media: { kind }, output_observation: observation };
+      const html = renderToStaticMarkup(React.createElement(SignalPath, { route: configuredSignalRoute(config), status: playback, health, horizontal }));
+      assert.match(html, /data-alsa-observation="observed"/);
+      assert.ok(html.includes(t("signalPath.observation.observedTitle")));
+      assert.match(html, /hw:2,0 · S32_LE · 192 kHz/);
+      assert.doesNotMatch(html, /np-signal-format|np-signal-stages/);
+      assert.ok(html.includes(t("signalPath.observation.notVerified")));
+      assert.doesNotMatch(html, /data-bitperfect|owner_pid|verified-badge/);
+      const compact = renderToStaticMarkup(React.createElement(signalComponent(t,"SignalPath"),{route:configuredSignalRoute(config),status:playback,health,compact:true}));
+      assert.doesNotMatch(compact,/S32_LE|192 kHz|hw:2,0/);assert.match(compact,/aria-haspopup="dialog"/);
+      for (const change of [{ status: { ...playback, state: "pause" } }, { status: { ...playback, state: "stop" } }, { health: { state: "unavailable" } }, { route: { mode: "shared", endpoint: "default" } }, { route: { mode: "direct", endpoint: "hw:Other,0" } }]) {
+        const stale = renderToStaticMarkup(React.createElement(SignalPath, { route: configuredSignalRoute(config), status: playback, health, ...change }));
+        assert.match(stale, /data-alsa-observation="unverified"/);
+        assert.doesNotMatch(stale, /S32_LE|192 kHz|hw:2,0/);
+      }
+    }
+    for (const reason of ["unavailable", "not_playing", "shared", "unreadable", "malformed", "not_owned", "ambiguous", "changed", "limit", "busy"]) {
+      const html = renderToStaticMarkup(React.createElement(SignalPath, { route: configuredSignalRoute(config), status: { ...status, output_observation: { state: "unverified", reason } }, health }));
+      assert.ok(html.includes(t(`signalPath.observation.${reason}`)));
+      assert.doesNotMatch(html, /signalPath\./);
+    }
+  }
+});
+
+test("actual App status polling carries and clears ALSA and engine evidence through its existing request and timer", async () => {
+  const source = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const ast = ts.createSourceFile("App.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let effect;
+  const visit = node => {
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect" && node.arguments[0]?.getText(ast).includes("audioService.getMpdStatusSnapshot()")) effect = node.arguments[0].getText(ast);
+    ts.forEachChild(node, visit);
+  }; visit(ast); assert.ok(effect);
+  const observation = { state: "observed", configured_endpoint: config.alsa_device, card: 2, device: 0, subdevice: 0, format: "S32_LE", rate: 96000, channels: 2 };
+  const identified = { state: "identified", evidence_id: "mpd-pcm-eof-20261017", scope: "pcm24_96000_stereo_gapless", pcm_eof_flush: true };
+  for (const output of [observation, null, undefined]) for (const engine of [identified, null, undefined]) {
+    let requests = 0, timers = 0; const values = [], updates = [];
+    const vars = { audioService: { async getMpdStatusSnapshot() { requests++; return { health, playback: status, output_observation: output, engine_evidence: engine }; } }, statusRequestGenerationRef: { current: 0 },
+      localAlbumCatalog: { onMpdStatus: value => updates.push(value) }, setMpdHealth() {}, setPlaybackStatus: value => values.push(value), logError() { assert.fail("unexpected error"); },
+      window: { setTimeout(fn, milliseconds) { assert.equal(milliseconds,1000); timers++; return 1; }, clearTimeout() {} } };
+    const effectJs = ts.transpileModule(`const effect = (${effect});`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
+    const cleanup = new Function(...Object.keys(vars), `${effectJs}; return effect();`)(...Object.values(vars));
+    for (let i=0;i<10;i++) await Promise.resolve();
+    assert.equal(requests,1); assert.equal(timers,1); assert.equal(values.length,1);
+    assert.deepEqual(values[0], { ...status, output_observation: output ?? null, engine_evidence: engine ?? null });
+    assert.equal(values[0].output_observation, output ?? null);
+    assert.deepEqual(status.output_observation, undefined); assert.equal(status.engine_evidence, undefined); cleanup();
+  }
 });

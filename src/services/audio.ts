@@ -1,3 +1,4 @@
+import { beginPlaybackIntent, configurePlaybackIntents, playbackIntentToken, type PlaybackIntent } from "../utils/playbackIntent";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { MpdStatusSnapshot, PlaybackStatus, PlaybackOptions, PlaybackOptionAction, TrackMetadata } from "../types/audio";
 import { LocalItem, LocalAlbum, LocalAlbumDiscTracks } from "../types/local";
@@ -14,6 +15,8 @@ const onlineArtworkRequest = (album: LocalAlbum) => ({
   year: album.year ?? null,
 });
 
+configurePlaybackIntents(() => invoke<string>("admit_playback_intent"), token => invoke("cancel_playback_intent", { token }), token => invoke<boolean>("playback_intent_current", { token }));
+
 export const audioService = {
   getStatus: (): Promise<PlaybackStatus> => invoke<PlaybackStatus>("get_playback_status"),
   getMpdStatusSnapshot: (): Promise<MpdStatusSnapshot> =>
@@ -24,14 +27,14 @@ export const audioService = {
   next: (): Promise<void> => invoke<void>("next_track"),
   previous: (): Promise<void> => invoke<void>("previous_track"),
   seek: (seconds: number): Promise<void> => invoke<void>("seek_playback", { seconds }),
-  playUris: (uris: string[], startIndex: number): Promise<void> =>
-    invoke<void>("play_uris", { uris, startIndex }),
-  playTracks: (tracks: TrackMetadata[], startIndex: number): Promise<void> =>
-    invoke<void>("play_tracks", { tracks, startIndex }),
+  playUris: async (uris: string[], startIndex: number, intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> =>
+    invoke<void>("play_uris", { uris, startIndex, intent: await playbackIntentToken(intent) }),
+  playTracks: async (tracks: TrackMetadata[], startIndex: number, intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> =>
+    invoke<void>("play_tracks", { tracks, startIndex, intent: await playbackIntentToken(intent) }),
   setVolume: (volume: number): Promise<void> => invoke<void>("set_volume", { volume }),
   getQueue: (): Promise<TrackMetadata[]> => invoke<TrackMetadata[]>("get_queue"),
-  playQueueIndex: (index: number): Promise<void> => invoke<void>("play_queue_index", { index }),
-  clearQueue: (): Promise<void> => invoke<void>("clear_queue"),
+  playQueueIndex: async (index: number, intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> => invoke<void>("play_queue_index", { index, intent: await playbackIntentToken(intent) }),
+  clearQueue: async (intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> => invoke<void>("clear_queue", { intent: await playbackIntentToken(intent) }),
   setWindowTitle: (title: string): Promise<void> => invoke<void>("set_window_title", { title }),
   listLocalDirectory: (path: string): Promise<LocalItem[]> =>
     invoke<LocalItem[]>("list_local_directory", { path }),

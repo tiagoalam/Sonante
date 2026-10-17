@@ -331,6 +331,8 @@ pub enum PlaybackDiagnostic {
     OutputBusy,
     OutputUnavailable,
     PlaybackError,
+    QueueUncertain,
+    PersistenceFailed,
 }
 
 impl PlaybackDiagnostic {
@@ -359,6 +361,8 @@ impl PlaybackDiagnostic {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlaybackStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processing: Option<crate::signal_processing::ProcessingStatus>,
     #[serde(default)]
     pub options: Option<crate::playback_options::PlaybackOptions>,
     pub state: String,
@@ -746,6 +750,9 @@ pub struct AudioEngine {
     restored_resume: Option<PlaybackResumeSnapshot>,
     startup_restore: StartupQueueRestore,
     queue_structure_reserved: Arc<AtomicU8>,
+    queue_coherent: bool,
+    cache_persistence_pending: bool,
+    playback_intent: u64,
 }
 
 const QUEUE_STRUCTURE_RESERVED: u8 = 1;
@@ -1498,6 +1505,7 @@ impl AudioEngine {
     }
 
     fn current_media_for_queue_index(&self, queue_index: Option<usize>) -> Option<CurrentMedia> {
+        if !self.queue_coherent { return None; }
         let queue_index = queue_index?;
         let track = self.queue.get(queue_index)?;
 
@@ -2751,7 +2759,36 @@ impl AudioEngine {
             restored_resume,
             startup_restore,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
         }
+    }
+
+    pub(crate) fn ensure_queue_coherent(&self) -> Result<(), String> {
+        if self.queue_coherent { Ok(()) } else { Err("PLAYBACK_QUEUE_UNCERTAIN".into()) }
+    }
+
+    pub(crate) fn invalidate_playback_intents(&mut self) {
+        self.playback_intent = self.playback_intent.saturating_add(1);
+    }
+
+    pub(crate) fn admit_playback_intent(&mut self) -> Result<String, String> {
+        self.ensure_queue_structure_available()?;
+        self.playback_intent = self.playback_intent.checked_add(1).ok_or("PLAYBACK_INTENT_EXHAUSTED")?;
+        Ok(self.playback_intent.to_string())
+    }
+
+    pub(crate) fn validate_playback_intent(&self, token: &str) -> Result<(), String> {
+        if token == self.playback_intent.to_string() { Ok(()) } else { Err("PLAYBACK_SUPERSEDED".into()) }
+    }
+
+    pub(crate) fn cancel_playback_intent(&mut self, token: &str) {
+        if self.validate_playback_intent(token).is_ok() { self.invalidate_playback_intents(); }
+    }
+
+    fn mark_queue_uncertain(&mut self) {
+        self.queue_coherent = false;
+        self.restored_resume = None;
+        self.startup_restore = StartupQueueRestore::Failed;
     }
 
     pub fn set_music_dir(&mut self, music_dir: &str) {
@@ -3139,6 +3176,9 @@ impl AudioEngine {
     }
 
     pub fn persist_shutdown_resume(&mut self) -> Result<(), String> {
+        self.invalidate_playback_intents();
+        self.ensure_queue_coherent()?;
+        if self.cache_persistence_pending { return Err("PLAYBACK_PERSISTENCE_FAILED".into()); }
         self.ensure_logical_resume_available()?;
         let captured = self.capture_playback_snapshot()?;
         if captured == self.restored_resume {
@@ -3191,6 +3231,8 @@ impl AudioEngine {
     pub(crate) fn capture_device_switch_queue(
         &mut self,
     ) -> Result<DeviceSwitchQueueSnapshot, String> {
+        self.ensure_queue_coherent()?;
+        self.invalidate_playback_intents();
         let owner = self
             .reserve_queue_structure()
             .ok_or("A fila não está disponível para preparar a troca de saída.")?;
@@ -3632,11 +3674,19 @@ impl AudioEngine {
         })
     }
 
-    pub fn play_tracks(
+    pub fn play_tracks(&mut self, tracks: Vec<TrackMetadata>, playback_uris: Vec<String>, start_index: usize) -> Result<(), String> {
+        let socket = self.socket_path.clone();
+        self.play_tracks_with_io(tracks, playback_uris, start_index,
+            |command| Self::send_command_to_socket(&socket, command), |audio| audio.save_queue_cache())
+    }
+
+    fn play_tracks_with_io(
         &mut self,
         mut tracks: Vec<TrackMetadata>,
         playback_uris: Vec<String>,
         start_index: usize,
+        mut send: impl FnMut(&str) -> Result<Vec<String>, String>,
+        mut persist: impl FnMut(&Self) -> Result<(), String>,
     ) -> Result<(), String> {
         self.ensure_queue_structure_available()?;
         if tracks.is_empty() {
@@ -3670,12 +3720,20 @@ impl AudioEngine {
         }
         batch.push_str(&format!("play {}\ncommand_list_end", start_index));
 
-        self.send_command(&batch)
-            .map_err(|error| Self::sanitize_mpd_error(error, &playback_uris))?;
+        if send(&batch).is_err() {
+            // A command list is sequential, never transactional. ACK/lost reply
+            // cannot establish which effects ran; retain the last durable cache.
+            self.mark_queue_uncertain();
+            return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+        }
         self.queue = tracks;
         self.restored_resume = None;
         self.startup_restore = StartupQueueRestore::Ready;
-        self.save_queue_cache()
+        self.queue_coherent = true;
+        self.cache_persistence_pending = true;
+        persist(self).map_err(|_| "PLAYBACK_PERSISTENCE_FAILED".to_string())?;
+        self.cache_persistence_pending = false;
+        Ok(())
     }
 
     pub fn play_uris(&mut self, uris: Vec<String>, start_index: usize) -> Result<(), String> {
@@ -3708,6 +3766,7 @@ impl AudioEngine {
     }
 
     fn ensure_startup_queue_ready(&self) -> Result<(), String> {
+        self.ensure_queue_coherent()?;
         self.ensure_logical_resume_available()?;
         match self.startup_restore {
             StartupQueueRestore::Ready => Ok(()),
@@ -3738,6 +3797,7 @@ impl AudioEngine {
     }
 
     pub fn play(&mut self, is_shared: bool) -> Result<(), String> {
+        self.invalidate_playback_intents();
         self.ensure_startup_queue_ready()?;
         if self.restored_resume.is_some() {
             return self.toggle_play_pause(is_shared);
@@ -3751,6 +3811,8 @@ impl AudioEngine {
     }
 
     pub fn pause(&mut self) -> Result<(), String> {
+        self.invalidate_playback_intents();
+        if !self.queue_coherent { return self.send_command("pause 1").map(|_| ()); }
         self.ensure_startup_queue_ready()?;
         if self.restored_resume.is_some() {
             return Ok(());
@@ -3764,6 +3826,12 @@ impl AudioEngine {
     }
 
     pub fn toggle_play_pause(&mut self, is_shared: bool) -> Result<(), String> {
+        self.invalidate_playback_intents();
+        if !self.queue_coherent {
+            return if self.playback_state()? == PlaybackState::Playing {
+                self.send_command("pause 1").map(|_| ())
+            } else { Err("PLAYBACK_QUEUE_UNCERTAIN".into()) };
+        }
         self.ensure_startup_queue_ready()?;
         if let Some(snapshot) = self.restored_resume {
             if !snapshot.valid_for(self.queue.len()) {
@@ -3856,6 +3924,7 @@ impl AudioEngine {
     }
 
     pub fn next(&mut self, is_shared: bool) -> Result<(), String> {
+        self.invalidate_playback_intents();
         let socket_path = self.socket_path.clone();
         let mut send_command = |command: &str| Self::send_command_to_socket(&socket_path, command);
         self.change_track_with(
@@ -3867,6 +3936,7 @@ impl AudioEngine {
     }
 
     pub fn previous(&mut self, is_shared: bool) -> Result<(), String> {
+        self.invalidate_playback_intents();
         let socket_path = self.socket_path.clone();
         let mut send_command = |command: &str| Self::send_command_to_socket(&socket_path, command);
         self.change_track_with(
@@ -4165,7 +4235,7 @@ impl AudioEngine {
     }
 
     pub fn get_queue(&self) -> Vec<TrackMetadata> {
-        self.queue.clone()
+        if self.queue_coherent { self.queue.clone() } else { Vec::new() }
     }
 
     pub fn play_index(&mut self, index: usize, is_shared: bool) -> Result<(), String> {
@@ -4184,11 +4254,18 @@ impl AudioEngine {
 
     pub fn clear_queue(&mut self) -> Result<(), String> {
         self.ensure_queue_structure_available()?;
-        self.send_command("clear")?;
+        if self.send_command("clear").is_err() {
+            self.mark_queue_uncertain();
+            return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+        }
         self.queue.clear();
         self.restored_resume = None;
         self.startup_restore = StartupQueueRestore::Ready;
-        self.save_queue_cache()
+        self.queue_coherent = true;
+        self.cache_persistence_pending = true;
+        self.save_queue_cache().map_err(|_| "PLAYBACK_PERSISTENCE_FAILED".to_string())?;
+        self.cache_persistence_pending = false;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -4351,6 +4428,7 @@ impl AudioEngine {
     ) -> Result<PlaybackStatus, String> {
         let lines = query("status")?;
         let options = crate::playback_options::PlaybackOptions::from_status(&lines);
+        let processing = crate::signal_processing::ProcessingStatus::from_status(&lines);
         crate::diagnostics::now_playing_seek_telemetry(&lines);
         crate::diagnostics::now_playing_mpd_error(
             lines
@@ -4390,6 +4468,10 @@ impl AudioEngine {
             "Resposta de status do MPD não contém o estado de reprodução.".to_string()
         })?;
 
+        if !self.queue_coherent { playback_error = Some(PlaybackDiagnostic::QueueUncertain); }
+        else if self.cache_persistence_pending { playback_error = Some(PlaybackDiagnostic::PersistenceFailed); }
+        let queue = if self.queue_coherent { self.queue.as_slice() } else { &[] };
+
         // Se o MPD estiver parado e sem nenhuma faixa ativa, retorna estado neutro e limpo
         if state == "stop" && song_index.is_none() {
             if include_logical_resume && self.startup_restore == StartupQueueRestore::Ready {
@@ -4402,6 +4484,7 @@ impl AudioEngine {
                         None => None,
                     };
                     return Ok(PlaybackStatus {
+                        processing: self.queue_coherent.then_some(processing),
                         options,
                         state: "pause".to_string(),
                         elapsed: resume.elapsed,
@@ -4428,6 +4511,7 @@ impl AudioEngine {
                 }
             }
             return Ok(PlaybackStatus {
+                processing: self.queue_coherent.then_some(processing),
                 options,
                 state,
                 elapsed: 0.0,
@@ -4480,7 +4564,7 @@ impl AudioEngine {
         let mut plex_image = None;
 
         if let Some(idx) = song_index {
-            if let Some(track) = self.queue.get(idx) {
+            if let Some(track) = queue.get(idx) {
                 title = track.title.clone();
                 artist = track.artist.clone();
                 album = track.album.clone();
@@ -4497,7 +4581,7 @@ impl AudioEngine {
         }
 
         if (title.is_empty() || thumb.is_none()) && !current_file.is_empty() {
-            if let Some(track) = self.queue.iter().find(|t| t.uri == current_file) {
+            if let Some(track) = queue.iter().find(|t| t.uri == current_file) {
                 if title.is_empty() {
                     title = track.title.clone();
                 }
@@ -4539,13 +4623,14 @@ impl AudioEngine {
             album = tag_album;
         }
 
-        if include_artwork && thumb.is_none() && !current_file.is_empty() {
+        if self.queue_coherent && include_artwork && thumb.is_none() && !current_file.is_empty() {
             thumb = cover(&current_file);
         }
 
         let current_media = self.current_media_for_queue_index(current_media_queue_index);
 
         Ok(PlaybackStatus {
+            processing: self.queue_coherent.then_some(processing),
             options,
             state,
             elapsed,
@@ -4575,6 +4660,35 @@ mod tests {
     use std::thread;
 
     static ALBUM_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn processing_status_follows_existing_telemetry_without_extra_queries() {
+        for plex in [false, true] {
+            let mut engine = engine_with_track("fixture.flac");
+            if plex { engine.queue[0] = plex_track(); }
+            let before = serde_json::to_string(&engine.queue).unwrap();
+            for state in ["play", "pause", "stop"] {
+                for (volume_line, expected) in [("volume: 43", Some(43)), ("volume: 100", Some(100)), ("volume: -1", None), ("", None)] {
+                    let commands = std::cell::RefCell::new(Vec::new());
+                    let status = engine.get_status_with_io(false, false, |_| None, |command| {
+                        commands.borrow_mut().push(command.to_string());
+                        match command {
+                            "status" => Ok(format!("state: {state}\nsong: 0\naudio: 96000:24:2\n{volume_line}\nxfade: 0\nmixrampdelay: nan").lines().map(str::to_owned).collect()),
+                            "currentsong" => Ok(vec!["Pos: 0".into(), "file: fixture.flac".into()]),
+                            _ => panic!("unexpected diagnostic/transport command"),
+                        }
+                    }).unwrap();
+                    let processing = status.processing.unwrap();
+                    assert_eq!(processing.mpd_volume, expected);
+                    assert_eq!(processing.crossfade_seconds, Some(0.0));
+                    assert_eq!(processing.replay_gain, crate::signal_processing::ReplayGain::Unknown);
+                    assert_eq!(*commands.borrow(), ["status", "currentsong"]);
+                    assert_eq!(serde_json::to_string(&engine.queue).unwrap(), before);
+                    assert_eq!(status.state, state);
+                }
+            }
+        }
+    }
 
     #[test]
     fn playback_options_status_preserves_stopped_restored_and_local_plex_identity() {
@@ -6850,6 +6964,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
         };
 
         assert_eq!(
@@ -7109,6 +7224,7 @@ mod tests {
                 restored_resume: None,
                 startup_restore: StartupQueueRestore::Ready,
                 queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
             };
             if command == "update" {
                 AudioEngine::update_library(&audio.socket_path).unwrap();
@@ -7126,6 +7242,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
         };
         assert!(AudioEngine::update_library(&audio.socket_path).is_err());
         server.join().unwrap();
@@ -8150,6 +8267,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
         }
     }
 
@@ -8915,6 +9033,8 @@ mod tests {
                 PlaybackDiagnostic::OutputBusy => "output_busy",
                 PlaybackDiagnostic::OutputUnavailable => "output_unavailable",
                 PlaybackDiagnostic::PlaybackError => "playback_error",
+                PlaybackDiagnostic::QueueUncertain => "queue_uncertain",
+                PlaybackDiagnostic::PersistenceFailed => "persistence_failed",
             };
             assert_eq!(
                 serde_json::to_string(&diagnostic).unwrap(),
@@ -10389,6 +10509,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
         };
 
         assert_eq!(
@@ -10438,8 +10559,10 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
         };
         let status = PlaybackStatus {
+            processing: None,
             options: None,
             state: "play".to_string(),
             elapsed: 1.0,
@@ -10476,6 +10599,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
         };
 
         assert!(matches!(
@@ -10966,6 +11090,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
         };
         let first = engine
             .device_switch_queue_restore_commands(
@@ -11261,6 +11386,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
         };
         assert!(engine.restore_after_device_switch(None, &[]).is_ok());
     }
@@ -11401,3 +11527,7 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "audio_reliability_tests.rs"]
+pub(crate) mod reliability_tests;

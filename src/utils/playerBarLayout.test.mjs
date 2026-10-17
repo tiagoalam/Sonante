@@ -7,7 +7,8 @@ import * as icons from "lucide-react";
 import ts from "typescript";
 import i18next from "i18next";
 import { renderToStaticMarkup } from "react-dom/server";
-import { signalPathInformation } from "./signalPath.ts";
+import { routeConditions } from "./routeConditions.ts";
+import { signalPathInformation, requiresDeviceVolumeControl } from "./signalPath.ts";
 import { currentMediaKey } from "./playerNavigation.ts";
 import { sourceAudioBadge, albumAudioBadge } from "./sourceAudio.ts";
 
@@ -26,7 +27,7 @@ async function fixture(language = "en") {
   const i18n = i18next.createInstance();
   await i18n.init({ lng: language, resources: { [language]: { translation: resource(language) } }, interpolation: { escapeValue: false } });
   const t = i18n.t.bind(i18n), calls = [];
-  const dependencies = { react: { ...React, default: React, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons, "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": { signalPathInformation } };
+  const dependencies = { react: { ...React, default: React, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons, "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": { signalPathInformation, requiresDeviceVolumeControl }, "../utils/routeConditions": { routeConditions } };
   const SignalPath = compile("SignalPath", dependencies);
   const SourceAudioBadges = compile("SourceAudioBadges", { ...dependencies, "../utils/sourceAudio": { sourceAudioBadge, albumAudioBadge } });
   const hooks = { ...React, useState: initial => [initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
@@ -165,30 +166,16 @@ test("queue drawer and Save feedback clear the new 112px player without shifting
   assert.doesNotMatch(queue, /bottom-24/);
 });
 
-test("discreet two-line signal shows mode, relevant format and accessible full information", async () => {
-  for (const language of ["en", "pt-BR"]) {
-    const { render, t } = await fixture(language);
-    for (const mode of ["shared", "direct"]) for (const kind of ["local", "plex"]) {
-      const html = renderToStaticMarkup(render({ route: { mode, endpoint: mode === "shared" ? "default" : "hw:Fixture,0" }, status: { ...status, current_media: { kind } } }));
-      assert.ok(html.includes(t("signalPath.title")));
-      assert.ok(html.includes(t(`signalPath.${mode}`))); assert.ok(html.includes(t(`player.source.${kind}`)));
-      assert.match(html, /192 kHz/); assert.match(html, /24-bit/);
-      assert.ok(html.includes(t("signalPath.help")));
-      assert.match(html, /aria-description=/); assert.match(html, /group-focus-within\/compact-signal:block/);
-      assert.match(html, /flex min-w-0 flex-col gap-1/);
-      assert.ok(html.includes(t("signalPath.pcm", { rate: 192, bits: 24, channels: 2 })));
-      const tree = render({ route: { mode, endpoint: mode === "shared" ? "default" : "hw:Fixture,0" }, status: { ...status, current_media: { kind } } });
-      const signalNode = nodes(tree).find(node => node.props.compact);
-      const { SignalPath } = await fixture(language);
-      const compact = SignalPath(signalNode.props);
-      const visible = React.Children.toArray(compact.props.children).filter(node => node.props.role !== "tooltip");
-      assert.equal(visible.length, 2);
-      assert.equal(visible[0].props.children, t(`signalPath.${mode}`));
-      assert.equal(visible[1].props.children, t("signalPath.pcmCompact", { rate: 192, bits: 24 }));
-      assert.doesNotMatch(compact.props.className, /bg-|border|rounded|py-/);
-
-    }
+test("player routing area restores audio format and keeps detailed route conditions in the dialog",async()=>{
+ for(const language of ["en","pt-BR"]){
+  const {render,t}=await fixture(language);
+  for(const mode of ["shared","direct"])for(const kind of ["local","plex"]){
+   const html=renderToStaticMarkup(render({route:{mode,endpoint:mode==='shared'?'default':'hw:Fixture,0'},status:{...status,current_media:{kind}}}));
+   assert.ok(html.includes(t("signalPath.title")));assert.match(html,/data-signal-summary|aria-haspopup="dialog"/);
+   assert.match(html,/192 kHz/); assert.match(html,/24-bit/);
+   assert.doesNotMatch(html,/hw:Fixture|data-route-conditions|<dialog/);
   }
+ }
 });
 
 test("navigation, playback, seek, volume and actions retain their handlers", async () => {
@@ -265,10 +252,25 @@ test("unmute, unknown format and missing route remain conservative", async () =>
   const { render, calls, t } = await fixture();
   const tree = render({ route: null, status: { ...status, audio_format: "unrecognized private input", volume: { ...status.volume, value: 0, muted: true } } });
   const html = renderToStaticMarkup(tree);
-  assert.ok(html.includes(t("signalPath.unknownRoute")));
-  assert.ok(html.includes(t("signalPath.unknownFormat")));
+  assert.ok(html.includes(t("signalPath.assessment.partial")));assert.match(html,/aria-haspopup="dialog"/);
   assert.doesNotMatch(html, /unrecognized private input/);
   const unmute = nodes(tree).find(node => node.type === "button" && node.props.title === t("player.unmute"));
   assert.ok(unmute); await unmute.props.onClick();
   assert.deepEqual(calls, [["setVolume", 100]]);
+});
+
+test("Direct PCM keeps volume, Direct software DSD keeps only mute, Shared and hardware DSD stay adjustable",async()=>{
+ for(const lng of ['en','pt-BR']){
+  const {render,t,calls}=await fixture(lng);
+  for(const [mode,audio_format,backend,slider] of [
+   ['direct','96000:24:2','mpd_software',true],['direct','dsd64:2','mpd_software',false],
+   ['direct','352800:dsd:2','mpd_software',false],['direct','dsd128:2','alsa_hardware',true],
+   ['shared','dsd64:2','pipewire',true],['shared','96000:24:2','pipewire',true]]){
+   const tree=render({route:{mode,endpoint:mode==='direct'?'hw:Fixture,0':'default'},status:{...status,audio_format,volume:{...status.volume,backend}}});
+   const ranges=nodes(tree).filter(n=>n.type==='input'&&n.props.type==='range');
+   assert.equal(ranges.length,slider?2:1,JSON.stringify({mode,audio_format,backend}));
+   const mute=nodes(tree).find(n=>n.type==='button'&&n.props.title===t('player.mute'));assert.ok(mute);assert.equal(mute.props.disabled,false);
+   if(!slider){await mute.props.onClick();assert.deepEqual(calls.pop(),['setVolume',0]);const html=renderToStaticMarkup(tree);assert.ok(html.includes(t('player.volumeOnDeviceShort')));}
+  }
+ }
 });

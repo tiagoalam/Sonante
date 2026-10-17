@@ -52,3 +52,10 @@ export function signalPathInformation(status: PlaybackStatus, health: MpdHealth)
     volumeBackend: available ? status.volume.backend : "unavailable",
   };
 }
+
+// MPD does not provide gradual software gain for a native DSD/DoP stream.
+// PCM in Direct and an actual ALSA hardware mixer remain adjustable.
+export function requiresDeviceVolumeControl(route: ConfiguredSignalRoute | null | undefined, status: PlaybackStatus | null | undefined): boolean {
+  return route?.mode === "direct" && status?.volume.backend === "mpd_software"
+    && parseReportedMpdFormat(status.audio_format).kind === "dsd";
+}

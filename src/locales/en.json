@@ -1,5 +1,8 @@
 {
-  "app": { "bootstrapError": "Could not load initial settings.", "managedSavePending": "A local folders transaction is pending or its completion could not be verified. Audio startup is blocked. Existing settings and library generations have been preserved for manual review." },
+  "app": {
+    "bootstrapError": "Could not load initial settings.",
+    "managedSavePending": "A local folders transaction is pending or its completion could not be verified. Audio startup is blocked. Existing settings and library generations have been preserved for manual review."
+  },
   "sidebar": {
     "mediaSources": "Media Sources",
     "musicGroup": "Music",
@@ -73,10 +76,17 @@
     "optionsFailed": "Could not change playback mode.",
     "navigationUnavailable": "The album or artist could not be identified safely. Your current view has been preserved.",
     "dismissNavigationError": "Dismiss navigation warning",
+    "requestError": {
+      "uncertain": "Playback could not be confirmed. Select a track again to restore the queue.",
+      "persistence": "Playback changed, but saving the queue could not be confirmed.",
+      "failed": "Could not complete playback. Please try again."
+    },
     "playbackError": {
       "output_busy": "Audio output is busy. Playback could not start.",
       "output_unavailable": "Audio output is unavailable. Playback could not start.",
-      "playback_error": "MPD reported a playback error."
+      "playback_error": "MPD reported a playback error.",
+      "queue_uncertain": "Playback could not be confirmed. Select a track again to restore the queue.",
+      "persistence_failed": "Playback changed, but saving the queue could not be confirmed."
     },
     "noTrack": "No track playing",
     "formatReportedByMpd": "Format reported by MPD; it does not confirm the effective ALSA/DAC output.",
@@ -100,7 +110,9 @@
     "next": "Next",
     "engineUnavailable": "Audio engine unavailable",
     "engineTransitioning": "Audio engine is changing state",
-    "lastKnown": "Last known playback"
+    "lastKnown": "Last known playback",
+    "volumeOnDevice": "Adjust volume on the DAC or amplifier",
+    "volumeOnDeviceShort": "DAC volume"
   },
   "nowPlaying": {
     "detach": "Detach window",
@@ -247,7 +259,6 @@
     "importPreviewIndexing": "Indexing…",
     "importPreviewUnknownAlbum": "Unknown album",
     "importPreviewUnknownArtist": "Unknown artist",
-
     "albumsTitle": "Local Albums",
     "foldersTitle": "Folder Browser",
     "albumsCount_one": "{{count}} album available",
@@ -686,14 +697,98 @@
     "discography": "Discography"
   },
   "signalPath": {
+    "conditions": {
+      "title": "Route conditions",
+      "summary": {
+        "inactive": "Available during playback",
+        "partial": "Partial verification · audio samples not compared",
+        "attention": "Reported processing or format differences",
+        "preserved": "Observed route conditions preserved"
+      },
+      "help": "Assessment uses the observed format and processing, without a list of permitted models. USB identity and kernel are additional information. A matching reference test, when available, is shown separately.",
+      "label": {
+        "route": "Output route",
+        "rate": "MPD → ALSA rate",
+        "channels": "MPD → ALSA channels",
+        "container": "Format / container",
+        "volume": "Volume control",
+        "replayGain": "ReplayGain reported by MPD",
+        "crossfade": "Crossfade reported by MPD",
+        "mixramp": "MixRamp",
+        "engine": "Engine",
+        "device": "USB device",
+        "kernel": "Kernel",
+        "transport": "DSD transport"
+      },
+      "value": {
+        "routeShared": "Shared · system processing unverified",
+        "routeObserved": "Direct · ALSA stream attributed to Sonante’s MPD",
+        "notChecked": "Not verified",
+        "rateEqual": "Same rate: {{input}} kHz",
+        "rateDifferent": "Different rates: {{input}} → {{output}} kHz",
+        "channelsEqual": "Same channel count: {{input}}",
+        "channelsDifferent": "Different channel counts: {{input}} → {{output}}",
+        "containerEqual": "{{input}} → {{output}} bit · samples not compared",
+        "containerWider": "{{input}} → {{output}} bit · wider container, not proof of processing loss",
+        "containerSmaller": "{{input}} → {{output}} bit · output has lower PCM capacity",
+        "containerUnknown": "Container preservation not verified",
+        "dsdSeparate": "DSD/DoP requires a separate check",
+        "softwareVolume": "Software volume: {{value}}%",
+        "softwareUnity": "Software volume: 100% · reported unity gain",
+        "softwareOther": "Software volume: {{value}}% · DSD/DoP effect not verified",
+        "hardwareVolume": "Hardware volume · digital gain not verified",
+        "systemVolume": "System volume · external gain not verified",
+        "replayGainUnavailable": "Could not confirm the current mode",
+        "gain_off": "Off (MPD report)",
+        "gain_track": "Track mode enabled",
+        "gain_album": "Album mode enabled",
+        "gain_auto": "Auto mode enabled",
+        "crossfadeOff": "Off (0 seconds)",
+        "crossfadeOn": "Enabled: {{value}} seconds",
+        "mixrampOff": "Disabled by the reported parameter",
+        "mixrampPossible": "Overlap cannot be ruled out",
+        "volumeChanged": "Volume readings differ; waiting for an update.",
+        "engineIdentified": "Engine build identified.",
+        "deviceObserved": "{{model}} · USB {{vendor}}:{{product}}",
+        "kernelObserved": "{{value}}",
+        "nativeDsd": "Native DSD · confirmed by engine and ALSA",
+        "dop": "DoP · encapsulation confirmed by engine and ALSA",
+        "dsdTransportUnknown": "DSD transport unconfirmed; enabling DoP does not prove the effective output",
+        "dsdRateEqual": "DSD preserved: {{input}} MHz · ALSA transport {{carrier}} kHz",
+        "dsdRateDifferent": "Different DSD rate: {{input}} → {{output}} MHz",
+        "nativeDsdContainer": "{{format}} · native DSD packing",
+        "dopContainer": "{{format}} · DoP carrier, without conversion to PCM",
+        "dsdSoftwareBypass": "DSD/DoP software gain bypassed; adjust volume on the DAC/amplifier",
+        "dsdMuted": "Software mute active; content replaced with DSD silence",
+        "softwareMuted": "Muted · badge retained for the route configuration; output is silent"
+      }
+    },
+    "observation": {
+      "title": "ALSA output",
+      "notVerified": "Bit-perfect not verified",
+      "limit": "The output could not be confirmed within the read limits.",
+      "unavailable": "Output not verified.",
+      "not_playing": "Output is observed during playback.",
+      "shared": "Shared: the physical output is not attributed to Sonante here.",
+      "unreadable": "The output data could not be read.",
+      "malformed": "The output format could not be confirmed.",
+      "not_owned": "No running output could be attributed to Sonante’s MPD.",
+      "ambiguous": "More than one output matched; output not verified.",
+      "changed": "The output changed during verification.",
+      "busy": "Output verification is already in progress.",
+      "channelCount_one": "{{count}} channel",
+      "channelCount_other": "{{count}} channels",
+      "help": "A read-only sample of the running ALSA stream owned by Sonante’s MPD. It does not compare audio samples or verify what the DAC receives. The format and rate describe the ALSA container; they do not establish DoP or native DSD.",
+      "observedTitle": "Observed ALSA output"
+    },
     "rate": "Frequency",
     "depth": "Bit depth",
     "channels": "Channels",
     "pcmCompact": "{{rate}} kHz · {{bits}}-bit",
     "endpointShort": "Endpoint",
-    "help": "Configured route, not a live measurement. The format is reported by MPD; it does not prove the original codec or the signal received by the DAC.",
+    "help": "Shows the configured route and, during Direct playback, the ALSA stream attributed to Sonante’s MPD. The tested profile records a previous sample comparison.",
     "title": "Signal Path",
-    "configured": "Configured route · not a live measurement",
+    "configured": "Configured route stages",
     "shared": "Shared",
     "direct": "ALSA Direct",
     "unknownRoute": "Route unavailable",
@@ -718,7 +813,32 @@
     "details": "Technical details",
     "formatExplanation": "The MPD status describes a reported decoded format, not the original codec or the signal received by the DAC. It does not verify Hi-Res, native DSD or bit-perfect playback.",
     "sharedExplanation": "ALSA default follows system routing, which may involve PipeWire, PulseAudio or dmix, with possible mixing and conversion. The endpoint is not measured here.",
-    "directExplanation": "The configured ALSA endpoint bypasses the shared default route. This view does not confirm that the PCM is open, hardware format support, or absence of processing. Software volume and ReplayGain can modify PCM."
+    "directExplanation": "Direct uses the selected ALSA hardware endpoint. Observation shows the playing stream and format; volume and processing appear in the route conditions.",
+    "assessment": {
+      "compatible": "Monitored conditions preserved",
+      "attention": "Conditions require attention",
+      "partial": "Incomplete verification",
+      "help": "Evaluates the playing ALSA output, rate, channels, PCM capacity and reported processing. It is independent of the DAC model or kernel release. It is not a comparison of the current track’s samples."
+    },
+    "evidence": {
+      "title": "Matching reference test",
+      "reference": "{{frames}} PCM frames preserved, with a continuous join across {{tracks}} tracks.",
+      "help": "In this test, reference samples reached the USB requests intact. It is additional evidence for this engine, DAC, format and kernel combination; it does not restrict other DACs or compare the current track."
+    },
+    "modal": {
+      "title": "Audio route details",
+      "open": "Open audio route details",
+      "close": "Close details"
+    },
+    "seal": {
+      "label": "Bit-perfect",
+      "scope": "The badge indicates observed Direct route conditions with the identified engine: PCM with preserved rate/channels and sufficient integer capacity, or native DSD/DoP with confirmed negotiated transport and matching DSD rate, PCM volume at 100%, DSD with software gain bypassed, and no reported processing changes. Engine validation includes file tests for DSD/DoP; this is not a DSD USB test on your DAC. It does not continuously compare track samples or measure internal DAC processing. Changes may take the buffer duration to reach the output. The badge refers to the route after decoding; it does not certify that the source file is lossless. While muted, the badge continues to indicate the route configuration; content is replaced with silence. On unmute, volume and all other conditions are evaluated again.",
+      "verified": "Route conditions verified"
+    },
+    "transport": {
+      "native_dsd": "Native DSD",
+      "dop": "DoP (DSD over PCM)"
+    }
   },
   "discover": {
     "albumPlayError": "The album could not be played. Try again.",
@@ -1163,7 +1283,10 @@
     "opusHint": "Opus uses a 48 kHz decoding clock. The original input rate is informational and does not establish the encoded bandwidth or master resolution.",
     "aacCoreHint": "ADTS declares the AAC core clock. Implicit SBR and the effective decoded output rate are not established by these headers.",
     "floatHint": "Floating-point storage precision does not establish master resolution or an equivalent integer bit depth.",
-    "hybridHint": "The WavPack header declares hybrid compression. No correction file was opened; lossless reconstruction is not established."
+    "hybridHint": "The WavPack header declares hybrid compression. No correction file was opened; lossless reconstruction is not established.",
+    "plexProvenance": "Reported by the Plex server · source metadata",
+    "plexLimits": "Metadata declared by Plex; absent fields remain undeclared. This is not original-file inspection or a check of output or bit-perfect playback.",
+    "plexBitrate": "Bitrate reported by Plex"
   },
   "sourceAudio": {
     "hiResLabel": "Hi-Res",

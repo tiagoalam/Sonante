@@ -5,6 +5,7 @@ import { ArrowDownLeft, ArrowUpRight, ListMusic, Maximize2, Minimize2, Pause, Pl
 import { useTranslation } from "react-i18next";
 import type { AudioLevelFrame, NowPlayingSnapshot } from "../types/audio";
 import { TrackArtwork } from "./TrackArtwork";
+import { requiresDeviceVolumeControl } from "../utils/signalPath";
 import { SignalPath } from "./SignalPath";
 import { VisualizerPanel } from "./visualizer/VisualizerPanel";
 import "./nowPlaying.css";
@@ -54,6 +55,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
   const available = health?.state === "available";
   const interactive = available && !props.controlsDisabled;
   const hasTrack = Boolean(status?.current_media && status.title);
+  const deviceVolume = requiresDeviceVolumeControl(props.snapshot?.route, status);
   const volumeAvailable = Boolean(interactive && status?.volume.available && status.volume.writable);
   const muted = Boolean(status?.volume.muted || status?.volume.value === 0);
   const volumeBackend = status?.volume.backend ?? "unavailable";
@@ -97,6 +99,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
               </div>
                 {hasTrack && available && props.snapshot?.sourceInfo && currentMediaKey(props.snapshot.sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={props.snapshot.sourceInfo.info} />}
               {!available && <p role="status" className="np-notice">{t(health?.state === "unavailable" ? "player.engineUnavailable" : "player.engineTransitioning")}{hasTrack && ` · ${t("player.lastKnown")}`}</p>}
+              {status?.playback_error && <p role="alert" className="np-error">{t(`player.playbackError.${status.playback_error.code}`)}</p>}
               {props.controlFailed && <p role="alert" className="np-error">{t("nowPlaying.controlFailed")}</p>}
               <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
                 inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} fullscreen={props.fullscreen} />
@@ -119,9 +122,9 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
               <div className="np-volume">
                 <div><button type="button" disabled={!volumeAvailable} onClick={props.onMute} aria-label={t(muted ? "player.unmute" : "player.mute")} title={t(muted ? "player.unmute" : "player.mute")}>
                   {muted ? <VolumeX size={19} /> : <Volume2 size={19} />}</button>
-                  <input type="range" aria-label={t("signalPath.volume")} min={0} max={100} value={volumeAvailable ? status.volume.value : 0} disabled={!volumeAvailable}
-                    onChange={event => props.onVolume(Number(event.target.value))} /></div>
-                <span>{volumeLabel}</span>
+                  {!deviceVolume && <input type="range" aria-label={t("signalPath.volume")} min={0} max={100} value={volumeAvailable ? status.volume.value : 0} disabled={!volumeAvailable}
+                    onChange={event => props.onVolume(Number(event.target.value))} />}</div>
+                <span>{deviceVolume ? t("player.volumeOnDevice") : volumeLabel}</span>
               </div>
             </>}
           </div>
