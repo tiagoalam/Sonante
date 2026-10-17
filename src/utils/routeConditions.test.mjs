@@ -387,3 +387,30 @@ test('confirmed mute retains the Direct route seal for PCM, native DSD and DoP w
   }
  }
 });
+
+test('real assembled contradictory snapshot loses current identity and badge in both SignalPath hosts; next coherent sample recovers',async()=>{
+ const fixture=JSON.parse(readFileSync(new URL('../../tests/fixtures/audio-snapshot-consistency.json',import.meta.url)));
+ const app=readFileSync(new URL('../App.tsx',import.meta.url),'utf8');const ast=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let projection;
+ function visit(n){if(ts.isCallExpression(n)&&n.expression.getText(ast)==='setPlaybackStatus'&&n.arguments[0]?.getText(ast).includes('...snapshot.playback'))projection=n.arguments[0].getText(ast);ts.forEachChild(n,visit)}visit(ast);assert.ok(projection);const project=new Function('snapshot','return ('+projection+')');
+ for(const lng of ['en','pt-BR']){
+  const i18n=i18next.createInstance();await i18n.init({lng,resources:{[lng]:{translation:JSON.parse(readFileSync(new URL(`../locales/${lng}.json`,import.meta.url)))}},fallbackLng:false});const t=i18n.t.bind(i18n),SignalPath=compile(t,'SignalPath');
+  for(const row of fixture.cases){
+   const status=project(row.snapshot),mixed=row.case.startsWith('track_')&&row.round===1;
+   const selected={mode:'direct',endpoint:'hw:Fixture,0'},result=routeConditions(selected,status,health);
+   if(mixed){assert.equal(status.snapshot_consistent,false);assert.equal(status.current_media,null);assert.equal(status.title,'');assert.equal(status.audio_format,'');assert.equal(result.bitPerfect,false);assert.equal(result.rows[0].message,'snapshotChanged');}
+   else if(row.case==='stable'||row.case==='track_new_output'){assert.equal(status.snapshot_consistent,true);assert.equal(result.bitPerfect,true);}
+   else assert.equal(result.bitPerfect,false,'coherent but converted output must still fail');
+   for(const compact of [false,true]){const html=renderToStaticMarkup(React.createElement(SignalPath,{route:selected,status,health,compact}));assert.equal(html.includes('data-bitperfect="route"'),!!result.bitPerfect);assert.doesNotMatch(html,/signalPath\./);}
+  }
+ }
+ // Even a malformed cross-window payload cannot reuse old positive evidence.
+ const stale={...playback,snapshot_consistent:false,engine_evidence:{state:'identified',evidence_id:'mpd-strict-route-20261017',scope:'pcm_dsd_route_strict',pcm_eof_flush:true}};
+ assert.equal(routeConditions(route,stale,health).bitPerfect,false);
+});
+
+test('strict capability is distinct from historical USB profiles and installed compatibility mode',()=>{
+ const strict={state:'identified',evidence_id:'mpd-strict-route-20261017',scope:'pcm_dsd_route_strict',pcm_eof_flush:true};
+ const current={...playback,engine_evidence:strict};
+ assert.equal(row(current,'negotiation').message,'directStrict');assert.equal(routeConditions(route,current,health).bitPerfect,true);assert.equal(routeConditions(route,current,health).profile,undefined);
+ assert.equal(row(playback,'negotiation').message,'directCompatibility');
+});

@@ -35,8 +35,21 @@ pub(crate) struct Snapshot {
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum SaveResponse {
-    Completed,
+    Completed { #[serde(skip_serializing_if = "Option::is_none")] warning: Option<SaveWarning> },
     Accepted { operation: Snapshot },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SaveWarning { PositionNotRestored }
+
+impl SaveResponse {
+    pub(crate) fn completed(outcome: crate::audio::DeviceSwitchRestoreOutcome) -> Self {
+        Self::Completed { warning: match outcome {
+            crate::audio::DeviceSwitchRestoreOutcome::Complete => None,
+            crate::audio::DeviceSwitchRestoreOutcome::PositionNotRestored => Some(SaveWarning::PositionNotRestored),
+        }}
+    }
 }
 
 #[derive(Default)]

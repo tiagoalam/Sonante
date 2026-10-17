@@ -84,6 +84,7 @@
     "playbackError": {
       "output_busy": "Audio output is busy. Playback could not start.",
       "output_unavailable": "Audio output is unavailable. Playback could not start.",
+      "format_unsupported": "The DAC did not accept this format in strict Direct. Choose a supported format or use Shared.",
       "playback_error": "MPD reported a playback error.",
       "queue_uncertain": "Playback could not be confirmed. Select a track again to restore the queue.",
       "persistence_failed": "Playback changed, but saving the queue could not be confirmed."
@@ -545,6 +546,7 @@
     "configPersistenceError": "Failed to persist the configuration.",
     "configPersistenceUncertain": "Could not confirm whether the configuration was saved. Check the current settings before trying again.",
     "outputStartError": "Could not start the new audio output.",
+    "outputPositionNotRestored": "Output applied and playback paused. The previous position could not be restored; choose where to resume.",
     "outputConfigChangeError": "Failed to change the output/configuration.",
     "backendReportedStep": "Step reported by the backend:",
     "separateFolderChanges": "Save local folder changes separately from audio, Plex or other preferences. No changes were applied. Save one group first, then reopen Preferences to save the other.",
@@ -718,11 +720,15 @@
         "engine": "Engine",
         "device": "USB device",
         "kernel": "Kernel",
+        "negotiation": "Direct negotiation",
         "transport": "DSD transport"
       },
       "value": {
         "routeShared": "Shared · system processing unverified",
-        "routeObserved": "Direct · ALSA stream attributed to Sonante’s MPD",
+        "directStrict": "Strict: unsupported formats are rejected before playback; reversible representations are allowed.",
+        "directCompatibility": "Compatibility: this engine does not establish conversion rejection. The badge assesses observed conditions only.",
+        "snapshotChanged": "The track changed during the query. Waiting for a consistent reading.",
+      "routeObserved": "Direct · ALSA stream attributed to Sonante’s MPD",
         "notChecked": "Not verified",
         "rateEqual": "Same rate: {{input}} kHz",
         "rateDifferent": "Different rates: {{input}} → {{output}} kHz",

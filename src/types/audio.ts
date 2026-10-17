@@ -44,7 +44,7 @@ export interface VolumeStatus {
 }
 
 export interface PlaybackDiagnostic {
-  code: "output_busy" | "output_unavailable" | "playback_error" | "queue_uncertain" | "persistence_failed";
+  code: "output_busy" | "output_unavailable" | "playback_error" | "queue_uncertain" | "persistence_failed" | "format_unsupported";
 }
 
 export interface PlaybackOptions {
@@ -68,12 +68,13 @@ export interface SignalProcessing {
 
 export interface EngineEvidence {
   state: "identified";
-  evidence_id: "mpd-pcm-eof-20261017" | "mpd-route-20261017";
-  scope: "pcm24_96000_stereo_gapless" | "pcm_dsd_route";
+  evidence_id: "mpd-pcm-eof-20261017" | "mpd-route-20261017" | "mpd-strict-route-20261017";
+  scope: "pcm24_96000_stereo_gapless" | "pcm_dsd_route" | "pcm_dsd_route_strict";
   pcm_eof_flush: boolean;
 }
 
 export interface PlaybackStatus {
+  snapshot_consistent?: boolean;
   processing?: SignalProcessing | null;
   output_observation?: OutputObservation | null;
   engine_evidence?: EngineEvidence | null;

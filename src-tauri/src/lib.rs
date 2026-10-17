@@ -2329,7 +2329,7 @@ async fn get_mpd_status_snapshot(app: AppHandle, diagnostic_id: Option<u64>) -> 
             &app.state::<SupervisorState>().0, &app.state::<AudioState>().0, &diagnostic)
             .map(|mut snapshot| {
                 let playing = snapshot.health == MpdHealth::Available
-                    && snapshot.playback.as_ref().is_some_and(|p| p.state == "play");
+                    && snapshot.playback.as_ref().is_some_and(|p| p.state == "play" && p.snapshot_consistent);
                 snapshot.output_observation = Some(alsa_observation::sample(playing, before.clone(),
                     || output_observation_context(&app), alsa_observation::observe));
                 if playing && matches!(snapshot.output_observation, Some(alsa_observation::Observation::Observed { .. })) {
@@ -2358,6 +2358,9 @@ async fn get_mpd_status_snapshot(app: AppHandle, diagnostic_id: Option<u64>) -> 
                             processing.transport = transport;
                         }
                     }
+                }
+                if snapshot.playback.as_ref().is_some_and(|p| !p.snapshot_consistent) {
+                    snapshot.output_observation = Some(alsa_observation::Observation::unverified(alsa_observation::Reason::Changed));
                 }
                 // Build provenance only: reuse the owned process/route context,
                 // without hashing, filesystem reads or extra MPD commands.
@@ -4086,6 +4089,7 @@ async fn save_config(
         true
     };
     let mut library_changed_during_start = false;
+    let mut restore_outcome = audio::DeviceSwitchRestoreOutcome::Complete;
     let mut playback_snapshot = None;
     let mut resume_analyzer = AnalyzerSwitchResume::new(|capture| {
         let Some(_restart_permit) = transaction_state.try_begin_restart() else {
@@ -4209,7 +4213,7 @@ async fn save_config(
                 e
             )),
         };
-        if let Err(restore_error) = restore_result {
+        restore_outcome = finish_device_switch_restore(restore_result, || {
             let rollback = resume_analyzer.after_rollback(rollback_audio_switch(
                 &current_cfg,
                 playback_snapshot,
@@ -4217,11 +4221,8 @@ async fn save_config(
                 &sup_state,
                 &audio_state,
             ));
-            return Err(error_with_rollback(
-                format!("Falha ao restaurar reprodução: {}", restore_error),
-                rollback,
-            ));
-        }
+            rollback
+        })?;
     }
 
     if folders_changed
@@ -4329,7 +4330,7 @@ async fn save_config(
     drop(config_guard);
 
     resume_analyzer.confirmed = true;
-    Ok(config_save_operation::SaveResponse::Completed)
+    Ok(config_save_operation::SaveResponse::completed(restore_outcome))
 }
 
 fn uncertain_config_save_message(error: &ConfigSaveError) -> String {
@@ -4368,6 +4369,15 @@ fn config_save_failure_with_rollback(
     }
 }
 
+// Applied-but-partial is a successful configuration change with an explicit warning.
+// Only an actual restoration failure may restart the previous output.
+fn finish_device_switch_restore(
+    result: Result<audio::DeviceSwitchRestoreOutcome, String>,
+    rollback: impl FnOnce() -> Result<(), String>,
+) -> Result<audio::DeviceSwitchRestoreOutcome, String> {
+    result.map_err(|error| error_with_rollback(format!("Falha ao restaurar reprodução: {}", error), rollback()))
+}
+
 fn error_with_rollback(original_error: String, rollback: Result<(), String>) -> String {
     match rollback {
         Ok(()) => format!("{}. Estado anterior restaurado.", original_error),
@@ -4392,14 +4402,9 @@ fn restore_prepared_playback(
     switch_queue: Option<&ResolvedDeviceSwitchQueue>,
     audio_state: &State<'_, AudioState>,
 ) -> Result<(), String> {
-    audio_state
-        .0
-        .lock()
-        .map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
-        .restore_after_reserved_device_switch(
-            playback_snapshot,
-            switch_queue.ok_or("Fila da troca de saída indisponível no rollback.")?,
-        )
+    rollback_audio_switch_with(playback_snapshot,
+        switch_queue.ok_or("Fila da troca de saída indisponível no rollback.")?,
+        &audio_state.0, || Ok(()))
 }
 
 fn rollback_audio_switch(
@@ -4430,15 +4435,21 @@ fn rollback_audio_switch_with(
     audio: &Mutex<AudioEngine>,
     restart_previous: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    audio
-        .lock()
-        .map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
-        .validate_device_switch_queue(switch_queue)?;
-    restart_previous()?;
-    audio
-        .lock()
-        .map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
-        .restore_after_reserved_device_switch(playback_snapshot, switch_queue)
+    let result = (|| {
+        audio.lock().map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
+            .validate_device_switch_queue(switch_queue)?;
+        restart_previous()?;
+        let outcome = audio.lock().map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
+            .restore_after_reserved_device_switch(playback_snapshot, switch_queue)?;
+        match outcome {
+            audio::DeviceSwitchRestoreOutcome::Complete => Ok(()),
+            audio::DeviceSwitchRestoreOutcome::PositionNotRestored => Err("Fila restaurada e pausada, mas a posição anterior não foi restaurada.".into()),
+        }
+    })();
+    if result.is_err() {
+        if let Ok(mut audio) = audio.lock() { audio.mark_queue_uncertain(); }
+    }
+    result
 }
 
 fn rollback_applied_config_change(
@@ -6502,6 +6513,7 @@ mod tests {
 
     fn playback_with_mpd_volume(value: i32) -> PlaybackStatus {
         PlaybackStatus {
+            snapshot_consistent: true,
             processing: None,
             options: None,
             state: "stop".to_string(),

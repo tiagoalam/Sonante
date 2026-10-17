@@ -1202,6 +1202,8 @@ mod tests {
             .join("supervisor-tests")
             .join(format!("{}-{}-{}", std::process::id(), test_name, id));
         fs::create_dir_all(&dir).expect("deve criar diretório temporário do teste");
+        // Fixture identity must survive a symlinked Cargo target/cache directory.
+        let dir = fs::canonicalize(dir).unwrap();
         let socket_path = dir.join("mpd.socket");
         let pid_path = dir.join("mpd.pid");
         (dir, socket_path, pid_path)

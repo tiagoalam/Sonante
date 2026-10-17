@@ -84,6 +84,7 @@
     "playbackError": {
       "output_busy": "Saída de áudio ocupada. Não foi possível iniciar a reprodução.",
       "output_unavailable": "Saída de áudio indisponível. Não foi possível iniciar a reprodução.",
+      "format_unsupported": "O DAC não aceitou este formato em Direct estrito. Escolha um formato compatível ou use Shared.",
       "playback_error": "O MPD informou um erro de reprodução.",
       "queue_uncertain": "Não foi possível confirmar a reprodução. Selecione uma faixa novamente para restabelecer a fila.",
       "persistence_failed": "A reprodução mudou, mas não foi possível confirmar o salvamento da fila."
@@ -545,6 +546,7 @@
     "configPersistenceError": "Falha ao persistir a configuração.",
     "configPersistenceUncertain": "Não foi possível confirmar se a configuração foi gravada. Confira as preferências atuais antes de tentar novamente.",
     "outputStartError": "Não foi possível iniciar a nova saída de áudio.",
+    "outputPositionNotRestored": "Saída aplicada e reprodução pausada. Não foi possível restaurar a posição anterior; escolha de onde retomar.",
     "outputConfigChangeError": "Falha ao alterar a saída/configuração.",
     "backendReportedStep": "Etapa reportada pelo backend:",
     "separateFolderChanges": "Grave as alterações de pastas locais separadamente das alterações de áudio, Plex ou outras preferências. Nenhuma alteração foi aplicada. Grave um grupo primeiro e depois reabra Preferências para gravar o outro.",
@@ -718,11 +720,15 @@
         "engine": "Motor",
         "device": "Dispositivo USB",
         "kernel": "Kernel",
+        "negotiation": "Negociação Direct",
         "transport": "Transporte DSD"
       },
       "value": {
         "routeShared": "Shared · processamento do sistema não verificado",
-        "routeObserved": "Direct · fluxo ALSA atribuído ao MPD do Sonante",
+        "directStrict": "Estrita: formatos incompatíveis são recusados antes de tocar; representações reversíveis são permitidas.",
+        "directCompatibility": "Compatibilidade: este motor não comprova a recusa de conversões. O selo considera apenas as condições observadas.",
+        "snapshotChanged": "A faixa mudou durante a consulta. Aguardando uma leitura coerente.",
+      "routeObserved": "Direct · fluxo ALSA atribuído ao MPD do Sonante",
         "notChecked": "Não verificado",
         "rateEqual": "Mesma taxa: {{input}} kHz",
         "rateDifferent": "Taxas diferentes: {{input}} → {{output}} kHz",

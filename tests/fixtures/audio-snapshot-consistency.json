@@ -1,0 +1,481 @@
+{
+  "provenance": "2cd4f53 plus strict-audio fix; synthetic status/currentsong with real assembly; no personal media",
+  "cases": [
+    {
+      "case": "stable",
+      "events": [
+        "status",
+        "after_status",
+        "currentsong",
+        "alsa",
+        "replay_gain"
+      ],
+      "live": {
+        "audio_format": "96000:24:2",
+        "gain": "off",
+        "index": 0,
+        "output_format": "S32_LE",
+        "output_rate": 96000,
+        "transport": {
+          "channels": 2,
+          "epoch": 1,
+          "kind": "pcm",
+          "output_rate": 96000,
+          "source_rate": 96000
+        },
+        "volume": 100
+      },
+      "round": 1,
+      "snapshot": {
+        "engine_evidence": {
+          "evidence_id": "mpd-strict-route-20261017",
+          "pcm_eof_flush": true,
+          "scope": "pcm_dsd_route_strict",
+          "state": "identified"
+        },
+        "health": {
+          "state": "available"
+        },
+        "output_observation": {
+          "card": 2,
+          "channels": 2,
+          "configured_endpoint": "hw:Fixture,0",
+          "device": 0,
+          "format": "S32_LE",
+          "kernel_release": null,
+          "rate": 96000,
+          "state": "observed",
+          "subdevice": 0,
+          "usb_device": null
+        },
+        "playback": {
+          "album": "Fixture",
+          "artist": "Fixture",
+          "audio_format": "96000:24:2",
+          "current_media": {
+            "kind": "local",
+            "queue_index": 0,
+            "uri": "a.flac"
+          },
+          "duration": 120.0,
+          "elapsed": 1.0,
+          "is_updating": false,
+          "options": {
+            "random": false,
+            "repeat": false,
+            "single": "off"
+          },
+          "playback_error": null,
+          "plex_image": null,
+          "processing": {
+            "crossfade_seconds": 0.0,
+            "mixramp": "off",
+            "mpd_volume": 100,
+            "replay_gain": {
+              "state": "off"
+            },
+            "transport": null
+          },
+          "snapshot_consistent": true,
+          "state": "play",
+          "thumb": "fixture-cover",
+          "title": "Old A",
+          "volume": {
+            "available": true,
+            "backend": "mpd_software",
+            "muted": false,
+            "value": 100,
+            "writable": true
+          }
+        }
+      }
+    },
+    {
+      "case": "stable",
+      "events": [
+        "status",
+        "after_status",
+        "currentsong",
+        "alsa",
+        "replay_gain"
+      ],
+      "live": {
+        "audio_format": "96000:24:2",
+        "gain": "off",
+        "index": 0,
+        "output_format": "S32_LE",
+        "output_rate": 96000,
+        "transport": {
+          "channels": 2,
+          "epoch": 1,
+          "kind": "pcm",
+          "output_rate": 96000,
+          "source_rate": 96000
+        },
+        "volume": 100
+      },
+      "round": 2,
+      "snapshot": {
+        "engine_evidence": {
+          "evidence_id": "mpd-strict-route-20261017",
+          "pcm_eof_flush": true,
+          "scope": "pcm_dsd_route_strict",
+          "state": "identified"
+        },
+        "health": {
+          "state": "available"
+        },
+        "output_observation": {
+          "card": 2,
+          "channels": 2,
+          "configured_endpoint": "hw:Fixture,0",
+          "device": 0,
+          "format": "S32_LE",
+          "kernel_release": null,
+          "rate": 96000,
+          "state": "observed",
+          "subdevice": 0,
+          "usb_device": null
+        },
+        "playback": {
+          "album": "Fixture",
+          "artist": "Fixture",
+          "audio_format": "96000:24:2",
+          "current_media": {
+            "kind": "local",
+            "queue_index": 0,
+            "uri": "a.flac"
+          },
+          "duration": 120.0,
+          "elapsed": 1.0,
+          "is_updating": false,
+          "options": {
+            "random": false,
+            "repeat": false,
+            "single": "off"
+          },
+          "playback_error": null,
+          "plex_image": null,
+          "processing": {
+            "crossfade_seconds": 0.0,
+            "mixramp": "off",
+            "mpd_volume": 100,
+            "replay_gain": {
+              "state": "off"
+            },
+            "transport": null
+          },
+          "snapshot_consistent": true,
+          "state": "play",
+          "thumb": "fixture-cover",
+          "title": "Old A",
+          "volume": {
+            "available": true,
+            "backend": "mpd_software",
+            "muted": false,
+            "value": 100,
+            "writable": true
+          }
+        }
+      }
+    },
+    {
+      "case": "track_converted_output",
+      "events": [
+        "status",
+        "after_status",
+        "currentsong"
+      ],
+      "live": {
+        "audio_format": "96000:24:2",
+        "gain": "off",
+        "index": 1,
+        "output_format": "S16_LE",
+        "output_rate": 48000,
+        "transport": {
+          "channels": 2,
+          "epoch": 1,
+          "kind": "pcm",
+          "output_rate": 48000,
+          "source_rate": 96000
+        },
+        "volume": 100
+      },
+      "round": 1,
+      "snapshot": {
+        "health": {
+          "state": "available"
+        },
+        "output_observation": {
+          "reason": "changed",
+          "state": "unverified"
+        },
+        "playback": {
+          "album": "",
+          "artist": "",
+          "audio_format": "",
+          "current_media": null,
+          "duration": 0.0,
+          "elapsed": 0.0,
+          "is_updating": false,
+          "options": {
+            "random": false,
+            "repeat": false,
+            "single": "off"
+          },
+          "playback_error": null,
+          "plex_image": null,
+          "snapshot_consistent": false,
+          "state": "play",
+          "thumb": null,
+          "title": "",
+          "volume": {
+            "available": true,
+            "backend": "mpd_software",
+            "muted": false,
+            "value": 100,
+            "writable": true
+          }
+        }
+      }
+    },
+    {
+      "case": "track_converted_output",
+      "events": [
+        "status",
+        "after_status",
+        "currentsong",
+        "alsa",
+        "replay_gain"
+      ],
+      "live": {
+        "audio_format": "96000:24:2",
+        "gain": "off",
+        "index": 1,
+        "output_format": "S16_LE",
+        "output_rate": 48000,
+        "transport": {
+          "channels": 2,
+          "epoch": 1,
+          "kind": "pcm",
+          "output_rate": 48000,
+          "source_rate": 96000
+        },
+        "volume": 100
+      },
+      "round": 2,
+      "snapshot": {
+        "engine_evidence": {
+          "evidence_id": "mpd-strict-route-20261017",
+          "pcm_eof_flush": true,
+          "scope": "pcm_dsd_route_strict",
+          "state": "identified"
+        },
+        "health": {
+          "state": "available"
+        },
+        "output_observation": {
+          "card": 2,
+          "channels": 2,
+          "configured_endpoint": "hw:Fixture,0",
+          "device": 0,
+          "format": "S16_LE",
+          "kernel_release": null,
+          "rate": 48000,
+          "state": "observed",
+          "subdevice": 0,
+          "usb_device": null
+        },
+        "playback": {
+          "album": "Fixture",
+          "artist": "Fixture",
+          "audio_format": "96000:24:2",
+          "current_media": {
+            "kind": "local",
+            "queue_index": 1,
+            "uri": "b.flac"
+          },
+          "duration": 120.0,
+          "elapsed": 1.0,
+          "is_updating": false,
+          "options": {
+            "random": false,
+            "repeat": false,
+            "single": "off"
+          },
+          "playback_error": null,
+          "plex_image": null,
+          "processing": {
+            "crossfade_seconds": 0.0,
+            "mixramp": "off",
+            "mpd_volume": 100,
+            "replay_gain": {
+              "state": "off"
+            },
+            "transport": null
+          },
+          "snapshot_consistent": true,
+          "state": "play",
+          "thumb": "fixture-cover",
+          "title": "New B",
+          "volume": {
+            "available": true,
+            "backend": "mpd_software",
+            "muted": false,
+            "value": 100,
+            "writable": true
+          }
+        }
+      }
+    },
+    {
+      "case": "track_new_output",
+      "events": [
+        "status",
+        "after_status",
+        "currentsong"
+      ],
+      "live": {
+        "audio_format": "96000:24:2",
+        "gain": "off",
+        "index": 1,
+        "output_format": "S32_LE",
+        "output_rate": 96000,
+        "transport": {
+          "channels": 2,
+          "epoch": 1,
+          "kind": "pcm",
+          "output_rate": 96000,
+          "source_rate": 96000
+        },
+        "volume": 100
+      },
+      "round": 1,
+      "snapshot": {
+        "health": {
+          "state": "available"
+        },
+        "output_observation": {
+          "reason": "changed",
+          "state": "unverified"
+        },
+        "playback": {
+          "album": "",
+          "artist": "",
+          "audio_format": "",
+          "current_media": null,
+          "duration": 0.0,
+          "elapsed": 0.0,
+          "is_updating": false,
+          "options": {
+            "random": false,
+            "repeat": false,
+            "single": "off"
+          },
+          "playback_error": null,
+          "plex_image": null,
+          "snapshot_consistent": false,
+          "state": "play",
+          "thumb": null,
+          "title": "",
+          "volume": {
+            "available": true,
+            "backend": "mpd_software",
+            "muted": false,
+            "value": 100,
+            "writable": true
+          }
+        }
+      }
+    },
+    {
+      "case": "track_new_output",
+      "events": [
+        "status",
+        "after_status",
+        "currentsong",
+        "alsa",
+        "replay_gain"
+      ],
+      "live": {
+        "audio_format": "96000:24:2",
+        "gain": "off",
+        "index": 1,
+        "output_format": "S32_LE",
+        "output_rate": 96000,
+        "transport": {
+          "channels": 2,
+          "epoch": 1,
+          "kind": "pcm",
+          "output_rate": 96000,
+          "source_rate": 96000
+        },
+        "volume": 100
+      },
+      "round": 2,
+      "snapshot": {
+        "engine_evidence": {
+          "evidence_id": "mpd-strict-route-20261017",
+          "pcm_eof_flush": true,
+          "scope": "pcm_dsd_route_strict",
+          "state": "identified"
+        },
+        "health": {
+          "state": "available"
+        },
+        "output_observation": {
+          "card": 2,
+          "channels": 2,
+          "configured_endpoint": "hw:Fixture,0",
+          "device": 0,
+          "format": "S32_LE",
+          "kernel_release": null,
+          "rate": 96000,
+          "state": "observed",
+          "subdevice": 0,
+          "usb_device": null
+        },
+        "playback": {
+          "album": "Fixture",
+          "artist": "Fixture",
+          "audio_format": "96000:24:2",
+          "current_media": {
+            "kind": "local",
+            "queue_index": 1,
+            "uri": "b.flac"
+          },
+          "duration": 120.0,
+          "elapsed": 1.0,
+          "is_updating": false,
+          "options": {
+            "random": false,
+            "repeat": false,
+            "single": "off"
+          },
+          "playback_error": null,
+          "plex_image": null,
+          "processing": {
+            "crossfade_seconds": 0.0,
+            "mixramp": "off",
+            "mpd_volume": 100,
+            "replay_gain": {
+              "state": "off"
+            },
+            "transport": null
+          },
+          "snapshot_consistent": true,
+          "state": "play",
+          "thumb": "fixture-cover",
+          "title": "New B",
+          "volume": {
+            "available": true,
+            "backend": "mpd_software",
+            "muted": false,
+            "value": 100,
+            "writable": true
+          }
+        }
+      }
+    }
+  ]
+}

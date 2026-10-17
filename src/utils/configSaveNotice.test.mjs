@@ -67,7 +67,7 @@ test("new Save cancels expiration, protects progress and subsequent success", ()
 });
 
 test("errors, Uncertain, unavailable status and active progress never auto-dismiss", () => {
-  for (const notice of [{ kind: "error" }, { kind: "error", uncertain: true },
+  for (const notice of [{ kind: "warning", positionNotRestored: true }, { kind: "error" }, { kind: "error", uncertain: true },
     { kind: "error", statusUnavailable: true }, { kind: "success", uncertain: true },
     { kind: "success", statusUnavailable: true }]) {
     const f = harness(); f.success(); const old = f.timers[0];

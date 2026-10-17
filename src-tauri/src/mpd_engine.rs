@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 
-const PRIVATE_SHA256: &str = "a8a49a518beea9ff11599b53d493b92c02d93563f8102e4fec73aab077966582";
+const PRIVATE_SHA256: &str = "46ea7b1eaa1969f377698155b041589e9475998a3859a4c96f7937565fda7841";
 const MAX_ENGINE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -103,8 +103,8 @@ impl MpdEngine {
     pub(crate) fn evidence(&self, is_shared: bool) -> Option<EngineEvidence> {
         (self.private_sha256.as_deref() == Some(PRIVATE_SHA256)).then_some(
             EngineEvidence::Identified {
-                evidence_id: "mpd-route-20261017",
-                scope: "pcm_dsd_route",
+                evidence_id: "mpd-strict-route-20261017",
+                scope: "pcm_dsd_route_strict",
                 pcm_eof_flush: !is_shared,
             },
         )
@@ -121,7 +121,7 @@ impl MpdEngine {
         let prefix = section
             .strip_suffix("\n}")
             .ok_or_else(|| "Seção ALSA inválida para o motor experimental.".to_string())?;
-        Ok(format!("{prefix}\n    pcm_eof_flush \"yes\"\n}}"))
+        Ok(format!("{prefix}\n    pcm_eof_flush \"yes\"\n    sonante_direct_strict \"yes\"\n}}"))
     }
 
     pub(crate) fn verify_child(&self, child: &Child) -> Result<(), String> {
@@ -223,7 +223,8 @@ mod tests {
             private_sha256: Some(PRIVATE_SHA256.into()),
         };
         let direct = serde_json::to_value(private.evidence(false).unwrap()).unwrap();
-        assert_eq!(direct["scope"], "pcm_dsd_route");
+        assert_eq!(direct["scope"], "pcm_dsd_route_strict");
+        assert_eq!(direct["evidence_id"], "mpd-strict-route-20261017");
         assert_eq!(direct["pcm_eof_flush"], true);
         assert_eq!(
             serde_json::to_value(private.evidence(true).unwrap()).unwrap()["pcm_eof_flush"],
@@ -323,6 +324,7 @@ mod tests {
         );
         let direct = engine.configure_output(section, false).unwrap();
         assert_eq!(direct.matches("pcm_eof_flush").count(), 1);
+        assert_eq!(direct.matches("sonante_direct_strict \"yes\"").count(), 1);
         assert!(direct.contains("dop \"yes\""));
         assert!(engine.configure_output("invalid".into(), false).is_err());
     }

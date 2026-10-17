@@ -435,8 +435,9 @@ export function App() {
   const importPreviewRef = useRef<ReturnType<typeof createLocalImportPreview> | null>(null);
   const configSaveMonitorRef = useRef<ReturnType<typeof monitorConfigSave> | null>(null);
   const [configSaveNotice, setConfigSaveNotice] = useState<{
-    kind: "success" | "error";
+    kind: "success" | "error" | "warning";
     detail?: string;
+    positionNotRestored?: boolean;
     reloadFailed?: boolean;
     refusal?: "fullRescan" | "planChanged" | "queueChanged" | "queueCheckRequired" | "overlap";
     stagingCleanupFailed?: boolean;
@@ -2384,7 +2385,7 @@ export function App() {
       </div>
       {(configSavePhase || configSaveNotice) && (
         <div
-          role={configSaveNotice?.kind === "error" ? "alert" : "status"}
+          role={configSaveNotice?.kind === "error" || configSaveNotice?.kind === "warning" ? "alert" : "status"}
           aria-live={configSaveNotice?.kind === "error" ? "assertive" : "polite"}
           className="fixed bottom-28 right-6 z-40 max-h-[60vh] max-w-sm overflow-y-auto rounded-lg border border-[#383838] bg-[#1D1D1D] p-4 text-xs text-white shadow-xl"
         >
@@ -2394,13 +2395,14 @@ export function App() {
             ) : configSaveNotice?.kind === "success" ? (
               <CheckCircle2 size={16} className="shrink-0 text-[#4BB543]" />
             ) : (
-              <CircleAlert size={16} className="shrink-0 text-red-400" />
+              <CircleAlert size={16} className={`shrink-0 ${configSaveNotice?.kind === "warning" ? "text-amber-300" : "text-red-400"}`} />
             )}
             <div className="min-w-0 flex-1">
               <div className="font-semibold">
                 {configSavePhase === "local" ? t(localSavePhase === "preparing" ? "settings.preparingLibrary"
                   : localSavePhase === "validating" ? "settings.validatingLibrary" : "settings.updatingLibrary")
                   : configSavePhase === "other" ? t("settings.savingSettings")
+                  : configSaveNotice?.positionNotRestored ? t("settings.outputPositionNotRestored")
                   : configSaveNotice?.kind === "success" ? t("settings.libraryUpdateSucceeded")
                   : configSaveNotice?.uncertain ? t("settings.librarySaveUncertain")
                   : configSaveNotice?.refusal === "fullRescan" ? t("settings.fullIndexRequired")
@@ -2463,7 +2465,8 @@ export function App() {
           onSaveFinished={finishConfigSave}
           onSaveAccepted={(operation) => configSaveMonitorRef.current?.accepted(operation)}
           onStartLocalFoldersSave={startLocalFoldersSave}
-          onSaved={(audioRestartExpected) => {
+          onSaved={(audioRestartExpected, warning) => {
+            if (warning === "position_not_restored") setConfigSaveNotice({ kind: "warning", positionNotRestored: true });
             if (audioRestartExpected) invalidateStatusRequests();
             configService.getConfig().then(setConfig).catch(error => logError("settings.reload", error));
             refreshPlexFavorites();

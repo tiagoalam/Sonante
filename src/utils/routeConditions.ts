@@ -1,10 +1,10 @@
 import type { ConfiguredSignalRoute, MpdHealth, PlaybackStatus } from "../types/audio";
 import { parseReportedMpdFormat } from "./signalPath.ts";
-import { engineProfiles, identifiedRouteEngine, reportsDsdTransport, identifiedUsb, usbMatches } from "./routeEvidenceProfiles.ts";
+import { engineProfiles, identifiedRouteEngine, reportsDsdTransport, strictDirectEngine, identifiedUsb, usbMatches } from "./routeEvidenceProfiles.ts";
 import type { RouteEvidenceProfile } from "./routeEvidenceProfiles.ts";
 
 export interface RouteCondition {
-  label: "transport" | "engine" | "device" | "kernel" | "route" | "rate" | "channels" | "container" | "volume" | "replayGain" | "crossfade" | "mixramp";
+  label: "negotiation" | "transport" | "engine" | "device" | "kernel" | "route" | "rate" | "channels" | "container" | "volume" | "replayGain" | "crossfade" | "mixramp";
   message: string;
   tone: "info" | "attention" | "unknown";
   values?: Record<string, string | number>;
@@ -36,6 +36,10 @@ export function routeConditions(route: ConfiguredSignalRoute | null, status: Pla
   const rows: RouteCondition[] = [];
   const add = (label: RouteCondition["label"], message: string, tone: RouteCondition["tone"] = "unknown", values?: RouteCondition["values"]) => rows.push({ label, message, tone, values });
   if (health.state !== "available" || status.state !== "play") return { summary: "inactive", rows };
+  if (status.snapshot_consistent === false) {
+    add("route", "snapshotChanged");
+    return { summary: "partial", assessment: "partial", bitPerfect: false, rows };
+  }
   const evidence = status.output_observation;
   const observed = route?.mode === "direct" && physicalEndpoint(route.endpoint)
     && evidence?.state === "observed" && evidence.configured_endpoint === route.endpoint
@@ -77,6 +81,7 @@ export function routeConditions(route: ConfiguredSignalRoute | null, status: Pla
     for (const label of ["rate", "channels", "container"] as const) add(label, reason);
   }
   // These identifiers are context, not a DAC/kernel whitelist for playback.
+  if (route?.mode === "direct") add("negotiation", strictDirectEngine(status.engine_evidence) ? "directStrict" : "directCompatibility", strictDirectEngine(status.engine_evidence) ? "info" : "unknown");
   const candidates = engineProfiles(status.engine_evidence);
   add("engine", observed && identifiedRouteEngine(status.engine_evidence) ? "engineIdentified" : "notChecked", observed && identifiedRouteEngine(status.engine_evidence) ? "info" : "unknown");
   const usb = observed?.usb_device;

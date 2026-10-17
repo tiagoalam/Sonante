@@ -24,7 +24,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { SettingsPages, type SettingsPage } from "./SettingsPages";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
-import { AppConfig, ConfigSaveOperation } from "../types/config";
+import { AppConfig, ConfigSaveOperation, ConfigSaveWarning } from "../types/config";
 import { AudioDevice } from "../types/audio";
 import { PlexServerResource } from "../types/plex";
 import { configService } from "../services/config";
@@ -39,7 +39,7 @@ interface Props {
   initialDraft?: AppConfig | null;
   initialFolderOverlap?: boolean;
   onClose: () => void;
-  onSaved: (audioRestartExpected: boolean) => void;
+  onSaved: (audioRestartExpected: boolean, warning?: ConfigSaveWarning) => void;
   onSaveStarted: (audioRestartExpected: boolean) => boolean;
   onSaveFinished: () => void;
   onSaveAccepted: (operation: ConfigSaveOperation) => void;
@@ -333,7 +333,7 @@ export const SettingsModal: React.FC<Props> = ({
         onClose();
         return;
       }
-      onSaved(restartExpected);
+      onSaved(restartExpected, response.warning);
       onClose();
     } catch (err) {
       const diagnostic = formatConfigError(err);
