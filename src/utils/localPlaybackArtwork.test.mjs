@@ -65,10 +65,12 @@ test("actual App projection restores Local artwork before Play through catalog/r
   assert.equal(f.calls.filter(c=>c[0]==="get_local_albums").length,1);assert.equal(f.calls.filter(c=>c[0]==="get_local_cover").length,1);
   for(let i=0;i<20;i++){f.status={...f.status,elapsed:19.5+i};f.render();await flush();}
   assert.equal(f.calls.length,2,"health/status rerenders perform no artwork or playback I/O");
-  const ref={current:null},published=[];const vars={queueArtwork:{blocked:false,onlineEnabled:true,generation:0},nowPlayingSnapshotRef:ref,configuredSignalRoute:()=>({mode:"shared"}),config:{},mpdHealth:{state:"available"},presentationPlayback:f.display,publishCurrentNowPlayingSnapshot:()=>published.push(ref.current)};
+  const sourceInfo={media:f.display.current_media,info:{provenance:"local",codec:"FLAC",compression:"lossless",sample_type:"integer",sample_rate:96000,bit_depth:24,dsd_level:null,revision:"fixture"}};
+  const ref={current:null},published=[];const vars={sourceInfo,queueArtwork:{blocked:false,onlineEnabled:true,generation:0},nowPlayingSnapshotRef:ref,configuredSignalRoute:()=>({mode:"shared"}),config:{},mpdHealth:{state:"available"},presentationPlayback:f.display,publishCurrentNowPlayingSnapshot:()=>published.push(ref.current)};
   new Function(...Object.keys(vars),`return (${snapshotEffect});`)(...Object.values(vars))();
   assert.equal(published[0].playback,f.display,"actual detached-window bridge publishes the projection");
   assert.equal(published[0].queueArtwork,vars.queueArtwork,"the same bridge carries the queue artwork gate/generation");
+  assert.equal(published[0].sourceInfo,sourceInfo,"the same bridge carries the source facts without new reads");
   for(const tag of ["PlayerBar","QueueDrawer","NowPlayingHost"]){
     let found;const walk=n=>{if(ts.isJsxSelfClosingElement(n)&&n.tagName.getText(ast)===tag)found=n;ts.forEachChild(n,walk);};walk(ast);assert.ok(found);
     const attr=found.attributes.properties.find(p=>p.name?.getText(ast)===(tag==="NowPlayingHost"?"snapshot":"status")).initializer.expression.getText(ast);

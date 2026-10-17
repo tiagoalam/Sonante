@@ -8,6 +8,8 @@ import ts from "typescript";
 import i18next from "i18next";
 import { renderToStaticMarkup } from "react-dom/server";
 import { signalPathInformation } from "./signalPath.ts";
+import { currentMediaKey } from "./playerNavigation.ts";
+import { sourceAudioBadge, albumAudioBadge } from "./sourceAudio.ts";
 
 const resource = language => JSON.parse(readFileSync(new URL(`../locales/${language}.json`, import.meta.url)));
 const source = name => readFileSync(new URL(`../components/${name}.tsx`, import.meta.url), "utf8");
@@ -26,10 +28,12 @@ async function fixture(language = "en") {
   const t = i18n.t.bind(i18n), calls = [];
   const dependencies = { react: { ...React, default: React, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons, "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": { signalPathInformation } };
   const SignalPath = compile("SignalPath", dependencies);
+  const SourceAudioBadges = compile("SourceAudioBadges", { ...dependencies, "../utils/sourceAudio": { sourceAudioBadge, albumAudioBadge } });
   const hooks = { ...React, useState: initial => [initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
   const controlled = { ...dependencies,
     react: { ...hooks, default: hooks, __esModule: true },
     "./SignalPath": { SignalPath }, "./PlexImage": { PlexImage: () => null },
+    "./SourceAudioBadges": { SourceAudioBadges }, "../utils/playerNavigation": { currentMediaKey },
     "../utils/frontendDiagnostics": { logError() { assert.fail("Unexpected diagnostic"); } },
     "../services/audio": { audioService: Object.fromEntries(["togglePlay", "next", "previous", "seek", "setVolume", "changePlaybackOption"].map(name => [name, async (...args) => { calls.push([name, ...args]); }])) },
   };
