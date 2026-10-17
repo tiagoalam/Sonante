@@ -21,6 +21,7 @@ import { PlexImage } from "./PlexImage";
 import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
 
+
 interface Props {
   onFavoritesChanged?: () => void;
   isPlaybackAvailable: boolean;
@@ -445,7 +446,6 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                         <Disc3 size={40} />
                       </div>
                     )}
-
                     <button
                       onClick={(e) => handleToggleFav(e, fav)}
                       className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-[#E5A00D] transition-transform active:scale-90 cursor-pointer shadow"

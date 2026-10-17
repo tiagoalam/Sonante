@@ -759,15 +759,20 @@ fn reconcile_output_with_io(
 ) -> Result<Option<&'static str>, String> {
     let assessment = (|| {
         if stop.load(Ordering::Acquire) {
-            Ok(Some("stopped"))
+            Ok((Some("stopped"), false))
         } else {
             let status = send("status")?;
             let song = send("currentsong")?;
-            Ok(playback_incompatibility(&status, &song))
+            // The active MPD output, not a UI preference or file extension,
+            // establishes Shared. A literal DoP stream remains unsupported.
+            let shared_dsd = dsd_or_dop_reason(&status, &song).is_some()
+                && !reports_dop(&status, &song)
+                && shared_pcm_outputs(&send("outputs")?);
+            Ok((playback_incompatibility(&status, &song, shared_dsd), shared_dsd))
         }
     })();
-    let mut reason = assessment.map_err(|error| disable_after_failure(error, stop, send))?;
-    if let Err(error) = ensure_auxiliary_output(reason.is_none(), stop, send) {
+    let (mut reason, shared_dsd) = assessment.map_err(|error| disable_after_failure(error, stop, send))?;
+    if let Err(error) = ensure_auxiliary_output_with_policy(reason.is_none(), shared_dsd, stop, send) {
         return Err(if reason.is_none() {
             disable_after_failure(error, stop, send)
         } else {
@@ -801,9 +806,22 @@ fn ensure_auxiliary_output(
     stop: &AtomicBool,
     send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
 ) -> Result<(), String> {
+    ensure_auxiliary_output_with_policy(requested, false, stop, send)
+}
+
+fn ensure_auxiliary_output_with_policy(
+    requested: bool,
+    shared_dsd: bool,
+    stop: &AtomicBool,
+    send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
+) -> Result<(), String> {
     let name = crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME;
-    let (id, actual) = auxiliary_output_state(&send("outputs")?, name)?;
+    let outputs = send("outputs")?;
+    let (id, actual) = auxiliary_output_state(&outputs, name)?;
     let desired = requested && !stop.load(Ordering::Acquire);
+    if desired && shared_dsd && !shared_pcm_outputs(&outputs) {
+        return Err("Saída Shared do analyzer mudou antes da confirmação.".into());
+    }
     if actual == desired {
         return Ok(());
     }
@@ -828,7 +846,11 @@ fn ensure_auxiliary_output(
         (false, false) => "disable_failed",
     });
     result?;
-    let (_, confirmed) = auxiliary_output_state(&send("outputs")?, name)?;
+    let outputs = send("outputs")?;
+    let (_, confirmed) = auxiliary_output_state(&outputs, name)?;
+    if desired && shared_dsd && !shared_pcm_outputs(&outputs) {
+        return Err("Saída Shared do analyzer mudou durante a confirmação.".into());
+    }
     if confirmed != desired && !(desired && !confirmed && stop.load(Ordering::Acquire)) {
         return Err("Estado da saída auxiliar não confirmou a transição aceita pelo MPD.".into());
     }
@@ -926,9 +948,9 @@ fn unique_value<'a>(lines: &'a [String], prefix: &str) -> Option<&'a str> {
     (values.next().is_none() && !value.is_empty()).then_some(value)
 }
 
-fn playback_incompatibility(status: &[String], song: &[String]) -> Option<&'static str> {
+fn playback_incompatibility(status: &[String], song: &[String], shared_dsd: bool) -> Option<&'static str> {
     if let Some(reason) = dsd_or_dop_reason(status, song) {
-        return Some(reason);
+        if !shared_dsd { return Some(reason); }
     }
     if unique_value(status, "state: ") == Some("stop") {
         return Some("stopped");
@@ -942,7 +964,8 @@ fn playback_incompatibility(status: &[String], song: &[String]) -> Option<&'stat
         || status_id != song_id
         || unique_value(song, "file: ").is_none()
         || status.iter().any(|line| line.starts_with("error: "))
-        || !unique_value(status, "audio: ").is_some_and(is_pcm_format)
+        || !unique_value(status, "audio: ").is_some_and(|format|
+            is_pcm_format(format) || (shared_dsd && is_dsd_format(format)))
     {
         return Some("reconcile_failed");
     }
@@ -955,6 +978,41 @@ fn is_pcm_format(value: &str) -> bool {
         && fields[0].parse::<u32>().is_ok_and(|rate| rate > 0)
         && matches!(fields[1], "8" | "16" | "24" | "32" | "f")
         && fields[2].parse::<u8>().is_ok_and(|channels| channels > 0)
+}
+
+// Only the two supervisor-owned outputs are accepted. Unknown, disabled,
+// duplicate or extra outputs cannot grant permission to analyze DSD.
+fn shared_pcm_outputs(lines: &[String]) -> bool {
+    let auxiliary = crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME;
+    let Ok((shared_id, true)) = auxiliary_output_state(lines, "Sonante Shared") else { return false; };
+    let Ok((aux_id, _)) = auxiliary_output_state(lines, auxiliary) else { return false; };
+    if shared_id == aux_id || lines.iter().filter(|line| line.starts_with("outputid: ")).count() != 2 {
+        return false;
+    }
+    for block in lines.split(|line| line.starts_with("outputid: ")).skip(1) {
+        match unique_value(block, "outputname: ") {
+            Some("Sonante Shared") if unique_value(block, "plugin: ") == Some("alsa") => {},
+            Some(name) if name == auxiliary && unique_value(block, "plugin: ") == Some("fifo") => {},
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn is_dsd_format(value: &str) -> bool {
+    let fields: Vec<_> = value.split(':').collect();
+    let channels = |value: &str| value.parse::<u8>().is_ok_and(|n| n > 0);
+    match fields.as_slice() {
+        [level, ch] => level.strip_prefix("dsd").is_some_and(|n| n.parse::<u32>().is_ok_and(|n| n > 0)) && channels(ch),
+        [rate, "dsd", ch] => rate.parse::<u32>().is_ok_and(|n| n > 0) && channels(ch),
+        _ => false,
+    }
+}
+
+fn reports_dop(status: &[String], song: &[String]) -> bool {
+    status.iter().filter_map(|line| line.strip_prefix("audio: "))
+        .chain(song.iter().filter_map(|line| line.strip_prefix("Format: ")))
+        .any(|format| format.to_ascii_lowercase().contains("dop"))
 }
 
 fn dsd_or_dop_reason(status: &[String], current_song: &[String]) -> Option<&'static str> {
@@ -1150,6 +1208,7 @@ mod tests {
         commands: Vec<String>,
         fail: Option<&'static str>,
         ignore_enable: bool,
+        primary_shared: bool,
     }
 
     impl ReconcileIo {
@@ -1168,6 +1227,7 @@ mod tests {
                 commands: Vec::new(),
                 fail: None,
                 ignore_enable: false,
+                primary_shared: false,
             }
         }
 
@@ -1182,10 +1242,12 @@ mod tests {
                 "currentsong" => Ok(self.song.clone()),
                 "outputs" => Ok(vec![
                     "outputid: 7".into(),
-                    "outputname: Sonante Output".into(),
+                    format!("outputname: {}", if self.primary_shared { "Sonante Shared" } else { "Sonante Output" }),
+                    "plugin: alsa".into(),
                     "outputenabled: 1".into(),
                     "outputid: 12".into(),
                     "outputname: Sonante Analyzer".into(),
+                    "plugin: fifo".into(),
                     format!("outputenabled: {}", u8::from(self.enabled)),
                 ]),
                 "enableoutput 12" => {
@@ -1210,6 +1272,68 @@ mod tests {
                 .filter(|command| command.ends_with("output 12"))
                 .map(String::as_str)
                 .collect()
+        }
+    }
+
+    #[test]
+    fn shared_dsd_enables_only_auxiliary_pcm_and_direct_dop_remain_blocked() {
+        let stop=AtomicBool::new(false);
+        for format in ["dsd64:2", "dsd128:2", "dsd256:2", "352800:dsd:2", "48000:24:2"] {
+            let mut io=ReconcileIo::pcm(false);io.primary_shared=true;
+            io.status[3]=format!("audio: {format}");io.song[0]="file: fixture/tone.dsf".into();
+            assert_eq!(io.reconcile(&stop).unwrap(),None,"{format}");
+            for state in ["pause","play","pause","play"] {
+                io.status[0]=format!("state: {state}");assert_eq!(io.reconcile(&stop).unwrap(),None);
+            }
+            assert_eq!(io.transitions(),["enableoutput 12"]);
+            io.primary_shared=false;
+            assert!(io.reconcile(&stop).unwrap().is_some());assert!(!io.enabled);
+            io.primary_shared=true;assert_eq!(io.reconcile(&stop).unwrap(),None);
+            io.song.push("Format: DoP:2".into());
+            assert_eq!(io.reconcile(&stop).unwrap(),Some("current_audio_format_is_dsd"));
+            assert!(!io.enabled);
+            assert_eq!(io.transitions(),["enableoutput 12","disableoutput 12","enableoutput 12","disableoutput 12"]);
+        }
+    }
+
+    #[test]
+    fn shared_dsd_still_requires_consistent_track_and_valid_audio_metadata() {
+        let stop=AtomicBool::new(false);
+        for format in ["", "dsdsecret:2", "dsd64:0", "dsd64:2:1", "0:dsd:2", "352800:dsd:0"] {
+            let mut io=ReconcileIo::pcm(true);io.primary_shared=true;
+            io.status[3]=format!("audio: {format}");io.song[0]="file: fixture/tone.dsf".into();
+            assert_eq!(io.reconcile(&stop).unwrap(),Some("reconcile_failed"));assert!(!io.enabled);
+        }
+        let mut io=ReconcileIo::pcm(true);io.primary_shared=true;io.status[3]="audio: dsd64:2".into();
+        io.song[1]="Id: 43".into();assert_eq!(io.reconcile(&stop).unwrap(),Some("reconcile_failed"));assert!(!io.enabled);
+    }
+
+    #[test]
+    fn shared_dsd_permission_rejects_ambiguous_or_non_shared_outputs() {
+        let mut io=ReconcileIo::pcm(false);io.primary_shared=true;
+        let outputs=io.send("outputs").unwrap();assert!(shared_pcm_outputs(&outputs));
+        for (old,new) in [("Sonante Shared","Sonante Output"),("outputenabled: 1","outputenabled: 0"),
+            ("plugin: alsa","plugin: null"),("plugin: fifo","plugin: alsa"),("outputid: 7","outputid: 12")] {
+            let bad:Vec<_>=outputs.iter().map(|line|line.replace(old,new)).collect();assert!(!shared_pcm_outputs(&bad),"{old} -> {new}");
+        }
+        let mut bad=outputs.clone();bad.extend(outputs[..4].iter().cloned());assert!(!shared_pcm_outputs(&bad));
+        let mut bad=outputs.clone();bad.push("outputenabled: 1".into());assert!(!shared_pcm_outputs(&bad));
+        let mut bad=outputs.clone();bad.push("plugin: fifo".into());assert!(!shared_pcm_outputs(&bad));
+        assert!(!shared_pcm_outputs(&[]));
+    }
+
+    #[test]
+    fn shared_dsd_route_change_during_enable_fails_closed_without_primary_commands() {
+        let stop=AtomicBool::new(false);
+        for change_at in [2,3] {
+            let mut io=ReconcileIo::pcm(false);io.primary_shared=true;io.status[3]="audio: dsd128:2".into();
+            let mut reads=0;
+            let result=reconcile_output_with_io(&stop,&mut |command|{
+                if command=="outputs" { reads+=1;if reads==change_at { io.primary_shared=false; } }
+                io.send(command)
+            });
+            assert!(result.is_err());assert!(!io.enabled);
+            assert!(!io.commands.iter().any(|c|c=="enableoutput 7"||c=="disableoutput 7"));
         }
     }
 

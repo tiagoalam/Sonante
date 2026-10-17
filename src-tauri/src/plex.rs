@@ -1,5 +1,7 @@
 #[path = "plex_discover.rs"]
 mod discover;
+#[path = "plex_source_info.rs"]
+mod source_info;
 pub use discover::{PlexDiscoverPage, PlexDiscoverRecent, PlexDiscoverHub, PlexDiscoverArtistContent, PlexLibraryMixPage, PlexMixYears, PlexMixStyles, PlexStyleSelection};
 use crate::audio::MediaLocator;
 use crate::config::AppConfig;
@@ -3062,6 +3064,10 @@ pub struct PlexLibrary {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlexAlbum {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_id: Option<String>,
     pub rating_key: String,
     pub title: String,
     pub artist: String,
@@ -3187,6 +3193,8 @@ impl AlbumCatalogPages {
                 return Err(invalid());
             }
             page.push(PlexAlbum {
+                server_id: Some(connection.server_id.clone()),
+                library_id: source_info::source_library(item),
                 rating_key: id.to_string(),
                 title: item["title"].as_str().unwrap_or("Desconhecido").to_string(),
                 artist: item["parentTitle"]
@@ -3289,6 +3297,7 @@ where
             .accept(&json, &connection)
             .map_err(|message| fail(pages.albums.len(), message))?;
         if complete {
+            for album in &mut pages.albums { album.library_id = Some(section_key.to_string()); }
             return Ok(PlexAlbumCatalog {
                 server_id: connection.server_id,
                 library_id: section_key.to_string(),
@@ -3411,6 +3420,8 @@ fn parse_track_navigation(
     let artist_name = navigation_text(&track["grandparentTitle"])?;
     Ok(PlexTrackNavigation {
         album: PlexAlbum {
+            server_id: Some(connection.server_id.clone()),
+            library_id: source_info::source_library(track),
             rating_key: album_key.to_string(),
             title: navigation_text(&track["parentTitle"])?,
             artist: artist_name.clone(),
@@ -3863,6 +3874,8 @@ impl PlexClient {
                                     .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                                 albums.push(PlexAlbum {
+                    server_id: Some(connection.server_id.clone()),
+                    library_id: source_info::source_library(item),
                                     rating_key,
                                     title,
                                     artist,
@@ -4152,6 +4165,8 @@ impl PlexClient {
                     .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                 albums.push(PlexAlbum {
+                    server_id: Some(connection.server_id.clone()),
+                    library_id: source_info::source_library(item),
                     rating_key,
                     title,
                     artist,
@@ -4211,6 +4226,8 @@ impl PlexClient {
                     .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                 albums.push(PlexAlbum {
+                    server_id: Some(connection.server_id.clone()),
+                    library_id: source_info::source_library(item),
                     rating_key,
                     title,
                     artist,

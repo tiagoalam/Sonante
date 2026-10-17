@@ -1572,6 +1572,10 @@ impl AudioEngine {
         socket_path: &str,
         filter: &str,
     ) -> Result<LocalAlbumCollection, String> {
+        Self::get_local_album_collection_limited_at(socket_path, filter, None)
+    }
+
+    fn get_local_album_collection_limited_at(socket_path: &str, filter: &str, limit: Option<usize>) -> Result<LocalAlbumCollection, String> {
         let status = Self::send_command_to_socket(socket_path, "status")
             .map_err(|e| format!("Falha ao verificar atualização da biblioteca: {e}"))?;
         if status.iter().any(|line| line.starts_with("updating_db: ")) {
@@ -1580,6 +1584,7 @@ impl AudioEngine {
         let count = Self::send_command_to_socket(socket_path, &format!("count {filter}"))
             .map_err(|e| format!("Falha ao contar músicas da biblioteca local: {e}"))?;
         let total = Self::parse_local_album_count(&count)?;
+        if limit.is_some_and(|limit| total > limit) { return Err("SOURCE_ALBUM_LIMIT".into()); }
         let mut collection = LocalAlbumCollection::default();
         for (start, end) in Self::local_album_windows(total) {
             let command = format!("find {filter} window {start}:{end}");
@@ -1606,6 +1611,14 @@ impl AudioEngine {
             .remove(album_id)
             .filter(|collector| collector.track_count > 0 && !collector.folder_path.is_empty())
             .map(|collector| collector.track_uris))
+    }
+
+    // Optional cover badges: reject an oversized scope BEFORE find/pages/track allocation.
+    pub(crate) fn get_source_album_tracks_at(socket_path: &str, album_id: &str) -> Result<Option<Vec<LocalAlbumDiscTracks>>, String> {
+        let scope = Self::local_album_scope(album_id)?;
+        let filter = Self::local_album_base_filter(scope)?;
+        let collection = Self::get_local_album_collection_limited_at(socket_path, &filter, Some(32))?;
+        Ok(Self::canonical_local_album_map(collection).remove(album_id).map(AlbumCollector::into_disc_tracks))
     }
 
     pub(crate) fn get_local_album_tracks_at(
@@ -6038,6 +6051,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
+    }
+
+    #[test]
+    fn source_info_album_limit_precedes_find_and_uses_canonical_identity() {
+        let (path, server) = fake_album_mpd(vec![
+            ("status", "state: stop\nOK\n"),
+            ("count \"(base 'Music/Shared')\"", "songs: 33\nOK\n"),
+        ]);
+        assert!(AudioEngine::get_source_album_tracks_at(&path, &album_id("Music/Shared", "First")).is_err());
+        server.join().unwrap();
+        let (path, server) = fake_album_mpd(vec![
+            ("status", "state: stop\nOK\n"),
+            ("count \"(base 'Music/Shared')\"", "songs: 3\nOK\n"),
+            ("find \"(base 'Music/Shared')\" window 0:3", "file: Music/Shared/a.flac\nAlbum: First\nfile: Music/Shared/b.flac\nAlbum: Other\nfile: Music/Shared/c.flac\nAlbum: First\nOK\n"),
+        ]);
+        let groups = AudioEngine::get_source_album_tracks_at(&path, &album_id("Music/Shared", "First")).unwrap().unwrap();
+        server.join().unwrap();
+        assert_eq!(groups.iter().map(|g| g.tracks.len()).sum::<usize>(), 2);
+        assert!(groups.iter().flat_map(|g| &g.tracks).all(|t| t.album.as_deref() == Some("First")));
     }
 
     #[test]

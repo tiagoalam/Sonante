@@ -81,7 +81,7 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
   const artwork = <div aria-busy={phase === "loading"} role={isAlbumArtwork ? "img" : undefined}
       aria-label={isAlbumArtwork ? t("explore.artistAlbumCover", { album: entry.album.title }) : undefined}
       title={isAlbumArtwork ? t("explore.artistAlbumCover", { album: entry.album.title }) : undefined}
-      className="aspect-square overflow-hidden rounded-lg bg-[#202020]">
+      className="relative aspect-square overflow-hidden rounded-lg bg-[#202020]">
       {cover ? <img src={cover} alt="" className="h-full w-full object-cover" onError={() => { setCover(null); setPhase("error"); }} /> : fallback ?? <AlbumArtworkPlaceholder />}
     </div>;
   if (artworkOnly) return <div ref={cardNode as React.Ref<HTMLDivElement>} className="h-full w-full">{artwork}</div>;

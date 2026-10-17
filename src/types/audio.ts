@@ -101,6 +101,7 @@ export interface QueueArtworkContext {
 
 export interface NowPlayingSnapshot {
   queueArtwork?: QueueArtworkContext;
+  sourceInfo?: import("./sourceAudio").PlayerSourceInfo | null;
   route: ConfiguredSignalRoute | null;
   health: MpdHealth;
   playback: PlaybackStatus;

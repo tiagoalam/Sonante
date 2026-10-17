@@ -15,6 +15,11 @@ const MAX_HERO_WINDOW: usize = 140;
 pub struct PlexMixTrack {
     pub server_id: String,
     pub library_id: String,
+    // Optional navigation only; playback and persisted playlists keep PlexTrack.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_rating_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist_rating_key: Option<String>,
     #[serde(flatten)]
     pub track: PlexTrack,
 }
@@ -536,7 +541,7 @@ fn parse_mix_observed(
             && counts.container_library_match == Some(true);
         let safe = parse_item(record, connection, section, !inherited_section, tokens)
             .filter(|item| item.kind == "track");
-        let parsed = safe.and_then(|_| client.parse_track_item(connection, record));
+        let parsed = safe.as_ref().and_then(|_| client.parse_track_item(connection, record));
         let Some(mut track) = parsed else {
             counts.reject(mix_rejection_reason(
                 record,
@@ -595,9 +600,12 @@ fn parse_mix_observed(
             rejected = true;
             continue;
         }
+        let album = safe.as_ref().and_then(|item| item.album.as_ref());
         tracks.push(PlexMixTrack {
             server_id: connection.server_id.clone(),
             library_id: section.into(),
+            album_rating_key: album.map(|album| album.rating_key.clone()),
+            artist_rating_key: album.and_then(|album| album.artist_rating_key.clone()),
             track,
         });
         counts.accepted += 1;
@@ -903,6 +911,8 @@ fn parse_item(
             return None;
         }
         Some(PlexAlbum {
+            server_id: Some(connection.server_id.clone()),
+            library_id: Some(section.to_string()),
             rating_key: album_id.into(),
             title: if kind == "track" {
                 subtitle.clone()
@@ -2735,6 +2745,43 @@ mod tests {
         assert_eq!(page.tracks.len(), 1);
         assert!(page.partial);
     }
+    #[test]
+    fn mix_navigation_uses_safe_pms_parents_without_changing_track_acceptance() {
+        let client = super::super::tests::media_client_for_test(&AppConfig::default());
+        let parse = |track, tokens: &[&str]| {
+            parse_mix(&client, &json!({"MediaContainer":{"Metadata":[track]}}), &connection(), "7", "en", 100, tokens).unwrap()
+        };
+        let mut track = mix_track("99");
+        track["grandparentRatingKey"] = json!("501");
+        let page = parse(track.clone(), &[]);
+        assert_eq!(page.tracks[0].album_rating_key.as_deref(), Some("12"));
+        assert_eq!(page.tracks[0].artist_rating_key.as_deref(), Some("501"));
+        assert_eq!(page.tracks[0].server_id, "server-a");
+        assert_eq!(page.tracks[0].library_id, "7");
+        let dto = serde_json::to_value(&page.tracks[0]).unwrap();
+        assert_eq!(dto["album_rating_key"], "12");
+        assert_eq!(dto["artist_rating_key"], "501");
+        let playback = serde_json::to_value(&page.tracks[0].track).unwrap();
+        assert!(playback.get("album_rating_key").is_none());
+        assert!(playback.get("artist_rating_key").is_none());
+        track.as_object_mut().unwrap().remove("grandparentRatingKey");
+        assert!(parse(track.clone(), &[]).tracks[0].artist_rating_key.is_none());
+        for value in [Value::Null, json!(42), json!(false), json!({"id":"501"}), json!(""), json!(" 501"), json!("../501"), json!("https://private.invalid/?token=fixture-secret"), json!("501?X-Plex-Token=fixture-secret"), json!("%35%30%31"), json!("１２"), json!("123456789012345678901")] {
+            track["grandparentRatingKey"] = value;
+            let page = parse(track.clone(), &["fixture-secret"]);
+            assert_eq!(page.tracks.len(), 1);
+            assert!(!page.partial);
+            assert!(page.tracks[0].artist_rating_key.is_none());
+            let dto = serde_json::to_string(&page).unwrap();
+            assert!(!dto.contains("fixture-secret") && !dto.contains("private.invalid"));
+        }
+        track["grandparentRatingKey"] = json!("501");
+        let page = parse(track, &["501"]);
+        assert_eq!(page.tracks.len(), 1);
+        assert!(page.tracks[0].artist_rating_key.is_none());
+        assert!(serde_json::to_value(&page.tracks[0]).unwrap().get("artist_rating_key").is_none());
+    }
+
     #[test]
     fn mix_parser_retains_source_locator_metadata_caps_and_deduplicates_identity() {
         let client = super::super::tests::media_client_for_test(&AppConfig::default());

@@ -1,3 +1,5 @@
+import { SourceAudioBadges } from "./SourceAudioBadges";
+import { currentMediaKey } from "../utils/playerNavigation";
 import React from "react";
 import { ArrowDownLeft, ArrowUpRight, ListMusic, Maximize2, Minimize2, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -23,6 +25,7 @@ export interface NowPlayingPresentationProps {
   optionsControls?: React.ReactNode;
   analyzerAvailable: boolean;
   analyzerInactiveLabel: string;
+  analyzerInactiveHelp?: string;
   controlFailed: boolean;
   isSeeking: boolean;
   seekValue: number;
@@ -58,6 +61,15 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
     ? `${status.volume.value}% · ${t(`player.volumeBackend.${volumeBackend}`)}` : t(`player.volumeBackend.${volumeBackend}`);
   const queueLabel = t(props.queueOpen ? "nowPlaying.hideQueue" : "nowPlaying.showQueue");
   const fullscreenLabel = t(props.fullscreen ? "nowPlaying.exitFullscreen" : "nowPlaying.enterFullscreen");
+  const visualizerMessage = !available
+    ? { label: t("nowPlaying.analyzerReason.mpd_unavailable"), help: t("nowPlaying.visualizer.helpUnavailable") }
+    : status?.state === "stop"
+      ? { label: t("nowPlaying.analyzerReason.stopped"), help: t("nowPlaying.visualizer.helpStopped") }
+      : !props.analyzerAvailable
+        ? { label: props.analyzerInactiveLabel, help: props.analyzerInactiveHelp ?? t("nowPlaying.visualizer.helpRetry") }
+        : status?.state === "pause"
+          ? { label: t("nowPlaying.visualizer.paused"), help: t("nowPlaying.visualizer.helpPaused") }
+          : { label: t("nowPlaying.vuUnavailable"), help: t("nowPlaying.visualizer.helpPreparing") };
   return <main className={`np-shell text-white${props.embedded ? " np-embedded" : ""}`} aria-busy={props.busy}>
     <div className="np-ambient" aria-hidden="true">{hasTrack && status && <TrackArtwork track={status} />}</div>
     <div className="np-layout">
@@ -83,10 +95,11 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
                 <p title={status.artist}>{props.onNavigate && hasTrack ? <button type="button" onClick={() => props.onNavigate?.("artist")} disabled={props.busy}>{status.artist || "Sonante"}</button> : hasTrack ? status.artist || "Sonante" : "Sonante"}</p>
                 {hasTrack && status.album && <span title={status.album}>{props.onNavigate ? <button type="button" onClick={() => props.onNavigate?.("album")} disabled={props.busy}>{status.album}</button> : status.album}</span>}
               </div>
+                {hasTrack && available && props.snapshot?.sourceInfo && currentMediaKey(props.snapshot.sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={props.snapshot.sourceInfo.info} />}
               {!available && <p role="status" className="np-notice">{t(health?.state === "unavailable" ? "player.engineUnavailable" : "player.engineTransitioning")}{hasTrack && ` · ${t("player.lastKnown")}`}</p>}
               {props.controlFailed && <p role="alert" className="np-error">{t("nowPlaying.controlFailed")}</p>}
               <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
-                inactiveLabel={!props.analyzerAvailable ? props.analyzerInactiveLabel : undefined} fullscreen={props.fullscreen} />
+                inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} fullscreen={props.fullscreen} />
               <div className="np-progress">
                 <input type="range" aria-label={t("nowPlaying.seek")} min={0} max={available && status.duration > 0 ? status.duration : 100} step={0.5}
                   value={available ? props.isSeeking ? props.seekValue : status.elapsed : 0} disabled={!interactive || status.duration <= 0}

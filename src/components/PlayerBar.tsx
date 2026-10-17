@@ -1,3 +1,6 @@
+import { SourceAudioBadges } from "./SourceAudioBadges";
+import type { PlayerSourceInfo } from "../types/sourceAudio";
+import { currentMediaKey } from "../utils/playerNavigation";
 import { PlaybackOptionsControls } from "./PlaybackOptionsControls";
 import { SignalPath } from "./SignalPath";
 import { logError } from "../utils/frontendDiagnostics";
@@ -27,6 +30,7 @@ interface Props {
   status: PlaybackStatus;
   health: MpdHealth;
   route: ConfiguredSignalRoute | null;
+  sourceInfo?: PlayerSourceInfo | null;
 }
 
 export const PlayerBar: React.FC<Props> = ({
@@ -38,6 +42,7 @@ export const PlayerBar: React.FC<Props> = ({
   status,
   health,
   route,
+  sourceInfo,
 }) => {
   const { t } = useTranslation();
   const [isSeeking, setIsSeeking] = useState(false);
@@ -221,6 +226,7 @@ export const PlayerBar: React.FC<Props> = ({
                 {status.album}
               </span>
             ) : null}
+            {!isNoTrack && isAvailable && sourceInfo && currentMediaKey(sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={sourceInfo.info} />}
           </div>
         </div>
       </div>

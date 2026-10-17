@@ -355,9 +355,13 @@ export const SettingsModal: React.FC<Props> = ({
       if (diagnostic === "LOCAL_FOLDERS_MIXED_CONFIG_CHANGE") {
         alert(t("settings.separateFolderChanges"));
       } else {
-        const summary = diagnostic.startsWith("Falha ao persistir configuração:")
-          ? t("settings.configPersistenceError")
-          : t("settings.outputConfigChangeError");
+        const summary = diagnostic.startsWith("CONFIG_PERSISTENCE_UNCERTAIN:")
+          ? t("settings.configPersistenceUncertain")
+          : diagnostic.startsWith("Falha ao persistir configuração:")
+            ? t("settings.configPersistenceError")
+            : diagnostic.startsWith("Falha ao iniciar nova saída:")
+              ? t("settings.outputStartError")
+              : t("settings.outputConfigChangeError");
         alert(`${summary}\n\n${t("settings.backendReportedStep")}\n${diagnostic}`);
       }
     } finally {

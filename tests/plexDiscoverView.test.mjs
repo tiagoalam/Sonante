@@ -339,3 +339,51 @@ test('album submission errors are visible and retryable without leaking backend 
  const html=renderToStaticMarkup(current);assert.match(html,/album could not be played/);assert.doesNotMatch(html,/private backend details/);
  assert.equal(nodes(current,n=>n.type==='button'&&n.props['aria-label']===i18n.t('common.playAlbum'),true)[0].props.disabled,false);
 });
+
+test('actual mix artist/album buttons keep source, selection, mode, scroll and keyboard focus through existing page callbacks',async()=>{
+ for(const selection of ['7','all'])for(const mode of ['library','decade','style'])for(const language of ['en','pt-BR']){
+  await i18n.changeLanguage(language);let queries=0,plays=0,saves=0;
+  const libraries=[{key:'7',title:'Music seven'},{key:'8',title:'Music eight'}],s={...scope,identity:{},libraryId:selection,libraries};
+  const session=new DiscoverSession(async(server_id,library_id,language)=>({server_id,library_id,language,hubs:[],partial:false}),async()=>assert.fail('navigation is not a Discover children lookup'),async(server_id,library_id,language)=>({server_id,library_id,language,items:[],partial:false,dates_missing:false}),()=>0,undefined,
+   async(server_id,library_id,language)=>{queries++;return{server_id,library_id,language,tracks:[{server_id,library_id,rating_key:'99',title:'Same track title',artist:'A full artist name that remains available beyond truncation',album_title:'A full album title that remains available beyond truncation',album_rating_key:'12',artist_rating_key:'13',media_locator:{kind:'plex',server_id,rating_key:'99',part_key:'/library/parts/99/file.flac'}}],partial:false,has_more:false};},
+   async(server_id,library_id,language)=>({server_id,library_id,language,years:[1992],partial:false}),
+   async(server_id,library_id,language)=>({server_id,library_id,language,field:'artist.style',choices:[{id:'55',title:'Jazz'}],partial:false}));
+  session.setContext(s);session.ensure();await flush();
+  if(mode==='decade'){session.openDecades();await flush();session.chooseDecade(1990);}
+  else if(mode==='style'){session.openStyles();await flush();session.chooseStyle(session.styleOptions()[0].key);}
+  else session.openMix();await flush();
+  const selected=session.getSnapshot().mix.tracks,order=selected.map(t=>[t.server_id,t.library_id,t.rating_key]),style=session.getSnapshot().mixStyle,decade=session.getSnapshot().mixDecade;assert.ok(selected.length);
+  const opened=[],focus=[],h={refs:[],cursor:0,effects:[]};let targets=[];
+  const props={session,scope:s,active:true,selection,libraries,librariesLoading:false,librariesError:false,onLibraryChange(){},onLibrary(){},onRetryLibraries(){},onOpenAlbum:album=>opened.push({kind:'album',item:album}),onOpenArtist:artist=>opened.push({kind:'artist',item:artist}),onPlayMix:async()=>plays++,onSaveMix:async()=>saves++,isPlaybackAvailable:true};
+  const viewport={scrollTop:0,querySelector:()=>({focus(){}}),querySelectorAll:selector=>selector==='[data-mix-link]'?targets:[]};
+  const render=()=>{h.cursor=0;h.effects=[];host=h;const tree=View(props);host=null;h.refs[0].current=viewport;h.effects.forEach(fn=>fn());return tree;};
+  let tree=render();const before=queries;
+  for(const kind of ['album','artist']){
+   const row=selected.at(-1),key=JSON.stringify([row.server_id,row.library_id,row.rating_key,kind]);
+   const link=nodes(tree,n=>n.props?.['data-mix-link']===key)[0];assert.ok(link);assert.equal(link.type,'button');assert.equal(link.props.type,'button');assert.equal(link.props.disabled,false);
+   const title=kind==='artist'?row.artist:row.album_title;assert.equal(link.props.title,title);assert.equal(link.props['aria-label'],i18n.t('discover.openItem',{title}));
+   nodes(tree,n=>n.props?.onScroll)[0].props.onScroll({currentTarget:{scrollTop:653}});
+   const target={isConnected:kind==='album',dataset:{mixLink:key},focus:options=>focus.push([key,options])};targets=[{dataset:{mixLink:key},focus:options=>focus.push([key,options])}];
+   // Native buttons dispatch this same click with detail=0 for Enter/Space.
+   link.props.onClick({currentTarget:target,detail:0});assert.equal(opened.at(-1).kind,kind);assert.equal(opened.at(-1).item.rating_key,kind==='album'?'12':'13');assert.equal(opened.at(-1).item.server_id,s.serverId);assert.equal(opened.at(-1).item.library_id,row.library_id);
+   props.active=false;render();viewport.scrollTop=0;props.active=true;tree=render();assert.equal(viewport.scrollTop,653);assert.deepEqual(focus.at(-1),[key,{preventScroll:true}]);
+   assert.equal(session.getSnapshot().mix.tracks,selected);assert.deepEqual(selected.map(t=>[t.server_id,t.library_id,t.rating_key]),order);assert.equal(session.getSnapshot().mixMode,mode);assert.equal(session.getSnapshot().mixStyle,style);assert.equal(session.getSnapshot().mixDecade,decade);
+  }
+  assert.equal(queries,before,'no enrichment, regeneration, or lookup on link render/navigation/back');assert.equal(plays,0);assert.equal(saves,0);
+ }
+ await i18n.changeLanguage('en');
+});
+
+test('actual mix keeps missing/invalid parent identities as plain text and rejects stale or inactive callbacks',async()=>{
+ let calls=0;const session=new DiscoverSession(async(server_id,library_id,language)=>({server_id,library_id,language,hubs:[],partial:false}),async()=>assert.fail(),undefined,()=>0,undefined,async(server_id,library_id,language)=>({server_id,library_id,language,tracks:[
+  {server_id,library_id,rating_key:'1',title:'Missing',artist:'Same artist',album_title:'Same album',media_locator:{kind:'plex',server_id,rating_key:'1',part_key:'/library/parts/1/file'}},
+  {server_id,library_id,rating_key:'2',title:'Invalid',artist:'Same artist',album_title:'Same album',album_rating_key:'../12',artist_rating_key:'13?token=private',media_locator:{kind:'plex',server_id,rating_key:'2',part_key:'/library/parts/2/file'}},
+  {server_id,library_id,rating_key:'3',title:'Known',artist:'Same artist',album_title:'Same album',album_rating_key:'12',artist_rating_key:'13',media_locator:{kind:'plex',server_id,rating_key:'3',part_key:'/library/parts/3/file'}}],has_more:false,partial:false}));
+ session.setContext(scope);session.ensure();await flush();session.openMix();await flush();
+ const props={...await fixture(),session,onOpenAlbum:()=>calls++,onOpenArtist:()=>calls++};const h={refs:[],cursor:0,effects:[]};const render=()=>{h.cursor=0;h.effects=[];host=h;const tree=View(props);host=null;return tree;};
+ let tree=render();assert.equal(session.getSnapshot().mix.tracks.length,3);const links=nodes(tree,n=>n.props?.['data-mix-link']);assert.equal(links.length,2);assert.ok(links.every(n=>JSON.parse(n.props['data-mix-link'])[2]==='3'));
+ const html=renderToStaticMarkup(React.createElement(View,props));assert.match(html,/Missing/);assert.match(html,/Invalid/);assert.doesNotMatch(html,/token=private|\.\.\/12/);
+ const target={isConnected:true};props.active=false;render();links[0].props.onClick({currentTarget:target});assert.equal(calls,0);
+ props.active=true;tree=render();session.openMixSave();links[0].props.onClick({currentTarget:target});assert.equal(calls,0);session.cancelMixSave();
+ session.setContext({...scope,identity:{}});links[1].props.onClick({currentTarget:target});assert.equal(calls,0);
+});

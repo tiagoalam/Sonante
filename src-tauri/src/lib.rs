@@ -29,6 +29,7 @@ mod shared_volume;
 mod supervisor;
 mod tags;
 mod local_file_info;
+mod player_source_info;
 
 use audio::{
     list_audio_devices, AudioDevice, AudioEngine, AudioState, DeviceSwitchSnapshot,
@@ -4894,6 +4895,8 @@ pub fn run() {
             resolve_local_library_path,
             get_local_track_tags,
             get_local_file_info,
+            player_source_info::get_player_source_info,
+            player_source_info::get_album_source_info,
             get_local_album_tag_inspection,
             preflight_local_album_tag_batch,
             apply_local_album_tag_batch,

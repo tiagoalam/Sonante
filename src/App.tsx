@@ -1,3 +1,4 @@
+import { usePlayerSourceInfo } from "./utils/usePlayerSourceInfo";
 import { useLocalPlaybackArtwork } from "./utils/useLocalPlaybackArtwork";
 import { createLocalAlbumPlayback } from "./utils/localAlbumPlayback";
 import { localLibrarySourceOptions, validLocalLibrarySourceSelection, filterLocalAlbumsByScope } from "./utils/localLibraryScope";
@@ -288,6 +289,7 @@ const PlexAlbumCard = memo<{
           </div>
         )}
 
+
         <button
           onClick={(e) => onToggleFav(e, album)}
           className={`absolute top-2 right-2 p-1.5 rounded-full backdrop-blur-xs transition-transform active:scale-90 cursor-pointer shadow z-20 ${
@@ -522,6 +524,11 @@ export function App() {
   const presentationPlayback = useLocalPlaybackArtwork(playbackStatus, localCatalog, isPlaybackAvailable,
     Boolean(config && !config.first_run && !showSettings && !showAbout),
     config?.online_artwork_enabled ?? false, ensurePlaybackArtworkCatalog);
+  const sourceInfoContext = useMemo(() => ({}), [config?.local_folders, config?.plex_server_id,
+    config?.plex_token, plexConnectionIdentity, plexBrowserCatalog, localCatalogRevision, localCatalog.albums]);
+  const sourceInfo = usePlayerSourceInfo(playbackStatus.current_media, sourceInfoContext,
+    !!config && !config.first_run && !configSavePhase && isPlaybackAvailable
+      && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy);
   useEffect(() => {
     statusRef.current = playbackStatus;
   }, [playbackStatus]);
@@ -562,6 +569,7 @@ export function App() {
     route: configuredSignalRoute(config),
     health: mpdHealth,
     playback: presentationPlayback,
+    sourceInfo,
     queueArtwork,
   });
 
@@ -910,10 +918,11 @@ export function App() {
       route: configuredSignalRoute(config),
       health: mpdHealth,
       playback: presentationPlayback,
+      sourceInfo,
       queueArtwork,
     };
     publishCurrentNowPlayingSnapshot();
-  }, [config, mpdHealth, presentationPlayback, queueArtwork, publishCurrentNowPlayingSnapshot]);
+  }, [config, mpdHealth, presentationPlayback, sourceInfo, queueArtwork, publishCurrentNowPlayingSnapshot]);
 
   // Atualiza favoritos Plex ao alternar a fonte de mídia
   useEffect(() => {
@@ -2346,7 +2355,7 @@ export function App() {
         )}
         </div>
         {nowPlayingEmbedded && <div className="flex-1 min-h-0 min-w-0" data-now-playing-embedded>
-          <NowPlayingHost snapshot={{ route: configuredSignalRoute(config), health: mpdHealth, playback: presentationPlayback, queueArtwork }} owner={hosting.owner} embedded busy={hosting.busy} hostingError={hosting.error}
+          <NowPlayingHost snapshot={{ route: configuredSignalRoute(config), health: mpdHealth, playback: presentationPlayback, sourceInfo, queueArtwork }} owner={hosting.owner} embedded busy={hosting.busy} hostingError={hosting.error}
             onReady={nowPlayingHosting.hostReady} onCollapse={() => void nowPlayingHosting.collapse()} onDetach={() => void nowPlayingHosting.detach()}
             onNavigate={view => void navigateFromNowPlaying(view)} />
         </div>}
@@ -2364,6 +2373,7 @@ export function App() {
       <PlayerBar
         route={configuredSignalRoute(config)}
         status={presentationPlayback}
+        sourceInfo={sourceInfo}
         health={mpdHealth}
         onOpenNowPlaying={showNowPlaying}
         onToggleQueue={() => setShowQueue(!showQueue)}

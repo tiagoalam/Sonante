@@ -131,6 +131,20 @@
       "left": "ESQUERDO",
       "right": "DIREITO",
       "relativeLevel": "NÍVEL RELATIVO",
+      "preparing": "Preparando visualizadores",
+      "paused": "Visualizadores pausados",
+      "howItWorks": "Como funcionam os visualizadores",
+      "helpOverview": "Os VUs mostram o nível do áudio; o espectro mostra as frequências. Ambos analisam uma cópia PCM do áudio.",
+      "worksPcm": "PCM: disponível em Shared e Direct.",
+      "worksDsd": "DSD: disponível em Shared.",
+      "directDsd": "DSD ou DoP no Direct: a análise permanece desativada para preservar o caminho de reprodução.",
+      "helpDsdDirect": "Para usar os visualizadores com DSD, selecione Shared nas preferências de áudio. A análise de DSD e DoP permanece desativada no Direct.",
+      "helpDsdShared": "O modo Shared está selecionado, mas este áudio não está disponível para análise. Os visualizadores precisam de uma cópia PCM; DoP não é analisado diretamente.",
+      "helpUnavailable": "Os visualizadores precisam que o reprodutor esteja disponível. Confira se a reprodução está disponível e abra novamente este player.",
+      "helpStopped": "Inicie uma faixa para ver os níveis do áudio e o espectro.",
+      "helpPaused": "Retome a reprodução para ver os níveis do áudio e o espectro.",
+      "helpPreparing": "Os visualizadores aparecerão quando o áudio estiver disponível para análise.",
+      "helpRetry": "Feche e abra novamente este player para tentar restabelecer a análise de áudio.",
       "modes": {
         "combo": "VU + Espectro",
         "spectrum-neon": "Espectro neon",
@@ -141,15 +155,15 @@
     },
     "vuUnavailable": "Inativo",
     "analyzerReason": {
-      "current_audio_format_is_dsd": "Inativo · formato atual é DSD/DoP",
-      "current_file_is_dsd": "Inativo · arquivo atual é DSD/DoP",
-      "stopped": "Inativo",
-      "mpd_unavailable": "Inativo · MPD indisponível",
-      "reader_error": "Inativo · erro de leitura do FIFO",
-      "output_disable_failed": "Inativo · falha ao controlar output",
-      "reconcile_failed": "Inativo · falha ao verificar faixa",
-      "fifo_open_failed": "Inativo · falha ao abrir FIFO",
-      "initial_reconcile_failed": "Inativo · falha ao preparar MPD"
+      "current_audio_format_is_dsd": "Visualizadores indisponíveis nesta saída DSD/DoP",
+      "current_file_is_dsd": "Visualizadores indisponíveis nesta saída DSD/DoP",
+      "stopped": "Reprodução parada",
+      "mpd_unavailable": "Reprodutor indisponível",
+      "reader_error": "Não foi possível ler o áudio para análise",
+      "output_disable_failed": "Não foi possível atualizar os visualizadores",
+      "reconcile_failed": "Não foi possível confirmar o áudio desta faixa",
+      "fifo_open_failed": "Não foi possível preparar a análise de áudio",
+      "initial_reconcile_failed": "Não foi possível iniciar a análise de áudio"
     }
   },
   "queue": {
@@ -518,6 +532,8 @@
     "savingSettings": "Salvando configurações...",
     "plexConnectionError": "Não foi possível conectar aos servidores do Plex.",
     "configPersistenceError": "Falha ao persistir a configuração.",
+    "configPersistenceUncertain": "Não foi possível confirmar se a configuração foi gravada. Confira as preferências atuais antes de tentar novamente.",
+    "outputStartError": "Não foi possível iniciar a nova saída de áudio.",
     "outputConfigChangeError": "Falha ao alterar a saída/configuração.",
     "backendReportedStep": "Etapa reportada pelo backend:",
     "separateFolderChanges": "Grave as alterações de pastas locais separadamente das alterações de áudio, Plex ou outras preferências. Nenhuma alteração foi aplicada. Grave um grupo primeiro e depois reabra Preferências para gravar o outro.",
@@ -690,6 +706,9 @@
     "reported": "Informado pelo MPD",
     "volume": "Controle de volume",
     "pcm": "{{rate}} kHz · {{bits}}-bit · {{channels}} canais",
+    "format": "Formato",
+    "dsd": "DSD{{level}} · {{rate}} MHz · {{channels}} canais",
+    "dsdCompact": "DSD{{level}} · {{rate}} MHz",
     "unknownFormat": "Formato não reconhecido",
     "noSignal": "Informações do sinal indisponíveis",
     "playing": "Em reprodução",
@@ -1145,5 +1164,17 @@
     "aacCoreHint": "ADTS declara o relógio do núcleo AAC. SBR implícito e a taxa efetiva da saída decodificada não são determinados por estes cabeçalhos.",
     "floatHint": "A precisão de armazenamento em ponto flutuante não comprova a resolução do master nem uma profundidade inteira equivalente.",
     "hybridHint": "O cabeçalho WavPack declara compressão híbrida. Nenhum arquivo de correção foi aberto; reconstrução sem perdas não foi comprovada."
+  },
+  "sourceAudio": {
+    "hiResLabel": "Hi-Res",
+    "mixed": "Misto",
+    "albumHiRes": "Hi-Res: todas as faixas do inventário verificado do álbum são elegíveis.",
+    "albumFormat": "Formato do inventário completo verificado do álbum; Hi-Res não comprovado para todas as faixas.",
+    "local": "Cabeçalhos do arquivo original Local",
+    "plex": "Formato da origem informado pelo Plex para este arquivo",
+    "pcmHiRes": "Hi-Res: PCM inteiro sem perdas ou não comprimido, a partir de 24 bit e 96 kHz.",
+    "dsdHiRes": "Hi-Res: nível DSD da origem comprovado.",
+    "formatOnly": "Formato identificado; Hi-Res não comprovado.",
+    "limit": "Os metadados da origem não autenticam o master nem confirmam reprodução bit-perfect ou o formato no DAC."
   }
 }

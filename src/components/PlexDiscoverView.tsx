@@ -16,7 +16,7 @@ const DiscoverCard: React.FC<{ item: PlexDiscoverItem; active: boolean; identity
     <button type="button" data-discover-item={item.presentation_key ?? discoverItemKey(item)} disabled={!active} onClick={event => onOpen(event.currentTarget)}
     aria-label={item.kind === "track" ? t("discover.openTrackAlbum", { title: item.title, album: item.album?.title }) : t("discover.openItem", { title: item.title })}
     className="group w-40 shrink-0 rounded-xl p-2 text-left hover:bg-[#242424] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E5A00D] sm:w-44">
-    <div className={`aspect-square overflow-hidden bg-[#252525] shadow-lg ${item.kind === "artist" ? "rounded-full" : "rounded-xl"}`}>
+    <div className={`relative aspect-square overflow-hidden bg-[#252525] shadow-lg ${item.kind === "artist" ? "rounded-full" : "rounded-xl"}`}>
       {item.thumb && active ? <PlexImage image={item.thumb} cacheScope={identity} alt="" className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105" fallback={<AlbumArtworkPlaceholder />} /> : <AlbumArtworkPlaceholder />}
     </div>
     <span className="mt-3 block min-h-10 line-clamp-2 text-sm font-semibold leading-5 text-white" title={item.title}>{item.title}</span>
@@ -77,6 +77,7 @@ export const PlexDiscoverView: React.FC<Props> = ({ session, scope, active, sele
   live.current = { scope, active, isPlaybackAvailable, revision };
   useEffect(() => { live.current.active = active; return () => { live.current.active = false; }; }, []);
   const submitting = useRef(false);
+  const lastMixLink = useRef<{ scope: DiscoverScope; tracks: PlexMixTrack[]; key: string; target: HTMLButtonElement } | null>(null);
   const [albumPlaying, setAlbumPlaying] = useState(false);
   const [albumPlayError, setAlbumPlayError] = useState(false);
   useEffect(() => { setAlbumPlayError(false); }, [scope]);
@@ -106,7 +107,12 @@ export const PlexDiscoverView: React.FC<Props> = ({ session, scope, active, sele
       (target ?? node.querySelector<HTMLElement>("h1"))?.focus({ preventScroll: true });
     } else if (state.mix.opened) {
       lastMix.current = true;
-      const target = session.mixFocus ? node.querySelector<HTMLElement>(`[data-mix-focus="${session.mixFocus}"]:not(:disabled)`) : null;
+      const saved = lastMixLink.current;
+      lastMixLink.current = null;
+      const link = saved && scope && session.isScope(saved.scope) && session.isScope(scope) && saved.tracks === state.mix.tracks
+        ? saved.target.isConnected ? saved.target : [...node.querySelectorAll<HTMLElement>("[data-mix-link]")].find(item => item.dataset.mixLink === saved.key)
+        : null;
+      const target = link ?? (session.mixFocus ? node.querySelector<HTMLElement>(`[data-mix-focus="${session.mixFocus}"]:not(:disabled)`) : null);
       (target ?? node.querySelector<HTMLElement>("h1"))?.focus({ preventScroll: true });
     }
     else if (lastMix.current) { node.querySelector<HTMLElement>(state.mixMode === "style" ? "[data-style-mix]" : state.mixMode === "decade" ? "[data-decade-mix]" : "[data-library-mix]")?.focus({ preventScroll: true }); lastMix.current = false; }
@@ -128,6 +134,23 @@ export const PlexDiscoverView: React.FC<Props> = ({ session, scope, active, sele
     if (!active || !available || !session.owns(item)) return;
     const album = session.album(item), artist = session.artist(item);
     if (album || artist) { lastAlbum.current = { key: item.presentation_key ?? discoverItemKey(item), target }; if (album) onOpenAlbum(album); else onOpenArtist(artist!); } else session.open(item);
+  };
+  const mixLinkKey = (track: PlexMixTrack, kind: "album" | "artist") => JSON.stringify([track.server_id, track.library_id, track.rating_key, kind]);
+  const openMixParent = (track: PlexMixTrack, kind: "album" | "artist", target: HTMLButtonElement) => {
+    if (!scope || !live.current.active || live.current.scope !== scope || !session.isScope(scope) || session.getSnapshot().mixSave.opened) return;
+    const album = kind === "album" ? session.mixAlbum(track) : null;
+    const artist = kind === "artist" ? session.mixArtist(track) : null;
+    if (!album && !artist) return;
+    lastMixLink.current = { scope, tracks: session.getSnapshot().mix.tracks, key: mixLinkKey(track, kind), target };
+    if (album) onOpenAlbum(album); else onOpenArtist(artist!);
+  };
+  const mixParent = (track: PlexMixTrack, kind: "album" | "artist") => {
+    const label = (kind === "artist" ? track.artist : track.album_title) || t("discover.mix.unknown");
+    const target = kind === "artist" ? session.mixArtist(track) : session.mixAlbum(track);
+    return target ? <button type="button" data-mix-link={mixLinkKey(track, kind)} title={label}
+      aria-label={t("discover.openItem", { title: label })} disabled={!active || !available || state.mixSave.opened}
+      onClick={event => openMixParent(track, kind, event.currentTarget)}
+      className="max-w-64 truncate text-left hover:text-[#E5A00D] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E5A00D] disabled:opacity-40">{label}</button> : <span title={label}>{label}</span>;
   };
   const action = (label: string, run: () => void, pending = false, accessibleLabel = label) => <button type="button" className={button} aria-label={accessibleLabel} disabled={!active || pending} onClick={run}><RefreshCw size={14} className="mr-2 inline" />{label}</button>;
   const error = (code: string | null) => <p role="alert" className="text-sm text-[#D8B980]">{t(code === "PLEX_DISCOVER_AUTH" ? "discover.authError" : "discover.error")}</p>;
@@ -199,7 +222,7 @@ export const PlexDiscoverView: React.FC<Props> = ({ session, scope, active, sele
             {mix.phase === "ready" && !mix.tracks.length && <p role="status" className="text-sm text-[#A69F91]">{t("discover.mix.empty")}</p>}
             {!!mix.tracks.length && <div className="overflow-x-auto rounded-xl border border-white/5 bg-black/15">
               <table className="w-full text-left text-sm"><caption className="sr-only">{t("discover.mix.preview")}</caption><thead className="sticky top-0 bg-[#25221C] text-xs text-[#A69F91]"><tr><th className="px-3 py-2" scope="col">{t("discover.mix.track")}</th><th className="px-3 py-2" scope="col">{t("discover.mix.artist")}</th><th className="px-3 py-2" scope="col">{t("discover.mix.album")}</th>{all && <th className="px-3 py-2" scope="col">{t("discover.mix.origin")}</th>}</tr></thead>
-                <tbody className="divide-y divide-white/5">{mix.tracks.map(track => <tr key={JSON.stringify([track.server_id, track.library_id, track.rating_key])}><td className="px-3 py-2 text-[#DDD4C4]">{track.title}</td><td className="px-3 py-2 text-[#AAA397]">{track.artist || t("discover.mix.unknown")}</td><td className="px-3 py-2 text-[#AAA397]">{track.album_title || t("discover.mix.unknown")}</td>{all && <td className="px-3 py-2 text-xs text-[#C4AD7D]">{track.library_title}</td>}</tr>)}</tbody>
+                <tbody className="divide-y divide-white/5">{mix.tracks.map(track => <tr key={JSON.stringify([track.server_id, track.library_id, track.rating_key])}><td className="px-3 py-2 text-[#DDD4C4]">{track.title}</td><td className="px-3 py-2 text-[#AAA397]">{mixParent(track, "artist")}</td><td className="px-3 py-2 text-[#AAA397]">{mixParent(track, "album")}</td>{all && <td className="px-3 py-2 text-xs text-[#C4AD7D]">{track.library_title}</td>}</tr>)}</tbody>
               </table>
             </div>}
         </div>

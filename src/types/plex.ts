@@ -132,6 +132,8 @@ export interface PlexDiscoverRecent {
 }
 export interface PlexMixTrack extends PlexTrack {
   server_id: string; library_id: string; library_title?: string;
+  /** Validated PMS parent identities; optional navigation, never playback keys. */
+  album_rating_key?: string | null; artist_rating_key?: string | null;
 }
 export interface PlexLibraryMixPage {
   server_id: string; library_id: string; language: string;

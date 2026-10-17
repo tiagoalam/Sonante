@@ -166,6 +166,7 @@ const LocalAlbumCard: React.FC<{
           <AlbumArtworkPlaceholder />
         )}
 
+
         <button
           onClick={(e) => onToggleFavorite(e, album, cover)}
           className={`absolute top-2 right-2 p-1.5 rounded-full backdrop-blur-xs transition-transform active:scale-90 cursor-pointer shadow z-10 ${

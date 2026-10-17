@@ -131,6 +131,20 @@
       "left": "LEFT",
       "right": "RIGHT",
       "relativeLevel": "RELATIVE LEVEL",
+      "preparing": "Preparing visualizers",
+      "paused": "Visualizers paused",
+      "howItWorks": "How the visualizers work",
+      "helpOverview": "VUs show audio levels; the spectrum shows frequency content. Both analyze a PCM copy of the audio.",
+      "worksPcm": "PCM: available in Shared and Direct.",
+      "worksDsd": "DSD: available in Shared.",
+      "directDsd": "DSD or DoP in Direct: analysis stays disabled to preserve the playback path.",
+      "helpDsdDirect": "To use visualizers with DSD, select Shared in audio preferences. DSD and DoP analysis stays disabled in Direct.",
+      "helpDsdShared": "Shared is selected, but this audio is not available for analysis. Visualizers need a PCM copy; DoP is not analyzed directly.",
+      "helpUnavailable": "Visualizers need the player to be available. Check whether playback is available, then reopen this player view.",
+      "helpStopped": "Start a track to see its audio levels and spectrum.",
+      "helpPaused": "Resume playback to see its audio levels and spectrum.",
+      "helpPreparing": "Visualizers will appear when audio is available for analysis.",
+      "helpRetry": "Close and reopen this player view to try restoring audio analysis.",
       "modes": {
         "combo": "VU + Spectrum",
         "spectrum-neon": "Neon Spectrum",
@@ -141,15 +155,15 @@
     },
     "vuUnavailable": "Inactive",
     "analyzerReason": {
-      "current_audio_format_is_dsd": "Inactive · current format is DSD/DoP",
-      "current_file_is_dsd": "Inactive · current file is DSD/DoP",
-      "stopped": "Inactive",
-      "mpd_unavailable": "Inactive · MPD unavailable",
-      "reader_error": "Inactive · FIFO read error",
-      "output_disable_failed": "Inactive · output control failed",
-      "reconcile_failed": "Inactive · track check failed",
-      "fifo_open_failed": "Inactive · FIFO open failed",
-      "initial_reconcile_failed": "Inactive · MPD setup failed"
+      "current_audio_format_is_dsd": "Visualizers unavailable for this DSD/DoP output",
+      "current_file_is_dsd": "Visualizers unavailable for this DSD/DoP output",
+      "stopped": "Playback stopped",
+      "mpd_unavailable": "Player unavailable",
+      "reader_error": "Audio could not be read for analysis",
+      "output_disable_failed": "Visualizers could not be updated",
+      "reconcile_failed": "Audio for this track could not be confirmed",
+      "fifo_open_failed": "Audio analysis could not be prepared",
+      "initial_reconcile_failed": "Audio analysis could not be started"
     }
   },
   "queue": {
@@ -518,6 +532,8 @@
     "savingSettings": "Saving settings...",
     "plexConnectionError": "Could not connect to the Plex servers.",
     "configPersistenceError": "Failed to persist the configuration.",
+    "configPersistenceUncertain": "Could not confirm whether the configuration was saved. Check the current settings before trying again.",
+    "outputStartError": "Could not start the new audio output.",
     "outputConfigChangeError": "Failed to change the output/configuration.",
     "backendReportedStep": "Step reported by the backend:",
     "separateFolderChanges": "Save local folder changes separately from audio, Plex or other preferences. No changes were applied. Save one group first, then reopen Preferences to save the other.",
@@ -690,6 +706,9 @@
     "reported": "MPD report",
     "volume": "Volume control",
     "pcm": "{{rate}} kHz · {{bits}}-bit · {{channels}} ch",
+    "format": "Format",
+    "dsd": "DSD{{level}} · {{rate}} MHz · {{channels}} ch",
+    "dsdCompact": "DSD{{level}} · {{rate}} MHz",
     "unknownFormat": "Unrecognized format",
     "noSignal": "Signal information unavailable",
     "playing": "Playing",
@@ -1145,5 +1164,17 @@
     "aacCoreHint": "ADTS declares the AAC core clock. Implicit SBR and the effective decoded output rate are not established by these headers.",
     "floatHint": "Floating-point storage precision does not establish master resolution or an equivalent integer bit depth.",
     "hybridHint": "The WavPack header declares hybrid compression. No correction file was opened; lossless reconstruction is not established."
+  },
+  "sourceAudio": {
+    "hiResLabel": "Hi-Res",
+    "mixed": "Mixed",
+    "albumHiRes": "Hi-Res: every track in the verified album inventory qualifies.",
+    "albumFormat": "Format of the complete verified album inventory; Hi-Res is not established for every track.",
+    "local": "Original Local file headers",
+    "plex": "Source format reported by Plex for this file",
+    "pcmHiRes": "Hi-Res: lossless or uncompressed integer PCM, at least 24 bit and 96 kHz.",
+    "dsdHiRes": "Hi-Res: verified source DSD level.",
+    "formatOnly": "Format identified; Hi-Res is not established.",
+    "limit": "Source metadata does not authenticate the master or confirm bit-perfect playback or the DAC format."
   }
 }

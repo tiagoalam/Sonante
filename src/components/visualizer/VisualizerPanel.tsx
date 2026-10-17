@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleHelp } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { AudioLevelFrame } from "../../types/audio";
@@ -30,6 +30,7 @@ interface VisualizerPanelProps {
   levels: AudioLevelFrame;
   active: boolean;
   inactiveLabel?: string;
+  inactiveHelp?: string;
   fullscreen: boolean;
 }
 
@@ -37,6 +38,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
   levels,
   active,
   inactiveLabel,
+  inactiveHelp,
   fullscreen,
 }) => {
   const { t } = useTranslation();
@@ -82,19 +84,36 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
           <p className="truncate text-[10px] font-semibold tracking-[0.12em] text-white/60">
             {modeLabel}
           </p>
-          {!active && inactiveLabel && (
-            <p className="mt-1 truncate text-[8px] tracking-[0.16em] text-white/28">
-              {inactiveLabel}
-            </p>
-          )}
         </div>
-        <div className="shrink-0 text-right text-[8px] tracking-[0.16em] text-white/25">
-          <p>{String(currentIndex).padStart(2, "0")} / {String(MODES.length).padStart(2, "0")}</p>
-          <p className="mt-1">{t("nowPlaying.visualizer.measurements")}</p>
+        <div className="flex shrink-0 items-start gap-3">
+          <details className="relative font-sans text-xs font-normal normal-case tracking-normal text-white/80"
+            onKeyDown={event => { if (event.key === "Escape" && event.currentTarget.open) { event.preventDefault(); event.stopPropagation(); event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}>
+            <summary aria-label={t("nowPlaying.visualizer.howItWorks")} title={t("nowPlaying.visualizer.howItWorks")}
+              className="list-none cursor-pointer rounded p-1 text-white/60 hover:text-white focus-visible:outline focus-visible:outline-[#E5A00D] [&::-webkit-details-marker]:hidden">
+              <CircleHelp size={16} aria-hidden="true" />
+            </summary>
+            <div className="absolute right-0 top-full z-30 mt-2 max-h-[min(18rem,60vh)] w-72 max-w-[calc(100vw-6rem)] overflow-y-auto rounded-lg border border-white/15 bg-[#17191d] p-3 leading-relaxed shadow-xl">
+              <p className="mb-2 font-semibold text-white">{t("nowPlaying.visualizer.howItWorks")}</p>
+              <p>{t("nowPlaying.visualizer.helpOverview")}</p>
+              <ul className="mt-2 list-disc space-y-1 pl-4">
+                <li>{t("nowPlaying.visualizer.worksPcm")}</li>
+                <li>{t("nowPlaying.visualizer.worksDsd")}</li>
+                <li>{t("nowPlaying.visualizer.directDsd")}</li>
+              </ul>
+            </div>
+          </details>
+          <div className="text-right text-[8px] tracking-[0.16em] text-white/25">
+            <p>{String(currentIndex).padStart(2, "0")} / {String(MODES.length).padStart(2, "0")}</p>
+            <p className="mt-1">{t("nowPlaying.visualizer.measurements")}</p>
+          </div>
         </div>
       </div>
 
       <div className="np-visualizer-graphs flex min-h-0 flex-1 flex-col justify-center">
+        {!active ? <div role="status" aria-live="polite" data-visualizer-inactive className="mx-auto max-h-full w-full max-w-xl overflow-y-auto px-1 py-3 text-center">
+          <p className="text-sm font-semibold leading-relaxed text-white/90">{inactiveLabel || t("nowPlaying.vuUnavailable")}</p>
+          <p className="mt-2 text-xs leading-relaxed text-white/65">{inactiveHelp || t("nowPlaying.visualizer.helpRetry")}</p>
+        </div> : <>
         {mode === "combo" && (
           <>
             <VuHorizontal levels={levels} active={active} />
@@ -136,6 +155,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
             fullscreen={fullscreen}
           />
         )}
+        </>}
       </div>
 
       <button

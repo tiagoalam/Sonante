@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import i18next from "i18next";
 import { configuredSignalRoute, parseReportedMpdFormat, signalPathInformation } from "./signalPath.ts";
+import { currentMediaKey } from "./playerNavigation.ts";
 
 const config = { first_run: false, audio_output_type: "alsa", alsa_device: "hw:CARD=Fixture,DEV=0", plex_token: "secret-token", local_folders: ["/home/private/music"] };
 const status = { state: "play", audio_format: "96000:24:2", current_media: { kind: "local", uri: "private.cue/track0001" }, volume: { backend: "mpd_software" } };
@@ -40,12 +41,12 @@ test("confirmed route is minimal and never publishes arbitrary PCM names or conf
   assert.deepEqual(Object.keys(configuredSignalRoute(config)), ["mode", "endpoint"]);
 });
 
-test("only known decoded PCM structures are parsed, without codec or source quality inference", () => {
+test("known decoded PCM structures are parsed, without codec or source quality inference", () => {
   for (const [value, rate, bits] of [["44100:16:2", 44.1,16], ["96000:24:2",96,24], ["192000:24:2",192,24]]) {
     assert.deepEqual(parseReportedMpdFormat(value), { kind: "pcm", rateKhz: rate, bits, channels: 2 });
   }
   assert.deepEqual(parseReportedMpdFormat(""), { kind: "absent" });
-  for (const value of ["dsd64:2", "48000:f:2", "FLAC", "0:24:2", "96000:24:0", "96000:24:999", "secret /private"]) {
+  for (const value of ["48000:dop:2", "48000:f:2", "FLAC", "0:24:2", "96000:24:0", "96000:24:999", "secret /private"]) {
     assert.deepEqual(parseReportedMpdFormat(value), { kind: "unknown" });
   }
 });
@@ -108,7 +109,7 @@ test("snapshot route follows confirmed config and shared presentation leaves pla
   assert.match(snapshotEffect, /route: configuredSignalRoute\(config\)/);
   assert.match(snapshotEffect, /playback: presentationPlayback,/);
   assert.match(snapshotEffect, /queueArtwork,/);
-  assert.match(snapshotEffect, /\[config, mpdHealth, presentationPlayback, queueArtwork, publishCurrentNowPlayingSnapshot\]/);
+  assert.match(snapshotEffect, /\[config, mpdHealth, presentationPlayback, sourceInfo, queueArtwork, publishCurrentNowPlayingSnapshot\]/);
   assert.doesNotMatch(snapshotEffect, /settingsDraft|setInterval|setTimeout|invoke/);
   const before = { route: configuredSignalRoute(config), playback: status, health };
   const draft = { ...config, audio_output_type: "pipewire" };
@@ -145,6 +146,7 @@ test("Now Playing receives route changes through the existing snapshot event and
     react: { ...hooks, default: hooks, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons,
     "react-i18next": { useTranslation: () => ({ t }) },
     "./SignalPath": { SignalPath }, "./TrackArtwork": { TrackArtwork: () => null },
+    "./SourceAudioBadges": { SourceAudioBadges: () => null }, "../utils/playerNavigation": { currentMediaKey },
     "./NowPlayingQueue": { NowPlayingQueue: () => null }, "./nowPlaying.css": {},
     "../utils/nowPlayingHosting": { analyzerOwnerMatches: () => true },
     "./NowPlayingHost": { NowPlayingHost: ({ snapshot }) => snapshot ? React.createElement(SignalPath, { route: snapshot.route, status: snapshot.playback, health: snapshot.health, horizontal: true }) : null },
@@ -225,4 +227,37 @@ test("compact signal uses at most two discreet lines and keeps absent/unknown fo
       assert.equal(tree.props["aria-description"], t("signalPath.help"));
     }
   }
+});
+
+
+test("reported DSD short and byte-rate forms are normalized independently of routes or source codec", () => {
+ for (const level of [32,64,128,256,512,1024]) {
+  const expected={kind:"dsd",rateMhz:44100*level/1e6,level,channels:2};
+  assert.deepEqual(parseReportedMpdFormat(`dsd${level}:2`),expected);
+  assert.deepEqual(parseReportedMpdFormat(`${44100*level/8}:dsd:2`),expected);
+ }
+ assert.deepEqual(parseReportedMpdFormat("384000:dsd:6"),{kind:"dsd",rateMhz:3.072,level:null,channels:6});
+ for(const value of ["dsd:2","dsd63:2","dsd64:0","dsd64:65","dsd64:2:1","DSD64:2","0:dsd:2","352800:dsd:0","352800:dsd:999","99999999999999999:dsd:2","352800.5:dsd:2"," ds d64:2","352800:DoP:2"])
+  assert.deepEqual(parseReportedMpdFormat(value),{kind:"unknown"},value);
+});
+
+test("DSD report appears in compact and detailed SignalPath without PCM depth, Hi-Res or DAC assertions",async()=>{
+ for(const language of ["en","pt-BR"]){
+  const i18n=i18next.createInstance();await i18n.init({lng:language,resources:{[language]:{translation:resource(language)}},interpolation:{escapeValue:false}});
+  const t=i18n.t.bind(i18n),SignalPath=signalComponent(t);
+  for(const mode of ["shared","direct"])for(const kind of ["local","plex"])for(const level of [64,128,256]) {
+   const route={mode,endpoint:mode==="shared"?"default":"hw:Fixture,0"};
+   const playback={...status,audio_format:`dsd${level}:2`,current_media:{kind}};
+   for(const props of [{},{horizontal:true},{compact:true}]){
+    const html=renderToStaticMarkup(React.createElement(SignalPath,{route,status:playback,health,...props}));
+    assert.ok(html.includes(`DSD${level}`));assert.ok(html.includes(`${44100*level/1e6} MHz`));
+    assert.ok(html.includes(t("signalPath.help"))||!props.compact);
+    assert.ok(!html.includes(t("signalPath.unknownFormat")));assert.doesNotMatch(html,/Hi-Res|1-bit|16-bit|24-bit|48 kHz|data-source-audio/);
+    if(!props.compact){assert.ok(html.includes(t("signalPath.reported")));assert.ok(html.includes(t("signalPath.format")));assert.ok(!html.includes(t("signalPath.depth")));assert.match(html,/<dd[^>]*>2<\/dd>/);}
+   }
+   for(const change of [{status:{...playback,state:"stop"}},{health:{state:"unavailable"}},{status:{...playback,audio_format:""}}]){
+    const html=renderToStaticMarkup(React.createElement(SignalPath,{route,status:playback,health,...change}));assert.doesNotMatch(html,/DSD64|DSD128|DSD256|MHz/);
+   }
+  }
+ }
 });

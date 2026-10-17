@@ -367,6 +367,12 @@ pub struct LocalTrackTagUpdate {
     pub disc_total: TagFieldUpdate<u32>,
 }
 
+pub(crate) fn source_revision_matches(library: &Path, uri: &str, folders: &[String], expected: &str) -> bool {
+    let Ok(resolved) = resolve_local_track_file(library, uri, folders) else { return false; };
+    revision_for_file(&resolved.file).is_ok_and(|revision| revision == expected)
+        && revalidate_original(library, uri, folders, &resolved, expected).is_ok()
+}
+
 pub(crate) fn inspect_local_file_info(
     library_dir: &Path,
     relative_path: &str,
@@ -2135,6 +2141,9 @@ mod tests {
         assert_eq!(info.bit_depth, Some(24));
         assert_eq!(info.provenance, "original_file_streaminfo");
         assert_eq!(info.revision, before);
+        assert!(source_revision_matches(&fixture.library, "Music/Unicode ü.flac", &fixture.folders(), &info.revision));
+        assert!(!source_revision_matches(&fixture.library, "Music/Unicode ü.flac", &fixture.folders(), "old-revision"));
+        assert!(!source_revision_matches(&fixture.library, "Music/../escape.flac", &fixture.folders(), &info.revision));
         assert_eq!(fs::read(&file).unwrap(), bytes);
         assert_eq!(revision_for_metadata(&fs::metadata(&file).unwrap()), before);
         assert_eq!(

@@ -19,7 +19,9 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
   const format = information.format;
   const formatLabel = format.kind === "pcm"
     ? t("signalPath.pcm", { rate: format.rateKhz, bits: format.bits, channels: format.channels })
-    : t(format.kind === "unknown" ? "signalPath.unknownFormat" : "signalPath.noSignal");
+    : format.kind === "dsd"
+      ? t("signalPath.dsd", { level: format.level ?? "", rate: format.rateMhz, channels: format.channels })
+      : t(format.kind === "unknown" ? "signalPath.unknownFormat" : "signalPath.noSignal");
   const mode = route ? t(`signalPath.${route.mode}`) : t("signalPath.unknownRoute");
   const source = information.source ? t(`player.source.${information.source}`) : t("signalPath.unknownSource");
   const state = t(`signalPath.${information.state}`);
@@ -31,7 +33,9 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
         ? [information.source ? source : null, state].filter(Boolean).join(" · ")
         : format.kind === "pcm"
           ? t("signalPath.pcmCompact", { rate: format.rateKhz, bits: format.bits })
-          : information.source ? source : "";
+          : format.kind === "dsd"
+            ? t("signalPath.dsdCompact", { level: format.level ?? "", rate: format.rateMhz })
+            : information.source ? source : "";
     const description = `${t("signalPath.title")}: ${source} · ${formatLabel} · ${mode} · ${state}`;
     return (
       <section tabIndex={0} aria-label={description}
@@ -90,8 +94,10 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
             {information.source && <><span>{source}</span><span aria-hidden="true">·</span></>}
             <span>{t("signalPath.reported")}</span>
           </p>
-          {format.kind === "pcm" ? <dl className="grid grid-cols-3 gap-x-3 gap-y-2">
-            {[["rate", `${format.rateKhz} kHz`], ["depth", `${format.bits}-bit`], ["channels", String(format.channels)]].map(([key, value]) => <div key={key}>
+          {format.kind === "pcm" || format.kind === "dsd" ? <dl className="grid grid-cols-3 gap-x-3 gap-y-2">
+            {(format.kind === "pcm"
+              ? [["rate", `${format.rateKhz} kHz`], ["depth", `${format.bits}-bit`], ["channels", String(format.channels)]]
+              : [["format", `DSD${format.level ?? ""}`], ["rate", `${format.rateMhz} MHz`], ["channels", String(format.channels)]]).map(([key, value]) => <div key={key}>
               <dt className="text-[10px] text-white/60">{t(`signalPath.${key}`)}</dt><dd className="text-sm font-semibold tabular-nums text-white/95">{value}</dd>
             </div>)}
           </dl> : <p className="text-xs text-white/75">{formatLabel}</p>}

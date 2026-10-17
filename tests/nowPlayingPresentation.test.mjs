@@ -21,6 +21,8 @@ dependencies['./PlaybackOptionsControls']=compile('components/PlaybackOptionsCon
 const graph=name=>({[name]:props=>React.createElement('svg',{'aria-label':props.label??name,role:'img',viewBox:'0 0 480 120',preserveAspectRatio:'none',style:{width:'100%',height:name==='VuHorizontal'?28:'100%'}},Array.from({length:40},(_,i)=>React.createElement('rect',{key:i,x:i*12,y:120-(25+(i*17)%85),width:8,height:25+(i*17)%85,rx:1,fill:'#E5A00D',opacity:.6})))});
 for(const name of ['AnalogVu','SpectrumNeon','SpectrumSegmented','VuHorizontal']) dependencies[`./${name}`]=graph(name);
 dependencies['./visualizer/VisualizerPanel']=compile('components/visualizer/VisualizerPanel.tsx');
+dependencies['../utils/playerNavigation']={currentMediaKey:media=>JSON.stringify(media)};
+dependencies['./SourceAudioBadges']={SourceAudioBadges:()=>null};
 const {NowPlayingPresentation:View}=compile('components/NowPlayingPresentation.tsx');
 const snapshot={route:{mode:'shared',endpoint:'default'},health:{state:'available'},playback:{state:'play',elapsed:57,duration:185,audio_format:'96000:24:2',current_media:{kind:'local',uri:'synthetic.flac',queue_index:1},title:'A synthetic song with a deliberately long title that remains above the playback controls',artist:'Synthetic artist',album:'Synthetic album',volume:{value:43,muted:false,writable:true,available:true,backend:'pipewire'},is_updating:false}};
 const props={snapshot,levels:{leftRms:.2,rightRms:.3,leftPeak:.4,rightPeak:.5,spectrum:Array(48).fill(.2)},fullscreen:false,queueOpen:false,queue:null,analyzerAvailable:true,analyzerInactiveLabel:'Unavailable',controlFailed:false,isSeeking:false,seekValue:57};
@@ -338,4 +340,58 @@ test('recovered current Local artwork reaches PlayerBar, both Now Playing hosts 
  assert.equal(art[0].props.track.thumb,cover);assert.equal(art[1].props.track,items[1]);assert.deepEqual(items,before);
  assert.equal(queueItemArtwork(items[0],1,current),items[0],'duplicate URI at a different queue index stays untouched');
  assert.equal(queueItemArtwork(items[0],0,{...current,current_media:{kind:'plex',server_id:'s',part_key:'p',queue_index:0}}),items[0]);
+});
+
+
+test('inactive visualizers show readable guidance, hide idle graphs, and keep keyboard help in every mode',async()=>{
+ for(const language of ['en','pt-BR']){
+  await i18n.changeLanguage(language);
+  for(const mode of ['combo','spectrum-neon','spectrum-segmented','vu-amber','vu-blue']){
+   const hooks={...React,default:React,useState:()=>[mode,()=>{}],useEffect(){}};
+   const {VisualizerPanel}=compile('components/visualizer/VisualizerPanel.tsx',{'react':hooks});
+   const label=i18n.t('nowPlaying.analyzerReason.current_audio_format_is_dsd'),help=i18n.t('nowPlaying.visualizer.helpDsdDirect');
+   const tree=VisualizerPanel({levels:props.levels,active:false,inactiveLabel:label,inactiveHelp:help,fullscreen:false});
+   const message=nodes(tree,n=>n.props['data-visualizer-inactive']!==undefined)[0];assert.ok(message);assert.equal(message.props.role,'status');
+   const messageHtml=renderToStaticMarkup(message);assert.ok(messageHtml.includes(label));assert.ok(messageHtml.includes(help));assert.doesNotMatch(messageHtml,/truncate|text-\[8px\]/);
+   assert.doesNotMatch(renderToStaticMarkup(tree),/<svg[^>]*role="img"/);
+   const details=nodes(tree,n=>n.type==='details')[0];const summary=nodes(details,n=>n.type==='summary')[0];assert.equal(summary.props['aria-label'],i18n.t('nowPlaying.visualizer.howItWorks'));
+   const html=renderToStaticMarkup(details);for(const key of ['helpOverview','worksPcm','worksDsd','directDsd'])assert.ok(html.includes(i18n.t('nowPlaying.visualizer.'+key)));
+   let focused=false,prevented=false,stopped=false;const target={open:true,querySelector:()=>({focus(){focused=true;}})};
+   details.props.onKeyDown({key:'Escape',currentTarget:target,preventDefault(){prevented=true;},stopPropagation(){stopped=true;}});assert.equal(target.open,false);assert.ok(focused&&prevented&&stopped);
+   const active=VisualizerPanel({levels:props.levels,active:true,fullscreen:false});assert.equal(nodes(active,n=>n.props['data-visualizer-inactive']!==undefined).length,0);assert.equal(nodes(active,n=>n.type==='details').length,1);
+  }
+ }
+ await i18n.changeLanguage('en');
+});
+
+test('both player hosts explain paused, stopped and unavailable states instead of showing a stale analyzer reason',()=>{
+ const panel=dependencies['./visualizer/VisualizerPanel'].VisualizerPanel;
+ for(const embedded of [true,false]){
+  const cases=[
+   [{analyzerAvailable:true,snapshot:{...snapshot,playback:{...snapshot.playback,state:'pause'}}},'nowPlaying.visualizer.paused','nowPlaying.visualizer.helpPaused'],
+   [{analyzerAvailable:false,snapshot:{...snapshot,playback:{...snapshot.playback,state:'stop'}}},'nowPlaying.analyzerReason.stopped','nowPlaying.visualizer.helpStopped'],
+   [{analyzerAvailable:false,snapshot:{...snapshot,health:{state:'unavailable'}}},'nowPlaying.analyzerReason.mpd_unavailable','nowPlaying.visualizer.helpUnavailable'],
+  ];
+  for(const [change,label,help]of cases){
+   const tree=View({...props,...change,embedded,analyzerInactiveLabel:'old DSD reason',analyzerInactiveHelp:'old DSD help'});
+   const visualizer=nodes(tree,n=>n.type===panel)[0];assert.equal(visualizer.props.active,false);assert.equal(visualizer.props.inactiveLabel,i18n.t(label));assert.equal(visualizer.props.inactiveHelp,i18n.t(help));
+  }
+ }
+});
+
+test('host guidance distinguishes blocked DSD in Direct from unavailable DSD in Shared without audio actions',()=>{
+ for(const embedded of [true,false])for(const mode of ['direct','shared'])for(const reason of ['current_audio_format_is_dsd','current_file_is_dsd','reader_error',null,'unknown/private?token=fixture']){
+  let cursor=0;const states=[false,false,false,0,100,false,props.levels,false,reason];
+  const hooks={...React,default:React,useState:initial=>[states[cursor++]??initial,()=>{}],useEffect(){},useRef:initial=>({current:initial})};
+  const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{startAudioAnalyzer:()=>assert.fail('unexpected read'),stopAudioAnalyzer:()=>assert.fail('unexpected stop')}});
+  const tree=NowPlayingHost({snapshot:{...snapshot,route:{mode,endpoint:mode==='shared'?'default':'hw:Fixture,0'}},owner,embedded,onReady(){}});
+  const key=reason?.startsWith('current_')?(mode==='shared'?'helpDsdShared':'helpDsdDirect'):reason?'helpRetry':'helpPreparing';
+  assert.equal(tree.props.analyzerInactiveHelp,i18n.t('nowPlaying.visualizer.'+key));assert.ok(!tree.props.analyzerInactiveLabel.includes('token='));
+ }
+});
+
+test('analyzer start rejection produces an explanatory failure state without retrying or changing playback',async()=>{
+ const effects=[],values=[],calls=[];const hooks={...React,default:React,useState:initial=>[initial,value=>values.push(value)],useEffect:fn=>effects.push(fn),useRef:initial=>({current:initial})};
+ const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{listen:async()=>()=>{}},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{AUDIO_LEVEL_EVENT:'level',ANALYZER_STATUS_EVENT:'analyzer',startAudioAnalyzer:async()=>{calls.push('start');throw new Error('synthetic');},stopAudioAnalyzer:async()=>calls.push('stop')}});
+ NowPlayingHost({snapshot,owner,embedded:true,onReady(){}});const cleanup=effects[2]();await flush();assert.ok(values.includes('initial_reconcile_failed'));assert.deepEqual(calls,['start']);cleanup();await flush();assert.deepEqual(calls,['start','stop']);
 });

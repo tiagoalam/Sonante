@@ -102,7 +102,7 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
       readyRef.current(owner);
       return start;
     }).catch(err => {
-      if (!disposed) { setAnalyzerAvailable(false); logError("now-playing.analyzer-start", err); }
+      if (!disposed) { setAnalyzerAvailable(false); setAnalyzerReason("initial_reconcile_failed"); logError("now-playing.analyzer-start", err); }
     });
     return () => {
       disposed = true;
@@ -179,13 +179,19 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
     ? t(`nowPlaying.analyzerReason.${analyzerReason}`, {
         defaultValue: t("nowPlaying.vuUnavailable"),
       })
-    : t("nowPlaying.vuUnavailable");
+    : t("nowPlaying.visualizer.preparing");
+  const dsdUnavailable = analyzerReason === "current_audio_format_is_dsd" || analyzerReason === "current_file_is_dsd";
+  const analyzerInactiveHelp = dsdUnavailable
+    ? snapshot?.route?.mode === "shared" ? t("nowPlaying.visualizer.helpDsdShared") : t("nowPlaying.visualizer.helpDsdDirect")
+    : analyzerReason === "mpd_unavailable" ? t("nowPlaying.visualizer.helpUnavailable")
+      : analyzerReason === "stopped" ? t("nowPlaying.visualizer.helpStopped")
+        : analyzerReason ? t("nowPlaying.visualizer.helpRetry") : t("nowPlaying.visualizer.helpPreparing");
 
   return <NowPlayingPresentation snapshot={snapshot} controlsDisabled={busy || !owner} embedded={embedded} busy={busy} hostingError={hostingError}
     onDetach={onDetach} onReincorporate={onReincorporate} onNavigate={onNavigate} levels={levels} fullscreen={isFullscreen}
     optionsControls={<PlaybackOptionsControls options={status?.options ?? null} disabled={!isAvailable} />}
     queueOpen={queueOpen} queue={<NowPlayingQueue open={queueOpen} available={isAvailable} status={status} artworkContext={snapshot?.queueArtwork} detached={!embedded} />}
-    analyzerAvailable={analyzerAvailable} analyzerInactiveLabel={analyzerInactiveLabel} controlFailed={controlFailed}
+    analyzerAvailable={analyzerAvailable} analyzerInactiveLabel={analyzerInactiveLabel} analyzerInactiveHelp={analyzerInactiveHelp} controlFailed={controlFailed}
     isSeeking={isSeeking} seekValue={seekValue} onSeekStart={() => setIsSeeking(true)} onSeekChange={setSeekValue} onSeekCommit={handleSeekCommit}
     onPrevious={() => void runControl(audioService.previous)} onTogglePlay={() => void runControl(audioService.togglePlay)}
     onNext={() => void runControl(audioService.next)} onVolume={value => void runControl(() => audioService.setVolume(value))}
