@@ -29,6 +29,13 @@ export const SignalPathDetails: React.FC<Props> = ({ route, status, health }) =>
   const conditions = routeConditions(route, status, health);
   const conditionsSummary = t(`signalPath.conditions.summary.${conditions.summary}`);
   return <section aria-label={t("signalPath.conditions.title")} className="min-w-0 space-y-4">
+    {route?.mode === "shared" && <section data-shared-dsp className="rounded border border-white/10 p-3 text-xs text-white/65">
+      <p className="font-semibold">{t("equalizer.title")} · {t(`equalizer.state.${status.shared_dsp?.phase ?? "off"}`)}</p>
+      {status.shared_dsp?.verified && status.shared_dsp.applied && <p>{status.shared_dsp.applied.name} · {t("equalizer.pcmFormat")} · {t("equalizer.stereo")}</p>}
+      {status.shared_dsp?.verified&&status.shared_dsp.protection&&<p>{t("equalizer.appliedGain",{effective:status.shared_dsp.protection.effective_preamp_db.toFixed(1),requested:status.shared_dsp.protection.requested_preamp_db.toFixed(1)})}</p>}
+      {status.shared_dsp?.comparison&&<p>{t(status.shared_dsp.comparison.interrupted?"equalizer.compare.interrupted":status.shared_dsp.comparison.side==="reference"?"equalizer.compare.referenceInRoute":"equalizer.compare.equalized")}</p>}
+      <p className="mt-1 text-[11px]">{t("equalizer.sharedProcessingHelp")}</p>
+    </section>}
     <div data-alsa-observation={observed ? "observed" : "unverified"} className="mt-2 border-t border-white/10 pt-2 text-[11px] leading-relaxed text-white/75" title={t("signalPath.observation.help")}>
       <p className="font-semibold text-white/85">{observationTitle}</p>
       <p className="break-words">{outputText}</p>
@@ -128,11 +135,18 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
       : format.kind === "pcm" ? t("signalPath.pcmCompact", { rate: format.rateKhz, bits: format.bits })
         : format.kind === "dsd" ? t("signalPath.dsdCompact", { level: format.level ?? "", rate: format.rateMhz })
           : information.source ? source : "";
+  const dsp = route?.mode === "shared" && status.shared_dsp?.in_path === true ? status.shared_dsp : null;
   const stages = [
     { label: "Sonante", icon: Music2 },
     { label: "MPD", icon: Cpu },
-    { label: route?.mode === "shared" ? "ALSA default" : route?.mode === "direct" && route.endpoint ? "ALSA hw" : "ALSA", icon: AudioLines },
-    ...(route?.mode === "shared" ? [{ label: t("signalPath.system"), icon: Volume2 }] : []),
+    ...(dsp ? [
+      { label: "PCM 48 kHz", icon: AudioLines },
+      { label: dsp.verified&&dsp.comparison?.side==="reference"?t("equalizer.compare.referenceInRoute"):t(`equalizer.state.${dsp.phase === "active" && (!dsp.verified || health.state !== "available" || status.state !== "play") ? "ready" : dsp.phase}`), icon: Cpu },
+      { label: "PipeWire", icon: Volume2 },
+    ] : [
+      { label: route?.mode === "shared" ? "ALSA default" : route?.mode === "direct" && route.endpoint ? "ALSA hw" : "ALSA", icon: AudioLines },
+      ...(route?.mode === "shared" ? [{ label: t("signalPath.system"), icon: Volume2 }] : []),
+    ]),
     { label: route?.mode === "direct" ? "DAC" : t("signalPath.output"), icon: Speaker },
   ];
   const label = conditions.bitPerfect ? t("signalPath.seal.label")

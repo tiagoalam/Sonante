@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use crate::local_changes::{Batch, Context, MAX_DIRTY_PATHS};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read};
@@ -26,6 +27,7 @@ const WATCH_MASK: u32 = libc::IN_CLOSE_WRITE
     | libc::IN_UNMOUNT;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(1_200);
 const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const BUSY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const UNCLOSED_WRITE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const UNCLOSED_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -222,16 +224,38 @@ struct PendingChanges {
     dirty: bool,
     overflowed: bool,
     writing: HashMap<PathBuf, PendingWrite>,
+    moved_writes: HashMap<u32, (Instant, Option<PendingWrite>)>,
     last_activity: Option<Instant>,
+    paths: BTreeSet<PathBuf>,
+    retry_not_before: Option<Instant>,
 }
 
 impl PendingChanges {
+    fn mark_path(&mut self, path: PathBuf, now: Instant) {
+        if self.paths.len() >= MAX_DIRTY_PATHS && !self.paths.contains(&path) {
+            self.overflowed = true;
+        } else {
+            self.paths.insert(path);
+        }
+        self.dirty = true;
+        self.touch(now);
+    }
+
+    fn rebase(&mut self, previous: &Context, current: &Context) {
+        self.paths.retain(|p| current.retains(previous, p));
+        self.writing.retain(|p, _| current.retains(previous, p));
+        self.moved_writes.clear();
+        self.dirty = !self.paths.is_empty();
+        self.retry_not_before = None;
+    }
+
     fn touch(&mut self, now: Instant) {
         self.last_activity = Some(now);
     }
 
     fn ready(&self, now: Instant, debounce: Duration) -> bool {
         self.dirty
+            && self.retry_not_before.is_none_or(|at| now >= at)
             && self.writing.is_empty()
             && self
                 .last_activity
@@ -239,6 +263,12 @@ impl PendingChanges {
     }
 
     fn mark_writing(&mut self, path: PathBuf, now: Instant) {
+        if self.writing.len() >= MAX_DIRTY_PATHS && !self.writing.contains_key(&path) {
+            self.overflowed = true;
+            self.dirty = true;
+            self.touch(now);
+            return;
+        }
         self.writing
             .entry(path)
             .and_modify(|pending| {
@@ -294,6 +324,7 @@ impl PendingChanges {
         if !removed.is_empty() {
             for path in removed {
                 self.writing.remove(&path);
+                self.mark_path(path, now);
             }
             self.dirty = true;
             self.touch(now);
@@ -309,12 +340,67 @@ impl PendingChanges {
         self.dirty = false;
         self.overflowed = false;
         self.last_activity = None;
+        self.paths.clear();
+        self.moved_writes.clear();
+        self.retry_not_before = None;
     }
 
     fn remove_path(&mut self, path: &Path) {
         self.writing
             .retain(|candidate, _| candidate != path && !candidate.starts_with(path));
     }
+}
+
+/// A reader may observe a draft, but cannot invoke any callback before its
+/// owner hands it off following a fully confirmed Save. Drop aborts it.
+pub(crate) struct PreparedWatch {
+    reader: InotifyReader,
+    sources: Vec<SourceIdentity>,
+}
+
+impl PreparedWatch {
+    fn prepare(
+        roots: Vec<PathBuf>,
+        shutdown: &AtomicBool,
+        control: &WatcherControl,
+    ) -> Result<Self, String> {
+        let sources = roots
+            .into_iter()
+            .map(SourceIdentity::capture)
+            .collect::<Result<Vec<_>, _>>()?;
+        let reader =
+            InotifyReader::new(&sources, control, shutdown)?.ok_or("LOCAL_WATCH_SHUTDOWN")?;
+        if !sources.iter().all(SourceIdentity::is_available) {
+            return Err("LOCAL_WATCH_SOURCE_CHANGED".into());
+        }
+        Ok(Self { reader, sources })
+    }
+    fn bound_to(&self, context: &Context) -> bool {
+        self.sources.len() == context.roots().len()
+            && self.sources.iter().all(|s| {
+                context.sources.values().any(|c| {
+                    c.root == s.physical_path && c.device == s.device && c.inode == s.inode
+                })
+            })
+    }
+    fn matches(&self, context: &Context) -> bool {
+        self.bound_to(context) && self.sources.iter().all(SourceIdentity::is_available)
+    }
+}
+
+struct Install {
+    context: Context,
+    prepared: Option<PreparedWatch>,
+}
+
+type Mailbox = Arc<Mutex<Option<Install>>>;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Reconcile {
+    Confirmed,
+    Busy,
+    Stale,
+    Blocked,
 }
 
 pub(crate) struct LocalWatcher {
@@ -332,6 +418,78 @@ fn publish_registration(registration: &Arc<(Mutex<Option<bool>>, Condvar)>, read
 }
 
 impl LocalWatcher {
+    fn start_context<F, N>(
+        context: Context,
+        mailbox: Mailbox,
+        debounce: Duration,
+        poll_interval: Duration,
+        unclosed_write_check_interval: Duration,
+        unclosed_write_timeout: Duration,
+        shutdown: Arc<AtomicBool>,
+        on_change: F,
+        needs_check: N,
+    ) -> Result<Self, String>
+    where
+        F: Fn(Batch) -> Reconcile + Send + 'static,
+        N: Fn(&'static str) + Send + 'static,
+    {
+        let control = Arc::new(WatcherControl::new());
+        let worker_control = control.clone();
+        let registration = Arc::new((Mutex::new(None), Condvar::new()));
+        let worker_registration = registration.clone();
+        let worker = thread::Builder::new()
+            .name("sonante-local-watcher".into())
+            .spawn(move || {
+                let roots = context.roots();
+                let sources = roots
+                    .into_iter()
+                    .map(SourceIdentity::capture)
+                    .collect::<Result<Vec<_>, _>>();
+                let sources = match sources {
+                    Ok(s) => s,
+                    Err(_) => {
+                        publish_registration(&worker_registration, false);
+                        needs_check("source_unavailable");
+                        return;
+                    }
+                };
+                let mut reader = match InotifyReader::new(&sources, &worker_control, &shutdown) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        publish_registration(&worker_registration, false);
+                        return;
+                    }
+                    Err(_) => {
+                        publish_registration(&worker_registration, false);
+                        needs_check("registration_failed");
+                        return;
+                    }
+                };
+                publish_registration(&worker_registration, true);
+                needs_check("ready");
+                run_watcher(
+                    &mut reader,
+                    context,
+                    mailbox,
+                    &worker_control,
+                    &shutdown,
+                    debounce,
+                    poll_interval,
+                    unclosed_write_check_interval,
+                    unclosed_write_timeout,
+                    on_change,
+                    needs_check,
+                );
+            })
+            .map_err(|_| "LOCAL_WATCH_WORKER_UNAVAILABLE")?;
+        Ok(Self {
+            control,
+            _registration: registration,
+            worker: Some(worker),
+        })
+    }
+
+    #[cfg(test)]
     fn start_with_timing<F>(
         roots: Vec<PathBuf>,
         debounce: Duration,
@@ -344,94 +502,28 @@ impl LocalWatcher {
     where
         F: Fn() -> Result<(), String> + Send + 'static,
     {
-        let control = Arc::new(WatcherControl::new());
-        let worker_control = control.clone();
-        let registration = Arc::new((Mutex::new(None), Condvar::new()));
-        let worker_registration = registration.clone();
-        let worker = thread::Builder::new()
-            .name("sonante-local-watcher".to_string())
-            .spawn(move || {
-                let mut sources = Vec::with_capacity(roots.len());
-                for root in roots {
-                    if worker_control.stopped(&shutdown) {
-                        publish_registration(&worker_registration, false);
-                        return;
-                    }
-                    match SourceIdentity::capture(root) {
-                        Ok(source) => sources.push(source),
-                        Err(error) => {
-                            if !worker_control.stopped(&shutdown) {
-                                eprintln!(
-                                    "[Watcher] Failed to prepare local sources: {}",
-                                    crate::diagnostics::error_summary(&error)
-                                );
-                            }
-                            publish_registration(&worker_registration, false);
-                            return;
-                        }
-                    }
-                }
-                let mut reader = match InotifyReader::new(&sources, &worker_control, &shutdown) {
-                    Ok(Some(reader)) => reader,
-                    Ok(None) => {
-                        publish_registration(&worker_registration, false);
-                        return;
-                    }
-                    Err(error) => {
-                        if !worker_control.stopped(&shutdown) {
-                            eprintln!(
-                                "[Watcher] Failed to register local sources: {}",
-                                crate::diagnostics::error_summary(&error)
-                            );
-                        }
-                        publish_registration(&worker_registration, false);
-                        return;
-                    }
-                };
-                publish_registration(&worker_registration, true);
-                run_watcher(
-                    &mut reader,
-                    &sources,
-                    &worker_control,
-                    &shutdown,
-                    debounce,
-                    poll_interval,
-                    unclosed_write_check_interval,
-                    unclosed_write_timeout,
-                    on_change,
-                )
-            })
-            .map_err(|error| format!("Falha ao iniciar worker do inotify: {error}"))?;
-        Ok(Self {
-            control,
-            _registration: registration,
-            worker: Some(worker),
-        })
-    }
-
-    pub(crate) fn start<F>(
-        roots: Vec<PathBuf>,
-        shutdown: Arc<AtomicBool>,
-        on_change: F,
-    ) -> Result<Self, String>
-    where
-        F: Fn() -> Result<(), String> + Send + 'static,
-    {
-        Self::start_with_timing(
-            roots,
-            WATCH_DEBOUNCE,
-            WATCH_POLL_INTERVAL,
-            UNCLOSED_WRITE_CHECK_INTERVAL,
-            UNCLOSED_WRITE_TIMEOUT,
+        Self::start_context(
+            Context::for_roots(&roots),
+            Arc::new(Mutex::new(None)),
+            debounce,
+            poll_interval,
+            unclosed_write_check_interval,
+            unclosed_write_timeout,
             shutdown,
-            on_change,
+            move |_| {
+                if on_change().is_ok() {
+                    Reconcile::Confirmed
+                } else {
+                    Reconcile::Blocked
+                }
+            },
+            |_| {},
         )
     }
 
     pub(crate) fn request_stop(&self) {
         self.control.stop();
     }
-
     #[cfg(test)]
     fn wait_until_ready(&self, timeout: Duration) -> bool {
         let (state, changed) = &*self._registration;
@@ -444,12 +536,11 @@ impl LocalWatcher {
         };
         *state == Some(true)
     }
-
     pub(crate) fn join(mut self) {
         self.request_stop();
         if let Some(worker) = self.worker.take() {
             if worker.join().is_err() {
-                eprintln!("[Watcher] Inotify worker panicked.");
+                eprintln!("[Watcher] worker panicked");
             }
         }
     }
@@ -457,6 +548,10 @@ impl LocalWatcher {
 
 pub(crate) struct LocalWatcherState {
     watcher: Mutex<Option<LocalWatcher>>,
+    mailbox: Mailbox,
+    needs_check: Arc<AtomicBool>,
+    preparation_control: Arc<WatcherControl>,
+    pub(crate) own_writes: Arc<crate::local_own_writes::OwnWrites>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -464,58 +559,190 @@ impl LocalWatcherState {
     pub(crate) fn new() -> Self {
         Self {
             watcher: Mutex::new(None),
+            mailbox: Arc::new(Mutex::new(None)),
+            own_writes: Arc::new(crate::local_own_writes::OwnWrites::default()),
+            needs_check: Arc::new(AtomicBool::new(false)),
+            preparation_control: Arc::new(WatcherControl::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub(crate) fn start<F>(&self, roots: Vec<PathBuf>, on_change: F) -> Result<(), String>
+    pub(crate) fn prepare(&self, roots: Vec<PathBuf>) -> Result<PreparedWatch, String> {
+        if self.shutdown.load(Ordering::SeqCst) {
+            return Err("LOCAL_WATCH_SHUTDOWN".into());
+        }
+        if self
+            .mailbox
+            .lock()
+            .map_err(|_| "LOCAL_WATCH_MAILBOX_UNAVAILABLE")?
+            .as_ref()
+            .is_some_and(|i| i.prepared.is_some())
+        {
+            return Err("LOCAL_WATCH_HANDOFF_PENDING".into());
+        }
+        let roots = crate::local_media::mirror::canonical_configured_roots(&roots)?;
+        PreparedWatch::prepare(roots, &self.shutdown, &self.preparation_control)
+    }
+
+    /// No join or callback under a state/transaction mutex. At most one pending
+    /// prepared reader. A later context-only publication can rebase it; a
+    /// second Save is refused before effects until handoff has been consumed.
+    pub(crate) fn install(
+        &self,
+        context: Context,
+        prepared: Option<PreparedWatch>,
+    ) -> Result<(), String> {
+        // Physical I/O precedes the mailbox lock; the worker revalidates
+        // again after taking ownership, outside every state mutex.
+        if prepared.as_ref().is_some_and(|p| !p.matches(&context)) {
+            return Err("LOCAL_WATCH_SOURCE_CHANGED".into());
+        }
+        let mut mailbox = self
+            .mailbox
+            .lock()
+            .map_err(|_| "LOCAL_WATCH_MAILBOX_UNAVAILABLE")?;
+        if self.shutdown.load(Ordering::SeqCst) {
+            return Err("LOCAL_WATCH_SHUTDOWN".into());
+        }
+        if prepared.is_some() && mailbox.as_ref().is_some_and(|i| i.prepared.is_some()) {
+            return Err("LOCAL_WATCH_HANDOFF_PENDING".into());
+        }
+        if prepared.is_none()
+            && mailbox
+                .as_ref()
+                .and_then(|i| i.prepared.as_ref())
+                .is_some_and(|p| !p.bound_to(&context))
+        {
+            return Err("LOCAL_WATCH_SOURCE_CHANGED".into());
+        }
+        // A namespace-only/startup reconciliation must not overwrite a queued
+        // prepared reader. Preserve it when it covers the same physical roots.
+        let prepared = match prepared {
+            Some(p) => Some(p),
+            None => mailbox.as_mut().and_then(|i| i.prepared.take()),
+        };
+        *mailbox = Some(Install { context, prepared });
+        Ok(())
+    }
+
+    pub(crate) fn start_context<F, N>(
+        &self,
+        context: Context,
+        on_change: F,
+        needs_check: N,
+    ) -> Result<(), String>
     where
-        F: Fn() -> Result<(), String> + Send + 'static,
+        F: Fn(Batch) -> Reconcile + Send + 'static,
+        N: Fn(&'static str) + Send + 'static,
     {
-        if roots.is_empty() {
-            return Ok(());
+        let finished = {
+            let mut current = self
+                .watcher
+                .lock()
+                .map_err(|_| "LOCAL_WATCH_STATE_UNAVAILABLE")?;
+            if self.shutdown.load(Ordering::SeqCst) {
+                return Err("LOCAL_WATCH_SHUTDOWN".into());
+            }
+            if current
+                .as_ref()
+                .is_some_and(|w| w.worker.as_ref().is_some_and(|w| !w.is_finished()))
+            {
+                return Ok(());
+            }
+            current.take()
+        };
+        if let Some(finished) = finished {
+            finished.join();
         }
         let mut current = self
             .watcher
             .lock()
-            .map_err(|error| format!("Falha ao acessar estado do watcher local: {error}"))?;
+            .map_err(|_| "LOCAL_WATCH_STATE_UNAVAILABLE")?;
         if self.shutdown.load(Ordering::SeqCst) {
-            return Err(
-                "A aplicação está sendo encerrada; o watcher local não foi iniciado.".to_string(),
-            );
+            return Err("LOCAL_WATCH_SHUTDOWN".into());
         }
         if current.is_some() {
-            return Err("O watcher local já foi iniciado.".to_string());
+            return Ok(());
         }
-        let watcher = LocalWatcher::start(roots, self.shutdown.clone(), on_change)?;
-        *current = Some(watcher);
+        let status = self.needs_check.clone();
+        *current = Some(LocalWatcher::start_context(
+            context,
+            self.mailbox.clone(),
+            WATCH_DEBOUNCE,
+            WATCH_POLL_INTERVAL,
+            UNCLOSED_WRITE_CHECK_INTERVAL,
+            UNCLOSED_WRITE_TIMEOUT,
+            self.shutdown.clone(),
+            on_change,
+            move |reason| {
+                status.store(reason != "ready", Ordering::SeqCst);
+                needs_check(reason);
+            },
+        )?);
         Ok(())
     }
 
+    #[cfg(test)]
+    fn start<F>(&self, roots: Vec<PathBuf>, on_change: F) -> Result<(), String>
+    where
+        F: Fn() -> Result<(), String> + Send + 'static,
+    {
+        self.start_context(
+            Context::for_roots(&roots),
+            move |_| {
+                if on_change().is_ok() {
+                    Reconcile::Confirmed
+                } else {
+                    Reconcile::Blocked
+                }
+            },
+            |_| {},
+        )
+    }
+
+    pub(crate) fn running(&self) -> bool {
+        self.watcher.lock().ok().is_some_and(|w| {
+            w.as_ref()
+                .is_some_and(|w| w.worker.as_ref().is_some_and(|w| !w.is_finished()))
+        })
+    }
+    pub(crate) fn needs_check(&self) -> bool {
+        self.needs_check.load(Ordering::SeqCst)
+    }
+    pub(crate) fn mark_needs_check(&self) {
+        self.needs_check.store(true, Ordering::SeqCst);
+    }
+
     pub(crate) fn begin_shutdown(&self) {
-        self.shutdown.store(true, Ordering::SeqCst);
+        // Fence install under the same mailbox lock; recursive registration
+        // checks the atomic at every directory and never activates after this.
+        let abandoned = if let Ok(mut mailbox) = self.mailbox.lock() {
+            self.shutdown.store(true, Ordering::SeqCst);
+            mailbox.take()
+        } else {
+            self.shutdown.store(true, Ordering::SeqCst);
+            None
+        };
+        drop(abandoned); // Closing registrations is never done under mailbox.
+        self.preparation_control.stop();
         if let Ok(current) = self.watcher.lock() {
-            if let Some(watcher) = current.as_ref() {
-                watcher.request_stop();
+            if let Some(w) = current.as_ref() {
+                w.request_stop();
             }
         }
     }
-
     pub(crate) fn stop_and_join(&self) {
-        let watcher = self
-            .watcher
-            .lock()
-            .ok()
-            .and_then(|mut current| current.take());
-        if let Some(watcher) = watcher {
-            watcher.join();
+        let watcher = self.watcher.lock().ok().and_then(|mut c| c.take());
+        if let Some(w) = watcher {
+            w.join();
         }
     }
 }
 
-fn run_watcher<F>(
+fn run_watcher<F, N>(
     reader: &mut InotifyReader,
-    sources: &[SourceIdentity],
+    mut context: Context,
+    mailbox: Mailbox,
     control: &WatcherControl,
     shutdown: &AtomicBool,
     debounce: Duration,
@@ -523,84 +750,125 @@ fn run_watcher<F>(
     unclosed_write_check_interval: Duration,
     unclosed_write_timeout: Duration,
     on_change: F,
+    needs_check: N,
 ) where
-    F: Fn() -> Result<(), String>,
+    F: Fn(Batch) -> Reconcile,
+    N: Fn(&'static str),
 {
     let mut pending = PendingChanges::default();
     let mut buffer = vec![0_u8; 64 * 1024];
+    let mut paused = false;
     while !control.stopped(shutdown) {
+        let install = match mailbox.lock() {
+            Ok(mut m) => m.take(),
+            Err(_) => {
+                needs_check("mailbox_unavailable");
+                return;
+            }
+        };
+        if let Some(install) = install {
+            if control.stopped(shutdown) {
+                return;
+            }
+            if let Some(prepared) = install.prepared {
+                if !prepared.matches(&install.context) {
+                    needs_check("source_changed");
+                    return;
+                }
+                // New reader was registered before Save's scan. Its queued
+                // events cover the full handoff, including surviving sources.
+                *reader = prepared.reader;
+                if paused {
+                    pending = PendingChanges::default();
+                }
+                paused = false;
+                needs_check("ready");
+            } else if context.sources != install.context.sources {
+                needs_check("unprepared_roots_change");
+                return;
+            }
+            pending.rebase(&context, &install.context);
+            context = install.context;
+        }
+        if paused {
+            thread::park_timeout(poll_interval);
+            continue;
+        }
         let mut descriptor = libc::pollfd {
             fd: reader.fd.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };
         let timeout = poll_interval.as_millis().min(i32::MAX as u128) as i32;
-        let poll_result = unsafe { libc::poll(&mut descriptor, 1, timeout) };
-        if poll_result < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != ErrorKind::Interrupted {
-                eprintln!(
-                    "[Watcher] Failed to wait for inotify events: {}",
-                    crate::diagnostics::error_summary(&error)
-                );
-                break;
+        let polled = unsafe { libc::poll(&mut descriptor, 1, timeout) };
+        if polled < 0 {
+            if std::io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+                needs_check("inotify_unavailable");
+                return;
             }
-        } else if poll_result > 0 && descriptor.revents & libc::POLLIN != 0 {
+        } else if descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            needs_check("inotify_unavailable");
+            return;
+        } else if polled > 0 && descriptor.revents & libc::POLLIN != 0 {
             loop {
+                if control.stopped(shutdown) {
+                    return;
+                }
                 match (&reader.fd).read(&mut buffer) {
                     Ok(0) => break,
                     Ok(length) => {
                         process_events(reader, control, shutdown, &buffer[..length], &mut pending)
                     }
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                    Err(error) => {
-                        eprintln!(
-                            "[Watcher] Failed to read inotify events: {}",
-                            crate::diagnostics::error_summary(&error)
-                        );
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        needs_check("inotify_unavailable");
                         return;
                     }
                 }
             }
-        } else if descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-            eprintln!("[Watcher] Inotify descriptor became unavailable.");
-            break;
         }
-
         let now = Instant::now();
-        if let Err(count) = pending.verify_unclosed_writes(
-            now,
-            unclosed_write_check_interval,
-            unclosed_write_timeout,
-        ) {
-            eprintln!(
-                "[Watcher] {count} regular file(s) did not emit CLOSE_WRITE within the limit; the watcher stopped without reconciliation to avoid partial content. Run a manual rescan after confirming writes have finished."
-            );
-            return;
+        pending
+            .moved_writes
+            .retain(|_, (when, _)| now.saturating_duration_since(*when) < debounce);
+        if pending
+            .verify_unclosed_writes(now, unclosed_write_check_interval, unclosed_write_timeout)
+            .is_err()
+        {
+            needs_check("write_not_closed");
+            paused = true;
+            continue;
+        }
+        if pending.overflowed {
+            needs_check("overflow");
+            paused = true;
+            continue;
         }
         if pending.ready(now, debounce) {
-            if !sources.iter().all(SourceIdentity::is_available) {
-                eprintln!(
-                    "[Watcher] Reconciliation skipped: one or more local sources became unavailable or changed identity. Run a manual rescan after restoring them."
-                );
-                pending.clear();
+            if !context.available() {
+                needs_check("source_unavailable");
+                paused = true;
                 continue;
             }
-            if pending.overflowed {
-                eprintln!(
-                    "[Watcher] Inotify overflow detected; automatic reconciliation was skipped because files may still be written. Run a manual rescan."
-                );
-                pending.clear();
-                continue;
+            if control.stopped(shutdown) {
+                return;
             }
-            if let Err(error) = on_change() {
-                eprintln!(
-                    "[Watcher] Automatic reconciliation failed: {}",
-                    crate::diagnostics::error_summary(&error)
-                );
+            match on_change(Batch {
+                context: context.clone(),
+                paths: pending.paths.clone(),
+            }) {
+                Reconcile::Confirmed => pending.clear(),
+                Reconcile::Busy | Reconcile::Stale => {
+                    // No attempt ceiling: bounded memory and at most 1 retry/s.
+                    // poll continues draining/coalescing events and shutdown.
+                    pending.retry_not_before = Some(Instant::now() + BUSY_RETRY_INTERVAL);
+                }
+                Reconcile::Blocked => {
+                    needs_check("reconciliation_blocked");
+                    paused = true;
+                }
             }
-            pending.clear();
         }
     }
 }
@@ -620,7 +888,7 @@ fn process_events(
         };
         let record_length = event_size.saturating_add(event.len as usize);
         if record_length < event_size || offset + record_length > bytes.len() {
-            eprintln!("[Watcher] Truncated or invalid inotify event.");
+            pending.overflowed = true;
             return;
         }
         let now = Instant::now();
@@ -663,33 +931,47 @@ fn process_events(
                     pending.overflowed = true;
                 }
             }
-            pending.dirty = true;
-            pending.touch(now);
+            pending.mark_path(path.clone(), now);
         } else if !is_directory && event.mask & (libc::IN_CREATE | libc::IN_MODIFY) != 0 {
             let link_like_create = event.mask & libc::IN_CREATE != 0
                 && fs::symlink_metadata(&path)
                     .is_ok_and(|metadata| !metadata.file_type().is_file() || metadata.nlink() > 1);
             if link_like_create {
-                pending.dirty = true;
-                pending.touch(now);
+                pending.mark_path(path.clone(), now);
             } else {
                 pending.mark_writing(path.clone(), now);
             }
         }
         if !is_directory && event.mask & libc::IN_CLOSE_WRITE != 0 {
             pending.writing.remove(&path);
-            pending.dirty = true;
-            pending.touch(now);
+            pending.mark_path(path.clone(), now);
         }
         if event.mask & (libc::IN_MOVED_TO | libc::IN_MOVED_FROM | libc::IN_DELETE) != 0 {
+            let mut moved_write = None;
+            if event.mask & libc::IN_MOVED_FROM != 0 && event.cookie != 0 {
+                if pending.moved_writes.len() >= MAX_DIRTY_PATHS {
+                    pending.overflowed = true;
+                } else {
+                    pending
+                        .moved_writes
+                        .insert(event.cookie, (now, pending.writing.remove(&path)));
+                }
+            }
+            if event.mask & libc::IN_MOVED_TO != 0 && event.cookie != 0 {
+                moved_write = pending
+                    .moved_writes
+                    .remove(&event.cookie)
+                    .and_then(|(_, write)| write);
+            }
             pending.remove_path(&path);
-            pending.dirty = true;
-            pending.touch(now);
+            if let Some(write) = moved_write {
+                pending.writing.insert(path.clone(), write);
+            }
+            pending.mark_path(path.clone(), now);
         }
         if event.mask & (libc::IN_DELETE_SELF | libc::IN_MOVE_SELF | libc::IN_UNMOUNT) != 0 {
             pending.remove_path(&directory);
-            pending.dirty = true;
-            pending.touch(now);
+            pending.mark_path(directory.clone(), now);
         }
         offset += record_length;
     }
@@ -981,3 +1263,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "local_watcher_updates_tests.rs"]
+mod updates_tests;

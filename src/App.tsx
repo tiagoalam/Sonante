@@ -1,3 +1,6 @@
+import { SlidersHorizontal } from "lucide-react";
+import { EqualizerView } from "./components/EqualizerView";
+import { LocalWatchNotice } from "./components/LocalWatchNotice";
 import { usePlaybackAttempt } from "./utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./components/PlaybackRequestNotice";
 import { usePlayerSourceInfo } from "./utils/usePlayerSourceInfo";
@@ -348,6 +351,8 @@ export function App() {
   const localCatalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
+  const eqReturnSectionRef=useRef<MainSection>("local");
+  const eqReturnViewRef=useRef(false);
   const [mediaSource, setMediaSource] = useState<MainSection | null>(null);
   const [playerNavigation, setPlayerNavigation] = useState<PlayerNavigationSession | null>(null);
   const playerTarget = playerNavigation?.target ?? null;
@@ -366,7 +371,7 @@ export function App() {
   const [playerNavigationError, setPlayerNavigationError] = useState(false);
   const playerNavigationRequests = useMemo(() => new PlayerNavigationRequests(), []);
   // Keep the previous view (including its context and scroll) mounted while visiting the player target.
-  const centralSection = playerReturnSection ?? mediaSource;
+  const centralSection = playerReturnSection ?? (mediaSource === "equalizer" ? eqReturnSectionRef.current : mediaSource);
   const mainSectionPreferenceRef = useRef<ReturnType<typeof createMainSectionPreference> | null>(null);
   if (!mainSectionPreferenceRef.current) {
     mainSectionPreferenceRef.current = createMainSectionPreference(setMediaSource);
@@ -527,11 +532,21 @@ export function App() {
   const presentationPlayback = useLocalPlaybackArtwork(playbackStatus, localCatalog, isPlaybackAvailable,
     Boolean(config && !config.first_run && !showSettings && !showAbout),
     config?.online_artwork_enabled ?? false, ensurePlaybackArtworkCatalog);
-  const sourceInfoContext = useMemo(() => ({}), [config?.local_folders, config?.plex_server_id,
-    config?.plex_token, plexConnectionIdentity, plexBrowserCatalog, localCatalogRevision, localCatalog.albums]);
+  // Source facts depend on the playing origin. Local indexing must not clear
+  // Plex labels or invalidate their in-flight read in either player host.
+  const playerSourceKind = playbackStatus.current_media?.kind;
+  const sourceInfoContext = useMemo(() => ({}), [playerSourceKind,
+    playerSourceKind === "local" ? config?.local_folders : null,
+    playerSourceKind === "local" ? localCatalogRevision : null,
+    playerSourceKind === "local" ? localCatalog.albums : null,
+    playerSourceKind === "plex" ? config?.plex_server_id : null,
+    playerSourceKind === "plex" ? config?.plex_token : null,
+    playerSourceKind === "plex" ? plexConnectionIdentity : null,
+    playerSourceKind === "plex" ? plexBrowserCatalog : null]);
   const sourceInfo = usePlayerSourceInfo(playbackStatus.current_media, sourceInfoContext,
     !!config && !config.first_run && !configSavePhase && isPlaybackAvailable
-      && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy);
+      && (playerSourceKind !== "local" || (!playbackStatus.is_updating
+        && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy)));
   useEffect(() => {
     statusRef.current = playbackStatus;
   }, [playbackStatus]);
@@ -947,7 +962,7 @@ export function App() {
         if (snapshot.health.state === "available" && snapshot.playback) {
           localAlbumCatalog.onMpdStatus(snapshot.playback.is_updating);
           setMpdHealth(snapshot.health);
-          setPlaybackStatus({ ...snapshot.playback, output_observation: snapshot.output_observation ?? null, engine_evidence: snapshot.engine_evidence ?? null });
+          setPlaybackStatus({ ...snapshot.playback, output_observation: snapshot.output_observation ?? null, engine_evidence: snapshot.engine_evidence ?? null, shared_dsp: snapshot.shared_dsp ?? null });
         } else if (snapshot.health.state === "available") {
           setMpdHealth({ state: "unavailable", reason: "protocol_unavailable" });
         } else {
@@ -988,6 +1003,8 @@ export function App() {
   // Atalhos de Teclado Globais
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // EQ owns its editing keys, including SVG points and its native dialog.
+      if ((e.target as Element | null)?.closest?.("[data-equalizer]")) return;
       if (nowPlayingHosting.getSnapshot().mode === "embedded" && !showSettings && !showAbout) return;
       if ((showSettings || showAbout) && e.key === "Escape") e.preventDefault();
       const activeEl = document.activeElement;
@@ -1322,10 +1339,14 @@ export function App() {
   const navigateLocalSubview = (view: LocalSubview) => {
     if (playerTarget?.kind === "local") {
       changePlayerLocalSubview(view);
+      if (mediaSource === "equalizer") mainSectionPreference.navigate(eqReturnSectionRef.current);
       return;
     }
     setLocalSubview(view);
-    if (!playerTarget && centralSection === "local") return;
+    if (!playerTarget && centralSection === "local") {
+      if (mediaSource === "equalizer") mainSectionPreference.navigate("local");
+      return;
+    }
     resetAllNavigation();
     mainSectionPreference.navigate("local");
   };
@@ -1371,7 +1392,7 @@ export function App() {
     local: { albums: exploreAlbums, state: localExploreState === "ready" && !exploreAlbums.length ? "empty" : localExploreState, sourceId: activeExploreSourceId },
   };
   const exploreLive = useRef({ context: exploreContext, visible: false });
-  exploreLive.current = { context: exploreContext, visible: centralSection === "explore" && !playerTarget && !exploreDetail && !showSettings && !showAbout };
+  exploreLive.current = { context: exploreContext, visible: mediaSource !== "equalizer" && centralSection === "explore" && !playerTarget && !exploreDetail && !showSettings && !showAbout };
   const exploreEntryCurrent = (entry: ExploreEntry) => {
     const current = exploreLive.current.context;
     return exploreEntryIsCurrent(current, entry);
@@ -1583,6 +1604,7 @@ export function App() {
                   <SidebarNavItem diagnosticAction="plex" icon={Compass} label={t("discover.menu")} active={mediaSource === "plex" && plexArea === "discover"}
                     onClick={() => { resetAllNavigation(); setPlexArea("discover"); mainSectionPreference.navigate("plex"); }} />
                 </div>
+
               </nav>
             </section>
 
@@ -1611,6 +1633,13 @@ export function App() {
                 />
               </nav>
             </section>
+            <section aria-labelledby="sidebar-audio-group">
+              <h2 id="sidebar-audio-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#5F5F5F]">{t("equalizer.audioGroup")}</h2>
+              <nav aria-label={t("equalizer.audioGroup")} className="space-y-1">
+                <SidebarNavItem icon={SlidersHorizontal} label={t("equalizer.title")} active={mediaSource === "equalizer"}
+                  onClick={() => { if(mediaSource&&mediaSource!=="equalizer"){eqReturnSectionRef.current=mediaSource;eqReturnViewRef.current=true;} mainSectionPreference.navigate("equalizer"); }} />
+              </nav>
+            </section>
           </div>
 
           <nav aria-label={t("sidebar.utilitiesGroup")} className="mt-auto shrink-0 space-y-1 pt-4">
@@ -1627,13 +1656,14 @@ export function App() {
           </nav>
         </aside>
 
-        <div ref={previousPageRef} data-now-playing-previous-page className={nowPlayingEmbedded ? "hidden" : "contents"} inert={nowPlayingEmbedded ? true : undefined}>
+        {mediaSource === "equalizer" && <div className={nowPlayingEmbedded ? "hidden" : "contents"} inert={nowPlayingEmbedded ? true : undefined}><EqualizerView onReturn={() => mainSectionPreference.navigate(eqReturnSectionRef.current)} available={mpdHealth.state === "available"} shared={configuredSignalRoute(config)?.mode === "shared"} runtime={playbackStatus.shared_dsp} onConfigure={() => { setSettingsInitialPage("audio"); setShowSettings(true); }} /></div>}
+        {(mediaSource !== "equalizer" || eqReturnViewRef.current) && <div ref={previousPageRef} data-now-playing-previous-page className={nowPlayingEmbedded || mediaSource === "equalizer" ? "hidden" : "contents"} inert={nowPlayingEmbedded || mediaSource === "equalizer" ? true : undefined}>
         {/* Painel Central */}
         <div className={playerTarget ? "hidden" : "contents"}>
         {centralSection === "explore" ? (
           <div className="contents">
             <div className={exploreDetail ? "hidden" : "contents"}>
-              <ExploreView context={exploreContext} active={!exploreDetail && !playerTarget}
+              <ExploreView context={exploreContext} active={mediaSource !== "equalizer" && !exploreDetail && !playerTarget}
                 configurationReady={config !== null}
                 loadingActivity={exploreLoadingActivity} onConfigure={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("local"); setShowSettings(true); } }}
                 canRetryLocal={isPlaybackAvailable && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy}
@@ -2353,7 +2383,7 @@ export function App() {
             )}
           </div>
         )}
-        </div>
+        </div>}
         {nowPlayingEmbedded && <div className="flex-1 min-h-0 min-w-0" data-now-playing-embedded>
           <NowPlayingHost snapshot={{ route: configuredSignalRoute(config), health: mpdHealth, playback: presentationPlayback, sourceInfo, queueArtwork }} owner={hosting.owner} embedded busy={hosting.busy} hostingError={hosting.error}
             onReady={nowPlayingHosting.hostReady} onCollapse={() => void nowPlayingHosting.collapse()} onDetach={() => void nowPlayingHosting.detach()}
@@ -2371,6 +2401,7 @@ export function App() {
       )}
 
       <PlaybackRequestNotice failure={appPlayback.failure} />
+      <LocalWatchNotice onOpenSettings={() => { setSettingsInitialPage("local"); setShowSettings(true); }} />
       <PlayerBar
         route={configuredSignalRoute(config)}
         status={presentationPlayback}

@@ -294,7 +294,7 @@ test("actual App status polling carries and clears ALSA and engine evidence thro
     const cleanup = new Function(...Object.keys(vars), `${effectJs}; return effect();`)(...Object.values(vars));
     for (let i=0;i<10;i++) await Promise.resolve();
     assert.equal(requests,1); assert.equal(timers,1); assert.equal(values.length,1);
-    assert.deepEqual(values[0], { ...status, output_observation: output ?? null, engine_evidence: engine ?? null });
+    assert.deepEqual(values[0], { ...status, output_observation: output ?? null, engine_evidence: engine ?? null, shared_dsp: null });
     assert.equal(values[0].output_observation, output ?? null);
     assert.deepEqual(status.output_observation, undefined); assert.equal(status.engine_evidence, undefined); cleanup();
   }

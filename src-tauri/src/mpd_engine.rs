@@ -56,6 +56,12 @@ impl MpdEngine {
         )
     }
 
+    /// EQ-only variant: the proven Direct binary and its evidence remain unchanged.
+    pub(crate) fn resolve_eq() -> Result<Self,String> {
+        let value=std::env::var_os("SONANTE_EQ_MPD_PATH").ok_or("EQ_MPD_RUNTIME_MISSING")?;
+        Self::resolve_override(Some(value.as_os_str()),cfg!(all(debug_assertions,target_os="linux")),"129049cb2cd36b392c9ac31dc8634990a31015db21e6d0d37ff00a58df8f1227")
+    }
+
     fn resolve_override(
         value: Option<&OsStr>,
         allowed: bool,

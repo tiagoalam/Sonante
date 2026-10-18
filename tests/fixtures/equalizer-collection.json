@@ -1,0 +1,2426 @@
+[
+  {
+    "admitted": true,
+    "coefficients": [
+      [
+        1.001173669876875,
+        -1.9807498917123965,
+        0.9798066324826189,
+        -1.9807735861946598,
+        0.9809566078772304
+      ],
+      [
+        0.996358225838305,
+        -1.9303751226619112,
+        0.9366660393976775,
+        -1.9303751226619112,
+        0.9330242652359826
+      ],
+      [
+        1.0962822249125201,
+        -1.3313908823060938,
+        0.4884361305820256,
+        -1.1728288103509248,
+        0.42615628353937723
+      ],
+      [
+        1.0,
+        -1.9667539817433715,
+        0.9678075705607523,
+        -1.9667539817433715,
+        0.9678075705607523
+      ],
+      [
+        1.0,
+        -1.9325213738986535,
+        0.9366679285951103,
+        -1.9325213738986535,
+        0.9366679285951103
+      ],
+      [
+        1.0,
+        -1.8614084445321082,
+        0.8774704646235392,
+        -1.8614084445321082,
+        0.8774704646235392
+      ],
+      [
+        1.0,
+        -1.7104970464692146,
+        0.7708368488713767,
+        -1.7104970464692146,
+        0.7708368488713767
+      ],
+      [
+        1.0,
+        -1.3856406460551018,
+        0.6,
+        -1.3856406460551018,
+        0.6
+      ],
+      [
+        1.0,
+        -0.697830520748038,
+        0.39566104149607556,
+        -0.697830520748038,
+        0.39566104149607556
+      ],
+      [
+        1.0,
+        0.6978305207480374,
+        0.39566104149607545,
+        0.6978305207480374,
+        0.39566104149607545
+      ]
+    ],
+    "config": {
+      "filters": {
+        "peq_b_666c61745f3031_1aa6e6005da76352": {
+          "parameters": {
+            "freq": 110.0,
+            "gain": 2.0,
+            "q": 0.707,
+            "type": "Lowshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3032_1aa6e6005da76352": {
+          "parameters": {
+            "freq": 400.0,
+            "gain": -1.0,
+            "q": 0.8,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3033_1aa6e6005da76352": {
+          "parameters": {
+            "freq": 4500.0,
+            "gain": 1.0,
+            "q": 0.707,
+            "type": "Highshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_preamp": {
+          "parameters": {
+            "gain": -20.067849402440025,
+            "scale": "dB"
+          },
+          "type": "Gain"
+        }
+      },
+      "pipeline": [
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_preamp"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3031_1aa6e6005da76352"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3032_1aa6e6005da76352"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3033_1aa6e6005da76352"
+          ],
+          "type": "Filter"
+        }
+      ]
+    },
+    "preset": {
+      "bands": [
+        {
+          "enabled": true,
+          "filter_type": "low_shelf",
+          "frequency_hz": 110.0,
+          "gain_db": 2.0,
+          "id": "flat_01",
+          "q": 0.707
+        },
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 400.0,
+          "gain_db": -1.0,
+          "id": "flat_02",
+          "q": 0.8
+        },
+        {
+          "enabled": true,
+          "filter_type": "high_shelf",
+          "frequency_hz": 4500.0,
+          "gain_db": 1.0,
+          "id": "flat_03",
+          "q": 0.707
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 250.0,
+          "gain_db": 0.0,
+          "id": "flat_04",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 500.0,
+          "gain_db": 0.0,
+          "id": "flat_05",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 1000.0,
+          "gain_db": 0.0,
+          "id": "flat_06",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 2000.0,
+          "gain_db": 0.0,
+          "id": "flat_07",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 4000.0,
+          "gain_db": 0.0,
+          "id": "flat_08",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.0,
+          "id": "flat_09",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 16000.0,
+          "gain_db": 0.0,
+          "id": "flat_10",
+          "q": 1.0
+        }
+      ],
+      "id": "style_rock",
+      "name": "Rock",
+      "preamp_db": -2.0
+    },
+    "protection": {
+      "attenuation_db": 18.067849402440025,
+      "ceiling_db": -1.0,
+      "effective_preamp_db": -20.067849402440025,
+      "filter_bound_db": 5.026649575880775,
+      "requested_preamp_db": -2.0,
+      "resampler_bound_db": 12.041199826559248
+    }
+  },
+  {
+    "admitted": true,
+    "coefficients": [
+      [
+        1.0013614763171992,
+        -1.9855432141654823,
+        0.9843278173900469,
+        -1.9855645457384763,
+        0.9856679621342528
+      ],
+      [
+        0.9937885635008622,
+        -1.8778547759420068,
+        0.8919771361283076,
+        -1.8778547759420068,
+        0.8857656996291698
+      ],
+      [
+        0.9209568577059483,
+        -0.7678966516125277,
+        0.27371810109768996,
+        -0.8876316287924755,
+        0.3144099359835859
+      ],
+      [
+        1.0,
+        -1.9667539817433715,
+        0.9678075705607523,
+        -1.9667539817433715,
+        0.9678075705607523
+      ],
+      [
+        1.0,
+        -1.9325213738986535,
+        0.9366679285951103,
+        -1.9325213738986535,
+        0.9366679285951103
+      ],
+      [
+        1.0,
+        -1.8614084445321082,
+        0.8774704646235392,
+        -1.8614084445321082,
+        0.8774704646235392
+      ],
+      [
+        1.0,
+        -1.7104970464692146,
+        0.7708368488713767,
+        -1.7104970464692146,
+        0.7708368488713767
+      ],
+      [
+        1.0,
+        -1.3856406460551018,
+        0.6,
+        -1.3856406460551018,
+        0.6
+      ],
+      [
+        1.0,
+        -0.697830520748038,
+        0.39566104149607556,
+        -0.697830520748038,
+        0.39566104149607556
+      ],
+      [
+        1.0,
+        0.6978305207480374,
+        0.39566104149607545,
+        0.6978305207480374,
+        0.39566104149607545
+      ]
+    ],
+    "config": {
+      "filters": {
+        "peq_b_666c61745f3031_44bab3e9565f5263": {
+          "parameters": {
+            "freq": 85.0,
+            "gain": 3.0,
+            "q": 0.707,
+            "type": "Lowshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3032_44bab3e9565f5263": {
+          "parameters": {
+            "freq": 700.0,
+            "gain": -1.0,
+            "q": 0.8,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3033_44bab3e9565f5263": {
+          "parameters": {
+            "freq": 6500.0,
+            "gain": -1.0,
+            "q": 0.707,
+            "type": "Highshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_preamp": {
+          "parameters": {
+            "gain": -20.595631266489264,
+            "scale": "dB"
+          },
+          "type": "Gain"
+        }
+      },
+      "pipeline": [
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_preamp"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3031_44bab3e9565f5263"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3032_44bab3e9565f5263"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3033_44bab3e9565f5263"
+          ],
+          "type": "Filter"
+        }
+      ]
+    },
+    "preset": {
+      "bands": [
+        {
+          "enabled": true,
+          "filter_type": "low_shelf",
+          "frequency_hz": 85.0,
+          "gain_db": 3.0,
+          "id": "flat_01",
+          "q": 0.707
+        },
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 700.0,
+          "gain_db": -1.0,
+          "id": "flat_02",
+          "q": 0.8
+        },
+        {
+          "enabled": true,
+          "filter_type": "high_shelf",
+          "frequency_hz": 6500.0,
+          "gain_db": -1.0,
+          "id": "flat_03",
+          "q": 0.707
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 250.0,
+          "gain_db": 0.0,
+          "id": "flat_04",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 500.0,
+          "gain_db": 0.0,
+          "id": "flat_05",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 1000.0,
+          "gain_db": 0.0,
+          "id": "flat_06",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 2000.0,
+          "gain_db": 0.0,
+          "id": "flat_07",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 4000.0,
+          "gain_db": 0.0,
+          "id": "flat_08",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.0,
+          "id": "flat_09",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 16000.0,
+          "gain_db": 0.0,
+          "id": "flat_10",
+          "q": 1.0
+        }
+      ],
+      "id": "style_reggae",
+      "name": "Reggae",
+      "preamp_db": -3.0
+    },
+    "protection": {
+      "attenuation_db": 17.595631266489264,
+      "ceiling_db": -1.0,
+      "effective_preamp_db": -20.595631266489264,
+      "filter_bound_db": 4.554431439930015,
+      "requested_preamp_db": -3.0,
+      "resampler_bound_db": 12.041199826559248
+    }
+  },
+  {
+    "admitted": true,
+    "coefficients": [
+      [
+        1.0031470074447573,
+        -1.9469153573395994,
+        0.9452705091881066,
+        -1.9469153573395994,
+        0.948417516632864
+      ],
+      [
+        0.9809184252354328,
+        -1.5615554509725678,
+        0.6681530345618963,
+        -1.5615554509725678,
+        0.649071459797329
+      ],
+      [
+        1.0783292642854756,
+        -0.7010861907475658,
+        0.266616499885096,
+        -0.5898341629247028,
+        0.23369373634770843
+      ],
+      [
+        1.0,
+        -1.9667539817433715,
+        0.9678075705607523,
+        -1.9667539817433715,
+        0.9678075705607523
+      ],
+      [
+        1.0,
+        -1.9325213738986535,
+        0.9366679285951103,
+        -1.9325213738986535,
+        0.9366679285951103
+      ],
+      [
+        1.0,
+        -1.8614084445321082,
+        0.8774704646235392,
+        -1.8614084445321082,
+        0.8774704646235392
+      ],
+      [
+        1.0,
+        -1.7104970464692146,
+        0.7708368488713767,
+        -1.7104970464692146,
+        0.7708368488713767
+      ],
+      [
+        1.0,
+        -1.3856406460551018,
+        0.6,
+        -1.3856406460551018,
+        0.6
+      ],
+      [
+        1.0,
+        -0.697830520748038,
+        0.39566104149607556,
+        -0.697830520748038,
+        0.39566104149607556
+      ],
+      [
+        1.0,
+        0.6978305207480374,
+        0.39566104149607545,
+        0.6978305207480374,
+        0.39566104149607545
+      ]
+    ],
+    "config": {
+      "filters": {
+        "peq_b_666c61745f3031_95facd75cfbfca43": {
+          "parameters": {
+            "freq": 300.0,
+            "gain": 1.0,
+            "q": 0.7,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3032_95facd75cfbfca43": {
+          "parameters": {
+            "freq": 2500.0,
+            "gain": -1.0,
+            "q": 0.8,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3033_95facd75cfbfca43": {
+          "parameters": {
+            "freq": 8000.0,
+            "gain": 1.0,
+            "q": 0.707,
+            "type": "Highshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_preamp": {
+          "parameters": {
+            "gain": -17.67817971378161,
+            "scale": "dB"
+          },
+          "type": "Gain"
+        }
+      },
+      "pipeline": [
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_preamp"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3031_95facd75cfbfca43"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3032_95facd75cfbfca43"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3033_95facd75cfbfca43"
+          ],
+          "type": "Filter"
+        }
+      ]
+    },
+    "preset": {
+      "bands": [
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 300.0,
+          "gain_db": 1.0,
+          "id": "flat_01",
+          "q": 0.7
+        },
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 2500.0,
+          "gain_db": -1.0,
+          "id": "flat_02",
+          "q": 0.8
+        },
+        {
+          "enabled": true,
+          "filter_type": "high_shelf",
+          "frequency_hz": 8000.0,
+          "gain_db": 1.0,
+          "id": "flat_03",
+          "q": 0.707
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 250.0,
+          "gain_db": 0.0,
+          "id": "flat_04",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 500.0,
+          "gain_db": 0.0,
+          "id": "flat_05",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 1000.0,
+          "gain_db": 0.0,
+          "id": "flat_06",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 2000.0,
+          "gain_db": 0.0,
+          "id": "flat_07",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 4000.0,
+          "gain_db": 0.0,
+          "id": "flat_08",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.0,
+          "id": "flat_09",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 16000.0,
+          "gain_db": 0.0,
+          "id": "flat_10",
+          "q": 1.0
+        }
+      ],
+      "id": "style_jazz",
+      "name": "Jazz",
+      "preamp_db": -1.0
+    },
+    "protection": {
+      "attenuation_db": 16.67817971378161,
+      "ceiling_db": -1.0,
+      "effective_preamp_db": -17.67817971378161,
+      "filter_bound_db": 3.6369798872223633,
+      "requested_preamp_db": -1.0,
+      "resampler_bound_db": 12.041199826559248
+    }
+  },
+  {
+    "admitted": true,
+    "coefficients": [
+      [
+        1.001040971771781,
+        -1.9889485514146166,
+        0.9879931477866007,
+        -1.988961046683171,
+        0.9890216242898274
+      ],
+      [
+        0.9967997200063305,
+        -1.9391068899130341,
+        0.9443440482478652,
+        -1.9391068899130341,
+        0.9411437682541955
+      ],
+      [
+        1.1735228738753403,
+        -0.9803167288687121,
+        0.3493485298896843,
+        -0.7228991678407073,
+        0.26545384273701983
+      ],
+      [
+        1.0,
+        -1.9667539817433715,
+        0.9678075705607523,
+        -1.9667539817433715,
+        0.9678075705607523
+      ],
+      [
+        1.0,
+        -1.9325213738986535,
+        0.9366679285951103,
+        -1.9325213738986535,
+        0.9366679285951103
+      ],
+      [
+        1.0,
+        -1.8614084445321082,
+        0.8774704646235392,
+        -1.8614084445321082,
+        0.8774704646235392
+      ],
+      [
+        1.0,
+        -1.7104970464692146,
+        0.7708368488713767,
+        -1.7104970464692146,
+        0.7708368488713767
+      ],
+      [
+        1.0,
+        -1.3856406460551018,
+        0.6,
+        -1.3856406460551018,
+        0.6
+      ],
+      [
+        1.0,
+        -0.697830520748038,
+        0.39566104149607556,
+        -0.697830520748038,
+        0.39566104149607556
+      ],
+      [
+        1.0,
+        0.6978305207480374,
+        0.39566104149607545,
+        0.6978305207480374,
+        0.39566104149607545
+      ]
+    ],
+    "config": {
+      "filters": {
+        "peq_b_666c61745f3031_d8e68e4a05b1691d": {
+          "parameters": {
+            "freq": 65.0,
+            "gain": 3.0,
+            "q": 0.707,
+            "type": "Lowshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3032_d8e68e4a05b1691d": {
+          "parameters": {
+            "freq": 350.0,
+            "gain": -1.0,
+            "q": 0.8,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3033_d8e68e4a05b1691d": {
+          "parameters": {
+            "freq": 7000.0,
+            "gain": 2.0,
+            "q": 0.707,
+            "type": "Highshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_preamp": {
+          "parameters": {
+            "gain": -23.388269415783505,
+            "scale": "dB"
+          },
+          "type": "Gain"
+        }
+      },
+      "pipeline": [
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_preamp"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3031_d8e68e4a05b1691d"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3032_d8e68e4a05b1691d"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3033_d8e68e4a05b1691d"
+          ],
+          "type": "Filter"
+        }
+      ]
+    },
+    "preset": {
+      "bands": [
+        {
+          "enabled": true,
+          "filter_type": "low_shelf",
+          "frequency_hz": 65.0,
+          "gain_db": 3.0,
+          "id": "flat_01",
+          "q": 0.707
+        },
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 350.0,
+          "gain_db": -1.0,
+          "id": "flat_02",
+          "q": 0.8
+        },
+        {
+          "enabled": true,
+          "filter_type": "high_shelf",
+          "frequency_hz": 7000.0,
+          "gain_db": 2.0,
+          "id": "flat_03",
+          "q": 0.707
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 250.0,
+          "gain_db": 0.0,
+          "id": "flat_04",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 500.0,
+          "gain_db": 0.0,
+          "id": "flat_05",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 1000.0,
+          "gain_db": 0.0,
+          "id": "flat_06",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 2000.0,
+          "gain_db": 0.0,
+          "id": "flat_07",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 4000.0,
+          "gain_db": 0.0,
+          "id": "flat_08",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.0,
+          "id": "flat_09",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 16000.0,
+          "gain_db": 0.0,
+          "id": "flat_10",
+          "q": 1.0
+        }
+      ],
+      "id": "style_electronic",
+      "name": "Electronic",
+      "preamp_db": -3.0
+    },
+    "protection": {
+      "attenuation_db": 20.388269415783505,
+      "ceiling_db": -1.0,
+      "effective_preamp_db": -23.388269415783505,
+      "filter_bound_db": 7.3470695892242555,
+      "requested_preamp_db": -3.0,
+      "resampler_bound_db": 12.041199826559248
+    }
+  },
+  {
+    "admitted": true,
+    "coefficients": [
+      [
+        1.00079989179414,
+        -1.9822533318142563,
+        0.9816385965820735,
+        -1.9822680151793974,
+        0.9824238050110721
+      ],
+      [
+        1.0175130080070718,
+        -1.6424054030511965,
+        0.6954319213930039,
+        -1.6424054030511965,
+        0.7129449294000759
+      ],
+      [
+        1.0384269815208742,
+        -0.6596168800668161,
+        0.2531274156334188,
+        -0.6050434743349037,
+        0.2369809914223809
+      ],
+      [
+        1.0,
+        -1.9667539817433715,
+        0.9678075705607523,
+        -1.9667539817433715,
+        0.9678075705607523
+      ],
+      [
+        1.0,
+        -1.9325213738986535,
+        0.9366679285951103,
+        -1.9325213738986535,
+        0.9366679285951103
+      ],
+      [
+        1.0,
+        -1.8614084445321082,
+        0.8774704646235392,
+        -1.8614084445321082,
+        0.8774704646235392
+      ],
+      [
+        1.0,
+        -1.7104970464692146,
+        0.7708368488713767,
+        -1.7104970464692146,
+        0.7708368488713767
+      ],
+      [
+        1.0,
+        -1.3856406460551018,
+        0.6,
+        -1.3856406460551018,
+        0.6
+      ],
+      [
+        1.0,
+        -0.697830520748038,
+        0.39566104149607556,
+        -0.697830520748038,
+        0.39566104149607556
+      ],
+      [
+        1.0,
+        0.6978305207480374,
+        0.39566104149607545,
+        0.6978305207480374,
+        0.39566104149607545
+      ]
+    ],
+    "config": {
+      "filters": {
+        "peq_b_666c61745f3031_e7a7668b41bc829a": {
+          "parameters": {
+            "freq": 100.0,
+            "gain": 1.5,
+            "q": 0.707,
+            "type": "Lowshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3032_e7a7668b41bc829a": {
+          "parameters": {
+            "freq": 2200.0,
+            "gain": 1.0,
+            "q": 0.8,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3033_e7a7668b41bc829a": {
+          "parameters": {
+            "freq": 8000.0,
+            "gain": 0.5,
+            "q": 0.707,
+            "type": "Highshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_preamp": {
+          "parameters": {
+            "gain": -18.745280710140882,
+            "scale": "dB"
+          },
+          "type": "Gain"
+        }
+      },
+      "pipeline": [
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_preamp"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3031_e7a7668b41bc829a"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3032_e7a7668b41bc829a"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3033_e7a7668b41bc829a"
+          ],
+          "type": "Filter"
+        }
+      ]
+    },
+    "preset": {
+      "bands": [
+        {
+          "enabled": true,
+          "filter_type": "low_shelf",
+          "frequency_hz": 100.0,
+          "gain_db": 1.5,
+          "id": "flat_01",
+          "q": 0.707
+        },
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 2200.0,
+          "gain_db": 1.0,
+          "id": "flat_02",
+          "q": 0.8
+        },
+        {
+          "enabled": true,
+          "filter_type": "high_shelf",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.5,
+          "id": "flat_03",
+          "q": 0.707
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 250.0,
+          "gain_db": 0.0,
+          "id": "flat_04",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 500.0,
+          "gain_db": 0.0,
+          "id": "flat_05",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 1000.0,
+          "gain_db": 0.0,
+          "id": "flat_06",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 2000.0,
+          "gain_db": 0.0,
+          "id": "flat_07",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 4000.0,
+          "gain_db": 0.0,
+          "id": "flat_08",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.0,
+          "id": "flat_09",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 16000.0,
+          "gain_db": 0.0,
+          "id": "flat_10",
+          "q": 1.0
+        }
+      ],
+      "id": "style_pop",
+      "name": "Pop",
+      "preamp_db": -2.0
+    },
+    "protection": {
+      "attenuation_db": 16.745280710140882,
+      "ceiling_db": -1.0,
+      "effective_preamp_db": -18.745280710140882,
+      "filter_bound_db": 3.704080883581633,
+      "requested_preamp_db": -2.0,
+      "resampler_bound_db": 12.041199826559248
+    }
+  },
+  {
+    "admitted": true,
+    "coefficients": [
+      [
+        0.999360665377811,
+        -1.9771485950323038,
+        0.978018228744246,
+        -1.9771345446628241,
+        0.9773929444915361
+      ],
+      [
+        1.0213640398050983,
+        -1.7392545059175077,
+        0.7519644763023698,
+        -1.7392545059175077,
+        0.7733285161074681
+      ],
+      [
+        1.0832988257455174,
+        -0.8751414349021822,
+        0.31344007264953455,
+        -0.7516090074429483,
+        0.27320647093581796
+      ],
+      [
+        1.0,
+        -1.9667539817433715,
+        0.9678075705607523,
+        -1.9667539817433715,
+        0.9678075705607523
+      ],
+      [
+        1.0,
+        -1.9325213738986535,
+        0.9366679285951103,
+        -1.9325213738986535,
+        0.9366679285951103
+      ],
+      [
+        1.0,
+        -1.8614084445321082,
+        0.8774704646235392,
+        -1.8614084445321082,
+        0.8774704646235392
+      ],
+      [
+        1.0,
+        -1.7104970464692146,
+        0.7708368488713767,
+        -1.7104970464692146,
+        0.7708368488713767
+      ],
+      [
+        1.0,
+        -1.3856406460551018,
+        0.6,
+        -1.3856406460551018,
+        0.6
+      ],
+      [
+        1.0,
+        -0.697830520748038,
+        0.39566104149607556,
+        -0.697830520748038,
+        0.39566104149607556
+      ],
+      [
+        1.0,
+        0.6978305207480374,
+        0.39566104149607545,
+        0.6978305207480374,
+        0.39566104149607545
+      ]
+    ],
+    "config": {
+      "filters": {
+        "peq_b_666c61745f3031_31acd83b5d522113": {
+          "parameters": {
+            "freq": 120.0,
+            "gain": -1.0,
+            "q": 0.707,
+            "type": "Lowshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3032_31acd83b5d522113": {
+          "parameters": {
+            "freq": 1500.0,
+            "gain": 1.5,
+            "q": 0.7,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3033_31acd83b5d522113": {
+          "parameters": {
+            "freq": 7000.0,
+            "gain": 1.0,
+            "q": 0.707,
+            "type": "Highshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_preamp": {
+          "parameters": {
+            "gain": -19.50435885478116,
+            "scale": "dB"
+          },
+          "type": "Gain"
+        }
+      },
+      "pipeline": [
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_preamp"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3031_31acd83b5d522113"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3032_31acd83b5d522113"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3033_31acd83b5d522113"
+          ],
+          "type": "Filter"
+        }
+      ]
+    },
+    "preset": {
+      "bands": [
+        {
+          "enabled": true,
+          "filter_type": "low_shelf",
+          "frequency_hz": 120.0,
+          "gain_db": -1.0,
+          "id": "flat_01",
+          "q": 0.707
+        },
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 1500.0,
+          "gain_db": 1.5,
+          "id": "flat_02",
+          "q": 0.7
+        },
+        {
+          "enabled": true,
+          "filter_type": "high_shelf",
+          "frequency_hz": 7000.0,
+          "gain_db": 1.0,
+          "id": "flat_03",
+          "q": 0.707
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 250.0,
+          "gain_db": 0.0,
+          "id": "flat_04",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 500.0,
+          "gain_db": 0.0,
+          "id": "flat_05",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 1000.0,
+          "gain_db": 0.0,
+          "id": "flat_06",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 2000.0,
+          "gain_db": 0.0,
+          "id": "flat_07",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 4000.0,
+          "gain_db": 0.0,
+          "id": "flat_08",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.0,
+          "id": "flat_09",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 16000.0,
+          "gain_db": 0.0,
+          "id": "flat_10",
+          "q": 1.0
+        }
+      ],
+      "id": "style_acoustic",
+      "name": "Acoustic",
+      "preamp_db": -2.0
+    },
+    "protection": {
+      "attenuation_db": 17.50435885478116,
+      "ceiling_db": -1.0,
+      "effective_preamp_db": -19.50435885478116,
+      "filter_bound_db": 4.46315902822191,
+      "requested_preamp_db": -2.0,
+      "resampler_bound_db": 12.041199826559248
+    }
+  },
+  {
+    "admitted": true,
+    "coefficients": [
+      [
+        0.9957744103886784,
+        -1.920270244822394,
+        0.9265129263698035,
+        -1.920270244822394,
+        0.9222873367584818
+      ],
+      [
+        1.010807619240663,
+        -1.5484284652431026,
+        0.6244011643986436,
+        -1.5484284652431026,
+        0.6352087836393062
+      ],
+      [
+        1.0,
+        -1.9835054836178139,
+        0.9837710353555572,
+        -1.9835054836178139,
+        0.9837710353555572
+      ],
+      [
+        1.0,
+        -1.9667539817433715,
+        0.9678075705607523,
+        -1.9667539817433715,
+        0.9678075705607523
+      ],
+      [
+        1.0,
+        -1.9325213738986535,
+        0.9366679285951103,
+        -1.9325213738986535,
+        0.9366679285951103
+      ],
+      [
+        1.0,
+        -1.8614084445321082,
+        0.8774704646235392,
+        -1.8614084445321082,
+        0.8774704646235392
+      ],
+      [
+        1.0,
+        -1.7104970464692146,
+        0.7708368488713767,
+        -1.7104970464692146,
+        0.7708368488713767
+      ],
+      [
+        1.0,
+        -1.3856406460551018,
+        0.6,
+        -1.3856406460551018,
+        0.6
+      ],
+      [
+        1.0,
+        -0.697830520748038,
+        0.39566104149607556,
+        -0.697830520748038,
+        0.39566104149607556
+      ],
+      [
+        1.0,
+        0.6978305207480374,
+        0.39566104149607545,
+        0.6978305207480374,
+        0.39566104149607545
+      ]
+    ],
+    "config": {
+      "filters": {
+        "peq_b_666c61745f3031_cea8aeb975d2e996": {
+          "parameters": {
+            "freq": 350.0,
+            "gain": -1.0,
+            "q": 0.6,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3032_cea8aeb975d2e996": {
+          "parameters": {
+            "freq": 2500.0,
+            "gain": 0.5,
+            "q": 0.7,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_preamp": {
+          "parameters": {
+            "gain": -15.886215101902952,
+            "scale": "dB"
+          },
+          "type": "Gain"
+        }
+      },
+      "pipeline": [
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_preamp"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3031_cea8aeb975d2e996"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3032_cea8aeb975d2e996"
+          ],
+          "type": "Filter"
+        }
+      ]
+    },
+    "preset": {
+      "bands": [
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 350.0,
+          "gain_db": -1.0,
+          "id": "flat_01",
+          "q": 0.6
+        },
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 2500.0,
+          "gain_db": 0.5,
+          "id": "flat_02",
+          "q": 0.7
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 125.0,
+          "gain_db": 0.0,
+          "id": "flat_03",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 250.0,
+          "gain_db": 0.0,
+          "id": "flat_04",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 500.0,
+          "gain_db": 0.0,
+          "id": "flat_05",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 1000.0,
+          "gain_db": 0.0,
+          "id": "flat_06",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 2000.0,
+          "gain_db": 0.0,
+          "id": "flat_07",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 4000.0,
+          "gain_db": 0.0,
+          "id": "flat_08",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.0,
+          "id": "flat_09",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 16000.0,
+          "gain_db": 0.0,
+          "id": "flat_10",
+          "q": 1.0
+        }
+      ],
+      "id": "mood_balanced",
+      "name": "Balanced",
+      "preamp_db": -1.0
+    },
+    "protection": {
+      "attenuation_db": 14.886215101902952,
+      "ceiling_db": -1.0,
+      "effective_preamp_db": -15.886215101902952,
+      "filter_bound_db": 1.8450152753437044,
+      "requested_preamp_db": -1.0,
+      "resampler_bound_db": 12.041199826559248
+    }
+  },
+  {
+    "admitted": true,
+    "coefficients": [
+      [
+        0.9653960302608271,
+        -1.45978885742382,
+        0.5982494961358166,
+        -1.45978885742382,
+        0.5636455263966437
+      ],
+      [
+        0.8481717668126564,
+        -0.6838520529156179,
+        0.2450090760002532,
+        -0.9139115400647632,
+        0.32324032996205454
+      ],
+      [
+        1.0,
+        -1.9835054836178139,
+        0.9837710353555572,
+        -1.9835054836178139,
+        0.9837710353555572
+      ],
+      [
+        1.0,
+        -1.9667539817433715,
+        0.9678075705607523,
+        -1.9667539817433715,
+        0.9678075705607523
+      ],
+      [
+        1.0,
+        -1.9325213738986535,
+        0.9366679285951103,
+        -1.9325213738986535,
+        0.9366679285951103
+      ],
+      [
+        1.0,
+        -1.8614084445321082,
+        0.8774704646235392,
+        -1.8614084445321082,
+        0.8774704646235392
+      ],
+      [
+        1.0,
+        -1.7104970464692146,
+        0.7708368488713767,
+        -1.7104970464692146,
+        0.7708368488713767
+      ],
+      [
+        1.0,
+        -1.3856406460551018,
+        0.6,
+        -1.3856406460551018,
+        0.6
+      ],
+      [
+        1.0,
+        -0.697830520748038,
+        0.39566104149607556,
+        -0.697830520748038,
+        0.39566104149607556
+      ],
+      [
+        1.0,
+        0.6978305207480374,
+        0.39566104149607545,
+        0.6978305207480374,
+        0.39566104149607545
+      ]
+    ],
+    "config": {
+      "filters": {
+        "peq_b_666c61745f3031_99b79c8b87922d17": {
+          "parameters": {
+            "freq": 2800.0,
+            "gain": -1.5,
+            "q": 0.7,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3032_99b79c8b87922d17": {
+          "parameters": {
+            "freq": 6500.0,
+            "gain": -2.0,
+            "q": 0.707,
+            "type": "Highshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_preamp": {
+          "parameters": {
+            "gain": -15.488410694885653,
+            "scale": "dB"
+          },
+          "type": "Gain"
+        }
+      },
+      "pipeline": [
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_preamp"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3031_99b79c8b87922d17"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3032_99b79c8b87922d17"
+          ],
+          "type": "Filter"
+        }
+      ]
+    },
+    "preset": {
+      "bands": [
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 2800.0,
+          "gain_db": -1.5,
+          "id": "flat_01",
+          "q": 0.7
+        },
+        {
+          "enabled": true,
+          "filter_type": "high_shelf",
+          "frequency_hz": 6500.0,
+          "gain_db": -2.0,
+          "id": "flat_02",
+          "q": 0.707
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 125.0,
+          "gain_db": 0.0,
+          "id": "flat_03",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 250.0,
+          "gain_db": 0.0,
+          "id": "flat_04",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 500.0,
+          "gain_db": 0.0,
+          "id": "flat_05",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 1000.0,
+          "gain_db": 0.0,
+          "id": "flat_06",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 2000.0,
+          "gain_db": 0.0,
+          "id": "flat_07",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 4000.0,
+          "gain_db": 0.0,
+          "id": "flat_08",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.0,
+          "id": "flat_09",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 16000.0,
+          "gain_db": 0.0,
+          "id": "flat_10",
+          "q": 1.0
+        }
+      ],
+      "id": "mood_relaxing",
+      "name": "Relaxing",
+      "preamp_db": -1.0
+    },
+    "protection": {
+      "attenuation_db": 14.488410694885653,
+      "ceiling_db": -1.0,
+      "effective_preamp_db": -15.488410694885653,
+      "filter_bound_db": 1.447210868326405,
+      "requested_preamp_db": -1.0,
+      "resampler_bound_db": 12.041199826559248
+    }
+  },
+  {
+    "admitted": true,
+    "coefficients": [
+      [
+        1.001173669876875,
+        -1.9807498917123965,
+        0.9798066324826189,
+        -1.9807735861946598,
+        0.9809566078772304
+      ],
+      [
+        1.0293319643470729,
+        -1.599165377394717,
+        0.6594572372885085,
+        -1.599165377394717,
+        0.6887892016355813
+      ],
+      [
+        1.0,
+        -1.9835054836178139,
+        0.9837710353555572,
+        -1.9835054836178139,
+        0.9837710353555572
+      ],
+      [
+        1.0,
+        -1.9667539817433715,
+        0.9678075705607523,
+        -1.9667539817433715,
+        0.9678075705607523
+      ],
+      [
+        1.0,
+        -1.9325213738986535,
+        0.9366679285951103,
+        -1.9325213738986535,
+        0.9366679285951103
+      ],
+      [
+        1.0,
+        -1.8614084445321082,
+        0.8774704646235392,
+        -1.8614084445321082,
+        0.8774704646235392
+      ],
+      [
+        1.0,
+        -1.7104970464692146,
+        0.7708368488713767,
+        -1.7104970464692146,
+        0.7708368488713767
+      ],
+      [
+        1.0,
+        -1.3856406460551018,
+        0.6,
+        -1.3856406460551018,
+        0.6
+      ],
+      [
+        1.0,
+        -0.697830520748038,
+        0.39566104149607556,
+        -0.697830520748038,
+        0.39566104149607556
+      ],
+      [
+        1.0,
+        0.6978305207480374,
+        0.39566104149607545,
+        0.6978305207480374,
+        0.39566104149607545
+      ]
+    ],
+    "config": {
+      "filters": {
+        "peq_b_666c61745f3031_05792dcc4b95788c": {
+          "parameters": {
+            "freq": 110.0,
+            "gain": 2.0,
+            "q": 0.707,
+            "type": "Lowshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3032_05792dcc4b95788c": {
+          "parameters": {
+            "freq": 2500.0,
+            "gain": 1.5,
+            "q": 0.8,
+            "type": "Peaking"
+          },
+          "type": "Biquad"
+        },
+        "peq_preamp": {
+          "parameters": {
+            "gain": -19.20535732937712,
+            "scale": "dB"
+          },
+          "type": "Gain"
+        }
+      },
+      "pipeline": [
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_preamp"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3031_05792dcc4b95788c"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3032_05792dcc4b95788c"
+          ],
+          "type": "Filter"
+        }
+      ]
+    },
+    "preset": {
+      "bands": [
+        {
+          "enabled": true,
+          "filter_type": "low_shelf",
+          "frequency_hz": 110.0,
+          "gain_db": 2.0,
+          "id": "flat_01",
+          "q": 0.707
+        },
+        {
+          "enabled": true,
+          "filter_type": "peak",
+          "frequency_hz": 2500.0,
+          "gain_db": 1.5,
+          "id": "flat_02",
+          "q": 0.8
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 125.0,
+          "gain_db": 0.0,
+          "id": "flat_03",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 250.0,
+          "gain_db": 0.0,
+          "id": "flat_04",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 500.0,
+          "gain_db": 0.0,
+          "id": "flat_05",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 1000.0,
+          "gain_db": 0.0,
+          "id": "flat_06",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 2000.0,
+          "gain_db": 0.0,
+          "id": "flat_07",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 4000.0,
+          "gain_db": 0.0,
+          "id": "flat_08",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.0,
+          "id": "flat_09",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 16000.0,
+          "gain_db": 0.0,
+          "id": "flat_10",
+          "q": 1.0
+        }
+      ],
+      "id": "mood_energetic",
+      "name": "Energetic",
+      "preamp_db": -2.0
+    },
+    "protection": {
+      "attenuation_db": 17.20535732937712,
+      "ceiling_db": -1.0,
+      "effective_preamp_db": -19.20535732937712,
+      "filter_bound_db": 4.164157502817871,
+      "requested_preamp_db": -2.0,
+      "resampler_bound_db": 12.041199826559248
+    }
+  },
+  {
+    "admitted": true,
+    "coefficients": [
+      [
+        1.0014401729176794,
+        -1.9680369887638898,
+        0.9671925211159501,
+        -1.968084229638854,
+        0.9685854531586653
+      ],
+      [
+        0.8320716152548829,
+        -0.9580110627568555,
+        0.34653985299059964,
+        -1.2346239971010937,
+        0.45522440258972047
+      ],
+      [
+        1.0,
+        -1.9835054836178139,
+        0.9837710353555572,
+        -1.9835054836178139,
+        0.9837710353555572
+      ],
+      [
+        1.0,
+        -1.9667539817433715,
+        0.9678075705607523,
+        -1.9667539817433715,
+        0.9678075705607523
+      ],
+      [
+        1.0,
+        -1.9325213738986535,
+        0.9366679285951103,
+        -1.9325213738986535,
+        0.9366679285951103
+      ],
+      [
+        1.0,
+        -1.8614084445321082,
+        0.8774704646235392,
+        -1.8614084445321082,
+        0.8774704646235392
+      ],
+      [
+        1.0,
+        -1.7104970464692146,
+        0.7708368488713767,
+        -1.7104970464692146,
+        0.7708368488713767
+      ],
+      [
+        1.0,
+        -1.3856406460551018,
+        0.6,
+        -1.3856406460551018,
+        0.6
+      ],
+      [
+        1.0,
+        -0.697830520748038,
+        0.39566104149607556,
+        -0.697830520748038,
+        0.39566104149607556
+      ],
+      [
+        1.0,
+        0.6978305207480374,
+        0.39566104149607545,
+        0.6978305207480374,
+        0.39566104149607545
+      ]
+    ],
+    "config": {
+      "filters": {
+        "peq_b_666c61745f3031_10854716e2ad5f37": {
+          "parameters": {
+            "freq": 180.0,
+            "gain": 1.5,
+            "q": 0.707,
+            "type": "Lowshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_b_666c61745f3032_10854716e2ad5f37": {
+          "parameters": {
+            "freq": 4500.0,
+            "gain": -2.0,
+            "q": 0.707,
+            "type": "Highshelf"
+          },
+          "type": "Biquad"
+        },
+        "peq_preamp": {
+          "parameters": {
+            "gain": -16.971402789439175,
+            "scale": "dB"
+          },
+          "type": "Gain"
+        }
+      },
+      "pipeline": [
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_preamp"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3031_10854716e2ad5f37"
+          ],
+          "type": "Filter"
+        },
+        {
+          "channels": [
+            0,
+            1
+          ],
+          "names": [
+            "peq_b_666c61745f3032_10854716e2ad5f37"
+          ],
+          "type": "Filter"
+        }
+      ]
+    },
+    "preset": {
+      "bands": [
+        {
+          "enabled": true,
+          "filter_type": "low_shelf",
+          "frequency_hz": 180.0,
+          "gain_db": 1.5,
+          "id": "flat_01",
+          "q": 0.707
+        },
+        {
+          "enabled": true,
+          "filter_type": "high_shelf",
+          "frequency_hz": 4500.0,
+          "gain_db": -2.0,
+          "id": "flat_02",
+          "q": 0.707
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 125.0,
+          "gain_db": 0.0,
+          "id": "flat_03",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 250.0,
+          "gain_db": 0.0,
+          "id": "flat_04",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 500.0,
+          "gain_db": 0.0,
+          "id": "flat_05",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 1000.0,
+          "gain_db": 0.0,
+          "id": "flat_06",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 2000.0,
+          "gain_db": 0.0,
+          "id": "flat_07",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 4000.0,
+          "gain_db": 0.0,
+          "id": "flat_08",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 8000.0,
+          "gain_db": 0.0,
+          "id": "flat_09",
+          "q": 1.0
+        },
+        {
+          "enabled": false,
+          "filter_type": "peak",
+          "frequency_hz": 16000.0,
+          "gain_db": 0.0,
+          "id": "flat_10",
+          "q": 1.0
+        }
+      ],
+      "id": "mood_cozy",
+      "name": "Cozy",
+      "preamp_db": -2.0
+    },
+    "protection": {
+      "attenuation_db": 14.971402789439175,
+      "ceiling_db": -1.0,
+      "effective_preamp_db": -16.971402789439175,
+      "filter_bound_db": 1.9302029628799287,
+      "requested_preamp_db": -2.0,
+      "resampler_bound_db": 12.041199826559248
+    }
+  }
+]

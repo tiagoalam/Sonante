@@ -1,6 +1,6 @@
 use super::*;
 pub(crate) fn fixture() -> AudioEngine { AudioEngine {
- socket_path:String::new(),music_dir:String::new(),queue:vec![TrackMetadata{title:"Old".into(),artist:"Fixture".into(),album:"Fixture".into(),thumb:Some("fixture-cover".into()),plex_image:None,media_locator:None,uri:"old.flac".into(),duration:Some(120.0)}],restored_resume:None,startup_restore:StartupQueueRestore::Ready,queue_structure_reserved:Arc::new(AtomicU8::new(0)),queue_coherent:true,cache_persistence_pending:false,playback_intent:0
+ socket_path:String::new(),music_dir:String::new(),queue:vec![TrackMetadata{title:"Old".into(),artist:"Fixture".into(),album:"Fixture".into(),thumb:Some("fixture-cover".into()),plex_image:None,media_locator:None,uri:"old.flac".into(),duration:Some(120.0)}],restored_resume:None,startup_restore:StartupQueueRestore::Ready,queue_structure_reserved:Arc::new(AtomicU8::new(0)),queue_coherent:true,cache_persistence_pending:false,playback_intent:0,eq_intervention:Arc::new(AtomicU64::new(0))
 } }
 #[test]
 fn partial_queue_failure_fences_actual_engine() {

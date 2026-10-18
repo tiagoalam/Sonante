@@ -447,7 +447,7 @@ fn generation(path: &Path) -> Result<Generation, String> {
 
 // Only mirror directories and their manifest are opened. Physical symlink targets
 // (including NAS paths) are never traversed or synchronized.
-fn sync_mirror(path: &Path, depth: usize) -> Result<(), String> {
+pub(crate) fn sync_mirror(path: &Path, depth: usize) -> Result<(), String> {
     if depth > 256 {
         return Err(blocked("Mirror excede o limite de profundidade."));
     }
@@ -2510,4 +2510,113 @@ mod tests {
             b"unrelated"
         );
     }
+    #[test]
+    fn source_id_reservations_survive_real_intent_publication_rollback_and_cleanup() {
+        let fixture = Fixture::new();
+        let history = fixture.config_dir.join("local-source-identities.json");
+        let reserved = fs::read(&history).unwrap();
+        let intent = fixture.intent();
+        let publication = fixture.publish(&intent);
+        publication.rollback().unwrap();
+        publication.cleanup_rejected_after_rollback().unwrap();
+        assert!(intent
+            .complete_transaction(Err("refresh failed".into()), Some(Completed::Recovered))
+            .is_err());
+        check_startup(&fixture.config_dir).unwrap();
+        assert_eq!(fs::read(&history).unwrap(), reserved);
+        // The aborted source's basename remains reserved for that physical origin.
+        let other = fixture.root.join("different/Added");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("new.flac"), b"fixture").unwrap();
+        let old = fixture.root.join("Old");
+        let prepared = mirror::build_filtered_staging(
+            &fixture.config_dir.join("library.next"),
+            &fixture.config_dir.join("library"),
+            &[old, other.clone()],
+            "after-rollback",
+        )
+        .unwrap();
+        assert_eq!(prepared.manifest.sources.get("Added (2)"), Some(&other));
+        assert!(!prepared.manifest.sources.contains_key("Added"));
+    }
+
+    #[test]
+    fn metadata_only_config_commit_faults_preserve_intent_and_identity_reservations() {
+        for after_rename in [false, true] {
+            let fixture = Fixture::new();
+            mirror::cleanup_prepared_managed_generation(&fixture.prepared).unwrap();
+            let library = fixture.config_dir.join("library");
+            let staging = fixture.config_dir.join("library.next");
+            let mut previous = mirror::read_manifest(&library).unwrap();
+            previous.schema_version = 1;
+            previous.registry_id = None;
+            mirror::write_manifest(&library, &previous).unwrap();
+            let old = fixture.root.join("Old");
+            let mirror::ManagedGenerationPreparation::Prepared(prepared) =
+                mirror::prepare_managed_generation(
+                    &library,
+                    &staging,
+                    &[old],
+                    "metadata-config-save",
+                )
+                .unwrap()
+            else {
+                panic!("upgrade must publish")
+            };
+            assert_eq!(prepared.refresh_plan, ManagedRefreshPlan::MetadataOnly);
+            let (plan, removal) = crate::plan_saved_folders_refresh(
+                &library, &prepared, &crate::SettingsSaveDiagnostics::new()).unwrap();
+            assert_eq!(plan, ManagedRefreshPlan::MetadataOnly);
+            assert!(removal.is_none());
+            crate::request_refresh_and_audit_traced("must-not-open-MPD", &plan, None, None).unwrap();
+            let mut next = fixture.previous.clone();
+            next.local_folders.push(next.local_folders[0].clone());
+            let intent =
+                SaveIntent::create(&fixture.config_dir, &fixture.previous, &next, &prepared)
+                    .unwrap();
+            let publication = intent.publish(&prepared, None).unwrap();
+            let ledger = fixture.config_dir.join("local-source-identities.json");
+            let reservations = fs::read(&ledger).unwrap();
+            let completed = Cell::new(None);
+            let result = complete_published_mirror_refresh(
+                || Ok(()),
+                || Ok(()),
+                || Ok(()),
+                || publication.rollback(),
+                |_| Ok(RestorePreviousOutcome::Restored),
+                || {
+                    publication.cleanup_rejected_after_rollback()?;
+                    completed.set(Some(Completed::Recovered));
+                    Ok(())
+                },
+                || {
+                    if after_rename {
+                        fixture.persist(&next)?;
+                        Err(ConfigSaveError::AfterRenameUnconfirmed(
+                            "injected parent fsync".into(),
+                        ))
+                    } else {
+                        Err(ConfigSaveError::BeforeRename(
+                            "injected config write".into(),
+                        ))
+                    }
+                },
+                || panic!("failed commit must not cleanup previous"),
+            );
+            assert!(intent
+                .complete_transaction(result, completed.get())
+                .is_err());
+            assert_eq!(fs::read(&ledger).unwrap(), reservations);
+            if after_rename {
+                assert!(staging.is_dir());
+                assert!(fixture.config_dir.join(NAME).exists());
+                assert_eq!(mirror::read_manifest(&library).unwrap().schema_version, 2);
+            } else {
+                assert!(!staging.exists());
+                assert!(!fixture.config_dir.join(NAME).exists());
+                assert_eq!(mirror::read_manifest(&library).unwrap().schema_version, 1);
+            }
+        }
+    }
+
 }

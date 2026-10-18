@@ -64,6 +64,9 @@ struct Inner {
     preview_not_before: Option<Instant>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BackgroundAdmission { Busy, Blocked }
+
 pub(crate) struct Coordinator {
     inner: Mutex<Inner>,
     idle: Condvar,
@@ -207,6 +210,16 @@ impl Coordinator {
         } else {
             None
         }
+    }
+
+    /// Watcher admission is typed and never waits while holding its event
+    /// reader. Busy retains a bounded batch; Uncertain/shutdown never retries.
+    pub(crate) fn try_begin_background(&self) -> Result<Transaction<'_>, BackgroundAdmission> {
+        let mut inner = self.inner.lock().map_err(|_| BackgroundAdmission::Blocked)?;
+        if Self::admission_error(&inner).is_some() { return Err(BackgroundAdmission::Blocked); }
+        if inner.busy { return Err(BackgroundAdmission::Busy); }
+        inner.busy = true;
+        Ok(Transaction { coordinator: self })
     }
 
     pub(crate) fn begin(&self) -> Result<Transaction<'_>, String> {

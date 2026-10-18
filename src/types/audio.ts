@@ -1,3 +1,4 @@
+import type { DspSnapshot } from "./equalizer";
 import type { PlexImageRef } from "./plex";
 
 export type MediaLocator =
@@ -78,6 +79,7 @@ export interface PlaybackStatus {
   processing?: SignalProcessing | null;
   output_observation?: OutputObservation | null;
   engine_evidence?: EngineEvidence | null;
+  shared_dsp?: DspSnapshot | null;
   options: PlaybackOptions | null;
   state: string;
   elapsed: number;
@@ -109,6 +111,7 @@ export type MpdHealth =
 export interface MpdStatusSnapshot {
   output_observation?: OutputObservation | null;
   engine_evidence?: EngineEvidence | null;
+  shared_dsp?: DspSnapshot | null;
   health: MpdHealth;
   playback: PlaybackStatus | null;
 }

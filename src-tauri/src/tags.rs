@@ -1750,7 +1750,7 @@ fn revision_for_file(file: &File) -> Result<String, LocalTrackTagsError> {
         .map_err(|_| transaction_error("Não foi possível calcular a revisão do arquivo local."))
 }
 
-fn revision_for_metadata(metadata: &Metadata) -> String {
+pub(crate) fn revision_for_metadata(metadata: &Metadata) -> String {
     let mut bytes = b"sonante-local-tags-v1\0".to_vec();
     for value in [
         metadata.dev(),

@@ -415,6 +415,7 @@ pub(crate) mod tests {
             fs::create_dir(&physical).unwrap();
             let manifest = MirrorManifest {
                 schema_version: 1,
+                registry_id: None,
                 generation_id: "preview-test".into(),
                 sources: BTreeMap::from([("Nova".into(), physical.clone())]),
             };

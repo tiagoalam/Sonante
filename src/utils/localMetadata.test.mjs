@@ -214,8 +214,8 @@ test("Local sidebar omits Metadata and preserves Local/player subview context an
   const expression = expressionFrom("../App.tsx", "navigateLocalSubview");
   for (const [player, section, expected] of [[null, "local", [["local", "browser"]]], [{ kind: "local", albumId: "B" }, "plex", [["player", "browser"]]], [null, "plex", [["local", "browser"], ["reset"], ["source", "local"]]]]) {
     const calls = [], before = structuredClone(player);
-    const navigate = new Function("playerTarget", "centralSection", "changePlayerLocalSubview", "setLocalSubview", "resetAllNavigation", "mainSectionPreference", `return (${expression});`)(
-      player, section, view => calls.push(["player", view]), view => calls.push(["local", view]), () => calls.push(["reset"]), { navigate: view => calls.push(["source", view]) });
+    const navigate = new Function("mediaSource", "eqReturnSectionRef", "playerTarget", "centralSection", "changePlayerLocalSubview", "setLocalSubview", "resetAllNavigation", "mainSectionPreference", `return (${expression});`)(
+      section, {current:section}, player, section, view => calls.push(["player", view]), view => calls.push(["local", view]), () => calls.push(["reset"]), { navigate: view => calls.push(["source", view]) });
     const item = SidebarNavItem({ icon: () => null, label: "Local", active: true, onClick: new Function("navigateLocalSubview", `return (${localSidebarClick()});`)(navigate) });
     item.props.onClick(); assert.deepEqual(calls, expected); assert.deepEqual(player, before);
   }

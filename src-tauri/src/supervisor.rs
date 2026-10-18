@@ -24,6 +24,8 @@ pub struct MpdSupervisor {
     shared_volume_backend: Option<SharedVolumeBackend>,
     volume_backend: VolumeBackend,
     engine_evidence: Option<crate::mpd_engine::EngineEvidence>,
+    shared_eq_pipe: Option<PathBuf>,
+    output_only_restart: bool,
 }
 
 pub struct LibrarySyncResult {
@@ -87,6 +89,8 @@ impl MpdSupervisor {
             shared_volume_backend: None,
             volume_backend: VolumeBackend::Unavailable,
             engine_evidence: None,
+            shared_eq_pipe: None,
+            output_only_restart: false,
         }
     }
 
@@ -102,6 +106,8 @@ impl MpdSupervisor {
             shared_volume_backend: None,
             volume_backend: VolumeBackend::Unavailable,
             engine_evidence: None,
+            shared_eq_pipe: None,
+            output_only_restart: false,
         }
     }
 
@@ -299,6 +305,9 @@ impl MpdSupervisor {
                             .to_string(),
                     );
                 }
+                let (current, namespace) = crate::local_media::mirror::identity_sources(lib_dir)?;
+                let roots = manifest.sources.values().cloned().collect::<Vec<_>>();
+                crate::source_identity::reserve(lib_dir, &roots, &current, namespace.as_deref())?;
                 return Ok(LibrarySyncResult {
                     library_dir: lib_dir.to_path_buf(),
                     changed: false,
@@ -339,7 +348,15 @@ impl MpdSupervisor {
             .map_err(|e| format!("Falha ao ler item da biblioteca virtual: {}", e))?;
         entries.sort_by_key(|entry| entry.file_name());
 
-        let mut used_names = HashSet::new();
+        let (mut current, namespace) = crate::local_media::mirror::identity_sources(lib_dir)?;
+        // Legacy reconciliation already keeps the first alias for a target.
+        // Reserve the remaining names as retired, retaining that behavior.
+        let mut seen = HashSet::new();
+        for root in current.values_mut() {
+            if root.as_ref().is_some_and(|p| !seen.insert(p.clone())) { *root = None; }
+        }
+        let (desired, _) = crate::source_identity::reserve(lib_dir, &unique_folders, &current, namespace.as_deref())?;
+        crate::source_identity::verify_origins(lib_dir, &desired)?;
         let mut preserved_targets = HashSet::new();
         let mut changed = false;
         for entry in entries {
@@ -352,7 +369,6 @@ impl MpdSupervisor {
                 )
             })?;
             if !metadata.file_type().is_symlink() {
-                used_names.insert(entry.file_name());
                 continue;
             }
             let keep = match fs::canonicalize(&path) {
@@ -366,9 +382,7 @@ impl MpdSupervisor {
                     ))
                 }
             };
-            if keep {
-                used_names.insert(entry.file_name());
-            } else {
+            if !keep {
                 fs::remove_file(&path).map_err(|e| {
                     format!(
                         "Falha ao remover symlink antigo ({}): {}",
@@ -380,24 +394,8 @@ impl MpdSupervisor {
             }
         }
 
-        for target_path in unique_folders {
-            if preserved_targets.contains(&target_path) {
-                continue;
-            }
-            let base_name = target_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Musicas")
-                .to_string();
-
-            let mut final_name = base_name.clone();
-            let mut counter = 2;
-            while used_names.contains(&std::ffi::OsString::from(final_name.as_str())) {
-                final_name = format!("{} ({})", base_name, counter);
-                counter += 1;
-            }
-            used_names.insert(std::ffi::OsString::from(final_name.as_str()));
-
+        for (final_name, target_path) in desired {
+            if preserved_targets.contains(&target_path) { continue; }
             let symlink_path = lib_dir.join(&final_name);
             symlink(&target_path, &symlink_path).map_err(|e| {
                 format!(
@@ -423,7 +421,11 @@ impl MpdSupervisor {
     ) -> Result<(PathBuf, VolumeBackend, LibrarySyncResult), String> {
         let dir = crate::persistence::ensure_sonante_config_dir()?;
 
-        let library_sync = Self::sync_library_symlinks(&cfg.local_folders)?;
+        let library_sync = if self.output_only_restart {
+            // The caller validated the existing generation before stopping.
+            // EQ changes output only; it must not publish mirrors or rescan.
+            LibrarySyncResult { library_dir: Self::library_dir(), changed: false }
+        } else { Self::sync_library_symlinks(&cfg.local_folders)? };
 
         let conf_path = dir.join("mpd.conf");
         let db_path = Self::database_path();
@@ -458,13 +460,15 @@ impl MpdSupervisor {
             &mixer_selection,
             shared_volume_backend,
         );
-        let audio_output_section = Self::audio_output_section(
+        let audio_output_section = if let Some(pipe) = &self.shared_eq_pipe {
+            Self::shared_eq_output_section(is_shared, pipe, shared_volume_backend)?
+        } else { Self::audio_output_section(
             is_shared,
             &alsa_device_value,
             dop_flag,
             &mixer_selection,
             shared_volume_backend,
-        )?;
+        )? };
         let audio_output_section = engine.configure_output(audio_output_section, is_shared)?;
 
         // Sem state_file: o MPD inicia em modo neutro/stop sem tocar sozinho
@@ -483,6 +487,54 @@ impl MpdSupervisor {
 
         fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
         Ok((conf_path, volume_backend, library_sync))
+    }
+
+    pub(crate) fn shared_eq_pipe(&self) -> Option<PathBuf> { self.shared_eq_pipe.clone() }
+
+    pub(crate) fn clear_shared_eq_pipe(&mut self) { self.shared_eq_pipe = None; }
+
+    pub(crate) fn start_shared_eq_output(&mut self, cfg: &AppConfig, pipe: Option<PathBuf>) -> Result<LibrarySyncResult, String> {
+        if !crate::is_shared_output(cfg) { return Err("EQ_SHARED_ONLY".into()); }
+        crate::managed_save_intent::check_startup(&Self::sonante_config_dir())?;
+        crate::local_media::resolve_local_sources(&Self::library_dir(), &cfg.local_folders).map_err(|_| "EQ_LIBRARY_UNAVAILABLE")?;
+        if let Some(path) = &pipe { Self::validate_eq_pipe(path)?; }
+        self.shared_eq_pipe = pipe;
+        self.output_only_restart = true;
+        let result = self.start(cfg);
+        self.output_only_restart = false;
+        result
+    }
+
+    fn validate_eq_pipe(path: &Path) -> Result<(), String> {
+        let parent = path.parent().ok_or("EQ_PIPE_UNSAFE")?;
+        let m = fs::symlink_metadata(path).map_err(|_| "EQ_PIPE_UNAVAILABLE")?;
+        let dir = fs::symlink_metadata(parent).map_err(|_| "EQ_PIPE_UNAVAILABLE")?;
+        if !path.is_absolute() || path.file_name().and_then(|s|s.to_str()) != Some("pcm.s32le")
+            || parent.parent() != Some(Self::runtime_dir().as_path())
+            || !parent.file_name().and_then(|s|s.to_str()).is_some_and(|s|s.starts_with("shared-eq-") && s.len()==42)
+            || !m.file_type().is_fifo() || m.uid()!=unsafe{libc::getuid()} || m.nlink()!=1 || m.mode()&0o777!=0o600
+            || !dir.is_dir() || dir.file_type().is_symlink() || dir.uid()!=m.uid() || dir.mode()&0o777!=0o700 {
+            return Err("EQ_PIPE_UNSAFE".into());
+        }
+        Ok(())
+    }
+
+    fn shared_eq_output_section(is_shared: bool, path: &Path, backend: Option<SharedVolumeBackend>) -> Result<String,String> {
+        if !is_shared { return Err("EQ_SHARED_ONLY".into()); }
+        Self::validate_eq_pipe(path)?;
+        let marker = Self::escape_config_value(&path.with_file_name("continuity.state").to_string_lossy())?;
+        let path = Self::escape_config_value(&path.to_string_lossy())?;
+        let mixer = if backend == Some(SharedVolumeBackend::PipeWire) { "none" } else { "software" };
+        Ok(format!(r#"audio_output {{
+    type "fifo"
+    name "Sonante Shared EQ"
+    sonante_strict_eq "yes"
+    sonante_continuity "{marker}"
+    path "{path}"
+    format "48000:32:2"
+    mixer_type "{mixer}"
+    always_on "yes"
+}}"#))
     }
 
     fn render_config(
@@ -656,7 +708,9 @@ decoder {{
     fn start_inner(&mut self, cfg: &AppConfig) -> Result<LibrarySyncResult, String> {
         // Resolve/validate an explicit development engine before stopping
         // the current owned MPD. No override keeps the established path.
-        let engine = crate::mpd_engine::MpdEngine::resolve()?;
+        let engine = if self.shared_eq_pipe.is_some() { crate::mpd_engine::MpdEngine::resolve_eq()? } else { crate::mpd_engine::MpdEngine::resolve()? };
+        if self.shared_eq_pipe.is_some() && !crate::is_shared_output(cfg) { return Err("EQ_SHARED_ONLY".into()); }
+
         let is_shared = cfg.audio_output_type == "pipewire"
             || cfg.audio_output_type == "shared"
             || cfg.alsa_device == "default";
@@ -2010,6 +2064,17 @@ mod tests {
     }
 
     #[test]
+    fn eq_rejects_direct_before_paths_process_or_format_changes() {
+        let mut sup=MpdSupervisor::new("/no-such-eq-test/mpd.sock");
+        let mut cfg=AppConfig::default();cfg.audio_output_type="alsa".into();cfg.alsa_device="hw:CARD=Fixture,DEV=0".into();
+        for dop in [false,true] {cfg.dop_enabled=dop;
+            assert_eq!(sup.start_shared_eq_output(&cfg,Some(PathBuf::from("/not-a-fifo"))).err().as_deref(),Some("EQ_SHARED_ONLY"));
+            assert!(sup.shared_eq_pipe().is_none());assert!(!sup.output_only_restart);
+        }
+        assert_eq!(MpdSupervisor::shared_eq_output_section(false,Path::new("/no-path"),None),Err("EQ_SHARED_ONLY".into()));
+    }
+
+    #[test]
     fn shared_output_with_pipewire_backend_disables_mpd_mixer() {
         let section = MpdSupervisor::audio_output_section(
             true,
@@ -2275,4 +2340,22 @@ mod tests {
         assert!(!fifo_path.exists());
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn legacy_retired_ids_are_not_reused_after_empty_startup_reconciliation() {
+        let (root, library) = library_test_paths("legacy-durable-identities");
+        let a = root.join("old/Music");
+        let b = root.join("new/Music");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&a)]).unwrap();
+        MpdSupervisor::reconcile_library_symlinks(&library, &[]).unwrap();
+        MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&b)]).unwrap();
+        assert!(!library.join("Music").exists());
+        assert_eq!(fs::canonicalize(library.join("Music (2)")).unwrap(), b);
+        let sources =
+            MpdSupervisor::local_library_sources_in(&library, &[configured_folder(&b)]).unwrap();
+        assert_eq!(sources[0].id, "Music (2)");
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }

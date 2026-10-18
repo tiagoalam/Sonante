@@ -124,6 +124,19 @@ function shallowMarkup(tree) {
   return React.cloneElement(tree,{},shallowMarkup(tree.props.children));
 }
 
+test('retained Explore resumes without catalog queries or rebuilding picks; synthetic cold mount is characterized',async()=>{
+ globalThis.__exploreTranslation=translations.en;
+ const c={local:{state:'ready',albums:Array.from({length:3000},(_,i)=>({...local('S'+i,'Artist '+(i%300)),title:'Album '+i,year:1980+i%40,genre:i%2?'Rock':'Jazz'}))}};
+ const results=[];
+ for(const origin of ['equalizer','plex']){
+  let ensures=0,reads=0;const catalog=new LocalAlbumCatalog(async()=>{reads++;return c.local.albums});catalog.ensureLoaded(false,true);await flush();assert.equal(reads,1);const props={context:c,active:true,ensureLocal:()=>{ensures++;catalog.ensureLoaded(false,true)},isCurrent:()=>true,onOpen(){}};
+  const h=host(ExploreView,props);const start=performance.now();let tree=h.render();h.effects();const coldMs=performance.now()-start;const picks=nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key);
+  h.render({...props,active:false});h.effects();const startReturn=performance.now();tree=h.render(props);h.effects();const retainedMs=performance.now()-startReturn;assert.deepEqual(nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key),picks);assert.equal(ensures,2);h.render(props);h.effects();assert.equal(ensures,2);
+  assert.equal(reads,1);results.push({origin,coldMs,retainedMs,ensureCalls:ensures,totalCatalogReads:reads,extraReadsOnReturn:reads-1,preservedPicks:true});h.close();
+ }
+ if(process.env.SONANTE_NAV_REPORT){const {writeFileSync}=await import('node:fs');writeFileSync(process.env.SONANTE_NAV_REPORT,JSON.stringify({albums:3000,scope:'real Explore component/session with hook host; synthetic metadata, ensure callback counted, no backend/DOM/hardware',results},null,2)+'\n');}
+});
+
 test("actual shelf card opens its exact entry, returns to the same selection, renews without queries and rejects stale handlers", () => {
   globalThis.__exploreTranslation=translations.en;const c=context(),opened=[];
   const props={context:c,active:true,libraryTitle:"Selected",ensureLocal(){},isCurrent:()=>true,onOpen:e=>opened.push(e)};
@@ -208,7 +221,7 @@ test("player visits preserve Explore as the return section without replacing its
   let visit=visitPlayerTarget(null,localTarget,"explore");s.syncContext(c,false);
   visit=visitPlayerTarget(visit,plexTarget,"plex");assert.equal(visit.returnSection,"explore");
   s.syncContext(c,true);assert.deepEqual(s.getSnapshot().selected,before);
-  assert.match(appSource,/const centralSection = playerReturnSection \?\? mediaSource/);
+  assert.match(appSource,/const centralSection = playerReturnSection \?\? \(mediaSource === "equalizer" \? eqReturnSectionRef.current : mediaSource\)/);
   assert.match(appSource,/else if \(playerTarget\) \{\s*closePlayerNavigation\(\);\s*\} else if \(exploreDetail\)/);
 });
 

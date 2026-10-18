@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -489,6 +489,10 @@ impl Read for MpdDeadlineReader {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct EqTransitionWatch {epoch:Arc<AtomicU64>,expected:u64}
+impl EqTransitionWatch {pub(crate) fn current(&self)->bool{self.epoch.load(Ordering::Acquire)==self.expected}}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeviceSwitchSnapshot {
     pub queue_index: usize,
@@ -763,6 +767,7 @@ pub struct AudioEngine {
     queue_coherent: bool,
     cache_persistence_pending: bool,
     playback_intent: u64,
+    eq_intervention:Arc<AtomicU64>,
 }
 
 const QUEUE_STRUCTURE_RESERVED: u8 = 1;
@@ -1968,6 +1973,15 @@ impl AudioEngine {
         Self::send_command_to_socket(socket_path, "update").map(|_| ())
     }
 
+    /// Filesystem evidence proves content may have changed even within MPD's
+    /// one-second mtime precision. Force only the validated relative subtree.
+    pub(crate) fn rescan_library_path(socket_path: &str, relative_uri: &str) -> Result<u64, String> {
+        if !crate::local_media::is_safe_relative_mpd_uri(relative_uri) { return Err("LOCAL_RESCAN_INVALID_PATH".into()); }
+        let quoted = Self::quote_mpd_argument(relative_uri)?;
+        let lines = Self::send_command_to_socket(socket_path, &format!("rescan {quoted}"))?;
+        Self::parse_mpd_update_job_id(&lines).map_err(|_| "LOCAL_RESCAN_INVALID_RESPONSE".into())
+    }
+
     pub fn update_library_path(
         socket_path: &str,
         relative_uri: &str,
@@ -2057,6 +2071,7 @@ impl AudioEngine {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn wait_for_mpd_idle(
         socket_path: &str,
         timeout: Duration,
@@ -2072,7 +2087,23 @@ impl AudioEngine {
         socket_path: &str,
         expected_job_id: Option<u64>,
         poll_interval: Duration,
+        shutdown_requested: impl FnMut() -> bool,
+    ) -> Result<MpdRefreshCompletion, ()> {
+        Self::wait_for_managed_mpd_update_with(
+            expected_job_id,
+            poll_interval,
+            shutdown_requested,
+            || Self::active_mpd_update_job(socket_path),
+            std::thread::sleep,
+        )
+    }
+
+    fn wait_for_managed_mpd_update_with(
+        expected_job_id: Option<u64>,
+        poll_interval: Duration,
         mut shutdown_requested: impl FnMut() -> bool,
+        mut query: impl FnMut() -> Result<Option<u64>, MpdStatusQueryError>,
+        mut sleep: impl FnMut(Duration),
     ) -> Result<MpdRefreshCompletion, ()> {
         if expected_job_id == Some(0) || poll_interval.is_zero() {
             return Ok(MpdRefreshCompletion::ProtocolError(
@@ -2084,7 +2115,11 @@ impl AudioEngine {
             if shutdown_requested() {
                 return Err(());
             }
-            match Self::active_mpd_update_job(socket_path) {
+            let status = query();
+            if shutdown_requested() {
+                return Err(());
+            }
+            match status {
                 Ok(Some(active))
                     if expected_job_id.is_none() || expected_job_id == Some(active) => {}
                 Ok(_) => return Ok(MpdRefreshCompletion::Completed),
@@ -2098,7 +2133,7 @@ impl AudioEngine {
                     return Ok(MpdRefreshCompletion::ProtocolError(message))
                 }
             }
-            std::thread::sleep(poll_interval);
+            sleep(poll_interval);
         }
     }
 
@@ -2769,7 +2804,7 @@ impl AudioEngine {
             restored_resume,
             startup_restore,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -2777,6 +2812,115 @@ impl AudioEngine {
         if self.queue_coherent { Ok(()) } else { Err("PLAYBACK_QUEUE_UNCERTAIN".into()) }
     }
 
+    pub(crate) fn watch_eq_transition(&self) -> EqTransitionWatch {
+        EqTransitionWatch {
+            epoch: self.eq_intervention.clone(),
+            expected: self.eq_intervention.load(Ordering::Acquire),
+        }
+    }
+    pub(crate) fn note_eq_intervention(&self) {
+        self.eq_intervention.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// EQ-only restoration: select paused in the command batch, then seek;
+    /// unrelated output switches retain their accepted paused contract.
+    pub(crate) fn restore_eq_switch(
+        &mut self,
+        saved: Option<DeviceSwitchSnapshot>,
+        resolved: &ResolvedDeviceSwitchQueue,
+    ) -> Result<DeviceSwitchRestoreOutcome, String> {
+        if saved.is_some_and(|s| !s.elapsed.is_finite() || s.elapsed < 0.) {
+            return Err("EQ_RESUME_INVALID_POSITION".into());
+        }
+        self.validate_device_switch_queue(resolved)?;
+        let mut batch =
+            self.device_switch_queue_restore_commands(saved, &resolved.playback_uris)?;
+        if saved.is_some_and(|s| s.state != PlaybackState::Stopped) {
+            batch = batch.replace("command_list_end", "pause 1\ncommand_list_end");
+        }
+        if self.send_command(&batch).is_err(){
+            self.mark_queue_uncertain();return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+        }
+        if let Some(s) = saved {
+            if s.state != PlaybackState::Stopped && s.elapsed > 0.0 {
+                return Self::restore_position(
+                    s.elapsed,
+                    &mut |cmd| self.send_command(cmd),
+                    &mut std::thread::sleep,
+                );
+            }
+        }
+        Ok(DeviceSwitchRestoreOutcome::Complete)
+    }
+    /// Linearized with human transport by AudioState's mutex. Recheck the watch
+    /// AFTER observation I/O, immediately before the single resume effect.
+    pub(crate) fn resume_eq_switch(
+        &mut self,
+        saved: Option<DeviceSwitchSnapshot>,
+        resolved: &ResolvedDeviceSwitchQueue,
+        watch: &EqTransitionWatch,
+    ) -> Result<&'static str, String> {
+        let Some(s) = saved else { return Ok("stopped") };
+        if s.state != PlaybackState::Playing {
+            return Ok(if s.state == PlaybackState::Stopped {
+                "stopped"
+            } else {
+                "paused"
+            });
+        }
+        if !watch.current() {
+            return Ok("superseded");
+        }
+        if saved.is_some_and(|s| !s.elapsed.is_finite() || s.elapsed < 0.) {
+            return Err("EQ_RESUME_INVALID_POSITION".into());
+        }
+        self.validate_device_switch_queue(resolved)?;
+        let before = Self::parse_mpd_queue_status(&self.send_command("status")?)?;
+        if before.state != PlaybackState::Paused
+            || before.current_index != Some(s.queue_index)
+            || !before.elapsed.is_finite()
+            || (before.elapsed - s.elapsed).abs() > 0.25
+        {
+            return Err("EQ_RESUME_CONTEXT_CHANGED".into());
+        }
+        let structure = Self::capture_mpd_queue_structure(&self.socket_path)
+            .map_err(|_| "EQ_RESUME_QUEUE_UNCONFIRMED")?;
+        if structure.entries.len() != resolved.playback_uris.len()
+            || !structure
+                .entries
+                .iter()
+                .zip(&resolved.playback_uris)
+                .all(|(a, b)| &a.uri == b)
+        {
+            self.mark_queue_uncertain();
+            return Err("EQ_RESUME_QUEUE_CHANGED".into());
+        }
+        if !watch.current() {
+            return Ok("superseded");
+        }
+        if self.send_command("pause 0").is_err() {
+            let _ = self.send_command("pause 1");
+            return Err("EQ_RESUME_UNCONFIRMED".into());
+        }
+        let after = match self
+            .send_command("status")
+            .and_then(|v| Self::parse_mpd_queue_status(&v))
+        {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = self.send_command("pause 1");
+                return Err("EQ_RESUME_UNCONFIRMED".into());
+            }
+        };
+        if after.state != PlaybackState::Playing
+            || after.current_index != Some(s.queue_index)
+            || after.playlist_version != structure.playlist_version
+        {
+            let _ = self.send_command("pause 1");
+            return Err("EQ_RESUME_UNCONFIRMED".into());
+        }
+        Ok("resumed")
+    }
     pub(crate) fn invalidate_playback_intents(&mut self) {
         self.playback_intent = self.playback_intent.saturating_add(1);
     }
@@ -3685,6 +3829,7 @@ impl AudioEngine {
     }
 
     pub fn play_tracks(&mut self, tracks: Vec<TrackMetadata>, playback_uris: Vec<String>, start_index: usize) -> Result<(), String> {
+        self.note_eq_intervention();
         let socket = self.socket_path.clone();
         self.play_tracks_with_io(tracks, playback_uris, start_index,
             |command| Self::send_command_to_socket(&socket, command), |audio| audio.save_queue_cache())
@@ -3807,6 +3952,7 @@ impl AudioEngine {
     }
 
     pub fn play(&mut self, is_shared: bool) -> Result<(), String> {
+        self.note_eq_intervention();
         self.invalidate_playback_intents();
         self.ensure_startup_queue_ready()?;
         if self.restored_resume.is_some() {
@@ -3821,6 +3967,7 @@ impl AudioEngine {
     }
 
     pub fn pause(&mut self) -> Result<(), String> {
+        self.note_eq_intervention();
         self.invalidate_playback_intents();
         if !self.queue_coherent { return self.send_command("pause 1").map(|_| ()); }
         self.ensure_startup_queue_ready()?;
@@ -3836,6 +3983,7 @@ impl AudioEngine {
     }
 
     pub fn toggle_play_pause(&mut self, is_shared: bool) -> Result<(), String> {
+        self.note_eq_intervention();
         self.invalidate_playback_intents();
         if !self.queue_coherent {
             return if self.playback_state()? == PlaybackState::Playing {
@@ -3934,6 +4082,7 @@ impl AudioEngine {
     }
 
     pub fn next(&mut self, is_shared: bool) -> Result<(), String> {
+        self.note_eq_intervention();
         self.invalidate_playback_intents();
         let socket_path = self.socket_path.clone();
         let mut send_command = |command: &str| Self::send_command_to_socket(&socket_path, command);
@@ -3946,6 +4095,7 @@ impl AudioEngine {
     }
 
     pub fn previous(&mut self, is_shared: bool) -> Result<(), String> {
+        self.note_eq_intervention();
         self.invalidate_playback_intents();
         let socket_path = self.socket_path.clone();
         let mut send_command = |command: &str| Self::send_command_to_socket(&socket_path, command);
@@ -4219,6 +4369,7 @@ impl AudioEngine {
     }
 
     pub fn seek(&mut self, seconds: f64, is_shared: bool) -> Result<(), String> {
+        self.note_eq_intervention();
         let socket_path = self.socket_path.clone();
         let started = Instant::now();
         let deadline = std::cell::Cell::new(None::<Instant>);
@@ -4249,6 +4400,7 @@ impl AudioEngine {
     }
 
     pub fn play_index(&mut self, index: usize, is_shared: bool) -> Result<(), String> {
+        self.note_eq_intervention();
         self.ensure_startup_queue_ready()?;
         if index >= self.queue.len() {
             return Err(format!(
@@ -4263,6 +4415,7 @@ impl AudioEngine {
     }
 
     pub fn clear_queue(&mut self) -> Result<(), String> {
+        self.note_eq_intervention();
         self.ensure_queue_structure_available()?;
         if self.send_command("clear").is_err() {
             self.mark_queue_uncertain();
@@ -6995,7 +7148,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
         };
 
         assert_eq!(
@@ -7255,7 +7408,7 @@ mod tests {
                 restored_resume: None,
                 startup_restore: StartupQueueRestore::Ready,
                 queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
             };
             if command == "update" {
                 AudioEngine::update_library(&audio.socket_path).unwrap();
@@ -7273,7 +7426,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
         };
         assert!(AudioEngine::update_library(&audio.socket_path).is_err());
         server.join().unwrap();
@@ -8298,7 +8451,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -10541,7 +10694,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
         };
 
         assert_eq!(
@@ -10591,7 +10744,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
         };
         let status = PlaybackStatus {
             snapshot_consistent: true,
@@ -10632,7 +10785,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
         };
 
         assert!(matches!(
@@ -10695,6 +10848,39 @@ mod tests {
         );
         assert!(!json.contains("X-Plex-Token"));
         assert!(!json.contains("SECRET"));
+    }
+
+    #[test]
+    fn eq_restore_partial_batch_marks_actual_queue_uncertain_without_resume(){
+        let (path,server)=fake_album_mpd(vec![("command_list_begin","ACK [50@1] {add} fixture refused\n")]);let mut e=engine_with_track("fixture.wav");e.socket_path=path;let r=e.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into()]).unwrap();assert!(e.restore_eq_switch(Some(DeviceSwitchSnapshot{queue_index:0,elapsed:17.,state:PlaybackState::Playing}),&r).is_err());assert!(e.ensure_queue_coherent().is_err());server.join().unwrap();
+    }
+
+    #[test]
+    fn eq_resume_actual_caller_requires_confirmed_cursor_queue_and_playing_origin(){
+        let pause="playlist: 9\nplaylistlength: 1\nsong: 0\nelapsed: 17.000\nstate: pause\nOK\n";
+        let play="playlist: 9\nplaylistlength: 1\nsong: 0\nelapsed: 17.001\nstate: play\nOK\n";
+        let (path,server)=fake_album_mpd(vec![("status",pause),("status",pause),("playlistinfo","file: fixture.wav\nPos: 0\nId: 7\nOK\n"),("status",pause),("pause 0","OK\n"),("status",play)]);
+        let mut engine=engine_with_track("fixture.wav");engine.socket_path=path;
+        let resolved=engine.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into()]).unwrap();
+        let watch=engine.watch_eq_transition();let saved=Some(DeviceSwitchSnapshot{queue_index:0,elapsed:17.,state:PlaybackState::Playing});
+        assert_eq!(engine.resume_eq_switch(saved,&resolved,&watch).unwrap(),"resumed");server.join().unwrap();
+        for origin in [PlaybackState::Paused,PlaybackState::Stopped]{let mut e=engine_with_track("fixture.wav");let r=e.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into()]).unwrap();let w=e.watch_eq_transition();assert_eq!(e.resume_eq_switch(Some(DeviceSwitchSnapshot{queue_index:0,elapsed:17.,state:origin}),&r,&w).unwrap(),if origin==PlaybackState::Paused{"paused"}else{"stopped"});}
+    }
+    #[test]
+    fn eq_resume_human_transport_callers_revoke_even_if_transport_refused(){
+        for action in 0..8{let mut e=engine_with_track("fixture.wav");let r=e.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into()]).unwrap();let w=e.watch_eq_transition();
+            let _=match action{0=>e.pause(),1=>e.seek(1.,true),2=>e.next(true),3=>e.previous(true),4=>e.play(true),5=>e.toggle_play_pause(true),6=>e.play_index(0,true),_=>e.clear_queue()};
+            assert!(!w.current(),"action {action}");assert_eq!(e.resume_eq_switch(Some(DeviceSwitchSnapshot{queue_index:0,elapsed:17.,state:PlaybackState::Playing}),&r,&w).unwrap(),"superseded");
+        }
+    }
+    #[test]
+    fn eq_resume_uncertain_or_changed_queue_never_reads_or_plays(){
+        for uncertain in [false,true]{let mut e=engine_with_track("fixture.wav");let r=e.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into()]).unwrap();let w=e.watch_eq_transition();if uncertain{e.mark_queue_uncertain()}else{e.queue[0].uri="other.wav".into()}
+            assert!(e.resume_eq_switch(Some(DeviceSwitchSnapshot{queue_index:0,elapsed:17.,state:PlaybackState::Playing}),&r,&w).is_err());}
+    }
+    #[test]
+    fn eq_resume_position_change_refuses_before_pause_zero(){
+        let (path,server)=fake_album_mpd(vec![("status","playlist: 9\nplaylistlength: 1\nsong: 0\nelapsed: 40\nstate: pause\nOK\n")]);let mut e=engine_with_track("fixture.wav");e.socket_path=path;let r=e.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into()]).unwrap();assert_eq!(e.resume_eq_switch(Some(DeviceSwitchSnapshot{queue_index:0,elapsed:17.,state:PlaybackState::Playing}),&r,&e.watch_eq_transition()).unwrap_err(),"EQ_RESUME_CONTEXT_CHANGED");server.join().unwrap();
     }
 
     #[test]
@@ -11127,7 +11313,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
         };
         let first = engine
             .device_switch_queue_restore_commands(
@@ -11423,7 +11609,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0,
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
         };
         assert!(engine.restore_after_device_switch(None, &[]).is_ok());
     }
@@ -11561,6 +11747,53 @@ mod tests {
         assert_eq!(json["tag_presence"], serde_json::json!({"evaluated_track_count":1,"missing":{"album":1,"artist":1,"album_artist":1,"date":1,"genre":1}}));
         let roundtrip: LocalAlbum = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip.tag_presence, albums[0].tag_presence);
+    }
+
+    #[test]
+    fn managed_pending_wait_crosses_virtual_hours_and_cancels_after_bounded_io() {
+        use std::cell::Cell;
+        let clock = Cell::new(Duration::ZERO);
+        let reads = Cell::new(0);
+        let result = AudioEngine::wait_for_managed_mpd_update_with(
+            Some(42),
+            Duration::from_millis(100),
+            || false,
+            || {
+                reads.set(reads.get() + 1);
+                clock.set(clock.get() + Duration::from_secs(3600));
+                Ok(if reads.get() < 4 { Some(42) } else { None })
+            },
+            |delay| clock.set(clock.get() + delay),
+        );
+        assert_eq!(result, Ok(MpdRefreshCompletion::Completed));
+        assert_eq!(reads.get(), 4);
+        assert!(clock.get() > Duration::from_secs(14400));
+        for cancelled in [false, true] {
+            let closing = Cell::new(false);
+            let reads = Cell::new(0);
+            let result = AudioEngine::wait_for_managed_mpd_update_with(
+                Some(42),
+                Duration::from_millis(100),
+                || closing.get(),
+                || {
+                    reads.set(reads.get() + 1);
+                    closing.set(cancelled);
+                    Err(MpdStatusQueryError::Transport(
+                        "injected bounded I/O error".into(),
+                    ))
+                },
+                |_| panic!("no sleep after cancellation/error"),
+            );
+            assert_eq!(reads.get(), 1);
+            if cancelled {
+                assert_eq!(result, Err(()));
+            } else {
+                assert!(matches!(
+                    result,
+                    Ok(MpdRefreshCompletion::TransportError(_))
+                ));
+            }
+        }
     }
 
 }
