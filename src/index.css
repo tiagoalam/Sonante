@@ -13,7 +13,7 @@
 body {
   margin: 0;
   background-color: var(--color-plex-dark);
-  color: #E0E0E0;
+  color: var(--theme-fg-primary, #E0E0E0);
   font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   overflow: hidden;
   user-select: none;
@@ -34,19 +34,95 @@ body {
   height: 0;
 }
 
-/* Força fundo escuro e texto claro em todos os menus dropdown nativos */
-select {
-  color-scheme: dark;
-  background-color: #1e1e1e !important;
-  color: #ffffff !important;
+/* Semantic light palette. Dark uses each existing color as its CSS fallback,
+   preserving the accepted dark appearance rather than flattening its shades.
+   Artwork/colored cards and technical instruments opt into contrast islands. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-plex-dark: #f3f5f8;
+  --color-plex-surface: #ffffff;
+  --color-plex-card: #edf1f6;
+  --color-plex-hover: #e3e9f1;
+  --color-plex-muted: #606b79;
+  --theme-surface-base: #f3f5f8;
+  --theme-surface-panel: #ffffff;
+  --theme-surface-raised: #eaf0f6;
+  --theme-surface-hover: #dde5ef;
+  --theme-surface-subtle: #e6ecf3;
+  --theme-surface-accent: #fff0cd;
+  --theme-surface-warning: #fff0d8;
+  --theme-surface-error: #fce8e8;
+  --theme-surface-success: #e6f4eb;
+  --theme-surface-info: #e5effb;
+  --theme-surface-purple: #efe8fa;
+  --theme-surface-pink: #f9e7f0;
+  --theme-fg-primary: #1d2734;
+  --theme-fg-secondary: #445163;
+  --theme-fg-muted: #596675;
+  --theme-fg-faint: #596675;
+  --theme-fg-accent: #815400;
+  --theme-fg-warning: #805000;
+  --theme-fg-error: #a7232d;
+  --theme-fg-success: #1b653e;
+  --theme-fg-info: #1c577f;
+  --theme-fg-purple: #683d96;
+  --theme-fg-pink: #922c60;
+  --theme-border-soft: #a5b1c0;
+  --theme-border-accent: #946200;
+  --theme-border-warning: #a56a19;
+  --theme-border-error: #b8464f;
+  --theme-border-success: #448160;
+  --theme-border-info: #447ca4;
+  --theme-border-purple: #8c6cb0;
+  --theme-border-pink: #ad5983;
+  --theme-control-accent: #946200;
+  --theme-band-1: #3955a0; --theme-band-2: #176e64;
+  --theme-band-3: #805800; --theme-band-4: #9d385d;
+  --theme-band-5: #416b20; --theme-band-6: #365d86;
+  --theme-band-7: #6b4596; --theme-band-8: #216476;
+  --theme-band-9: #86513a; --theme-band-10: #6c621b;
+  --theme-play-bg: #1d2734;
+  --theme-play-fg: #ffffff;
+  --theme-np-shade-start: #ffffffb8;
+  --theme-np-shade-end: #f3f5f8eb;
+  --theme-scroll-thumb: #a5b1c0;
 }
 
-select option {
-  background-color: #1e1e1e !important;
-  color: #ffffff !important;
+:root[data-theme="light"] :is([data-theme-surface="contrast"], [data-theme-surface="instrument"]) {
+  color-scheme: dark;
+  color: #e0e0e0;
+  --theme-surface-base: initial; --theme-surface-panel: initial;
+  --theme-surface-raised: initial; --theme-surface-hover: initial;
+  --theme-surface-subtle: initial; --theme-surface-accent: initial;
+  --theme-surface-warning: initial; --theme-surface-error: initial;
+  --theme-surface-success: initial; --theme-surface-info: initial;
+  --theme-surface-purple: initial; --theme-surface-pink: initial;
+  --theme-fg-primary: initial; --theme-fg-secondary: initial;
+  --theme-fg-muted: initial; --theme-fg-faint: initial;
+  --theme-fg-accent: initial; --theme-fg-warning: initial;
+  --theme-fg-error: initial; --theme-fg-success: initial;
+  --theme-fg-info: initial; --theme-fg-purple: initial; --theme-fg-pink: initial;
+  --theme-border-soft: initial; --theme-border-accent: initial;
+  --theme-border-warning: initial; --theme-border-error: initial;
+  --theme-border-success: initial; --theme-border-info: initial;
+  --theme-border-purple: initial; --theme-border-pink: initial;
+  --theme-control-accent: initial;
+}
+
+/* Native controls inherit the active palette, including dialogs and optgroups. */
+select {
+  background-color: var(--theme-surface-panel, #1e1e1e) !important;
+  color: var(--theme-fg-primary, #ffffff) !important;
+}
+
+select option, select optgroup {
+  background-color: var(--theme-surface-panel, #1e1e1e) !important;
+  color: var(--theme-fg-primary, #ffffff) !important;
 }
 
 select option:checked {
-  background-color: #332b15 !important;
-  color: #e5a00d !important;
+  background-color: var(--theme-surface-accent, #332b15) !important;
+  color: var(--theme-fg-accent, #e5a00d) !important;
 }
+
+:root[data-theme="light"] { scrollbar-color: var(--theme-scroll-thumb) transparent; }

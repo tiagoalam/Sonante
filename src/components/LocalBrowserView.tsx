@@ -155,7 +155,7 @@ const LocalAlbumCard: React.FC<{
 
   return (
     <div ref={cardRef} onClick={onClick} className="group flex flex-col cursor-pointer relative">
-      <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
+      <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md">
         {cover ? (
           <img
             src={cover}
@@ -168,18 +168,18 @@ const LocalAlbumCard: React.FC<{
         )}
 
 
-        <button
+        <button data-theme-surface="contrast"
           onClick={(e) => onToggleFavorite(e, album, cover)}
           className={`absolute top-2 right-2 p-1.5 rounded-full backdrop-blur-xs transition-transform active:scale-90 cursor-pointer shadow z-10 ${
             isFavorite
-              ? "bg-black/60 text-[#E5A00D]"
-              : "bg-black/40 text-white/70 hover:text-white opacity-0 group-hover:opacity-100"
+              ? "bg-black/60 text-[color:var(--theme-fg-accent,#E5A00D)]"
+              : "bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.4))] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.7))] hover:text-[color:var(--theme-fg-primary,#ffffff)] opacity-0 group-hover:opacity-100"
           }`}
         >
           <Heart size={14} fill={isFavorite ? "#E5A00D" : "none"} />
         </button>
 
-        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+        <div data-theme-surface="contrast" className="absolute inset-0 bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.4))] opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
           <button
             onClick={onPlayQuick}
             disabled={!isPlaybackAvailable}
@@ -190,13 +190,13 @@ const LocalAlbumCard: React.FC<{
         </div>
       </div>
 
-      <span className="text-sm font-semibold text-white truncate" title={album.title}>
+      <span className="text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)] truncate" title={album.title}>
         {album.title}
       </span>
-      <span className="text-xs text-[#999999] truncate mt-0.5" title={album.artist}>
+      <span className="text-xs text-[color:var(--theme-fg-secondary,#999999)] truncate mt-0.5" title={album.artist}>
         {album.artist}
       </span>
-      <span className="text-[11px] text-[#666666] mt-0.5">
+      <span className="text-[11px] text-[color:var(--theme-fg-muted,#666666)] mt-0.5">
         {album.year ? `${album.year} • ` : ""}
         {t("localBrowser.trackCount", { count: album.track_count })}
       </span>
@@ -780,11 +780,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   };
 
   return (
-    <main className="flex-1 flex flex-col overflow-hidden bg-[#121212] select-none">
-      {detailUnavailable && <div role="status" className="space-y-3 p-6 text-sm text-[#BBBBBB]">
+    <main className="flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)] select-none">
+      {detailUnavailable && <div role="status" className="space-y-3 p-6 text-sm text-[color:var(--theme-fg-secondary,#BBBBBB)]">
         <p>{t("explore.detailUnavailable")}</p>
         <button type="button" disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)}
-          onClick={() => onAlbumNavigationBack?.()} className="rounded px-2 py-1 focus-visible:ring-1 focus-visible:ring-[#E5A00D]">{t("explore.back")}</button>
+          onClick={() => onAlbumNavigationBack?.()} className="rounded px-2 py-1 focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]">{t("explore.back")}</button>
       </div>}
       <div className={metadataMode && !detailUnavailable ? "contents" : "hidden"}>
         <LocalMetadataView catalog={catalog} updating={isLibraryUpdating} selectedAlbumId={metadataAlbumId}
@@ -798,7 +798,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           {showContextBack && (
             <button
               onClick={handleContextBack}
-              className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
+              className="p-1.5 rounded-lg bg-[var(--theme-surface-raised,#1E1E1E)] border border-[color:var(--theme-border-soft,#333333)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer mr-1"
               title={t("localBrowser.back")}
             >
               <ArrowLeft size={16} />
@@ -806,11 +806,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           )}
 
           <div>
-            <h2 className="text-2xl font-bold text-white tracking-tight">{headerTitle}</h2>
-            <p className="text-xs text-[#888888] mt-0.5">{headerCount}</p>
+            <h2 className="text-2xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight">{headerTitle}</h2>
+            <p className="text-xs text-[color:var(--theme-fg-muted,#888888)] mt-0.5">{headerCount}</p>
             {viewMode === "albums" && artworkStatus.onlineActivity && (
-              <div className="text-[11px] text-[#777777] mt-1 flex flex-wrap items-center gap-x-2">
-                <span className="text-[#E5A00D] flex items-center gap-1 max-w-72 truncate" title={artworkStatus.onlineActivity.title}>
+              <div className="text-[11px] text-[color:var(--theme-fg-muted,#777777)] mt-1 flex flex-wrap items-center gap-x-2">
+                <span className="text-[color:var(--theme-fg-accent,#E5A00D)] flex items-center gap-1 max-w-72 truncate" title={artworkStatus.onlineActivity.title}>
                   {artworkStatus.onlineActivity.kind === "searching" && <Disc3 size={11} className="animate-spin" />}
                   {t(artworkStatus.onlineActivity.kind === "searching" ? "artwork.searchingOnline" : "artwork.foundOnline", { title: artworkStatus.onlineActivity.title })}
                 </span>
@@ -821,7 +821,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       </div>
 
       {!selectedAlbum && !selectedArtist && (
-        <div className="flex flex-wrap gap-1 border-b border-[#222222] px-8 pb-3">
+        <div className="flex flex-wrap gap-1 border-b border-[color:var(--theme-border-soft,#222222)] px-8 pb-3">
           {([
             ["albums", Grid, t("localBrowser.tabAlbums")],
             ["artists", Users, t("localBrowser.tabArtists")],
@@ -834,7 +834,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               type="button"
               onClick={() => selectViewMode(mode)}
               className={`flex items-center space-x-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
-                viewMode === mode ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                viewMode === mode ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
               }`}
             >
               <Icon size={14} />
@@ -845,11 +845,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       )}
 
       {!selectedAlbum && viewMode !== "folders" && (
-        <div className="flex flex-wrap items-center gap-3 border-b border-[#222222] px-8 py-3">
-          {libraryPresentation.mode !== "empty" && <div className="flex items-center gap-2 text-xs text-[#888888]">
+        <div className="flex flex-wrap items-center gap-3 border-b border-[color:var(--theme-border-soft,#222222)] px-8 py-3">
+          {libraryPresentation.mode !== "empty" && <div className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
             <span>{t("localBrowser.libraryScope")}</span>
             {libraryPresentation.mode === "single" ? (
-              <span className="max-w-44 truncate text-white" title={libraryPresentation.label}>{libraryPresentation.label}</span>
+              <span className="max-w-44 truncate text-[color:var(--theme-fg-primary,#ffffff)]" title={libraryPresentation.label}>{libraryPresentation.label}</span>
             ) : <ToolbarSelect
               value={activeSourceId ?? ""}
               options={librarySelectOptions}
@@ -861,10 +861,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           {(viewMode === "albums" || (viewMode === "genres" && activeGenre !== null)) && (
             <>
               <div className="relative flex w-64 max-w-full items-center">
-                <Search size={14} className="absolute left-3 text-[#666666]" />
-                <input type="text" value={albumSearch} onChange={(event) => setAlbumSearch(event.target.value)} placeholder={t("localBrowser.filterPlaceholder")} className="w-full rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] py-1.5 pl-9 pr-3 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D]" />
+                <Search size={14} className="absolute left-3 text-[color:var(--theme-fg-muted,#666666)]" />
+                <input type="text" value={albumSearch} onChange={(event) => setAlbumSearch(event.target.value)} placeholder={t("localBrowser.filterPlaceholder")} className="w-full rounded-lg border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#1A1A1A)] py-1.5 pl-9 pr-3 text-xs text-[color:var(--theme-fg-primary,#ffffff)] placeholder-[color:var(--theme-fg-muted,#666666)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)]" />
               </div>
-              <div className="flex items-center gap-2 text-xs text-[#888888]">
+              <div className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                 <span>{t("localBrowser.sortLabel")}</span>
                 <ToolbarSelect
                   value={albumSortMode}
@@ -879,10 +879,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           {viewMode === "artists" && !selectedArtist && (
             <>
               <div className="relative flex w-64 max-w-full items-center">
-                <Search size={14} className="absolute left-3 text-[#666666]" />
-                <input type="text" value={artistSearch} onChange={(event) => setArtistSearch(event.target.value)} placeholder={t("localBrowser.artistSearchPlaceholder")} className="w-full rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] py-1.5 pl-9 pr-3 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D]" />
+                <Search size={14} className="absolute left-3 text-[color:var(--theme-fg-muted,#666666)]" />
+                <input type="text" value={artistSearch} onChange={(event) => setArtistSearch(event.target.value)} placeholder={t("localBrowser.artistSearchPlaceholder")} className="w-full rounded-lg border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#1A1A1A)] py-1.5 pl-9 pr-3 text-xs text-[color:var(--theme-fg-primary,#ffffff)] placeholder-[color:var(--theme-fg-muted,#666666)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)]" />
               </div>
-              <div className="flex items-center gap-2 text-xs text-[#888888]">
+              <div className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                 <span>{t("localBrowser.sortLabel")}</span>
                 <ToolbarSelect
                   value={artistSortMode}
@@ -900,7 +900,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       {!selectedAlbum && !selectedArtist && viewMode === "albums" && isTextLocalAlbumSort(albumSortMode) && (
         <nav
           aria-label={t("localBrowser.albumIndex")}
-          className="flex flex-wrap items-center gap-1 border-b border-[#222222] px-8 py-2"
+          className="flex flex-wrap items-center gap-1 border-b border-[color:var(--theme-border-soft,#222222)] px-8 py-2"
         >
           {LOCAL_ALBUM_INDEX_BUCKETS.map((bucket) => {
             const index = albumBucketIndices.get(bucket);
@@ -916,7 +916,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 onClick={() => {
                   if (index !== undefined) albumGridRef.current?.scrollToIndex(index);
                 }}
-                className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[#999999] transition-colors hover:bg-[#282828] hover:text-[#E5A00D] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:cursor-default disabled:text-[#444444] disabled:hover:bg-transparent"
+                className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[color:var(--theme-fg-secondary,#999999)] transition-colors hover:bg-[var(--theme-surface-hover,#282828)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:cursor-default disabled:text-[color:var(--theme-fg-faint,#444444)] disabled:hover:bg-transparent"
               >
                 {bucket}
               </button>
@@ -925,12 +925,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         </nav>
       )}
       {!selectedAlbum && !selectedArtist && viewMode === "artists" && (
-        <nav aria-label={t("localBrowser.artistIndex")} className="flex flex-wrap items-center gap-1 border-b border-[#222222] px-8 py-2">
+        <nav aria-label={t("localBrowser.artistIndex")} className="flex flex-wrap items-center gap-1 border-b border-[color:var(--theme-border-soft,#222222)] px-8 py-2">
           {LOCAL_ALBUM_INDEX_BUCKETS.map((bucket) => {
             const index = artistBucketIndices.get(bucket);
             const label = t("localBrowser.jumpToArtistBucket", { bucket });
             return (
-              <button key={bucket} type="button" disabled={index === undefined} title={label} aria-label={label} onClick={() => index !== undefined && artistListRef.current?.scrollToIndex(index)} className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[#999999] transition-colors hover:bg-[#282828] hover:text-[#E5A00D] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:cursor-default disabled:text-[#444444] disabled:hover:bg-transparent">
+              <button key={bucket} type="button" disabled={index === undefined} title={label} aria-label={label} onClick={() => index !== undefined && artistListRef.current?.scrollToIndex(index)} className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[color:var(--theme-fg-secondary,#999999)] transition-colors hover:bg-[var(--theme-surface-hover,#282828)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:cursor-default disabled:text-[color:var(--theme-fg-faint,#444444)] disabled:hover:bg-transparent">
                 {bucket}
               </button>
             );
@@ -939,18 +939,18 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       )}
 
       {catalogActivity && (
-        <div className="px-8 py-2 text-xs text-[#E5A00D] flex items-center gap-2 border-b border-[#222222]">
+        <div className="px-8 py-2 text-xs text-[color:var(--theme-fg-accent,#E5A00D)] flex items-center gap-2 border-b border-[color:var(--theme-border-soft,#222222)]">
           <Disc3 size={14} className="animate-spin" />
           <span>{t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}</span>
         </div>
       )}
       {playbackFailure && (
-        <div role="alert" className="px-8 py-2 text-xs text-red-400 border-b border-[#222222]">
+        <div role="alert" className="px-8 py-2 text-xs text-[color:var(--theme-fg-error,var(--color-red-400))] border-b border-[color:var(--theme-border-soft,#222222)]">
           {t(`player.requestError.${playbackFailure}`)}
         </div>
       )}
       {catalog.error && (
-        <div role="alert" className="px-8 py-2 text-xs text-red-400 border-b border-[#222222]">
+        <div role="alert" className="px-8 py-2 text-xs text-[color:var(--theme-fg-error,var(--color-red-400))] border-b border-[color:var(--theme-border-soft,#222222)]">
           {catalog.error}
         </div>
       )}
@@ -958,7 +958,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         {selectedAlbum ? (
           <div className="space-y-8 animate-in fade-in duration-100">
             <div className="flex items-end space-x-6">
-              <div className="w-52 h-52 rounded-xl bg-[#202020] border border-[#2B2B2B] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
+              <div className="w-52 h-52 rounded-xl bg-[var(--theme-surface-raised,#202020)] border border-[color:var(--theme-border-soft,#2B2B2B)] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
                 {albumCover ? (
                   <img src={albumCover} alt={selectedAlbum.title} className="w-full h-full object-cover" />
                 ) : (
@@ -967,11 +967,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               </div>
 
               <div className="space-y-3">
-                <span className="text-xs font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1">
+                <span className="text-xs font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider flex items-center space-x-1">
                   <Sparkles size={13} />
                   <span>{t("localBrowser.albumsTitle")}</span>
                 </span>
-                <h1 className="text-3xl font-black text-white">{selectedAlbum.title}</h1>
+                <h1 className="text-3xl font-black text-[color:var(--theme-fg-primary,#ffffff)]">{selectedAlbum.title}</h1>
                 <button
                   type="button"
                   onClick={() => {
@@ -983,21 +983,21 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     setSelectedYear(null);
                     setUnknownYearSelected(false);
                   }}
-                  className="text-base text-[#CCCCCC] hover:text-[#E5A00D] font-medium transition-colors cursor-pointer text-left block"
+                  className="text-base text-[color:var(--theme-fg-secondary,#CCCCCC)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] font-medium transition-colors cursor-pointer text-left block"
                   title={t("localBrowser.viewDiscography")}
                 >
                   {selectedAlbum.artist}
                 </button>
-                <p className="text-xs text-[#777777]">
+                <p className="text-xs text-[color:var(--theme-fg-muted,#777777)]">
                   {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
                   {t("localBrowser.trackCount", { count: tracksReady ? albumTracks.length : selectedAlbum.track_count })}
                 </p>
                 {albumLocations?.album === selectedAlbum && albumLocations.paths.length > 0 && (
-                  <div className="space-y-1 text-[11px] text-[#777777] min-w-0">
+                  <div className="space-y-1 text-[11px] text-[color:var(--theme-fg-muted,#777777)] min-w-0">
                     <p className="font-semibold">{t("localBrowser.location")}</p>
                     {albumLocations.paths.map((location, index) => (
                       <div key={`${location.absolutePath}-${index}`} className="min-w-0">
-                        {location.label && <span className="block text-[#999999]">{location.label}</span>}
+                        {location.label && <span className="block text-[color:var(--theme-fg-secondary,#999999)]">{location.label}</span>}
                         <span
                           className="block w-full max-w-xl truncate select-text cursor-text"
                           title={location.absolutePath}
@@ -1027,7 +1027,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       )
                     }
                     disabled={albumTracks.length === 0}
-                    className="flex items-center space-x-2 rounded-xl border border-[#2B2B2B] bg-[#1E1E1E] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#282828] disabled:opacity-50"
+                    className="flex items-center space-x-2 rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-raised,#1E1E1E)] px-4 py-2.5 text-xs font-bold text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-hover,#282828)] disabled:opacity-50"
                     title={t("playlists.addAlbum")}
                   >
                     <ListPlus size={16} />
@@ -1036,12 +1036,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
                   <button
                     onClick={(e) => handleToggleFavoriteLocal(e, selectedAlbum, albumCover)}
-                    className="p-2.5 rounded-xl bg-[#1E1E1E] border border-[#2B2B2B] hover:bg-[#282828] text-white transition-colors cursor-pointer"
+                    className="p-2.5 rounded-xl bg-[var(--theme-surface-raised,#1E1E1E)] border border-[color:var(--theme-border-soft,#2B2B2B)] hover:bg-[var(--theme-surface-hover,#282828)] text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer"
                     title={favoriteIds.has(selectedAlbum.folder_path) ? t("favorites.removeFavorite") : t("favorites.title")}
                   >
                     <Heart
                       size={16}
-                      className={favoriteIds.has(selectedAlbum.folder_path) ? "text-[#E5A00D]" : "text-[#888888]"}
+                      className={favoriteIds.has(selectedAlbum.folder_path) ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#888888)]"}
                       fill={favoriteIds.has(selectedAlbum.folder_path) ? "#E5A00D" : "none"}
                     />
                   </button>
@@ -1054,7 +1054,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                         onSubviewChange?.("metadata");
                       }
                     }}
-                    className="flex items-center gap-1.5 rounded px-1 py-1 text-xs text-[#999999] transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:cursor-not-allowed disabled:opacity-40"
+                    className="flex items-center gap-1.5 rounded px-1 py-1 text-xs text-[color:var(--theme-fg-secondary,#999999)] transition-colors hover:text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:cursor-not-allowed disabled:opacity-40"
                     title={t("localMetadata.review")}
                   >
                     <Pencil size={15} />
@@ -1064,13 +1064,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               </div>
             </div>
 
-            <div className="bg-[#141414] border border-[#222222] rounded-xl overflow-hidden divide-y divide-[#1D1D1D]">
+            <div className="bg-[var(--theme-surface-base,#141414)] border border-[color:var(--theme-border-soft,#222222)] rounded-xl overflow-hidden divide-y divide-[color:var(--theme-border-soft,#1D1D1D)]">
               {!tracksReady && (
-                <div role={catalogConfirmed && trackState.albumId === selectedAlbum.id && trackState.phase === "error" ? "alert" : "status"} className="px-4 py-4 text-sm text-[#CCCCCC]">
+                <div role={catalogConfirmed && trackState.albumId === selectedAlbum.id && trackState.phase === "error" ? "alert" : "status"} className="px-4 py-4 text-sm text-[color:var(--theme-fg-secondary,#CCCCCC)]">
                   {catalogConfirmed && trackState.albumId === selectedAlbum.id && trackState.phase === "error" ? trackState.error : t(catalogConfirmed && trackState.phase === "loading" ? "localBrowser.loadingTracks" : "localBrowser.waitingTracks")}
                 </div>
               )}
-              <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[#666666] uppercase tracking-wider bg-[#181818]">
+              <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[color:var(--theme-fg-muted,#666666)] uppercase tracking-wider bg-[var(--theme-surface-panel,#181818)]">
                 <span className="col-span-1 text-center">#</span>
                 <span className="col-span-8">{t("plex.tracks")}</span>
                 <span className="col-span-3 text-right flex items-center justify-end space-x-1">
@@ -1082,7 +1082,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               {albumSections.map((section) => (
                 <React.Fragment key={section.disc.folder_path}>
                   {selectedAlbum.discs.length > 1 && (
-                    <div className="px-4 py-2.5 text-xs font-bold text-[#E5A00D] bg-[#181818]">
+                    <div className="px-4 py-2.5 text-xs font-bold text-[color:var(--theme-fg-accent,#E5A00D)] bg-[var(--theme-surface-panel,#181818)]">
                       {section.disc.label}
                     </div>
                   )}
@@ -1093,23 +1093,23 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   aria-disabled={!isPlaybackAvailable}
                   className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
                     isPlaybackAvailable
-                      ? "hover:bg-[#1E1E1E] cursor-pointer"
+                      ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                       : "opacity-60 cursor-not-allowed"
                   }`}
                 >
-                  <span className="col-span-1 text-center font-mono text-[#666666] group-hover:text-[#E5A00D]">
+                  <span className="col-span-1 text-center font-mono text-[color:var(--theme-fg-muted,#666666)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
                     {idx + 1}
                   </span>
                   <div className="col-span-8 flex flex-col pr-2">
-                    <span className="font-semibold text-white group-hover:text-[#E5A00D] transition-colors truncate">
+                    <span className="font-semibold text-[color:var(--theme-fg-primary,#ffffff)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate">
                       {track.title || track.name}
                     </span>
-                    <span className="text-[11px] text-[#777777] truncate">
+                    <span className="text-[11px] text-[color:var(--theme-fg-muted,#777777)] truncate">
                       {track.artist || selectedAlbum.artist}
                     </span>
                   </div>
                   <div className="col-span-3 flex items-center justify-end gap-3">
-                    <span className="font-mono text-[#888888]">
+                    <span className="font-mono text-[color:var(--theme-fg-muted,#888888)]">
                       {formatDuration(track.duration)}
                     </span>
                     <button
@@ -1118,14 +1118,14 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                         event.stopPropagation();
                         setPlaylistItems([toPlaylistItem(track, selectedAlbum)]);
                       }}
-                      className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                      className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
                       title={t("playlists.addTrack")}
                     >
                       <ListPlus size={15} />
                     </button>
                     <button type="button" onClick={(event) => { event.stopPropagation(); setFileInfoTrack({ track: track, catalog: localAlbumCatalog.getSnapshot() }); }}
                       title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: track.title || track.name })}
-                      className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]">
+                      className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
                       <Info size={14} />
                     </button>
                     <button
@@ -1134,7 +1134,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                         event.stopPropagation();
                         setTagEditorTrack(track);
                       }}
-                      className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                      className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
                       title={t("tagEditor.edit")}
                       aria-label={t("tagEditor.editTrack", { title: track.title || track.name })}
                     >
@@ -1150,11 +1150,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         ) : selectedArtist ? (
           <div className="space-y-6 animate-in fade-in duration-100">
             {artistAlbums.length === 0 && emptyCatalogState === "indexing" ? (
-              <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+              <div className="h-60 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
                 {t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
               </div>
             ) : emptyCatalogState === "error" ? null : artistAlbums.length === 0 ? (
-              <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
+              <div className="h-60 flex flex-col items-center justify-center text-[color:var(--theme-fg-muted,#666666)] space-y-2">
                 <Disc3 size={40} className="opacity-40" />
                 <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
               </div>
@@ -1186,12 +1186,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         ) : viewMode === "albums" ? (
           <>
             {filteredAlbums.length === 0 && visibleImportPreview.length > 0 ? null : emptyCatalogState === "indexing" ? (
-              <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+              <div className="h-60 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
                 {t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
               </div>
             ) : emptyCatalogState === "error" ? null
             : filteredAlbums.length === 0 ? (
-              <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
+              <div className="h-60 flex flex-col items-center justify-center text-[color:var(--theme-fg-muted,#666666)] space-y-2">
                 <Disc3 size={40} className="opacity-40" />
                 <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
               </div>
@@ -1224,12 +1224,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           </>
         ) : viewMode === "artists" ? (
           emptyCatalogState === "indexing" ? (
-            <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+            <div className="h-60 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
               {t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
             </div>
           ) : emptyCatalogState === "error" ? null
           : visibleArtists.length === 0 ? (
-            <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
+            <div className="h-60 flex flex-col items-center justify-center text-[color:var(--theme-fg-muted,#666666)] space-y-2">
               <Users size={40} className="opacity-40" />
               <span className="text-xs">{t("localBrowser.emptyArtists")}</span>
             </div>
@@ -1245,10 +1245,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setSelectedArtist(artist.name)}
-                  className="flex h-full w-full items-center justify-between border-b border-[#1D1D1D] px-4 text-left transition-colors hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#E5A00D]"
+                  className="flex h-full w-full items-center justify-between border-b border-[color:var(--theme-border-soft,#1D1D1D)] px-4 text-left transition-colors hover:bg-[var(--theme-surface-raised,#1E1E1E)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
                 >
-                  <span className="truncate pr-4 text-sm font-semibold text-white">{artist.name}</span>
-                  <span className="shrink-0 text-xs text-[#777777]">{t("localBrowser.albumsCount", { count: artist.albumCount })}</span>
+                  <span className="truncate pr-4 text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)]">{artist.name}</span>
+                  <span className="shrink-0 text-xs text-[color:var(--theme-fg-muted,#777777)]">{t("localBrowser.albumsCount", { count: artist.albumCount })}</span>
                 </button>
               )}
             />
@@ -1256,7 +1256,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         ) : viewMode === "genres" ? (
           activeGenre !== null ? (
             genreAlbums.length === 0 ? (
-              <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+              <div className="h-60 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
                 {t("localBrowser.emptyAlbums")}
               </div>
             ) : (
@@ -1284,7 +1284,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               />
             )
           ) : emptyCatalogState === "indexing" ? (
-            <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+            <div className="h-60 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
               {t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
             </div>
           ) : emptyCatalogState === "error" ? null : (
@@ -1294,7 +1294,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         ) : viewMode === "years" ? (
           selectedYear !== null || unknownYearSelected ? (
             yearAlbums.length === 0 ? (
-              <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
+              <div className="h-60 flex flex-col items-center justify-center text-[color:var(--theme-fg-muted,#666666)] space-y-2">
                 <Disc3 size={40} className="opacity-40" />
                 <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
               </div>
@@ -1329,19 +1329,19 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   key={year.year}
                   type="button"
                   onClick={() => setSelectedYear(year.year)}
-                  className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                  className="rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] p-5 text-left transition-colors hover:border-[color:var(--theme-border-accent,#E5A00D)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
                 >
-                  <span className="block text-xl font-bold text-white">{year.year}</span>
-                  <span className="mt-1 block text-xs text-[#777777]">{t("localBrowser.albumsCount", { count: year.albumCount })}</span>
+                  <span className="block text-xl font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{year.year}</span>
+                  <span className="mt-1 block text-xs text-[color:var(--theme-fg-muted,#777777)]">{t("localBrowser.albumsCount", { count: year.albumCount })}</span>
                 </button>
               ))}
             </div>
           ) : emptyCatalogState === "indexing" ? (
-            <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+            <div className="h-60 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
               {t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
             </div>
           ) : emptyCatalogState === "error" ? null : scopedAlbums.length === 0 ? (
-            <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
+            <div className="h-60 flex flex-col items-center justify-center text-[color:var(--theme-fg-muted,#666666)] space-y-2">
               <Disc3 size={40} className="opacity-40" />
               <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
             </div>
@@ -1353,20 +1353,20 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   type="button"
                   onClick={() => setSelectedDecade(decade.decade)}
                   aria-label={t("localBrowser.decadeLabel", { decade: decade.decade })}
-                  className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                  className="rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] p-5 text-left transition-colors hover:border-[color:var(--theme-border-accent,#E5A00D)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
                 >
-                  <span className="block text-xl font-bold text-white">{t("localBrowser.decadeShort", { decade: decade.decade })}</span>
-                  <span className="mt-1 block text-xs text-[#777777]">{t("localBrowser.albumsCount", { count: decade.albumCount })}</span>
+                  <span className="block text-xl font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{t("localBrowser.decadeShort", { decade: decade.decade })}</span>
+                  <span className="mt-1 block text-xs text-[color:var(--theme-fg-muted,#777777)]">{t("localBrowser.albumsCount", { count: decade.albumCount })}</span>
                 </button>
               ))}
               {yearNavigation.unknownCount > 0 && (
                 <button
                   type="button"
                   onClick={() => setUnknownYearSelected(true)}
-                  className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                  className="rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] p-5 text-left transition-colors hover:border-[color:var(--theme-border-accent,#E5A00D)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
                 >
-                  <span className="block text-lg font-bold text-white">{t("localBrowser.unknownYear")}</span>
-                  <span className="mt-1 block text-xs text-[#777777]">{t("localBrowser.albumsCount", { count: yearNavigation.unknownCount })}</span>
+                  <span className="block text-lg font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{t("localBrowser.unknownYear")}</span>
+                  <span className="mt-1 block text-xs text-[color:var(--theme-fg-muted,#777777)]">{t("localBrowser.albumsCount", { count: yearNavigation.unknownCount })}</span>
                 </button>
               )}
             </div>
@@ -1380,7 +1380,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   parts.pop();
                   setCurrentPath(parts.join("/"));
                 }}
-                className="flex items-center space-x-2 text-xs font-semibold text-[#888888] hover:text-white transition-colors cursor-pointer mb-2"
+                className="flex items-center space-x-2 text-xs font-semibold text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer mb-2"
               >
                 <ArrowLeft size={14} />
                 <span>{t("localBrowser.upOneLevel")}</span>
@@ -1388,15 +1388,15 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
             )}
 
             {loadingFolders ? (
-              <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
+              <div className="h-40 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
                 {t("localBrowser.loadingFolder")}
               </div>
             ) : items.length === 0 ? (
-              <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
+              <div className="h-40 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
                 {t("localBrowser.emptyFolder")}
               </div>
             ) : (
-              <div className="divide-y divide-[#1D1D1D] bg-[#141414] rounded-xl border border-[#222222]">
+              <div className="divide-y divide-[color:var(--theme-border-soft,#1D1D1D)] bg-[var(--theme-surface-base,#141414)] rounded-xl border border-[color:var(--theme-border-soft,#222222)]">
                 {items.map((item) => {
                   const isDir = item.item_type === "directory";
                   return (
@@ -1422,24 +1422,24 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       aria-disabled={!isDir && !isPlaybackAvailable}
                       className={`flex items-center justify-between p-3 transition-colors group ${
                         isDir || isPlaybackAvailable
-                          ? "hover:bg-[#1E1E1E] cursor-pointer"
+                          ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                           : "opacity-60 cursor-not-allowed"
                       }`}
                     >
                       <div className="flex items-center space-x-3 truncate mr-4">
                         {isDir ? (
-                          <Folder size={18} className="text-[#E5A00D] shrink-0" />
+                          <Folder size={18} className="text-[color:var(--theme-fg-accent,#E5A00D)] shrink-0" />
                         ) : (
-                          <Music size={18} className="text-[#888888] group-hover:text-white shrink-0" />
+                          <Music size={18} className="text-[color:var(--theme-fg-muted,#888888)] group-hover:text-[color:var(--theme-fg-primary,#ffffff)] shrink-0" />
                         )}
-                        <span className="text-xs font-medium text-white truncate">
+                        <span className="text-xs font-medium text-[color:var(--theme-fg-primary,#ffffff)] truncate">
                           {item.title || item.name}
                         </span>
                       </div>
 
                       {!isDir && (
                         <div className="flex items-center gap-3">
-                          <span className="text-xs font-mono text-[#666666]">
+                          <span className="text-xs font-mono text-[color:var(--theme-fg-muted,#666666)]">
                             {formatDuration(item.duration)}
                           </span>
                           <button
@@ -1448,14 +1448,14 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                               event.stopPropagation();
                               setPlaylistItems([toPlaylistItem(item)]);
                             }}
-                            className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                            className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
                             title={t("playlists.addTrack")}
                           >
                             <ListPlus size={15} />
                           </button>
                           <button type="button" onClick={(event) => { event.stopPropagation(); setFileInfoTrack({ track: item, catalog: localAlbumCatalog.getSnapshot() }); }}
                             title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: item.title || item.name })}
-                            className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]">
+                            className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
                             <Info size={14} />
                           </button>
                           <button
@@ -1464,7 +1464,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                               event.stopPropagation();
                               setTagEditorTrack(item);
                             }}
-                            className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                            className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
                             title={t("tagEditor.edit")}
                             aria-label={t("tagEditor.editTrack", { title: item.title || item.name })}
                           >

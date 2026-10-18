@@ -86,6 +86,7 @@ async function modal(overrides = {}) {
   const plexService = { async getServers() { return []; }, async createPin() { calls.pins++; return { id: 7, code: "fixture", auth_url: "https://example.invalid" }; }, async openExternalUrl() {} };
   const h = component("SettingsModal", {
     "./SettingsPages": { SettingsPages: function SettingsPages() {} },
+    "./AppearanceSetting": { AppearanceSetting: function AppearanceSetting() {} },
     "./AudioSignalDiagram": { AudioSignalDiagram: function AudioSignalDiagram() {} },
     "../services/config": { configService }, "../services/audio": { audioService }, "../services/plex": { plexService },
     "../utils/audioConfigChange": { audioRestartExpected, localFoldersOnlyChanged },

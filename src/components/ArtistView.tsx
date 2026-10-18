@@ -129,37 +129,37 @@ export const ArtistView: React.FC<Props> = ({
   return (
     <main ref={viewport} onScroll={event => { if (active) scroll.current = event.currentTarget.scrollTop; }}
       onKeyDown={event => { if ((event.target as HTMLElement).closest?.("[data-artist-album]")) event.stopPropagation(); }}
-      className="flex-1 flex min-h-0 flex-col overflow-y-auto bg-gradient-to-b from-[#1C1812] via-[#121212] to-[#121212] select-none p-8">
+      className="flex-1 flex min-h-0 flex-col overflow-y-auto bg-gradient-to-b from-[var(--theme-surface-panel,#1C1812)] via-[var(--theme-surface-base,#121212)] to-[var(--theme-surface-base,#121212)] select-none p-8">
       <PlaybackRequestNotice failure={request.failure} />
       {/* Botão de Retorno */}
       <button
         onClick={onBack}
-        className="flex items-center space-x-2 text-xs font-bold text-[#888888] hover:text-[#E5A00D] transition-colors mb-6 cursor-pointer w-fit"
+        className="flex items-center space-x-2 text-xs font-bold text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors mb-6 cursor-pointer w-fit"
       >
         <ArrowLeft size={16} />
         <span>{t("artistView.back")}</span>
       </button>
 
       {/* Cabeçalho do Artista */}
-      <div className="flex items-end space-x-6 pb-8 border-b border-[#252525]">
-        <div className="w-44 h-44 rounded-full bg-[#1C1C1C] overflow-hidden shadow-2xl shrink-0 border-2 border-[#2B2B2B]">
+      <div className="flex items-end space-x-6 pb-8 border-b border-[color:var(--theme-border-soft,#252525)]">
+        <div className="w-44 h-44 rounded-full bg-[var(--theme-surface-panel,#1C1C1C)] overflow-hidden shadow-2xl shrink-0 border-2 border-[color:var(--theme-border-soft,#2B2B2B)]">
           {artistThumb ? (
             <PlexImage image={artistThumb} cacheScope={requestIdentity} alt={artist.name} className="w-full h-full object-cover" />
           ) : (
-            <div className="w-full h-full flex items-center justify-center text-[#444444]">
+            <div className="w-full h-full flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]">
               <User size={64} />
             </div>
           )}
         </div>
 
         <div className="flex flex-col justify-end space-y-2">
-          <span className="text-[11px] font-bold text-[#E5A00D] tracking-widest uppercase">
+          <span className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] tracking-widest uppercase">
             {t("artistView.artist")}
           </span>
-          <h2 data-artist-heading tabIndex={-1} className="text-4xl font-black text-white tracking-tight leading-tight outline-none">
+          <h2 data-artist-heading tabIndex={-1} className="text-4xl font-black text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight leading-tight outline-none">
             {artist.name}
           </h2>
-          <div className="flex items-center space-x-3 text-xs text-[#777777] pt-1">
+          <div className="flex items-center space-x-3 text-xs text-[color:var(--theme-fg-muted,#777777)] pt-1">
             <span>{t("artistView.albumsCount", { count: albums.length })}</span>
             <span>•</span>
             <span>{t("artistView.catalogedTracks", { count: topTracks.length })}</span>
@@ -167,8 +167,8 @@ export const ArtistView: React.FC<Props> = ({
         </div>
       </div>
 
-      {failed ? <p role="alert" className="mt-8 text-sm text-[#D8B980]">{t("artistView.loadError")}</p> : loading || !current ? (
-        <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
+      {failed ? <p role="alert" className="mt-8 text-sm text-[color:var(--theme-fg-accent,#D8B980)]">{t("artistView.loadError")}</p> : loading || !current ? (
+        <div className="h-40 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
           {t("artistView.loading")}
         </div>
       ) : (
@@ -177,12 +177,12 @@ export const ArtistView: React.FC<Props> = ({
           {topTracks.length > 0 && (
             <div>
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-bold text-white tracking-tight">
+                <h3 className="text-lg font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight">
                   {t("artistView.popular")}
                 </h3>
               </div>
 
-              <div className="divide-y divide-[#1A1A1A]">
+              <div className="divide-y divide-[color:var(--theme-border-soft,#1A1A1A)]">
                 {topTracks.slice(0, visibleTracksCount).map((track, idx) => {
                   const active = isTrackActive(track);
                   const isPlaying = active && status.state === "play";
@@ -195,7 +195,7 @@ export const ArtistView: React.FC<Props> = ({
                       className={`group grid grid-cols-[40px_48px_1fr_110px] items-center px-4 py-2.5 rounded-lg text-xs transition-colors ${
                         isPlaybackAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-60"
                       } ${
-                        active ? "bg-[#251E10] text-[#E5A00D]" : "hover:bg-[#1A1A1A] text-[#CCCCCC]"
+                        active ? "bg-[var(--theme-surface-accent,#251E10)] text-[color:var(--theme-fg-accent,#E5A00D)]" : "hover:bg-[var(--theme-surface-panel,#1A1A1A)] text-[color:var(--theme-fg-secondary,#CCCCCC)]"
                       }`}
                     >
                       <div className="flex items-center justify-center">
@@ -206,40 +206,40 @@ export const ArtistView: React.FC<Props> = ({
                             <span className="w-0.5 h-3.5 bg-[#E5A00D] animate-pulse delay-150 rounded-full" />
                           </div>
                         ) : active ? (
-                          <Pause size={14} className="text-[#E5A00D]" />
+                          <Pause size={14} className="text-[color:var(--theme-fg-accent,#E5A00D)]" />
                         ) : (
                           <>
-                            <span className="group-hover:hidden text-[#666666] font-mono">
+                            <span className="group-hover:hidden text-[color:var(--theme-fg-muted,#666666)] font-mono">
                               {idx + 1}
                             </span>
-                            <Play size={14} className="hidden group-hover:block text-white" fill="white" />
+                            <Play size={14} className="hidden group-hover:block text-[color:var(--theme-fg-primary,#ffffff)]" fill="white" />
                           </>
                         )}
                       </div>
 
-                      <div className="w-8 h-8 rounded bg-[#202020] overflow-hidden mr-3">
+                      <div className="w-8 h-8 rounded bg-[var(--theme-surface-raised,#202020)] overflow-hidden mr-3">
                         {track.thumb ? (
                           <PlexImage image={track.thumb} cacheScope={requestIdentity} alt="" className="w-full h-full object-cover" />
                         ) : (
-                          <div className="w-full h-full flex items-center justify-center text-[#444444]">
+                          <div className="w-full h-full flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]">
                             <Disc3 size={14} />
                           </div>
                         )}
                       </div>
 
                       <div className="flex flex-col truncate pr-4">
-                        <span className={`truncate font-medium ${active ? "text-[#E5A00D] font-bold" : "text-white"}`}>
+                        <span className={`truncate font-medium ${active ? "text-[color:var(--theme-fg-accent,#E5A00D)] font-bold" : "text-[color:var(--theme-fg-primary,#ffffff)]"}`}>
                           {track.title}
                         </span>
                         {track.album_title && (
-                          <span className="text-[11px] text-[#666666] truncate mt-0.5">
+                          <span className="text-[11px] text-[color:var(--theme-fg-muted,#666666)] truncate mt-0.5">
                             {track.album_title}
                           </span>
                         )}
                       </div>
 
                       <div className="flex items-center justify-end gap-3">
-                        <span className={`font-mono text-[11px] ${active ? "text-[#E5A00D]" : "text-[#777777]"}`}>
+                        <span className={`font-mono text-[11px] ${active ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#777777)]"}`}>
                           {formatTime(track.duration_ms || 0)}
                         </span>
                         <button
@@ -249,7 +249,7 @@ export const ArtistView: React.FC<Props> = ({
                             event.stopPropagation();
                             setPlaylistItems([toPlaylistItem(track)]);
                           }}
-                          className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                          className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
                           title={t("playlists.addTrack")}
                         >
                           <ListPlus size={15} />
@@ -265,7 +265,7 @@ export const ArtistView: React.FC<Props> = ({
                   {visibleTracksCount < topTracks.length ? (
                     <button
                       onClick={() => setVisibleTracksCount((prev) => Math.min(prev + 5, topTracks.length))}
-                      className="flex items-center space-x-1.5 text-xs font-bold text-[#888888] hover:text-white transition-colors cursor-pointer"
+                      className="flex items-center space-x-1.5 text-xs font-bold text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer"
                     >
                       <span>{t("artistView.showMore")}</span>
                       <ChevronDown size={14} />
@@ -273,7 +273,7 @@ export const ArtistView: React.FC<Props> = ({
                   ) : (
                     <button
                       onClick={() => setVisibleTracksCount(5)}
-                      className="flex items-center space-x-1.5 text-xs font-bold text-[#888888] hover:text-white transition-colors cursor-pointer"
+                      className="flex items-center space-x-1.5 text-xs font-bold text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer"
                     >
                       <span>{t("artistView.showLess")}</span>
                       <ChevronUp size={14} />
@@ -286,7 +286,7 @@ export const ArtistView: React.FC<Props> = ({
 
           {/* Discografia com Cards Clicáveis e Links Reativos */}
           <div>
-            <h3 className="text-lg font-bold text-white tracking-tight mb-4">
+            <h3 className="text-lg font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight mb-4">
               {t("artistView.discography")}
             </h3>
             <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
@@ -295,9 +295,9 @@ export const ArtistView: React.FC<Props> = ({
                   key={alb.rating_key}
                   disabled={!active || !current}
                   onClick={event => { if (!active || !current) return; returnAlbum.current = event.currentTarget; onSelectAlbum(alb); }}
-                  className="group flex flex-col cursor-pointer text-left rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E5A00D]"
+                  className="group flex flex-col cursor-pointer text-left rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
                 >
-                  <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md border border-[#262626] group-hover:border-[#E5A00D]/50 transition-all">
+                  <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md border border-[color:var(--theme-border-soft,#262626)] group-hover:border-[color:var(--theme-border-accent,#E5A00D)]/50 transition-all">
                     {alb.thumb ? (
                       <PlexImage
                         image={alb.thumb}
@@ -307,19 +307,19 @@ export const ArtistView: React.FC<Props> = ({
                         loading="lazy"
                       />
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center text-[#444444]">
+                      <div className="w-full h-full flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]">
                         <Disc3 size={40} />
                       </div>
                     )}
                   </div>
                   <span
-                    className="text-sm font-semibold text-white truncate group-hover:text-[#E5A00D] transition-colors"
+                    className="text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)] truncate group-hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors"
                     title={alb.title}
                   >
                     {alb.title}
                   </span>
                   {alb.year && (
-                    <span className="text-[11px] text-[#666666] mt-0.5">{alb.year}</span>
+                    <span className="text-[11px] text-[color:var(--theme-fg-muted,#666666)] mt-0.5">{alb.year}</span>
                   )}
                 </button>
               ))}

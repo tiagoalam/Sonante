@@ -12,7 +12,7 @@ export const AlbumArtworkPlaceholder: React.FC<AlbumArtworkPlaceholderProps> = (
 }) => (
   <div
     aria-hidden="true"
-    className={`relative flex h-full w-full items-center justify-center overflow-hidden bg-[#1A1A1A] ${className}`}
+    className={`relative flex h-full w-full items-center justify-center overflow-hidden bg-[var(--theme-surface-panel,#1A1A1A)] ${className}`}
   >
     <div
       className="absolute inset-0"
@@ -21,13 +21,13 @@ export const AlbumArtworkPlaceholder: React.FC<AlbumArtworkPlaceholderProps> = (
       }}
     />
     <div
-      className={`absolute inset-2 border border-white/[0.035] ${size === "detail" ? "rounded-lg" : "rounded-md"}`}
+      className={`absolute inset-2 border border-[color:var(--theme-border-soft,#ffffff)]/[0.035] ${size === "detail" ? "rounded-lg" : "rounded-md"}`}
     />
     <div
-      className={`relative flex flex-col items-center text-[#B78319] ${size === "detail" ? "gap-3" : "gap-2"}`}
+      className={`relative flex flex-col items-center text-[color:var(--theme-fg-accent,#B78319)] ${size === "detail" ? "gap-3" : "gap-2"}`}
     >
       <div
-        className={`flex items-center justify-center rounded-full border border-[#E5A00D]/20 bg-black/10 ${size === "detail" ? "h-16 w-16" : "h-12 w-12"}`}
+        className={`flex items-center justify-center rounded-full border border-[color:var(--theme-border-accent,#E5A00D)]/20 bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.1))] ${size === "detail" ? "h-16 w-16" : "h-12 w-12"}`}
       >
         <Disc3
           className={size === "detail" ? "h-8 w-8" : "h-6 w-6"}
@@ -36,7 +36,7 @@ export const AlbumArtworkPlaceholder: React.FC<AlbumArtworkPlaceholderProps> = (
       </div>
       <div className="h-px w-7 bg-[#E5A00D]/25" />
       <span
-        className={`${size === "detail" ? "text-[10px]" : "text-[9px]"} font-semibold tracking-[0.24em] text-[#A77A1C]`}
+        className={`${size === "detail" ? "text-[10px]" : "text-[9px]"} font-semibold tracking-[0.24em] text-[color:var(--theme-fg-accent,#A77A1C)]`}
       >
         SONANTE
       </span>

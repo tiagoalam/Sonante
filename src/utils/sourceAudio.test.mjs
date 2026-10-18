@@ -61,7 +61,7 @@ const playback={title:'Fixture',artist:'Artist',album:'Album',state:'play',elaps
 const health={state:'available'};
 test('real badges have stable text/color, translated source/limits and focus tooltip; cards do not capture actions',async()=>{
  for(const lng of ['en','pt-BR']){await i18n.changeLanguage(lng);
-  const html=renderToStaticMarkup(React.createElement(SourceAudioBadges,{info:dsd()}));assert.match(html,/DSD64/);assert.match(html,/Hi-Res/);assert.match(html,/text-rose-200/);assert.match(html,/text-amber-200/);assert.match(html,/tabindex="0"/);assert.match(html,/role="tooltip"/);assert.ok(html.includes(i18n.t('sourceAudio.local')));assert.ok(html.includes(i18n.t('sourceAudio.limit')));
+  const html=renderToStaticMarkup(React.createElement(SourceAudioBadges,{info:dsd()}));assert.match(html,/DSD64/);assert.match(html,/Hi-Res/);assert.match(html,/--theme-fg-error,var\(--color-rose-200\)/);assert.match(html,/--theme-fg-accent,var\(--color-amber-200\)/);assert.match(html,/tabindex="0"/);assert.match(html,/role="tooltip"/);assert.ok(html.includes(i18n.t('sourceAudio.local')));assert.ok(html.includes(i18n.t('sourceAudio.limit')));
   const compact=renderToStaticMarkup(React.createElement(SourceAudioBadges,{album:[pcm(),pcm({codec:'MP3',compression:'lossy'})],compact:true}));assert.ok(compact.includes(i18n.t('sourceAudio.mixed')));assert.doesNotMatch(compact,/tabindex|<button|role="tooltip"|>Hi-Res</);
   assert.equal(renderToStaticMarkup(React.createElement(SourceAudioBadges,{info:null})), '');
  }

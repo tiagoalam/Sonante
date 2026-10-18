@@ -729,7 +729,7 @@ test("album card has sibling native Play/navigation buttons, translated focus ov
     const [open,play]=buttons;
     assert.equal(play.props.type,"button");assert.equal(play.props.onKeyDown,undefined,"native Enter/Space activation, no duplicate key handler");
     assert.equal(play.props.title,translations[language].t("common.playAlbum"));assert.ok(play.props["aria-label"].includes(entry.album.title));
-    assert.ok(nodes(tree,n=>n.props?.className?.includes("bg-black/40")&&n.props.className.includes("group-focus-within:opacity-100")).length);
+    assert.ok(nodes(tree,n=>n.props?.className?.includes("--theme-surface-subtle,rgb(0_0_0_/_0.4)")&&n.props.className.includes("group-focus-within:opacity-100")).length);
     assert.ok(play.props.className.includes("w-12 h-12"));assert.equal(plays,0,"render/effects never play");
     for(const key of [" ","Enter"]){let stopped=0;tree.props.onKeyDown({key,stopPropagation(){stopped++;},preventDefault(){assert.fail("native activation must remain enabled");}});assert.equal(stopped,1);assert.equal(plays,0);}
     const pending=play.props.onClick();await play.props.onClick();assert.equal(plays,1);assert.equal(opens,0);assert.equal(valid(),true);

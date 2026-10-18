@@ -326,38 +326,38 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
         role="dialog"
         aria-modal="true"
         aria-labelledby="local-album-tag-editor-title"
-        className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#333333] bg-[#171717] shadow-2xl"
+        className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-panel,#171717)] shadow-2xl"
       >
-        <header className="flex items-center justify-between border-b border-[#292929] px-5 py-4">
+        <header className="flex items-center justify-between border-b border-[color:var(--theme-border-soft,#292929)] px-5 py-4">
           <div className="min-w-0">
-            <h2 id="local-album-tag-editor-title" className="text-base font-bold text-white">
+            <h2 id="local-album-tag-editor-title" className="text-base font-bold text-[color:var(--theme-fg-primary,#ffffff)]">
               {t("albumTagEditor.title")}
             </h2>
-            <p className="mt-1 truncate text-xs text-[#777777]">{displayName}</p>
+            <p className="mt-1 truncate text-xs text-[color:var(--theme-fg-muted,#777777)]">{displayName}</p>
           </div>
           <button
             type="button"
             onClick={requestClose}
             disabled={applying || previewing}
             aria-label={t("albumTagEditor.close")}
-            className="rounded-lg p-2 text-[#888888] hover:bg-[#252525] hover:text-white disabled:opacity-50"
+            className="rounded-lg p-2 text-[color:var(--theme-fg-muted,#888888)] hover:bg-[var(--theme-surface-raised,#252525)] hover:text-[color:var(--theme-fg-primary,#ffffff)] disabled:opacity-50"
           >
             <X size={18} />
           </button>
         </header>
 
         {review && <p id="local-album-tag-doctor-context" role="note"
-          className="mx-5 mt-4 rounded-lg border border-sky-400/25 bg-sky-400/10 px-3 py-2 text-xs text-sky-100">
+          className="mx-5 mt-4 rounded-lg border border-[color:var(--theme-border-info,var(--color-sky-400))]/25 bg-sky-400/10 px-3 py-2 text-xs text-[color:var(--theme-fg-info,var(--color-sky-100))]">
           {t("libraryDoctor.review.context", { finding: t(`libraryDoctor.codes.${review.code}`) })}
         </p>}
 
         {draft && mustReload && !applying && !result && !applyIssue && (
-          <p role="status" className="mx-5 mt-4 text-xs text-amber-200">
+          <p role="status" className="mx-5 mt-4 text-xs text-[color:var(--theme-fg-accent,var(--color-amber-200))]">
             {t(snapshotCurrent ? "albumTagEditor.stale" : "albumTagEditor.unavailable")}
           </p>
         )}
-        {applying && <p role="status" className="mx-5 mt-4 text-sm text-amber-200">{t("albumTagEditor.applying")}</p>}
-        {applyIssue && <p role="alert" className="mx-5 mt-4 text-sm text-amber-200">
+        {applying && <p role="status" className="mx-5 mt-4 text-sm text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t("albumTagEditor.applying")}</p>}
+        {applyIssue && <p role="alert" className="mx-5 mt-4 text-sm text-[color:var(--theme-fg-accent,var(--color-amber-200))]">
           {t(applyIssue === "conflict" ? "albumTagEditor.applyConflict" : "albumTagEditor.applyUnknown")}
         </p>}
         {message && (
@@ -365,8 +365,8 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
             role={message.kind === "error" ? "alert" : "status"}
             className={`mx-5 mt-4 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${
               message.kind === "warning"
-                ? "border-amber-400/25 bg-amber-400/10 text-amber-100"
-                : "border-red-400/25 bg-red-400/10 text-red-200"
+                ? "border-[color:var(--theme-border-accent,var(--color-amber-400))]/25 bg-amber-400/10 text-[color:var(--theme-fg-accent,var(--color-amber-100))]"
+                : "border-[color:var(--theme-border-error,var(--color-red-400))]/25 bg-red-400/10 text-[color:var(--theme-fg-error,var(--color-red-200))]"
             }`}
           >
             {message.kind === "warning" && <AlertTriangle size={15} className="mt-0.5 shrink-0" />}
@@ -375,24 +375,24 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
         )}
 
         {loading && !draft ? (
-          <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-[#888888]">
+          <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-[color:var(--theme-fg-muted,#888888)]">
             <LoaderCircle size={20} className="animate-spin" />
             <span>{t("albumTagEditor.loading")}</span>
           </div>
         ) : draft ? (
           <form onSubmit={requestPreview} className="flex min-h-0 flex-1 flex-col">
             <div className="overflow-y-auto px-5 py-4">
-              <div className="mb-4 flex flex-wrap gap-x-4 gap-y-1 text-[11px] uppercase tracking-wider text-[#777777]">
+              <div className="mb-4 flex flex-wrap gap-x-4 gap-y-1 text-[11px] uppercase tracking-wider text-[color:var(--theme-fg-muted,#777777)]">
                 <span>{t("albumTagEditor.physicalTracks", { count: draft.inspection.physical_track_count })}</span>
                 {draft.inspection.cue_virtual_count > 0 && (
-                  <span className="text-amber-300">
+                  <span className="text-[color:var(--theme-fg-accent,var(--color-amber-300))]">
                     {t("albumTagEditor.cueTracks", { count: draft.inspection.cue_virtual_count })}
                   </span>
                 )}
               </div>
 
               {analysis?.blocked && (
-                <div className="mb-4 rounded-lg border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+                <div className="mb-4 rounded-lg border border-[color:var(--theme-border-accent,var(--color-amber-400))]/25 bg-amber-400/10 px-3 py-2 text-xs text-[color:var(--theme-fg-accent,var(--color-amber-100))]">
                   {t(analysis.blockedReason === "cue" ? "albumTagEditor.cueBlocked"
                     : analysis.blockedReason === "format" ? "albumTagEditor.formatBlocked"
                     : "albumTagEditor.inspectionBlocked")}
@@ -405,8 +405,8 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                   const state = fieldDraft.summary.state;
                   const disabled = Boolean(applying || consumed.current || analysis?.blocked || !snapshotCurrent || reloading);
                   return (
-                    <div key={field} className={`space-y-1.5 ${review?.field === field ? "rounded-lg bg-sky-400/10 p-2 ring-1 ring-sky-400/40" : ""}`}>
-                      <label htmlFor={`local-album-tag-${field}`} className="text-xs text-[#BBBBBB]">
+                    <div key={field} className={`space-y-1.5 ${review?.field === field ? "rounded-lg bg-sky-400/10 p-2 ring-1 ring-[color:var(--theme-border-info,var(--color-sky-400))]/40" : ""}`}>
+                      <label htmlFor={`local-album-tag-${field}`} className="text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)]">
                         {t(`tagEditor.fields.${field}`)}
                       </label>
                       <input
@@ -422,10 +422,10 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                             : ""}
                         onChange={(event) => changeField(field, event.target.value)}
                         disabled={disabled}
-                        className="w-full rounded-lg border border-[#333333] bg-[#111111] px-3 py-2 text-sm text-white outline-none placeholder:text-[#666666] focus:border-[#E5A00D] disabled:opacity-60"
+                        className="w-full rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-base,#111111)] px-3 py-2 text-sm text-[color:var(--theme-fg-primary,#ffffff)] outline-none placeholder:text-[color:var(--theme-fg-muted,#666666)] focus:border-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-60"
                       />
                       <div className="flex min-h-5 items-center justify-between gap-2 text-[11px]">
-                        <span className={state === "indeterminate" || state === "not_applicable" ? "text-amber-300" : "text-[#666666]"}>
+                        <span className={state === "indeterminate" || state === "not_applicable" ? "text-[color:var(--theme-fg-accent,var(--color-amber-300))]" : "text-[color:var(--theme-fg-muted,#666666)]"}>
                           {fieldDraft.clearAll
                             ? t("albumTagEditor.removeForAll")
                             : t(`albumTagEditor.states.${state}`)}
@@ -435,7 +435,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                             type="button"
                             onClick={() => fieldDraft.clearAll ? undoField(field) : clearAll(field)}
                             disabled={disabled}
-                            className="flex items-center gap-1 text-[#999999] hover:text-[#E5A00D] disabled:opacity-50"
+                            className="flex items-center gap-1 text-[color:var(--theme-fg-secondary,#999999)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] disabled:opacity-50"
                           >
                             {fieldDraft.clearAll ? <Undo2 size={12} /> : <X size={12} />}
                             {t(fieldDraft.clearAll ? "albumTagEditor.undoClear" : "albumTagEditor.clearForAll")}
@@ -453,46 +453,46 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                 isAvailable={metadataAvailable} onTransfer={transferMetadata} />
 
               {result && (
-                <section aria-label={t("albumTagEditor.resultTitle")} className="mt-5 rounded-xl border border-[#333333] p-4 text-xs text-[#CCCCCC]">
-                  <h3 className="text-sm font-bold text-white">{t("albumTagEditor.resultTitle")}</h3>
+                <section aria-label={t("albumTagEditor.resultTitle")} className="mt-5 rounded-xl border border-[color:var(--theme-border-soft,#333333)] p-4 text-xs text-[color:var(--theme-fg-secondary,#CCCCCC)]">
+                  <h3 className="text-sm font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{t("albumTagEditor.resultTitle")}</h3>
                   <p className="mt-2">{t("albumTagEditor.resultSummary", {
                     committed: result.committed_count, unchanged: result.unchanged_count,
                     failed: result.failed_count, notAttempted: result.not_attempted_count,
                   })}</p>
                   <p className="mt-2">{t("albumTagEditor.partialCommitStatus", { value: t(result.partial_commit ? "albumTagEditor.yes" : "albumTagEditor.no") })}</p>
-                  {result.partial_commit && <p className="mt-2 text-amber-200">{t("albumTagEditor.partialCommit")}</p>}
-                  {!result.applicable && <p className="mt-2 text-amber-200">{t(result.blocked_reason === "cue_virtual"
+                  {result.partial_commit && <p className="mt-2 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t("albumTagEditor.partialCommit")}</p>}
+                  {!result.applicable && <p className="mt-2 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t(result.blocked_reason === "cue_virtual"
                     ? "albumTagEditor.cueBlocked" : "albumTagEditor.inspectionBlocked")}</p>}
                   <p className="mt-2">{t("albumTagEditor.independentWrites")}</p>
                   <ul className="mt-3 space-y-3">
                     {result.tracks.map((track) => (
-                      <li key={track.uri} className="rounded-lg border border-[#333333] p-3">
+                      <li key={track.uri} className="rounded-lg border border-[color:var(--theme-border-soft,#333333)] p-3">
                         <p className="break-all font-mono">{track.uri}</p>
                         <p className="mt-1 font-bold">{t(`albumTagEditor.outcomes.${track.state}`)}</p>
-                        {track.error && <p className="mt-1 text-amber-200">
+                        {track.error && <p className="mt-1 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">
                           {track.state === "committed" && <span>{t("albumTagEditor.committedWarning")} </span>}
                           {t(`albumTagEditor.writeErrors.${track.error.code}`)}
                         </p>}
                         <p className="mt-1">{t(`albumTagEditor.refresh.${track.mpd_refresh.state}`, { jobId: track.mpd_refresh.job_id })}</p>
-                        {track.mpd_refresh.error_code && <p className="mt-1 text-amber-200">
+                        {track.mpd_refresh.error_code && <p className="mt-1 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">
                           {t(`albumTagEditor.refreshErrors.${track.mpd_refresh.error_code}`)}
                         </p>}
                       </li>
                     ))}
                   </ul>
-                  <p className="mt-3 text-amber-200">{t("albumTagEditor.newInspectionRequired")}</p>
+                  <p className="mt-3 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t("albumTagEditor.newInspectionRequired")}</p>
                 </section>
               )}
               {previewView && (
                 <div className={`mt-5 rounded-xl border px-4 py-3 ${
                   previewView.applicable
-                    ? "border-emerald-400/25 bg-emerald-400/10"
-                    : "border-amber-400/25 bg-amber-400/10"
+                    ? "border-[color:var(--theme-border-success,var(--color-emerald-400))]/25 bg-emerald-400/10"
+                    : "border-[color:var(--theme-border-accent,var(--color-amber-400))]/25 bg-amber-400/10"
                 }`}>
-                  <p className={`text-sm font-bold ${previewView.applicable ? "text-emerald-200" : "text-amber-100"}`}>
+                  <p className={`text-sm font-bold ${previewView.applicable ? "text-[color:var(--theme-fg-success,var(--color-emerald-200))]" : "text-[color:var(--theme-fg-accent,var(--color-amber-100))]"}`}>
                     {t(previewView.applicable ? "albumTagEditor.previewReady" : "albumTagEditor.previewBlocked")}
                   </p>
-                  <p className="mt-1 text-xs text-[#BBBBBB]">
+                  <p className="mt-1 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)]">
                     {t("albumTagEditor.previewSummary", {
                       changeCount: previewView.changeCount,
                       unchangedCount: previewView.unchangedCount,
@@ -500,12 +500,12 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                   </p>
                   <ul className="mt-3 space-y-3 text-xs">
                     {previewView.files.map((file) => (
-                      <li key={file.uri} className="rounded-lg border border-[#333333] p-3">
+                      <li key={file.uri} className="rounded-lg border border-[color:var(--theme-border-soft,#333333)] p-3">
                         <p className="break-all font-mono">{file.uri}</p>
                         {file.blocked ? (
-                          <p className="mt-1 text-amber-200">{t("albumTagEditor.blockedFile")}</p>
+                          <p className="mt-1 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t("albumTagEditor.blockedFile")}</p>
                         ) : file.changes.length === 0 ? (
-                          <p className="mt-1 text-[#888888]">{t("albumTagEditor.unchangedFile")}</p>
+                          <p className="mt-1 text-[color:var(--theme-fg-muted,#888888)]">{t("albumTagEditor.unchangedFile")}</p>
                         ) : (
                           <dl className="mt-2 space-y-2">
                             {file.changes.map((change) => (
@@ -525,19 +525,19 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                     ))}
                   </ul>
                   {previewView.applicable && (
-                    <p className="mt-2 text-[11px] text-[#888888]">{t("albumTagEditor.previewOnly")}</p>
+                    <p className="mt-2 text-[11px] text-[color:var(--theme-fg-muted,#888888)]">{t("albumTagEditor.previewOnly")}</p>
                   )}
                 </div>
               )}
             </div>
 
-            <footer className="flex items-center justify-between gap-3 border-t border-[#292929] px-5 py-4">
+            <footer className="flex items-center justify-between gap-3 border-t border-[color:var(--theme-border-soft,#292929)] px-5 py-4">
               <div>
                 <button
                   type="button"
                   onClick={reload}
                   disabled={applying || !available || previewing || reloading}
-                  className="flex items-center gap-2 rounded-lg border border-amber-400/30 px-3 py-2 text-xs font-bold text-amber-200 hover:bg-amber-400/10 disabled:opacity-50"
+                  className="flex items-center gap-2 rounded-lg border border-[color:var(--theme-border-accent,var(--color-amber-400))]/30 px-3 py-2 text-xs font-bold text-[color:var(--theme-fg-accent,var(--color-amber-200))] hover:bg-amber-400/10 disabled:opacity-50"
                 >
                   <RotateCcw size={14} className={reloading ? "animate-spin" : ""} />
                   {t("albumTagEditor.reload")}
@@ -549,7 +549,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                     type="button"
                     onClick={requestClose}
                     disabled={applying || previewing}
-                    className="rounded-lg border border-[#333333] px-4 py-2 text-sm font-semibold text-white hover:bg-[#252525] disabled:opacity-50"
+                    className="rounded-lg border border-[color:var(--theme-border-soft,#333333)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#252525)] disabled:opacity-50"
                   >{t("albumTagEditor.closeButton")}</button>
                 ) : (
                   <>
@@ -557,7 +557,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                       type="button"
                       onClick={requestClose}
                       disabled={applying || previewing}
-                      className="rounded-lg border border-[#333333] px-4 py-2 text-sm font-semibold text-white hover:bg-[#252525] disabled:opacity-50"
+                      className="rounded-lg border border-[color:var(--theme-border-soft,#333333)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#252525)] disabled:opacity-50"
                     >
                       {t("albumTagEditor.cancel")}
                     </button>
@@ -591,7 +591,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
         ) : (
           <div className="min-h-32 p-5">
             <button type="button" disabled={applying || !available || loading || reloading} onClick={reload}
-              className="text-sm text-amber-200 disabled:opacity-40">{t("albumTagEditor.reload")}</button>
+              className="text-sm text-[color:var(--theme-fg-accent,var(--color-amber-200))] disabled:opacity-40">{t("albumTagEditor.reload")}</button>
           </div>
         )}
       </div>

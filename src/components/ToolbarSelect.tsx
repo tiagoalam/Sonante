@@ -114,14 +114,14 @@ export const ToolbarSelect: React.FC<ToolbarSelectProps> = ({
         onClick={() => open ? closeMenu() : openMenu()}
         onKeyDown={handleKeyDown}
         disabled={disabled}
-        className="flex w-full items-center justify-between gap-3 rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] px-3 py-1.5 text-left text-xs text-white outline-none transition-colors hover:border-[#444444] focus-visible:border-[#E5A00D] focus-visible:ring-1 focus-visible:ring-[#E5A00D]/40 disabled:cursor-not-allowed disabled:text-[#666666]"
+        className="flex w-full items-center justify-between gap-3 rounded-lg border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#1A1A1A)] px-3 py-1.5 text-left text-xs text-[color:var(--theme-fg-primary,#ffffff)] outline-none transition-colors hover:border-[color:var(--theme-border-soft,#444444)] focus-visible:border-[color:var(--theme-border-accent,#E5A00D)] focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]/40 disabled:cursor-not-allowed disabled:text-[color:var(--theme-fg-muted,#666666)]"
         title={selectedOption?.label}
       >
         <span className="truncate">{selectedOption?.label ?? ""}</span>
         <ChevronDown
           size={14}
           aria-hidden="true"
-          className={`shrink-0 text-[#888888] transition-transform ${open ? "rotate-180 text-[#E5A00D]" : ""}`}
+          className={`shrink-0 text-[color:var(--theme-fg-muted,#888888)] transition-transform ${open ? "rotate-180 text-[color:var(--theme-fg-accent,#E5A00D)]" : ""}`}
         />
       </button>
 
@@ -131,7 +131,7 @@ export const ToolbarSelect: React.FC<ToolbarSelectProps> = ({
           role="listbox"
           aria-label={label}
           aria-activedescendant={`${listboxId}-option-${highlightedIndex}`}
-          className="absolute left-0 top-full z-50 mt-1 max-h-64 w-full min-w-full overflow-y-auto rounded-lg border border-[#333333] bg-[#1A1A1A] p-1 shadow-2xl"
+          className="absolute left-0 top-full z-50 mt-1 max-h-64 w-full min-w-full overflow-y-auto rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-panel,#1A1A1A)] p-1 shadow-2xl"
         >
           {options.map((option, index) => {
             const selected = option.value === value;
@@ -148,11 +148,11 @@ export const ToolbarSelect: React.FC<ToolbarSelectProps> = ({
                 onMouseEnter={() => setHighlightedIndex(index)}
                 onClick={() => selectIndex(index)}
                 className={`flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-xs transition-colors ${
-                  highlighted ? "bg-[#282828] text-white" : "text-[#CCCCCC] hover:bg-[#242424] hover:text-white"
-                } ${selected ? "text-[#E5A00D]" : ""}`}
+                  highlighted ? "bg-[var(--theme-surface-hover,#282828)] text-[color:var(--theme-fg-primary,#ffffff)]" : "text-[color:var(--theme-fg-secondary,#CCCCCC)] hover:bg-[var(--theme-surface-raised,#242424)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
+                } ${selected ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : ""}`}
               >
                 <span className="truncate">{option.label}</span>
-                {selected && <Check size={13} aria-hidden="true" className="shrink-0 text-[#E5A00D]" />}
+                {selected && <Check size={13} aria-hidden="true" className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" />}
               </button>
             );
           })}

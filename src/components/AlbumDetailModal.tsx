@@ -58,25 +58,25 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-8 animate-fade-in">
-      <div className="bg-[#181818] border border-[#2B2B2B] rounded-xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+      <div className="bg-[var(--theme-surface-panel,#181818)] border border-[color:var(--theme-border-soft,#2B2B2B)] rounded-xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
         <PlaybackRequestNotice failure={request.failure} />
         {/* Cabeçalho do Álbum */}
-        <div className="p-6 bg-[#202020] border-b border-[#2A2A2A] flex items-center justify-between">
+        <div className="p-6 bg-[var(--theme-surface-raised,#202020)] border-b border-[color:var(--theme-border-soft,#2A2A2A)] flex items-center justify-between">
           <div className="flex items-center space-x-5">
-            <div className="w-24 h-24 rounded-lg bg-[#141414] overflow-hidden shrink-0 shadow-md">
+            <div className="w-24 h-24 rounded-lg bg-[var(--theme-surface-base,#141414)] overflow-hidden shrink-0 shadow-md">
               {album.thumb ? (
                 <PlexImage image={album.thumb} alt={album.title} className="w-full h-full object-cover" />
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-[#444444]">
+                <div className="w-full h-full flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]">
                   <Disc3 size={32} />
                 </div>
               )}
             </div>
             <div>
-              <h3 className="text-xl font-bold text-white tracking-tight">{album.title}</h3>
-              <p className="text-sm text-[#AAAAAA] mt-0.5">{album.artist}</p>
+              <h3 className="text-xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight">{album.title}</h3>
+              <p className="text-sm text-[color:var(--theme-fg-secondary,#AAAAAA)] mt-0.5">{album.artist}</p>
               {album.year && (
-                <p className="text-xs text-[#777777] mt-1">{album.year} • {t("common.trackCount", { count: tracks.length })}</p>
+                <p className="text-xs text-[color:var(--theme-fg-muted,#777777)] mt-1">{album.year} • {t("common.trackCount", { count: tracks.length })}</p>
               )}
             </div>
           </div>
@@ -91,7 +91,7 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
             </button>
             <button
               onClick={onClose}
-              className="p-2 text-[#888888] hover:text-white rounded-lg hover:bg-[#282828] transition-colors cursor-pointer"
+              className="p-2 text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] rounded-lg hover:bg-[var(--theme-surface-hover,#282828)] transition-colors cursor-pointer"
             >
               <X size={20} />
             </button>
@@ -101,30 +101,30 @@ export const AlbumDetailModal: React.FC<Props> = ({ album, onClose }) => {
         {/* Lista de Faixas */}
         <div className="flex-1 overflow-y-auto p-4 space-y-1">
           {loading ? (
-            <div className="py-12 text-center text-sm text-[#666666]">{t("common.loadingTracks")}</div>
+            <div className="py-12 text-center text-sm text-[color:var(--theme-fg-muted,#666666)]">{t("common.loadingTracks")}</div>
           ) : tracks.length === 0 ? (
-            <div className="py-12 text-center text-sm text-[#666666]">{t("common.noTracks")}</div>
+            <div className="py-12 text-center text-sm text-[color:var(--theme-fg-muted,#666666)]">{t("common.noTracks")}</div>
           ) : (
             tracks.map((track, idx) => (
               <div
                 key={track.rating_key}
                 onClick={() => playAll(idx)}
-                className="group flex items-center justify-between px-3 py-2.5 rounded-lg hover:bg-[#222222] transition-colors cursor-pointer"
+                className="group flex items-center justify-between px-3 py-2.5 rounded-lg hover:bg-[var(--theme-surface-raised,#222222)] transition-colors cursor-pointer"
               >
                 <div className="flex items-center space-x-4">
-                  <span className="w-6 text-center text-xs font-mono text-[#666666] group-hover:text-[#E5A00D]">
+                  <span className="w-6 text-center text-xs font-mono text-[color:var(--theme-fg-muted,#666666)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
                     {track.track_index}
                   </span>
-                  <span className="text-sm font-medium text-white group-hover:text-[#E5A00D] transition-colors">
+                  <span className="text-sm font-medium text-[color:var(--theme-fg-primary,#ffffff)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors">
                     {track.title}
                   </span>
                 </div>
-                <div className="flex items-center space-x-3 text-xs text-[#777777] font-mono">
+                <div className="flex items-center space-x-3 text-xs text-[color:var(--theme-fg-muted,#777777)] font-mono">
                   <Clock size={12} />
 		  <span>{formatDuration(track.duration_ms || 0)}</span>
                   <button type="button" data-plex-file-info onClick={event => { event.stopPropagation(); setFileInfoTrack({ albumKey: infoAlbumKey, track }); }}
                     onKeyDown={event => event.stopPropagation()} title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: track.title })}
-                    className="rounded-md p-1.5 hover:bg-[#2A2A2A] hover:text-[#E5A00D]"><Info size={14} aria-hidden="true" /></button>
+                    className="rounded-md p-1.5 hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"><Info size={14} aria-hidden="true" /></button>
                 </div>
               </div>
             ))

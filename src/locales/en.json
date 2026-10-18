@@ -802,9 +802,14 @@
     "processingDetails": "About processing and volume",
     "performanceDetails": "About the buffer and restarting audio",
     "audioChangeNotice": "Saving these changes restarts the private MPD and may pause playback.",
-    "dopRequirement": "Requires compatible MPD, ALSA and DAC."
+    "dopRequirement": "Requires compatible MPD, ALSA and DAC.",
+    "appearance": "Appearance",
+    "appearanceDark": "Dark",
+    "appearanceLight": "Light",
+    "appearanceHelp": "Applies immediately across Sonante windows. Playback is unchanged."
   },
   "wizard": {
+    "appearanceTitle": "Choose your appearance",
     "deviceBusy": "The DAC is busy. Choose another device or return to Audio and check again. Your preferences have not been confirmed.",
     "deviceUnavailable": "The selected audio device is unavailable. Check its connection or choose another device.",
     "folderError": "Could not select a folder. Try again.",

@@ -802,9 +802,14 @@
     "processingDetails": "Sobre processamento e volume",
     "performanceDetails": "Sobre o buffer e o reinício do áudio",
     "audioChangeNotice": "Gravar estas alterações reinicia o MPD privado e pode pausar a reprodução.",
-    "dopRequirement": "Requer MPD, ALSA e DAC compatíveis."
+    "dopRequirement": "Requer MPD, ALSA e DAC compatíveis.",
+    "appearance": "Aparência",
+    "appearanceDark": "Escuro",
+    "appearanceLight": "Claro",
+    "appearanceHelp": "Aplicado imediatamente às janelas do Sonante. Não altera a reprodução."
   },
   "wizard": {
+    "appearanceTitle": "Escolha a aparência",
     "deviceBusy": "O DAC está ocupado. Escolha outro dispositivo ou volte à etapa Áudio e verifique novamente. Suas preferências ainda não foram confirmadas.",
     "deviceUnavailable": "O dispositivo de áudio selecionado está indisponível. Confira a conexão ou escolha outro dispositivo.",
     "folderError": "Não foi possível selecionar uma pasta. Tente novamente.",

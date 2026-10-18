@@ -150,7 +150,7 @@ export const PlayerBar: React.FC<Props> = ({
       : volumeBackendLabel;
 
   return (
-    <footer className="h-28 shrink-0 bg-[#161616] border-t border-[#2A2A2A] grid grid-cols-[minmax(0,1fr)_clamp(240px,26vw,400px)_minmax(0,1fr)] items-center gap-3 px-4 z-40 select-none shadow-[0_-8px_24px_rgba(0,0,0,0.16)]">
+    <footer className="h-28 shrink-0 bg-[var(--theme-surface-base,#161616)] border-t border-[color:var(--theme-border-soft,#2A2A2A)] grid grid-cols-[minmax(0,1fr)_clamp(240px,26vw,400px)_minmax(0,1fr)] items-center gap-3 px-4 z-40 select-none shadow-[0_-8px_24px_rgba(0,0,0,0.16)]">
       {/* Equal side tracks keep playback at the geometric window center. */}
       <div data-player-area="left" className="flex min-w-0 items-center gap-2">
         {/* 1. Metadados e Capa com Links Interativos */}
@@ -159,9 +159,9 @@ export const PlayerBar: React.FC<Props> = ({
             onClick={() => {
               if (!isNoTrack && onNavigateToAlbum) onNavigateToAlbum();
             }}
-            className={`w-[76px] h-[76px] rounded-xl bg-[#202020] border border-[#303030] overflow-hidden shrink-0 flex items-center justify-center shadow-lg group/cover transition-all ${
+            className={`w-[76px] h-[76px] rounded-xl bg-[var(--theme-surface-raised,#202020)] border border-[color:var(--theme-border-soft,#303030)] overflow-hidden shrink-0 flex items-center justify-center shadow-lg group/cover transition-all ${
               !isNoTrack && onNavigateToAlbum
-                ? "cursor-pointer hover:border-[#E5A00D] hover:shadow-[0_0_12px_rgba(229,160,13,0.2)]"
+                ? "cursor-pointer hover:border-[color:var(--theme-border-accent,#E5A00D)] hover:shadow-[0_0_12px_rgba(229,160,13,0.2)]"
                 : ""
             }`}
             title={!isNoTrack && onNavigateToAlbum ? (status.album || displayTitle) : undefined}
@@ -179,7 +179,7 @@ export const PlayerBar: React.FC<Props> = ({
                 className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
               />
             ) : (
-              <Disc3 size={28} className="text-[#444444]" />
+              <Disc3 size={28} className="text-[color:var(--theme-fg-faint,#444444)]" />
             )}
           </div>
 
@@ -188,13 +188,13 @@ export const PlayerBar: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={onNavigateToAlbum}
-                className="text-sm leading-tight font-bold text-white hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
+                className="text-sm leading-tight font-bold text-[color:var(--theme-fg-primary,#ffffff)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate text-left cursor-pointer"
                 title={displayTitle}
               >
                 {displayTitle}
               </button>
             ) : (
-              <span className="text-sm leading-tight font-bold text-white truncate" title={displayTitle}>
+              <span className="text-sm leading-tight font-bold text-[color:var(--theme-fg-primary,#ffffff)] truncate" title={displayTitle}>
                 {displayTitle}
               </span>
             )}
@@ -203,13 +203,13 @@ export const PlayerBar: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={onNavigateToArtist}
-                className="text-xs leading-tight text-[#B0B0B0] hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
+                className="text-xs leading-tight text-[color:var(--theme-fg-secondary,#B0B0B0)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate text-left cursor-pointer"
                 title={displayArtist}
               >
                 {displayArtist}
               </button>
             ) : (
-              <span className="text-xs leading-tight text-[#B0B0B0] truncate" title={displayArtist}>
+              <span className="text-xs leading-tight text-[color:var(--theme-fg-secondary,#B0B0B0)] truncate" title={displayArtist}>
                 {displayArtist}
               </span>
             )}
@@ -218,13 +218,13 @@ export const PlayerBar: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={onNavigateToAlbum}
-                className="text-[10px] leading-tight text-[#777777] hover:text-[#E5A00D] transition-colors truncate text-left cursor-pointer"
+                className="text-[10px] leading-tight text-[color:var(--theme-fg-muted,#777777)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate text-left cursor-pointer"
                 title={status.album}
               >
                 {status.album}
               </button>
             ) : !isNoTrack && status.album ? (
-              <span className="text-[10px] leading-tight text-[#777777] truncate" title={status.album}>
+              <span className="text-[10px] leading-tight text-[color:var(--theme-fg-muted,#777777)] truncate" title={status.album}>
                 {status.album}
               </span>
             ) : null}
@@ -240,14 +240,14 @@ export const PlayerBar: React.FC<Props> = ({
           aria-live="polite"
           aria-atomic="true"
           title={status.playback_error ? t(`player.playbackError.${status.playback_error.code}`) : undefined}
-          className={status.playback_error ? "w-full truncate text-[10px] leading-tight text-[#C9A45D] text-center" : "sr-only"}
+          className={status.playback_error ? "w-full truncate text-[10px] leading-tight text-[color:var(--theme-fg-accent,#C9A45D)] text-center" : "sr-only"}
         >
           {status.playback_error
             ? t(`player.playbackError.${status.playback_error.code}`)
             : ""}
         </span>
         {!isAvailable && (
-          <span title={health.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")} className="w-full truncate text-center text-[10px] leading-tight font-semibold text-[#C9A45D]">
+          <span title={health.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")} className="w-full truncate text-center text-[10px] leading-tight font-semibold text-[color:var(--theme-fg-accent,#C9A45D)]">
             {health.state === "unavailable"
               ? t("player.engineUnavailable")
               : t("player.engineTransitioning")}
@@ -257,7 +257,7 @@ export const PlayerBar: React.FC<Props> = ({
           <button
             onClick={handlePrevious}
             disabled={!isAvailable}
-            className="col-start-2 justify-self-center text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+            className="col-start-2 justify-self-center text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={t("player.previous")}
           >
             <SkipBack size={18} />
@@ -279,7 +279,7 @@ export const PlayerBar: React.FC<Props> = ({
           <button
             onClick={handleNext}
             disabled={!isAvailable}
-            className="col-start-4 justify-self-center text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+            className="col-start-4 justify-self-center text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={t("player.next")}
           >
             <SkipForward size={18} />
@@ -290,7 +290,7 @@ export const PlayerBar: React.FC<Props> = ({
         </div>
 
         {/* Barra de Progresso (Seek) */}
-        <div className="w-full flex items-center gap-3 text-[10px] font-mono text-[#888888]">
+        <div className="w-full flex items-center gap-3 text-[10px] font-mono text-[color:var(--theme-fg-muted,#888888)]">
           <span className="w-8 text-right">
             {isAvailable ? formatTime(isSeeking ? seekValue : status.elapsed) : "--:--"}
           </span>
@@ -305,7 +305,7 @@ export const PlayerBar: React.FC<Props> = ({
             onMouseDown={() => setIsSeeking(true)}
             onChange={(e) => setSeekValue(parseFloat(e.target.value))}
             onMouseUp={(e) => handleSeekCommit(parseFloat((e.target as HTMLInputElement).value))}
-            className="min-w-0 flex-1 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-30 disabled:cursor-default"
+            className="min-w-0 flex-1 h-1 bg-[var(--theme-surface-hover,#262626)] rounded-lg appearance-none cursor-pointer accent-[var(--theme-control-accent,#E5A00D)] disabled:opacity-30 disabled:cursor-default"
           />
 
           <span className="w-8 text-left">
@@ -324,7 +324,7 @@ export const PlayerBar: React.FC<Props> = ({
             <button
               onClick={handleToggleMute}
               disabled={!isVolumeAvailable}
-              className="text-[#888888] hover:text-white transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+              className="text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
               title={isVolumeAvailable ? (isMuted ? t("player.unmute") : t("player.mute")) : undefined}
             >
               {isVolumeAvailable && isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
@@ -337,11 +337,11 @@ export const PlayerBar: React.FC<Props> = ({
               value={isVolumeAvailable ? status.volume.value : 0}
               disabled={!isVolumeAvailable}
               onChange={(e) => handleVolumeChange(parseInt(e.target.value, 10))}
-              className="w-24 h-1 bg-[#262626] rounded-lg appearance-none cursor-pointer accent-[#E5A00D] disabled:opacity-35 disabled:cursor-not-allowed"
+              className="w-24 h-1 bg-[var(--theme-surface-hover,#262626)] rounded-lg appearance-none cursor-pointer accent-[var(--theme-control-accent,#E5A00D)] disabled:opacity-35 disabled:cursor-not-allowed"
             />}
           </div>
 
-          <span title={deviceVolume ? t("player.volumeOnDevice") : volumeStatusLabel} className="max-w-full truncate text-[9px] leading-none text-[#777777] pr-0.5">
+          <span title={deviceVolume ? t("player.volumeOnDevice") : volumeStatusLabel} className="max-w-full truncate text-[9px] leading-none text-[color:var(--theme-fg-muted,#777777)] pr-0.5">
             {deviceVolume ? t("player.volumeOnDeviceShort") : volumeStatusLabel}
           </span>
         </div>
@@ -350,7 +350,7 @@ export const PlayerBar: React.FC<Props> = ({
           <button
             type="button"
             onClick={onOpenNowPlaying}
-            className="shrink-0 p-2.5 rounded-lg border border-[#2D2D2D] text-[#888888] hover:text-white hover:bg-[#202020] transition-colors cursor-pointer"
+            className="shrink-0 p-2.5 rounded-lg border border-[color:var(--theme-border-soft,#2D2D2D)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#202020)] transition-colors cursor-pointer"
             title={t("player.openNowPlaying")}
           >
             <Maximize2 size={17} />
@@ -362,8 +362,8 @@ export const PlayerBar: React.FC<Props> = ({
           onClick={onToggleQueue}
           className={`shrink-0 p-2.5 rounded-lg border transition-colors cursor-pointer ${
             isQueueOpen
-              ? "bg-[#252014] border-[#E5A00D] text-[#E5A00D]"
-              : "border-[#262626] text-[#888888] hover:text-white hover:bg-[#202020]"
+              ? "bg-[var(--theme-surface-accent,#252014)] border-[color:var(--theme-border-accent,#E5A00D)] text-[color:var(--theme-fg-accent,#E5A00D)]"
+              : "border-[color:var(--theme-border-soft,#262626)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#202020)]"
           }`}
           title={t("player.queue")}
         >

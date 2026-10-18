@@ -196,8 +196,8 @@ test("embedded thumbnails stay decorative below the indexing mask; invalid image
   assert.ok(markup.includes(`src="${png}"`));
   assert.ok(markup.includes('alt=""'));
   assert.ok(markup.includes('draggable="false"'));
-  assert.ok(markup.indexOf("<img") < markup.indexOf("bg-black/40"));
-  assert.equal((markup.match(/text-\[#555555\]/g) ?? []).length, 3);
+  assert.ok(markup.indexOf("<img") < markup.indexOf("--theme-surface-subtle,rgb(0_0_0_/_0.4)"));
+  assert.equal((markup.match(/--theme-fg-faint,#555555/g) ?? []).length, 3);
   assert.doesNotMatch(markup, /<(button|a|input|audio)\b|tabindex=|href=|role="button"/i);
   assert.ok(componentSource.includes("onError={() => setFailed(true)}"));
   assert.ok(componentSource.includes("<PreviewImage key={image}"));
@@ -209,7 +209,7 @@ test("preview shares the existing grid/scroll and keeps placeholders without int
   assert.equal((markup.match(/data-item=/g) ?? []).length, 2);
   assert.equal(gridMock.calls.at(-1).scrollContainer, container);
   assert.ok(markup.includes("importPreviewIndexing"));
-  assert.ok(markup.includes("bg-black/40"));
+  assert.ok(markup.includes("--theme-surface-subtle,rgb(0_0_0_/_0.4)"));
   assert.ok(markup.includes("animate-spin"));
   assert.doesNotMatch(markup, /<(button|a|img|input|audio)\b|tabindex=|href=|role="button"/i);
   assert.doesNotMatch(componentSource, /onClick|onKey|tabIndex|services\/|Artwork|LocalAlbumCard|\.uri|max-h-|overflow-y|grid-cols-|gap-4/);

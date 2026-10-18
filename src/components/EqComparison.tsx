@@ -14,17 +14,17 @@ export function EqComparison({snapshot,disabled,onChange,onBusy,sourceLabel}:{so
    else if(value.comparison&&!value.comparison.interrupted)void equalizerService.compare('finish',value.comparison.token).catch(()=>{});
   }catch{if(alive.current)setError(true)}finally{busy.current=false;onBusy(false);if(alive.current)setWorking(false)}
  };
- const locked=disabled||working;const button='rounded-lg border border-white/15 px-3 py-2 text-xs disabled:opacity-35';
- return <section aria-busy={working||snapshot?.phase==='updating'} aria-label={t('equalizer.compare.title')} onKeyDown={e=>{if(e.key==='Escape'&&comparison&&!comparison.interrupted&&!locked){e.preventDefault();void run('finish')}}} className="rounded-xl border border-white/10 p-4">
+ const locked=disabled||working;const button='rounded-lg border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] px-3 py-2 text-xs disabled:opacity-35';
+ return <section aria-busy={working||snapshot?.phase==='updating'} aria-label={t('equalizer.compare.title')} onKeyDown={e=>{if(e.key==='Escape'&&comparison&&!comparison.interrupted&&!locked){e.preventDefault();void run('finish')}}} className="rounded-xl border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.1))] p-4">
   <div className="flex flex-wrap items-center gap-2"><h2 className="mr-auto text-sm font-medium">{t('equalizer.compare.title')}</h2>
    {!comparison?<button ref={trigger} type="button" disabled={locked||!snapshot?.applied||!snapshot.verified||!!snapshot.error} onClick={()=>void run('reference')} className={button}>{t('equalizer.compare.start')}</button>:<>
-    <button type="button" aria-pressed={comparison.side==='reference'} disabled={locked||comparison.interrupted} onClick={()=>void run('reference')} className={`${button} ${comparison.side==='reference'?'text-[#E5A00D] border-amber-500/60':''}`}>{t('equalizer.compare.reference')}</button>
-    <button type="button" aria-pressed={comparison.side==='equalized'} disabled={locked||comparison.interrupted} onClick={()=>void run('equalized')} className={`${button} ${comparison.side==='equalized'?'text-[#E5A00D] border-amber-500/60':''}`}>{t('equalizer.compare.equalized')}</button>
+    <button type="button" aria-pressed={comparison.side==='reference'} disabled={locked||comparison.interrupted} onClick={()=>void run('reference')} className={`${button} ${comparison.side==='reference'?'text-[color:var(--theme-fg-accent,#E5A00D)] border-[color:var(--theme-border-accent,var(--color-amber-50))]0/60':''}`}>{t('equalizer.compare.reference')}</button>
+    <button type="button" aria-pressed={comparison.side==='equalized'} disabled={locked||comparison.interrupted} onClick={()=>void run('equalized')} className={`${button} ${comparison.side==='equalized'?'text-[color:var(--theme-fg-accent,#E5A00D)] border-[color:var(--theme-border-accent,var(--color-amber-50))]0/60':''}`}>{t('equalizer.compare.equalized')}</button>
     <button type="button" disabled={locked||comparison.interrupted} onClick={()=>void run('finish')} className={button}>{t('equalizer.compare.finish')}</button>
    </>}
   </div>
-  <p className="mt-2 text-[11px] leading-relaxed text-white/50">{t('equalizer.compare.help')}</p>
-  {comparison&&<p role="status" className="mt-2 text-xs text-amber-100">{working||snapshot?.phase==='updating'||!snapshot?.verified?t(`equalizer.state.${working?'updating':snapshot?.phase??'loading'}`):comparison.interrupted?t('equalizer.compare.interrupted'):t('equalizer.compare.current',{side:comparison.side==='reference'?'A':'B',name:sourceLabel??comparison.source.name,gain:comparison.effective_gain_db.toFixed(1)})}</p>}
-  {error&&<p role="alert" className="mt-2 text-xs text-amber-100">{t('equalizer.compare.failed')}</p>}
+  <p className="mt-2 text-[11px] leading-relaxed text-[color:var(--theme-fg-muted,rgb(255_255_255_/_0.5))]">{t('equalizer.compare.help')}</p>
+  {comparison&&<p role="status" className="mt-2 text-xs text-[color:var(--theme-fg-accent,var(--color-amber-100))]">{working||snapshot?.phase==='updating'||!snapshot?.verified?t(`equalizer.state.${working?'updating':snapshot?.phase??'loading'}`):comparison.interrupted?t('equalizer.compare.interrupted'):t('equalizer.compare.current',{side:comparison.side==='reference'?'A':'B',name:sourceLabel??comparison.source.name,gain:comparison.effective_gain_db.toFixed(1)})}</p>}
+  {error&&<p role="alert" className="mt-2 text-xs text-[color:var(--theme-fg-accent,var(--color-amber-100))]">{t('equalizer.compare.failed')}</p>}
  </section>;
 }

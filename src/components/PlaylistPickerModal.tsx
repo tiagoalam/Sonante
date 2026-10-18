@@ -91,11 +91,11 @@ export const PlaylistPickerModal: React.FC<Props> = ({ items, title, onClose }) 
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      <div className="w-full max-w-md overflow-hidden rounded-2xl border border-[#333333] bg-[#171717] shadow-2xl">
-        <header className="flex items-center justify-between border-b border-[#292929] px-5 py-4">
+      <div className="w-full max-w-md overflow-hidden rounded-2xl border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-panel,#171717)] shadow-2xl">
+        <header className="flex items-center justify-between border-b border-[color:var(--theme-border-soft,#292929)] px-5 py-4">
           <div className="min-w-0">
-            <h2 className="truncate text-base font-bold text-white">{title}</h2>
-            <p className="mt-1 text-xs text-[#777777]">
+            <h2 className="truncate text-base font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{title}</h2>
+            <p className="mt-1 text-xs text-[color:var(--theme-fg-muted,#777777)]">
               {t("playlists.addItemCount", { count: items.length })}
             </p>
           </div>
@@ -103,7 +103,7 @@ export const PlaylistPickerModal: React.FC<Props> = ({ items, title, onClose }) 
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="rounded-lg p-2 text-[#888888] hover:bg-[#252525] hover:text-white disabled:opacity-50"
+            className="rounded-lg p-2 text-[color:var(--theme-fg-muted,#888888)] hover:bg-[var(--theme-surface-raised,#252525)] hover:text-[color:var(--theme-fg-primary,#ffffff)] disabled:opacity-50"
             title={t("playlists.cancel")}
           >
             <X size={17} />
@@ -111,14 +111,14 @@ export const PlaylistPickerModal: React.FC<Props> = ({ items, title, onClose }) 
         </header>
 
         {error && (
-          <div className="mx-5 mt-4 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-200">
+          <div className="mx-5 mt-4 rounded-lg border border-[color:var(--theme-border-error,var(--color-red-400))]/20 bg-red-400/10 px-3 py-2 text-xs text-[color:var(--theme-fg-error,var(--color-red-200))]">
             {error}
           </div>
         )}
 
         <div className="max-h-72 overflow-y-auto p-3">
           {loading ? (
-            <div className="flex justify-center p-8 text-[#777777]">
+            <div className="flex justify-center p-8 text-[color:var(--theme-fg-muted,#777777)]">
               <LoaderCircle size={22} className="animate-spin" />
             </div>
           ) : (
@@ -129,13 +129,13 @@ export const PlaylistPickerModal: React.FC<Props> = ({ items, title, onClose }) 
                   type="button"
                   disabled={busy}
                   onClick={() => void addToPlaylist(playlist.id)}
-                  className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left hover:bg-[#242424] disabled:opacity-50"
+                  className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left hover:bg-[var(--theme-surface-raised,#242424)] disabled:opacity-50"
                 >
-                  <ListMusic size={17} className="shrink-0 text-[#E5A00D]" />
-                  <span className="min-w-0 flex-1 truncate text-sm font-semibold text-white">
+                  <ListMusic size={17} className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" />
+                  <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)]">
                     {playlist.name}
                   </span>
-                  <span className="text-[11px] text-[#666666]">
+                  <span className="text-[11px] text-[color:var(--theme-fg-muted,#666666)]">
                     {t("playlists.itemCount", { count: playlist.items.length })}
                   </span>
                 </button>
@@ -144,7 +144,7 @@ export const PlaylistPickerModal: React.FC<Props> = ({ items, title, onClose }) 
                 type="button"
                 disabled={busy}
                 onClick={() => setCreating(true)}
-                className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-[#E5A00D] hover:bg-[#242424] disabled:opacity-50"
+                className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-[color:var(--theme-fg-accent,#E5A00D)] hover:bg-[var(--theme-surface-raised,#242424)] disabled:opacity-50"
               >
                 <Plus size={17} />
                 <span className="text-sm font-bold">{t("playlists.newPlaylist")}</span>
@@ -154,14 +154,14 @@ export const PlaylistPickerModal: React.FC<Props> = ({ items, title, onClose }) 
         </div>
 
         {creating && (
-          <form onSubmit={createAndAdd} className="flex gap-2 border-t border-[#292929] p-4">
+          <form onSubmit={createAndAdd} className="flex gap-2 border-t border-[color:var(--theme-border-soft,#292929)] p-4">
             <input
               autoFocus
               value={newName}
               onChange={(event) => setNewName(event.target.value)}
               disabled={busy}
               placeholder={t("playlists.namePlaceholder")}
-              className="min-w-0 flex-1 rounded-lg border border-[#3A3A3A] bg-[#111111] px-3 py-2 text-sm text-white outline-none focus:border-[#E5A00D]"
+              className="min-w-0 flex-1 rounded-lg border border-[color:var(--theme-border-soft,#3A3A3A)] bg-[var(--theme-surface-base,#111111)] px-3 py-2 text-sm text-[color:var(--theme-fg-primary,#ffffff)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)]"
             />
             <button
               type="submit"

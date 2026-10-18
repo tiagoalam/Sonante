@@ -29,50 +29,50 @@ export const SignalPathDetails: React.FC<Props> = ({ route, status, health }) =>
   const conditions = routeConditions(route, status, health);
   const conditionsSummary = t(`signalPath.conditions.summary.${conditions.summary}`);
   return <section aria-label={t("signalPath.conditions.title")} className="min-w-0 space-y-4">
-    {route?.mode === "shared" && <section data-shared-dsp className="rounded border border-white/10 p-3 text-xs text-white/65">
+    {route?.mode === "shared" && <section data-shared-dsp className="rounded border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.1))] p-3 text-xs text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.65))]">
       <p className="font-semibold">{t("equalizer.title")} · {t(`equalizer.state.${status.shared_dsp?.phase ?? "off"}`)}</p>
       {status.shared_dsp?.verified && status.shared_dsp.applied && <p>{status.shared_dsp.applied.name} · {t("equalizer.pcmFormat")} · {t("equalizer.stereo")}</p>}
       {status.shared_dsp?.verified&&status.shared_dsp.protection&&<p>{t("equalizer.appliedGain",{effective:status.shared_dsp.protection.effective_preamp_db.toFixed(1),requested:status.shared_dsp.protection.requested_preamp_db.toFixed(1)})}</p>}
       {status.shared_dsp?.comparison&&<p>{t(status.shared_dsp.comparison.interrupted?"equalizer.compare.interrupted":status.shared_dsp.comparison.side==="reference"?"equalizer.compare.referenceInRoute":"equalizer.compare.equalized")}</p>}
       <p className="mt-1 text-[11px]">{t("equalizer.sharedProcessingHelp")}</p>
     </section>}
-    <div data-alsa-observation={observed ? "observed" : "unverified"} className="mt-2 border-t border-white/10 pt-2 text-[11px] leading-relaxed text-white/75" title={t("signalPath.observation.help")}>
-      <p className="font-semibold text-white/85">{observationTitle}</p>
+    <div data-alsa-observation={observed ? "observed" : "unverified"} className="mt-2 border-t border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.1))] pt-2 text-[11px] leading-relaxed text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.75))]" title={t("signalPath.observation.help")}>
+      <p className="font-semibold text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.85))]">{observationTitle}</p>
       <p className="break-words">{outputText}</p>
-      <p className="text-white/60">{t(conditions.bitPerfect ? "signalPath.seal.verified" : "signalPath.observation.notVerified")}</p>
+      <p className="text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.6))]">{t(conditions.bitPerfect ? "signalPath.seal.verified" : "signalPath.observation.notVerified")}</p>
       <div data-signal-quality-slot>
         {route?.mode === "direct" && conditions.assessment && <span
           data-route-assessment={conditions.assessment}
           title={t("signalPath.assessment.help")}
           className={`inline-flex rounded-full border px-2 py-1 text-[10px] leading-snug ${conditions.assessment === "compatible"
-            ? "border-[#E5A00D]/35 bg-[#E5A00D]/10 text-[#D1B475]"
-            : conditions.assessment === "attention" ? "border-amber-400/30 text-amber-200" : "border-white/15 text-white/55"}`}>
+            ? "border-[color:var(--theme-border-accent,#E5A00D)]/35 bg-[#E5A00D]/10 text-[color:var(--theme-fg-accent,#D1B475)]"
+            : conditions.assessment === "attention" ? "border-[color:var(--theme-border-accent,var(--color-amber-400))]/30 text-[color:var(--theme-fg-accent,var(--color-amber-200))]" : "border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] text-[color:var(--theme-fg-muted,rgb(255_255_255_/_0.55))]"}`}>
           {t(`signalPath.assessment.${conditions.assessment}`)}
         </span>}
         {route?.mode === "direct" && conditions.assessment !== "compatible" && conditions.issues?.[0] &&
-          <p data-route-reason className="mt-1 text-[10px] leading-snug text-white/65">
+          <p data-route-reason className="mt-1 text-[10px] leading-snug text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.65))]">
             {t(`signalPath.conditions.label.${conditions.issues[0].label}`)}: {t(`signalPath.conditions.value.${conditions.issues[0].message}`, conditions.issues[0].values)}
           </p>}
       </div>
 
       <section data-route-conditions className="mt-4">
-        <h3 className="font-semibold text-white/85">{t("signalPath.conditions.title")}</h3>
-        <div tabIndex={0} role="region" aria-label={t("signalPath.conditions.title")} className="mt-2 rounded-lg border border-white/15 bg-[#17191d] p-3">
-          <p className="mb-2 font-semibold text-white">{conditionsSummary}</p>
-          {conditions.profile && <div data-route-profile={conditions.profile.id} className="mb-3 rounded border border-[#E5A00D]/25 bg-[#E5A00D]/5 p-2 text-white/80">
-            <p className="font-semibold text-[#D1B475]">{t("signalPath.evidence.title")}</p>
+        <h3 className="font-semibold text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.85))]">{t("signalPath.conditions.title")}</h3>
+        <div tabIndex={0} role="region" aria-label={t("signalPath.conditions.title")} className="mt-2 rounded-lg border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] bg-[var(--theme-surface-panel,#17191d)] p-3">
+          <p className="mb-2 font-semibold text-[color:var(--theme-fg-primary,#ffffff)]">{conditionsSummary}</p>
+          {conditions.profile && <div data-route-profile={conditions.profile.id} className="mb-3 rounded border border-[color:var(--theme-border-accent,#E5A00D)]/25 bg-[#E5A00D]/5 p-2 text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.8))]">
+            <p className="font-semibold text-[color:var(--theme-fg-accent,#D1B475)]">{t("signalPath.evidence.title")}</p>
             <p>{t("signalPath.evidence.reference", { frames: conditions.profile.measured.frames, tracks: conditions.profile.measured.tracks })}</p>
-            <p className="mt-1 text-[10px] text-white/55">{conditions.profile.id} · {conditions.profile.measured.date}</p>
-            <p className="mt-1 text-[10px] text-white/65">{t("signalPath.evidence.help")}</p>
+            <p className="mt-1 text-[10px] text-[color:var(--theme-fg-muted,rgb(255_255_255_/_0.55))]">{conditions.profile.id} · {conditions.profile.measured.date}</p>
+            <p className="mt-1 text-[10px] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.65))]">{t("signalPath.evidence.help")}</p>
           </div>}
           <dl className="space-y-2">
             {conditions.rows.map(row => <div key={row.label}>
-              <dt className="text-white/55">{t(`signalPath.conditions.label.${row.label}`)}</dt>
-              <dd className={row.tone === "attention" ? "text-amber-200" : "text-white/85"}>{t(`signalPath.conditions.value.${row.message}`, row.values)}</dd>
+              <dt className="text-[color:var(--theme-fg-muted,rgb(255_255_255_/_0.55))]">{t(`signalPath.conditions.label.${row.label}`)}</dt>
+              <dd className={row.tone === "attention" ? "text-[color:var(--theme-fg-accent,var(--color-amber-200))]" : "text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.85))]"}>{t(`signalPath.conditions.value.${row.message}`, row.values)}</dd>
             </div>)}
           </dl>
-          <p className="mt-3 border-t border-white/10 pt-2 text-white/60">{t("signalPath.conditions.help")}</p>
-          <p className="mt-2 text-white/60">{t("signalPath.seal.scope")}</p>
+          <p className="mt-3 border-t border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.1))] pt-2 text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.6))]">{t("signalPath.conditions.help")}</p>
+          <p className="mt-2 text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.6))]">{t("signalPath.seal.scope")}</p>
         </div>
       </section>
     </div>
@@ -96,11 +96,11 @@ export function SignalPathInfo({ children, title, openLabel, closeLabel }: {
   return <>
     <button ref={trigger} type="button" data-signal-info aria-label={openLabel}
       aria-haspopup="dialog" aria-expanded={open} onKeyDown={event => { if (event.key === " " || event.key === "Enter") event.stopPropagation(); }} onClick={event => { event.stopPropagation(); setOpen(true); }}
-      className="shrink-0 rounded-full p-1.5 text-white/60 hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-[#E5A00D]">
+      className="shrink-0 rounded-full p-1.5 text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.6))] hover:bg-[var(--theme-surface-subtle,rgb(255_255_255_/_0.1))] hover:text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:outline focus-visible:outline-[color:var(--theme-border-accent,#E5A00D)]">
       <CircleHelp size={18} aria-hidden="true" />
     </button>
     {open && <dialog ref={dialog} aria-label={title} aria-modal="true" tabIndex={-1}
-      className="m-auto max-h-[85dvh] w-11/12 max-w-2xl overflow-y-auto rounded-xl border border-white/15 bg-[#181818] p-0 text-white/85 shadow-2xl backdrop:bg-black/75"
+      className="m-auto max-h-[85dvh] w-11/12 max-w-2xl overflow-y-auto rounded-xl border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] bg-[var(--theme-surface-panel,#181818)] p-0 text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.85))] shadow-2xl backdrop:bg-black/75"
       onKeyDown={event => event.stopPropagation()}
       onCancel={event => { event.preventDefault(); setOpen(false); }} onClose={() => setOpen(false)}
       onClick={event => { event.stopPropagation(); if (event.target === event.currentTarget) setOpen(false); }}>
@@ -108,7 +108,7 @@ export function SignalPathInfo({ children, title, openLabel, closeLabel }: {
         <header className="mb-4 flex items-center justify-between gap-4">
           <h2 className="text-lg font-semibold">{title}</h2>
           <button type="button" autoFocus aria-label={closeLabel} onClick={() => setOpen(false)}
-            className="rounded p-2 text-white/70 hover:bg-white/10 focus-visible:outline focus-visible:outline-[#E5A00D]"><X size={20} /></button>
+            className="rounded p-2 text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.7))] hover:bg-[var(--theme-surface-subtle,rgb(255_255_255_/_0.1))] focus-visible:outline focus-visible:outline-[color:var(--theme-border-accent,#E5A00D)]"><X size={20} /></button>
         </header>
         {children}
       </div>
@@ -155,8 +155,8 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
   const badge = <div data-signal-badge className="inline-flex max-w-full items-center gap-1">
     {route?.mode !== "shared" && <span data-route-assessment={conditions.assessment} data-bitperfect={conditions.bitPerfect ? "route" : undefined}
       className={`inline-flex min-w-0 items-center gap-1.5 rounded-full border px-2 py-1 ${conditions.bitPerfect
-        ? "border-[#E5A00D]/40 bg-[#E5A00D]/10 text-[#E5B84C]" : conditions.assessment === "attention"
-          ? "border-amber-400/30 text-amber-200" : "border-white/15 text-white/65"}`}>
+        ? "border-[color:var(--theme-border-accent,#E5A00D)]/40 bg-[#E5A00D]/10 text-[color:var(--theme-fg-accent,#E5B84C)]" : conditions.assessment === "attention"
+          ? "border-[color:var(--theme-border-accent,var(--color-amber-400))]/30 text-[color:var(--theme-fg-accent,var(--color-amber-200))]" : "border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.65))]"}`}>
       {conditions.bitPerfect && <BadgeCheck size={compact ? 13 : 16} aria-hidden="true" />}{label}
     </span>}
     <SignalPathInfo title={t("signalPath.modal.title")} openLabel={t("signalPath.modal.open")} closeLabel={t("signalPath.modal.close")}>
@@ -166,14 +166,14 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
   if (compact) return <section aria-label={t("signalPath.title")} data-signal-summary
     className="flex min-w-0 flex-col items-start gap-0.5 text-[10px] leading-tight">
     {badge}
-    <span className="max-w-full truncate text-[9px] text-white/65" title={`${mode} · ${formatLabel} · ${state}`}>{mode}{secondary ? ` · ${secondary}` : ""}</span>
+    <span className="max-w-full truncate text-[9px] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.65))]" title={`${mode} · ${formatLabel} · ${state}`}>{mode}{secondary ? ` · ${secondary}` : ""}</span>
   </section>;
   return <section aria-label={t("signalPath.title")} data-signal-summary
-    className={`relative w-full min-w-0 rounded-xl border border-[#E5A00D]/20 bg-black/25 p-4 ${horizontal ? "np-signal-path" : ""}`}>
+    className={`relative w-full min-w-0 rounded-xl border border-[color:var(--theme-border-accent,#E5A00D)]/20 bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.25))] p-4 ${horizontal ? "np-signal-path" : ""}`}>
     <div className="np-signal-heading flex flex-wrap items-center justify-between gap-2">
-      <h3 className="text-xs font-semibold text-white/85">{t("signalPath.title")}</h3>
+      <h3 className="text-xs font-semibold text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.85))]">{t("signalPath.title")}</h3>
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="text-[11px] text-white/70">{mode} · {state}</span>
+        <span className="text-[11px] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.7))]">{mode} · {state}</span>
         {badge}
       </div>
     </div>
@@ -181,18 +181,18 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
         <ol className={`np-signal-stages mt-3 grid items-start gap-3 ${route.mode === "shared" ? "grid-cols-5" : "grid-cols-4"}`} aria-label={t("signalPath.configured")}>
           {stages.map(({ label, icon: Icon }, index) => (
             <li key={index} className="relative flex min-w-0 flex-col items-center gap-2 text-center">
-              {index > 0 && <ArrowRight size={12} className="absolute -left-2 top-1.5 text-[#E5A00D]/65" aria-hidden="true" />}
-              <Icon size={24} className="shrink-0 text-[#E5A00D]" aria-hidden="true" />
-              <span className="w-full break-words text-xs font-medium leading-snug text-white/85">{label}</span>
+              {index > 0 && <ArrowRight size={12} className="absolute -left-2 top-1.5 text-[color:var(--theme-fg-accent,color-mix(in_srgb,#E5A00D_65%,transparent))]" aria-hidden="true" />}
+              <Icon size={24} className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" aria-hidden="true" />
+              <span className="w-full break-words text-xs font-medium leading-snug text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.85))]">{label}</span>
             </li>
           ))}
         </ol>
       )}
       {!horizontal && route?.mode === "direct" && route.endpoint &&
-        <p className="mt-2 break-all text-[11px] text-white/70">{t("signalPath.endpointShort")}: {route.endpoint}</p>}
-      <div className="np-signal-metadata mt-3 flex flex-wrap items-center gap-3 text-[11px] text-white/75">
-        <div className="np-signal-format rounded-lg border border-[#E5A00D]/20 bg-[#E5A00D]/5 px-3 py-2" title={t("signalPath.reported")}>
-          <p className="np-signal-format-heading mb-1 flex flex-wrap items-center gap-x-1 text-[10px] font-semibold text-[#D1B475]">
+        <p className="mt-2 break-all text-[11px] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.7))]">{t("signalPath.endpointShort")}: {route.endpoint}</p>}
+      <div className="np-signal-metadata mt-3 flex flex-wrap items-center gap-3 text-[11px] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.75))]">
+        <div className="np-signal-format rounded-lg border border-[color:var(--theme-border-accent,#E5A00D)]/20 bg-[#E5A00D]/5 px-3 py-2" title={t("signalPath.reported")}>
+          <p className="np-signal-format-heading mb-1 flex flex-wrap items-center gap-x-1 text-[10px] font-semibold text-[color:var(--theme-fg-accent,#D1B475)]">
             {information.source && <><span>{source}</span><span aria-hidden="true">·</span></>}
             <span>{t("signalPath.reported")}</span>
           </p>
@@ -200,11 +200,11 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
             {(format.kind === "pcm"
               ? [["rate", `${format.rateKhz} kHz`], ["depth", `${format.bits}-bit`], ["channels", String(format.channels)]]
               : [["format", `DSD${format.level ?? ""}`], ["rate", `${format.rateMhz} MHz`], ["channels", String(format.channels)]]).map(([key, value]) => <div key={key}>
-              <dt className="text-[10px] text-white/60">{t(`signalPath.${key}`)}</dt><dd className="text-sm font-semibold tabular-nums text-white/95">{value}</dd>
+              <dt className="text-[10px] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.6))]">{t(`signalPath.${key}`)}</dt><dd className="text-sm font-semibold tabular-nums text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.95))]">{value}</dd>
             </div>)}
-          </dl> : <p className="text-xs text-white/75">{formatLabel}</p>}
-          {conditions.transport && <p data-signal-transport={conditions.transport} className="mt-1 text-[11px] text-[#D1B475]">{t(`signalPath.transport.${conditions.transport}`)}</p>}
-          {requiresDeviceVolumeControl(route, status) ? <p className="np-signal-format-volume mt-1 border-t border-white/10 pt-1 text-[11px] text-white/75">{t("player.volumeOnDevice")}</p> : information.volumeBackend !== "unavailable" && <p className="np-signal-format-volume mt-1 border-t border-white/10 pt-1 text-[11px] leading-snug text-white/75">
+          </dl> : <p className="text-xs text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.75))]">{formatLabel}</p>}
+          {conditions.transport && <p data-signal-transport={conditions.transport} className="mt-1 text-[11px] text-[color:var(--theme-fg-accent,#D1B475)]">{t(`signalPath.transport.${conditions.transport}`)}</p>}
+          {requiresDeviceVolumeControl(route, status) ? <p className="np-signal-format-volume mt-1 border-t border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.1))] pt-1 text-[11px] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.75))]">{t("player.volumeOnDevice")}</p> : information.volumeBackend !== "unavailable" && <p className="np-signal-format-volume mt-1 border-t border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.1))] pt-1 text-[11px] leading-snug text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.75))]">
             {t("signalPath.volume")}: {status.volume.available ? `${status.volume.value}% · ` : ""}{t(`player.volumeBackend.${information.volumeBackend}`)}
           </p>}
         </div>

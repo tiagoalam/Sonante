@@ -72,7 +72,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
         : status?.state === "pause"
           ? { label: t("nowPlaying.visualizer.paused"), help: t("nowPlaying.visualizer.helpPaused") }
           : { label: t("nowPlaying.vuUnavailable"), help: t("nowPlaying.visualizer.helpPreparing") };
-  return <main className={`np-shell text-white${props.embedded ? " np-embedded" : ""}`} aria-busy={props.busy}>
+  return <main className={`np-shell text-[color:var(--theme-fg-primary,#ffffff)]${props.embedded ? " np-embedded" : ""}`} aria-busy={props.busy}>
     <div className="np-ambient" aria-hidden="true">{hasTrack && status && <TrackArtwork track={status} />}</div>
     <div className="np-layout">
       <header className="np-header">

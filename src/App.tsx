@@ -207,7 +207,7 @@ const PlexCollectionArtwork = memo<{ collection: PlexCollection }>(({ collection
 
   if (showPrimary) {
     return (
-      <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
+      <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md">
         <PlexImage
           image={collection.thumb!}
           alt={collection.title}
@@ -222,9 +222,9 @@ const PlexCollectionArtwork = memo<{ collection: PlexCollection }>(({ collection
   return (
     <div
       ref={artworkRef}
-      className="relative aspect-square w-full rounded-lg bg-[#202020] border border-[#2B2B2B] overflow-hidden mb-2.5 shadow-md group-hover:border-[#E5A00D] transition-colors"
+      className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] border border-[color:var(--theme-border-soft,#2B2B2B)] overflow-hidden mb-2.5 shadow-md group-hover:border-[color:var(--theme-border-accent,#E5A00D)] transition-colors"
     >
-      <div className="grid grid-cols-2 grid-rows-2 w-full h-full gap-px bg-[#2B2B2B]">
+      <div className="grid grid-cols-2 grid-rows-2 w-full h-full gap-px bg-[var(--theme-surface-hover,#2B2B2B)]">
         {[0, 1, 2, 3].map((slot) => {
           const thumb = mosaicThumbs[slot];
           return thumb && !failedMosaicSlots.has(slot) ? (
@@ -239,8 +239,8 @@ const PlexCollectionArtwork = memo<{ collection: PlexCollection }>(({ collection
               }}
             />
           ) : (
-            <div key={slot} className="w-full h-full bg-[#1B1B1B] flex items-center justify-center">
-              <Disc3 size={18} className="text-[#444444]" />
+            <div key={slot} className="w-full h-full bg-[var(--theme-surface-panel,#1B1B1B)] flex items-center justify-center">
+              <Disc3 size={18} className="text-[color:var(--theme-fg-faint,#444444)]" />
             </div>
           );
         })}
@@ -280,7 +280,7 @@ const PlexAlbumCard = memo<{
       onClick={() => onSelect(album)}
       className="group flex flex-col cursor-pointer relative"
     >
-      <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
+      <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md">
         {album.thumb ? (
           <PlexImage
             image={album.thumb}
@@ -289,25 +289,25 @@ const PlexAlbumCard = memo<{
             loading="lazy"
           />
         ) : (
-          <div className="w-full h-full flex items-center justify-center text-[#444444]">
+          <div className="w-full h-full flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]">
             <Disc3 size={40} />
           </div>
         )}
 
 
-        <button
+        <button data-theme-surface="contrast"
           onClick={(e) => onToggleFav(e, album)}
           className={`absolute top-2 right-2 p-1.5 rounded-full backdrop-blur-xs transition-transform active:scale-90 cursor-pointer shadow z-20 ${
             isFav
-              ? "bg-black/60 text-[#E5A00D]"
-              : "bg-black/40 text-white/70 hover:text-white opacity-0 group-hover:opacity-100"
+              ? "bg-black/60 text-[color:var(--theme-fg-accent,#E5A00D)]"
+              : "bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.4))] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.7))] hover:text-[color:var(--theme-fg-primary,#ffffff)] opacity-0 group-hover:opacity-100"
           }`}
           title={isFav ? removeFavText : addFavText}
         >
           <Heart size={14} fill={isFav ? "#E5A00D" : "none"} />
         </button>
 
-        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+        <div data-theme-surface="contrast" className="absolute inset-0 bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.4))] opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
           <button
             onClick={(e) => onPlayQuick(e, album)}
             disabled={!isPlaybackAvailable}
@@ -319,7 +319,7 @@ const PlexAlbumCard = memo<{
         </div>
       </div>
 
-      <span className="text-sm font-semibold text-white truncate" title={album.title}>
+      <span className="text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)] truncate" title={album.title}>
         {album.title}
       </span>
       <button
@@ -331,12 +331,12 @@ const PlexAlbumCard = memo<{
             onSelectArtist(artistKey, album.artist);
           }
         }}
-        className="text-xs text-[#999999] hover:text-[#E5A00D] transition-colors truncate mt-0.5 text-left cursor-pointer"
+        className="text-xs text-[color:var(--theme-fg-secondary,#999999)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate mt-0.5 text-left cursor-pointer"
       >
         {album.artist}
       </button>
       {album.year && (
-        <span className="text-[11px] text-[#666666] mt-0.5">
+        <span className="text-[11px] text-[color:var(--theme-fg-muted,#666666)] mt-0.5">
           {album.year}
         </span>
       )}
@@ -1522,10 +1522,10 @@ export function App() {
 
   if (!config || mediaSource === null) {
     return (
-      <main className="h-screen w-screen flex items-center justify-center bg-[#121212] text-[#E0E0E0]">
+      <main className="h-screen w-screen flex items-center justify-center bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-primary,#E0E0E0)]">
         <div className="max-w-xl px-6 text-center">
-          <h1 className="text-xl font-black tracking-wider text-[#E5A00D]">SONANTE</h1>
-          <p className="mt-3 text-sm text-[#888888]">
+          <h1 className="text-xl font-black tracking-wider text-[color:var(--theme-fg-accent,#E5A00D)]">SONANTE</h1>
+          <p className="mt-3 text-sm text-[color:var(--theme-fg-muted,#888888)]">
             {t(managedSavePending ? "app.managedSavePending" : bootstrapError ? "app.bootstrapError" : "wizard.starting")}
           </p>
         </div>
@@ -1547,20 +1547,20 @@ export function App() {
   }
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-[#121212] text-[#E0E0E0] overflow-hidden select-none"
+    <div className="h-screen w-screen flex flex-col bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-primary,#E0E0E0)] overflow-hidden select-none"
       onClickCapture={() => playerNavigationRequests.invalidate()}
       onChangeCapture={() => playerNavigationRequests.invalidate()}>
       <div className="min-h-0 flex-1 flex overflow-hidden">
         {/* Barra Lateral */}
-        <aside data-sonante-sidebar inert={hosting.busy ? true : undefined} onClickCapture={() => { if (nowPlayingEmbedded && !hosting.busy) void nowPlayingHosting.collapse(); }} className="flex min-h-0 w-56 shrink-0 flex-col overflow-hidden border-r border-[#262626] bg-[#181818] p-3">
+        <aside data-sonante-sidebar inert={hosting.busy ? true : undefined} onClickCapture={() => { if (nowPlayingEmbedded && !hosting.busy) void nowPlayingHosting.collapse(); }} className="flex min-h-0 w-56 shrink-0 flex-col overflow-hidden border-r border-[color:var(--theme-border-soft,#262626)] bg-[var(--theme-surface-panel,#181818)] p-3">
           <div className="mb-7 flex shrink-0 items-center gap-2.5 px-3 py-3">
-            <Sparkles className="shrink-0 text-[#E5A00D]" size={21} />
-            <h1 className="truncate text-base font-black tracking-[0.14em] text-[#E5A00D]">SONANTE</h1>
+            <Sparkles className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" size={21} />
+            <h1 className="truncate text-base font-black tracking-[0.14em] text-[color:var(--theme-fg-accent,#E5A00D)]">SONANTE</h1>
           </div>
 
           <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pb-3">
             <section aria-labelledby="sidebar-music-group">
-              <h2 id="sidebar-music-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#5F5F5F]">
+              <h2 id="sidebar-music-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[color:var(--theme-fg-muted,#5F5F5F)]">
                 {t("sidebar.musicGroup")}
               </h2>
               <nav aria-label={t("sidebar.musicGroup")} className="space-y-1">
@@ -1571,22 +1571,22 @@ export function App() {
                   onClick={() => navigateLocalSubview("browser")}
                   trailing={!isPlaybackAvailable ? (
                     <span
-                      className="flex items-center text-[#C9A45D]"
+                      className="flex items-center text-[color:var(--theme-fg-accent,#C9A45D)]"
                       title={mpdHealth.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")}
                     >
                       <CircleAlert size={13} />
                     </span>
                   ) : localCatalogActivity(playbackStatus.is_updating, localCatalog) ? (
-                    <span className="flex items-center text-[#E5A00D]" title={t(playbackStatus.is_updating ? "sidebar.indexingTooltip" : "localBrowser.organizing")}>
+                    <span className="flex items-center text-[color:var(--theme-fg-accent,#E5A00D)]" title={t(playbackStatus.is_updating ? "sidebar.indexingTooltip" : "localBrowser.organizing")}>
                       <RefreshCw size={13} className="animate-spin" />
                     </span>
                   ) : (
-                    <span className="flex items-center text-[#4BB543]/80" title={t("sidebar.syncedTooltip")}>
+                    <span className="flex items-center text-[color:var(--theme-fg-success,color-mix(in_srgb,#4BB543_80%,transparent))]" title={t("sidebar.syncedTooltip")}>
                       <CheckCircle2 size={13} />
                     </span>
                   )}
                 />
-                <div className="ml-6 border-l border-[#333333] pl-2">
+                <div className="ml-6 border-l border-[color:var(--theme-border-soft,#333333)] pl-2">
                   <SidebarNavItem diagnosticAction="explore" icon={Compass} label={t("explore.title")} active={mediaSource === "explore"}
                     onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("explore"); }} />
                 </div>
@@ -1600,7 +1600,7 @@ export function App() {
                     mainSectionPreference.navigate("plex");
                   }}
                 />
-                <div className="ml-6 border-l border-[#333333] pl-2">
+                <div className="ml-6 border-l border-[color:var(--theme-border-soft,#333333)] pl-2">
                   <SidebarNavItem diagnosticAction="plex" icon={Compass} label={t("discover.menu")} active={mediaSource === "plex" && plexArea === "discover"}
                     onClick={() => { resetAllNavigation(); setPlexArea("discover"); mainSectionPreference.navigate("plex"); }} />
                 </div>
@@ -1609,7 +1609,7 @@ export function App() {
             </section>
 
             <section aria-labelledby="sidebar-collection-group">
-              <h2 id="sidebar-collection-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#5F5F5F]">
+              <h2 id="sidebar-collection-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[color:var(--theme-fg-muted,#5F5F5F)]">
                 {t("sidebar.collectionGroup")}
               </h2>
               <nav aria-label={t("sidebar.collectionGroup")} className="space-y-1">
@@ -1634,7 +1634,7 @@ export function App() {
               </nav>
             </section>
             <section aria-labelledby="sidebar-audio-group">
-              <h2 id="sidebar-audio-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#5F5F5F]">{t("equalizer.audioGroup")}</h2>
+              <h2 id="sidebar-audio-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[color:var(--theme-fg-muted,#5F5F5F)]">{t("equalizer.audioGroup")}</h2>
               <nav aria-label={t("equalizer.audioGroup")} className="space-y-1">
                 <SidebarNavItem icon={SlidersHorizontal} label={t("equalizer.title")} active={mediaSource === "equalizer"}
                   onClick={() => { if(mediaSource&&mediaSource!=="equalizer"){eqReturnSectionRef.current=mediaSource;eqReturnViewRef.current=true;} mainSectionPreference.navigate("equalizer"); }} />
@@ -1703,12 +1703,12 @@ export function App() {
             configuredLocalFolders={config?.local_folders ?? []}
           />
         ) : !isPlexConnected ? (
-          <main className="flex-1 flex flex-col items-center justify-center bg-[#121212] select-none p-8 text-center animate-in fade-in duration-200">
-            <div className="w-16 h-16 rounded-2xl bg-[#E5A00D]/10 border border-[#E5A00D]/20 flex items-center justify-center text-[#E5A00D] mb-4 shadow-xl">
+          <main className="flex-1 flex flex-col items-center justify-center bg-[var(--theme-surface-base,#121212)] select-none p-8 text-center animate-in fade-in duration-200">
+            <div className="w-16 h-16 rounded-2xl bg-[#E5A00D]/10 border border-[color:var(--theme-border-accent,#E5A00D)]/20 flex items-center justify-center text-[color:var(--theme-fg-accent,#E5A00D)] mb-4 shadow-xl">
               <Server size={32} />
             </div>
-            <h2 className="text-xl font-bold text-white mb-2">{t("plex.disconnectedTitle")}</h2>
-            <p className="text-xs text-[#888888] max-w-md mb-6 leading-relaxed">
+            <h2 className="text-xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] mb-2">{t("plex.disconnectedTitle")}</h2>
+            <p className="text-xs text-[color:var(--theme-fg-muted,#888888)] max-w-md mb-6 leading-relaxed">
               {t("plex.disconnectedDesc")}
             </p>
             <button
@@ -1775,20 +1775,20 @@ export function App() {
             isPlaybackAvailable={isPlaybackAvailable}
           />
         ) : (
-          <main className="flex-1 flex flex-col overflow-hidden bg-[#121212]">
+          <main className="flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)]">
             <div className="flex flex-wrap items-center justify-between gap-4 px-8 pt-8 pb-4">
               <div className="flex items-center space-x-3">
                 {hasPlexSubview && (
                   <button
                     onClick={handlePlexContextBack}
-                    className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
+                    className="p-1.5 rounded-lg bg-[var(--theme-surface-raised,#1E1E1E)] border border-[color:var(--theme-border-soft,#333333)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer mr-1"
                     title={t("plex.back")}
                   >
                     <ArrowLeft size={16} />
                   </button>
                 )}
                 <div>
-                  <h2 className="text-2xl font-bold text-white tracking-tight">
+                  <h2 className="text-2xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight">
                     {searchQuery.trim().length > 0
                       ? t("plex.resultsFor", { query: searchQuery })
                       : activeCollection
@@ -1806,7 +1806,7 @@ export function App() {
                                 : plexViewMode === "genres" ? t("common.genresLabel") : t("player.source.plex")}
                   </h2>
                   {searchQuery.trim().length === 0 && (
-                    <p className="mt-0.5 text-xs text-[#888888]">
+                    <p className="mt-0.5 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                       {activeCollection
                         ? t("plex.albumsCount", { count: collectionAlbums.length })
                         : fallbackPlexArtist
@@ -1829,12 +1829,12 @@ export function App() {
             </div>
 
             {!hasPlexSubview && searchQuery.trim().length === 0 && (
-              <div className="flex flex-wrap gap-1 border-b border-[#222222] px-8 pb-3">
+              <div className="flex flex-wrap gap-1 border-b border-[color:var(--theme-border-soft,#222222)] px-8 pb-3">
                 <button
                   type="button"
                   onClick={() => handlePlexModeChange("albums")}
                   className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
-                    plexViewMode === "albums" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                    plexViewMode === "albums" ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                   }`}
                 >
                   {t("plex.tabAlbums")}
@@ -1843,7 +1843,7 @@ export function App() {
                   type="button"
                   onClick={() => handlePlexModeChange("artists")}
                   className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
-                    plexViewMode === "artists" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                    plexViewMode === "artists" ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                   }`}
                 >
                   {t("plex.tabArtists")}
@@ -1852,7 +1852,7 @@ export function App() {
                   type="button"
                   onClick={() => handlePlexModeChange("years")}
                   className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
-                    plexViewMode === "years" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                    plexViewMode === "years" ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                   }`}
                 >
                   {t("plex.tabYears")}
@@ -1861,7 +1861,7 @@ export function App() {
                   type="button"
                   onClick={() => handlePlexModeChange("genres")}
                   className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
-                    plexViewMode === "genres" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                    plexViewMode === "genres" ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                   }`}
                 >
                   {t("common.genresLabel")}
@@ -1871,7 +1871,7 @@ export function App() {
                     type="button"
                     onClick={() => handlePlexModeChange("collections")}
                     className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
-                      plexViewMode === "collections" ? "bg-[#E5A00D] text-black shadow" : "text-[#999999] hover:bg-[#1E1E1E] hover:text-white"
+                      plexViewMode === "collections" ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                     }`}
                   >
                     {t("plex.tabCollections")}
@@ -1880,8 +1880,8 @@ export function App() {
               </div>
             )}
 
-            <div className="flex flex-wrap items-center gap-3 border-b border-[#222222] px-8 py-3">
-              <div className="flex items-center gap-2 text-xs text-[#888888]">
+            <div className="flex flex-wrap items-center gap-3 border-b border-[color:var(--theme-border-soft,#222222)] px-8 py-3">
+              <div className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                 <span>{t("plex.libraryLabel")}</span>
                 <ToolbarSelect
                   value={selectedLibrary?.key ?? ""}
@@ -1894,24 +1894,24 @@ export function App() {
               </div>
 
               <div className="relative flex w-72 max-w-full items-center">
-                <Search size={15} className="absolute left-3 text-[#666666]" />
+                <Search size={15} className="absolute left-3 text-[color:var(--theme-fg-muted,#666666)]" />
                 <input
                   ref={searchInputRef}
                   type="text"
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
                   placeholder={t("plex.searchPlaceholder")}
-                  className="w-full rounded-lg border border-[#2B2B2B] bg-[#1A1A1A] py-1.5 pl-9 pr-8 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D]"
+                  className="w-full rounded-lg border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#1A1A1A)] py-1.5 pl-9 pr-8 text-xs text-[color:var(--theme-fg-primary,#ffffff)] placeholder-[color:var(--theme-fg-muted,#666666)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)]"
                 />
                 {searchQuery && (
-                  <button type="button" onClick={() => setSearchQuery("")} className="absolute right-2.5 text-[#666666] hover:text-white cursor-pointer">
+                  <button type="button" onClick={() => setSearchQuery("")} className="absolute right-2.5 text-[color:var(--theme-fg-muted,#666666)] hover:text-[color:var(--theme-fg-primary,#ffffff)] cursor-pointer">
                     <X size={14} />
                   </button>
                 )}
               </div>
 
               {searchQuery.trim().length === 0 && ((!hasPlexSubview && plexViewMode === "albums") || activePlexGenre !== null) && (
-                <div className="flex items-center gap-2 text-xs text-[#888888]">
+                <div className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                   <span>{t("plex.sortLabel")}</span>
                   <ToolbarSelect
                     value={plexSortMode}
@@ -1923,7 +1923,7 @@ export function App() {
                 </div>
               )}
               {!hasPlexSubview && searchQuery.trim().length === 0 && plexViewMode === "artists" && (
-                <div className="flex items-center gap-2 text-xs text-[#888888]">
+                <div className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                   <span>{t("plex.sortLabel")}</span>
                   <ToolbarSelect
                     value={plexArtistSortMode}
@@ -1939,7 +1939,7 @@ export function App() {
             {(showPlexAlbumIndex || showPlexArtistIndex) && (
               <nav
                 aria-label={t(plexViewMode === "artists" ? "plex.artistIndex" : "plex.albumIndex")}
-                className="flex flex-wrap items-center gap-1 border-b border-[#222222] px-8 py-2"
+                className="flex flex-wrap items-center gap-1 border-b border-[color:var(--theme-border-soft,#222222)] px-8 py-2"
               >
                 {LOCAL_ALBUM_INDEX_BUCKETS.map((bucket) => {
                   const index = plexViewMode === "artists"
@@ -1958,7 +1958,7 @@ export function App() {
                         if (plexViewMode === "artists") plexArtistListRef.current?.scrollToIndex(index);
                         else plexGridRef.current?.scrollToIndex(index);
                       }}
-                      className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[#999999] transition-colors hover:bg-[#282828] hover:text-[#E5A00D] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D] disabled:cursor-default disabled:text-[#444444] disabled:hover:bg-transparent"
+                      className="h-6 min-w-6 rounded px-1 text-[11px] font-semibold text-[color:var(--theme-fg-secondary,#999999)] transition-colors hover:bg-[var(--theme-surface-hover,#282828)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:cursor-default disabled:text-[color:var(--theme-fg-faint,#444444)] disabled:hover:bg-transparent"
                     >
                       {bucket}
                     </button>
@@ -1970,7 +1970,7 @@ export function App() {
             <div ref={setPlexScrollContainer} className="flex-1 overflow-y-auto p-8">
               {searchQuery.trim().length > 0 ? (
                 isSearching ? (
-                  <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
+                  <div className="h-40 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
                     {t("plex.searching")}
                   </div>
                 ) : searchResults &&
@@ -1980,7 +1980,7 @@ export function App() {
                   <div className="space-y-8">
                     {searchResults.artists.length > 0 && (
                       <div>
-                        <h3 className="text-sm font-bold text-[#888888] uppercase tracking-wider mb-3">
+                        <h3 className="text-sm font-bold text-[color:var(--theme-fg-muted,#888888)] uppercase tracking-wider mb-3">
                           {t("plex.artists")}
                         </h3>
                         <div className="flex flex-wrap gap-3">
@@ -1990,16 +1990,16 @@ export function App() {
                               onClick={() =>
                                 setActiveArtist({ rating_key: art.rating_key, name: art.name })
                               }
-                              className="flex items-center space-x-3 bg-[#181818] border border-[#262626] hover:border-[#E5A00D] rounded-full pl-1.5 pr-4 py-1.5 transition-colors cursor-pointer"
+                              className="flex items-center space-x-3 bg-[var(--theme-surface-panel,#181818)] border border-[color:var(--theme-border-soft,#262626)] hover:border-[color:var(--theme-border-accent,#E5A00D)] rounded-full pl-1.5 pr-4 py-1.5 transition-colors cursor-pointer"
                             >
-                              <div className="w-8 h-8 rounded-full bg-[#242424] overflow-hidden flex items-center justify-center">
+                              <div className="w-8 h-8 rounded-full bg-[var(--theme-surface-raised,#242424)] overflow-hidden flex items-center justify-center">
                                 {art.thumb ? (
                                   <PlexImage image={art.thumb} alt="" className="w-full h-full object-cover" />
                                 ) : (
-                                  <User size={14} className="text-[#666666]" />
+                                  <User size={14} className="text-[color:var(--theme-fg-muted,#666666)]" />
                                 )}
                               </div>
-                              <span className="text-xs font-bold text-white">{art.name}</span>
+                              <span className="text-xs font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{art.name}</span>
                             </button>
                           ))}
                         </div>
@@ -2008,7 +2008,7 @@ export function App() {
 
                     {visibleSearchAlbums.length > 0 && (
                       <div>
-                        <h3 className="text-sm font-bold text-[#888888] uppercase tracking-wider mb-3">
+                        <h3 className="text-sm font-bold text-[color:var(--theme-fg-muted,#888888)] uppercase tracking-wider mb-3">
                           {t("plex.albums")}
                         </h3>
                         <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
@@ -2036,10 +2036,10 @@ export function App() {
 
                     {searchResults.tracks.length > 0 && (
                       <div>
-                        <h3 className="text-sm font-bold text-[#888888] uppercase tracking-wider mb-3">
+                        <h3 className="text-sm font-bold text-[color:var(--theme-fg-muted,#888888)] uppercase tracking-wider mb-3">
                           {t("plex.tracks")}
                         </h3>
-                        <div className="divide-y divide-[#1A1A1A] bg-[#141414] rounded-xl border border-[#222222] p-2">
+                        <div className="divide-y divide-[color:var(--theme-border-soft,#1A1A1A)] bg-[var(--theme-surface-base,#141414)] rounded-xl border border-[color:var(--theme-border-soft,#222222)] p-2">
                           {searchResults.tracks.map((track) => (
                             <div
                               key={track.rating_key}
@@ -2060,26 +2060,26 @@ export function App() {
                               aria-disabled={!isPlaybackAvailable}
                               className={`flex items-center justify-between p-2.5 rounded-lg transition-colors group ${
                                 isPlaybackAvailable
-                                  ? "hover:bg-[#1E1E1E] cursor-pointer"
+                                  ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                                   : "opacity-60 cursor-not-allowed"
                               }`}
                             >
                               <div className="flex items-center space-x-3 min-w-0 pr-4">
-                                <div className="w-9 h-9 rounded bg-[#202020] overflow-hidden shrink-0">
+                                <div className="w-9 h-9 rounded bg-[var(--theme-surface-raised,#202020)] overflow-hidden shrink-0">
                                   {track.thumb ? (
                                     <PlexImage image={track.thumb} alt="" className="w-full h-full object-cover" />
                                   ) : (
-                                    <div className="w-full h-full flex items-center justify-center text-[#444444]">
+                                    <div className="w-full h-full flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]">
                                       <Disc3 size={16} />
                                     </div>
                                   )}
                                 </div>
                                 <div className="flex flex-col min-w-0">
-                                  <span className="text-xs font-bold text-white group-hover:text-[#E5A00D] transition-colors truncate">
+                                  <span className="text-xs font-bold text-[color:var(--theme-fg-primary,#ffffff)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate">
                                     {track.title}
                                   </span>
                                   {track.album_title && (
-                                    <span className="text-[11px] text-[#777777] truncate">
+                                    <span className="text-[11px] text-[color:var(--theme-fg-muted,#777777)] truncate">
                                       {track.album_title}
                                     </span>
                                   )}
@@ -2104,12 +2104,12 @@ export function App() {
                                       },
                                     ]);
                                   }}
-                                  className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                                  className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
                                   title={t("playlists.addTrack")}
                                 >
                                   <ListPlus size={15} />
                                 </button>
-                                <Play size={14} className="text-[#888888] group-hover:text-white shrink-0 mr-2" />
+                                <Play size={14} className="text-[color:var(--theme-fg-muted,#888888)] group-hover:text-[color:var(--theme-fg-primary,#ffffff)] shrink-0 mr-2" />
                               </div>
                             </div>
                           ))}
@@ -2118,12 +2118,12 @@ export function App() {
                     )}
                   </div>
                 ) : (
-                  <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
+                  <div className="h-40 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
                     {t("plex.noResults", { query: searchQuery })}
                   </div>
                 )
               ) : loading ? (
-                <div className="h-full flex items-center justify-center text-[#666666]">
+                <div className="h-full flex items-center justify-center text-[color:var(--theme-fg-muted,#666666)]">
                   {t("plex.loading")}
                 </div>
               ) : activeCollection ? (
@@ -2265,10 +2265,10 @@ export function App() {
                           setFallbackPlexArtist(artist);
                         }
                       }}
-                      className="flex h-full w-full items-center justify-between border-b border-[#1D1D1D] px-4 text-left transition-colors hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#E5A00D]"
+                      className="flex h-full w-full items-center justify-between border-b border-[color:var(--theme-border-soft,#1D1D1D)] px-4 text-left transition-colors hover:bg-[var(--theme-surface-raised,#1E1E1E)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
                     >
-                      <span className="truncate pr-4 text-sm font-semibold text-white">{artist.name}</span>
-                      <span className="shrink-0 text-xs text-[#777777]">
+                      <span className="truncate pr-4 text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)]">{artist.name}</span>
+                      <span className="shrink-0 text-xs text-[color:var(--theme-fg-muted,#777777)]">
                         {t("plex.albumsCount", { count: artist.albumCount })}
                       </span>
                     </button>
@@ -2282,10 +2282,10 @@ export function App() {
                         key={year.year}
                         type="button"
                         onClick={() => setSelectedPlexYear(year.year)}
-                        className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                        className="rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] p-5 text-left transition-colors hover:border-[color:var(--theme-border-accent,#E5A00D)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
                       >
-                        <span className="block text-xl font-bold text-white">{year.year}</span>
-                        <span className="mt-1 block text-xs text-[#777777]">
+                        <span className="block text-xl font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{year.year}</span>
+                        <span className="mt-1 block text-xs text-[color:var(--theme-fg-muted,#777777)]">
                           {t("plex.albumsCount", { count: year.albumCount })}
                         </span>
                       </button>
@@ -2299,10 +2299,10 @@ export function App() {
                         type="button"
                         onClick={() => setSelectedPlexDecade(decade.decade)}
                         aria-label={t("plex.decadeLabel", { decade: decade.decade })}
-                        className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                        className="rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] p-5 text-left transition-colors hover:border-[color:var(--theme-border-accent,#E5A00D)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
                       >
-                        <span className="block text-xl font-bold text-white">{t("plex.decadeShort", { decade: decade.decade })}</span>
-                        <span className="mt-1 block text-xs text-[#777777]">
+                        <span className="block text-xl font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{t("plex.decadeShort", { decade: decade.decade })}</span>
+                        <span className="mt-1 block text-xs text-[color:var(--theme-fg-muted,#777777)]">
                           {t("plex.albumsCount", { count: decade.albumCount })}
                         </span>
                       </button>
@@ -2311,10 +2311,10 @@ export function App() {
                       <button
                         type="button"
                         onClick={() => setSelectedPlexUnknownYear(true)}
-                        className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+                        className="rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] p-5 text-left transition-colors hover:border-[color:var(--theme-border-accent,#E5A00D)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
                       >
-                        <span className="block text-lg font-bold text-white">{t("plex.unknownYear")}</span>
-                        <span className="mt-1 block text-xs text-[#777777]">
+                        <span className="block text-lg font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{t("plex.unknownYear")}</span>
+                        <span className="mt-1 block text-xs text-[color:var(--theme-fg-muted,#777777)]">
                           {t("plex.albumsCount", { count: plexYearNavigation.unknownCount })}
                         </span>
                       </button>
@@ -2331,10 +2331,10 @@ export function App() {
                     >
                       <PlexCollectionArtwork collection={col} />
 
-                      <span className="text-sm font-semibold text-white truncate" title={col.title}>
+                      <span className="text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)] truncate" title={col.title}>
                         {col.title}
                       </span>
-                      <span className="text-xs text-[#E5A00D] font-bold mt-0.5">
+                      <span className="text-xs text-[color:var(--theme-fg-accent,#E5A00D)] font-bold mt-0.5">
                         {t("plex.itemsCount", { count: col.child_count })}
                       </span>
                     </div>
@@ -2391,10 +2391,10 @@ export function App() {
         </div>}
       </div>
 
-      {!nowPlayingEmbedded && hosting.error && <p role="alert" className="px-6 py-2 text-xs text-red-200">{t("nowPlaying.transitionFailed")}</p>}
+      {!nowPlayingEmbedded && hosting.error && <p role="alert" className="px-6 py-2 text-xs text-[color:var(--theme-fg-error,var(--color-red-200))]">{t("nowPlaying.transitionFailed")}</p>}
       <div hidden={nowPlayingEmbedded} data-now-playing-player-bar>
       {playerNavigationError && (
-        <div role="alert" className="flex items-center justify-between gap-4 border-t border-[#383838] bg-[#211D14] px-6 py-2 text-xs text-[#D7AD52]">
+        <div role="alert" className="flex items-center justify-between gap-4 border-t border-[color:var(--theme-border-soft,#383838)] bg-[var(--theme-surface-panel,#211D14)] px-6 py-2 text-xs text-[color:var(--theme-fg-accent,#D7AD52)]">
           <span>{t("player.navigationUnavailable")}</span>
           <button type="button" onClick={() => setPlayerNavigationError(false)} aria-label={t("player.dismissNavigationError")} className="p-1"><X size={14} /></button>
         </div>
@@ -2418,15 +2418,15 @@ export function App() {
         <div
           role={configSaveNotice?.kind === "error" || configSaveNotice?.kind === "warning" ? "alert" : "status"}
           aria-live={configSaveNotice?.kind === "error" ? "assertive" : "polite"}
-          className="fixed bottom-28 right-6 z-40 max-h-[60vh] max-w-sm overflow-y-auto rounded-lg border border-[#383838] bg-[#1D1D1D] p-4 text-xs text-white shadow-xl"
+          className="fixed bottom-28 right-6 z-40 max-h-[60vh] max-w-sm overflow-y-auto rounded-lg border border-[color:var(--theme-border-soft,#383838)] bg-[var(--theme-surface-panel,#1D1D1D)] p-4 text-xs text-[color:var(--theme-fg-primary,#ffffff)] shadow-xl"
         >
           <div className="flex items-start gap-2">
             {configSavePhase ? (
-              <RefreshCw size={16} className="shrink-0 animate-spin text-[#E5A00D]" />
+              <RefreshCw size={16} className="shrink-0 animate-spin text-[color:var(--theme-fg-accent,#E5A00D)]" />
             ) : configSaveNotice?.kind === "success" ? (
-              <CheckCircle2 size={16} className="shrink-0 text-[#4BB543]" />
+              <CheckCircle2 size={16} className="shrink-0 text-[color:var(--theme-fg-success,#4BB543)]" />
             ) : (
-              <CircleAlert size={16} className={`shrink-0 ${configSaveNotice?.kind === "warning" ? "text-amber-300" : "text-red-400"}`} />
+              <CircleAlert size={16} className={`shrink-0 ${configSaveNotice?.kind === "warning" ? "text-[color:var(--theme-fg-accent,var(--color-amber-300))]" : "text-[color:var(--theme-fg-error,var(--color-red-400))]"}`} />
             )}
             <div className="min-w-0 flex-1">
               <div className="font-semibold">
@@ -2443,9 +2443,9 @@ export function App() {
                   : configSaveNotice?.refusal === "queueCheckRequired" ? t("settings.queueClearCheckRequired")
                   : t("settings.libraryUpdateFailed")}
               </div>
-              {configSavePhase === "local" && <div className="mt-1 text-[#999999]">{t("settings.indexingMayTakeTime")}</div>}
+              {configSavePhase === "local" && <div className="mt-1 text-[color:var(--theme-fg-secondary,#999999)]">{t("settings.indexingMayTakeTime")}</div>}
               {configSaveNotice?.kind === "error" && (
-                <div className="mt-1 whitespace-pre-wrap break-words text-red-300">
+                <div className="mt-1 whitespace-pre-wrap break-words text-[color:var(--theme-fg-error,var(--color-red-300))]">
                   {configSaveNotice.refusal && <div>{t("settings.noChangesApplied")}</div>}
                   {configSaveNotice.refusal === "fullRescan" && <div className="mt-1">{t("settings.fullIndexNotStarted")}</div>}
                   {(configSaveNotice.refusal === "queueChanged" || configSaveNotice.refusal === "queueCheckRequired") && <div className="mt-1">{t("settings.queueClearRecheck")}</div>}
@@ -2457,7 +2457,7 @@ export function App() {
               )}
             </div>
             {configSaveNotice && (
-              <button type="button" onClick={() => setConfigSaveNotice(null)} aria-label={t("settings.dismissStatus")} className="shrink-0 text-[#999999] hover:text-white">
+              <button type="button" onClick={() => setConfigSaveNotice(null)} aria-label={t("settings.dismissStatus")} className="shrink-0 text-[color:var(--theme-fg-secondary,#999999)] hover:text-[color:var(--theme-fg-primary,#ffffff)]">
                 <X size={14} />
               </button>
             )}

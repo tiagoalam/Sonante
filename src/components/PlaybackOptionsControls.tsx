@@ -35,7 +35,7 @@ export const PlaybackOptionsControls: React.FC<{ options: PlaybackOptions | null
   const repeatActive = mode !== "off" && mode !== "unavailable";
   const repeatLabel = t(`player.repeat.${mode}`);
   const randomLabel = t(!options ? "player.random.unavailable" : options.random ? "player.random.on" : "player.random.off");
-  const iconStyle = (active: boolean): React.CSSProperties => ({ color: active ? "#E5A00D" : "#888888", padding: 6, position: "relative", display: "inline-flex" });
+  const iconStyle = (active: boolean): React.CSSProperties => ({ color: active ? "var(--theme-fg-accent,#E5A00D)" : "var(--theme-fg-muted,#888888)", padding: 6, position: "relative", display: "inline-flex" });
   return <span className="relative inline-flex items-center gap-2" aria-busy={busy}>
     <button type="button" disabled={disabled || !options || busy} onClick={() => void change("cycle_repeat")}
       aria-label={repeatLabel} title={repeatLabel} aria-pressed={repeatActive} style={iconStyle(repeatActive)}>
@@ -46,6 +46,6 @@ export const PlaybackOptionsControls: React.FC<{ options: PlaybackOptions | null
       aria-label={randomLabel} title={randomLabel} aria-pressed={Boolean(options?.random)} style={iconStyle(Boolean(options?.random))}>
       <Shuffle size={18} aria-hidden="true" />
     </button>
-    {failed && <span role="alert" className="absolute top-full right-0 text-[10px] text-red-300 whitespace-nowrap">{t("player.optionsFailed")}</span>}
+    {failed && <span role="alert" className="absolute top-full right-0 text-[10px] text-[color:var(--theme-fg-error,var(--color-red-300))] whitespace-nowrap">{t("player.optionsFailed")}</span>}
   </span>;
 };

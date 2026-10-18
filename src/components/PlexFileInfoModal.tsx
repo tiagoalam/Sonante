@@ -24,7 +24,7 @@ export function PlexFileInfoModal({ track, onClose }: { track: PlexTrack; onClos
   const depth = info?.sample_type === "not_applicable" ? t("fileInfo.notApplicable")
     : info?.bit_depth == null ? unknown : t("fileInfo.bitDepthValue", { bits: info.bit_depth });
   return <dialog ref={dialog} aria-labelledby="plex-file-info-title" aria-modal="true" tabIndex={-1}
-    className="m-auto max-h-[85dvh] w-11/12 max-w-md overflow-y-auto rounded-xl border border-[#333] bg-[#181818] p-5 text-[#ddd] shadow-2xl backdrop:bg-black/70"
+    className="m-auto max-h-[85dvh] w-11/12 max-w-md overflow-y-auto rounded-xl border border-[color:var(--theme-border-soft,#333)] bg-[var(--theme-surface-panel,#181818)] p-5 text-[color:var(--theme-fg-primary,#ddd)] shadow-2xl backdrop:bg-black/70"
     onKeyDown={event => event.stopPropagation()}
     onCancel={event => { event.preventDefault(); onClose(); }}
     // StrictMode closes/reopens during effect replay. Its queued close event
@@ -37,10 +37,10 @@ export function PlexFileInfoModal({ track, onClose }: { track: PlexTrack; onClos
     <header className="flex items-center justify-between gap-4">
       <h2 id="plex-file-info-title" className="text-lg font-semibold">{t("fileInfo.title")}</h2>
       <button type="button" autoFocus onClick={onClose} aria-label={t("fileInfo.close")}
-        className="rounded p-2 hover:bg-[#333] focus-visible:outline focus-visible:outline-[#E5A00D]"><X size={18} /></button>
+        className="rounded p-2 hover:bg-[var(--theme-surface-hover,#333)] focus-visible:outline focus-visible:outline-[color:var(--theme-border-accent,#E5A00D)]"><X size={18} /></button>
     </header>
     <p className="my-3 break-words text-sm">{track.title}</p>
-    <p className="mb-3 text-xs text-[#aaa]">{t("fileInfo.plexProvenance")}</p>
+    <p className="mb-3 text-xs text-[color:var(--theme-fg-secondary,#aaa)]">{t("fileInfo.plexProvenance")}</p>
     <dl className="grid grid-cols-2 gap-2 text-sm">
       <dt>{t("fileInfo.format")}</dt><dd>{info?.container ?? unknown}</dd>
       <dt>{t("fileInfo.codec")}</dt><dd>{info?.codec ?? unknown}</dd>
@@ -54,6 +54,6 @@ export function PlexFileInfoModal({ track, onClose }: { track: PlexTrack; onClos
       <dt>{t("fileInfo.duration")}</dt><dd>{duration != null && Number.isSafeInteger(duration) && duration > 0
         ? t("fileInfo.durationValue", { seconds: (duration / 1000).toLocaleString(i18n.resolvedLanguage, { maximumFractionDigits: 3 }) }) : unknown}</dd>
     </dl>
-    <p className="mt-4 text-xs text-[#aaa]">{t("fileInfo.plexLimits")}</p>
+    <p className="mt-4 text-xs text-[color:var(--theme-fg-secondary,#aaa)]">{t("fileInfo.plexLimits")}</p>
   </dialog>;
 }

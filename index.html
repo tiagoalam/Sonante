@@ -2,6 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // Set the persisted palette before styles and the React entry can paint.
+      (() => {
+        let value = "dark";
+        try {
+          const r = JSON.parse(localStorage.getItem("sonante_appearance_v1") || "null");
+          if (r && r.version === 1 && (r.value === "dark" || r.value === "light") && r.revision &&
+            Number.isSafeInteger(r.revision.counter) && r.revision.counter >= 0 &&
+            typeof r.revision.origin === "string" && r.revision.origin.length <= 96 && /^[\w-]*$/.test(r.revision.origin)) value = r.value;
+        } catch { /* Storage is optional; Dark is the default. */ }
+        document.documentElement.dataset.theme = value;
+        document.documentElement.style.colorScheme = value;
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Tauri + React + Typescript</title>

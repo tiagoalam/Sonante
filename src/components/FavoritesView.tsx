@@ -200,14 +200,14 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
   );
 
   return (
-    <main className="flex-1 flex flex-col overflow-hidden bg-[#121212] select-none">
+    <main className="flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)] select-none">
       <PlaybackRequestNotice failure={request.failure} />
-      <div className="flex items-center justify-between p-8 pb-4 border-b border-[#222222]">
+      <div className="flex items-center justify-between p-8 pb-4 border-b border-[color:var(--theme-border-soft,#222222)]">
         <div className="flex items-center space-x-3">
           {selectedAlbum && (
             <button
               onClick={() => setSelectedAlbum(null)}
-              className="p-1.5 rounded-lg bg-[#1E1E1E] border border-[#333333] hover:bg-[#2A2A2A] text-white transition-colors cursor-pointer mr-1"
+              className="p-1.5 rounded-lg bg-[var(--theme-surface-raised,#1E1E1E)] border border-[color:var(--theme-border-soft,#333333)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer mr-1"
               title={t("favorites.back")}
             >
               <ArrowLeft size={16} />
@@ -215,11 +215,11 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
           )}
 
           <div>
-            <h2 className="text-2xl font-bold text-white tracking-tight flex items-center space-x-2">
-              <Heart size={22} className="text-[#E5A00D]" fill="#E5A00D" />
+            <h2 className="text-2xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight flex items-center space-x-2">
+              <Heart size={22} className="text-[color:var(--theme-fg-accent,#E5A00D)]" fill="#E5A00D" />
               <span>{selectedAlbum ? selectedAlbum.title : t("favorites.title")}</span>
             </h2>
-            <p className="text-xs text-[#888888] mt-0.5">
+            <p className="text-xs text-[color:var(--theme-fg-muted,#888888)] mt-0.5">
               {selectedAlbum
                 ? selectedAlbum.artist
                 : t("favorites.count", { count: filtered.length })}
@@ -230,17 +230,17 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
         {!selectedAlbum && (
           <div className="flex items-center space-x-4">
             <div className="relative flex items-center w-64">
-              <Search size={14} className="absolute left-3 text-[#666666]" />
+              <Search size={14} className="absolute left-3 text-[color:var(--theme-fg-muted,#666666)]" />
               <input
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder={t("favorites.filterPlaceholder")}
-                className="w-full bg-[#1A1A1A] border border-[#2B2B2B] rounded-lg pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#666666] outline-none focus:border-[#E5A00D] transition-colors"
+                className="w-full bg-[var(--theme-surface-panel,#1A1A1A)] border border-[color:var(--theme-border-soft,#2B2B2B)] rounded-lg pl-9 pr-3 py-1.5 text-xs text-[color:var(--theme-fg-primary,#ffffff)] placeholder-[color:var(--theme-fg-muted,#666666)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)] transition-colors"
               />
             </div>
 
-            <div className="flex bg-[#1E1E1E] p-1 rounded-lg border border-[#333333]">
+            <div className="flex bg-[var(--theme-surface-raised,#1E1E1E)] p-1 rounded-lg border border-[color:var(--theme-border-soft,#333333)]">
               <button
                 onClick={() => {
                   setActiveTab("local");
@@ -249,7 +249,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                 className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
                   activeTab === "local"
                     ? "bg-[#E5A00D] text-black shadow"
-                    : "text-[#999999] hover:text-white"
+                    : "text-[color:var(--theme-fg-secondary,#999999)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                 }`}
               >
                 <HardDrive size={13} />
@@ -264,7 +264,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                 className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
                   activeTab === "plex"
                     ? "bg-[#E5A00D] text-black shadow"
-                    : "text-[#999999] hover:text-white"
+                    : "text-[color:var(--theme-fg-secondary,#999999)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                 }`}
               >
                 <Server size={13} />
@@ -279,23 +279,23 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
         {selectedAlbum ? (
           <div className="space-y-8 animate-in fade-in duration-100">
             <div className="flex items-end space-x-6">
-              <div className="w-52 h-52 rounded-xl bg-[#202020] border border-[#2B2B2B] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
+              <div className="w-52 h-52 rounded-xl bg-[var(--theme-surface-raised,#202020)] border border-[color:var(--theme-border-soft,#2B2B2B)] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
                 {selectedAlbum.source === "plex" && selectedAlbum.plex_image ? (
                   <PlexImage
                     image={selectedAlbum.plex_image}
                     alt=""
                     className="w-full h-full object-cover"
-                    fallback={<Disc3 size={64} className="text-[#444444]" />}
+                    fallback={<Disc3 size={64} className="text-[color:var(--theme-fg-faint,#444444)]" />}
                   />
                 ) : selectedAlbum.thumb ? (
                   <img src={selectedAlbum.thumb} alt="" className="w-full h-full object-cover" />
                 ) : (
-                  <Disc3 size={64} className="text-[#444444]" />
+                  <Disc3 size={64} className="text-[color:var(--theme-fg-faint,#444444)]" />
                 )}
               </div>
 
               <div className="space-y-3">
-                <span className="text-xs font-bold text-[#E5A00D] uppercase tracking-wider flex items-center space-x-1">
+                <span className="text-xs font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider flex items-center space-x-1">
                   <Heart size={13} fill="#E5A00D" />
                   <span>
                     {selectedAlbum.title} (
@@ -305,9 +305,9 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                     )
                   </span>
                 </span>
-                <h1 className="text-3xl font-black text-white">{selectedAlbum.title}</h1>
-                <p className="text-base text-[#CCCCCC] font-medium">{selectedAlbum.artist}</p>
-                <p className="text-xs text-[#777777]">
+                <h1 className="text-3xl font-black text-[color:var(--theme-fg-primary,#ffffff)]">{selectedAlbum.title}</h1>
+                <p className="text-base text-[color:var(--theme-fg-secondary,#CCCCCC)] font-medium">{selectedAlbum.artist}</p>
+                <p className="text-xs text-[color:var(--theme-fg-muted,#777777)]">
                   {selectedAlbum.year ? `${selectedAlbum.year} • ` : ""}
                   {t("common.trackCount", { count: tracks.length })}
                 </p>
@@ -326,7 +326,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                     type="button"
                     onClick={() => setPlaylistItems(albumPlaylistItems())}
                     disabled={tracks.length === 0}
-                    className="flex items-center space-x-2 rounded-xl border border-[#333333] bg-[#222222] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#2A2A2A] disabled:opacity-50"
+                    className="flex items-center space-x-2 rounded-xl border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-raised,#222222)] px-4 py-2.5 text-xs font-semibold text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] disabled:opacity-50"
                     title={t("playlists.addAlbum")}
                   >
                     <ListPlus size={15} />
@@ -335,7 +335,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
 
                   <button
                     onClick={(e) => handleToggleFav(e, selectedAlbum)}
-                    className="flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-[#222222] hover:bg-[#2A2A2A] text-xs font-semibold text-[#E5A00D] border border-[#333333] transition-colors cursor-pointer"
+                    className="flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-[var(--theme-surface-raised,#222222)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] text-xs font-semibold text-[color:var(--theme-fg-accent,#E5A00D)] border border-[color:var(--theme-border-soft,#333333)] transition-colors cursor-pointer"
                   >
                     <Heart size={15} fill="#E5A00D" />
                     <span>{t("favorites.removeFavorite")}</span>
@@ -345,12 +345,12 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
             </div>
 
             {loadingTracks ? (
-              <div className="h-40 flex items-center justify-center text-xs text-[#666666]">
+              <div className="h-40 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
                 {t("plex.loading")}
               </div>
             ) : (
-              <div className="bg-[#141414] border border-[#222222] rounded-xl overflow-hidden divide-y divide-[#1D1D1D]">
-                <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[#666666] uppercase tracking-wider bg-[#181818]">
+              <div className="bg-[var(--theme-surface-base,#141414)] border border-[color:var(--theme-border-soft,#222222)] rounded-xl overflow-hidden divide-y divide-[color:var(--theme-border-soft,#1D1D1D)]">
+                <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[color:var(--theme-fg-muted,#666666)] uppercase tracking-wider bg-[var(--theme-surface-panel,#181818)]">
                   <span className="col-span-1 text-center">#</span>
                   <span className="col-span-8">{t("plex.tracks")}</span>
                   <span className="col-span-3 text-right flex items-center justify-end space-x-1">
@@ -366,21 +366,21 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                     aria-disabled={!isPlaybackAvailable}
                     className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
                       isPlaybackAvailable
-                        ? "hover:bg-[#1E1E1E] cursor-pointer"
+                        ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                         : "opacity-60 cursor-not-allowed"
                     }`}
                   >
-                    <span className="col-span-1 text-center font-mono text-[#666666] group-hover:text-[#E5A00D]">
+                    <span className="col-span-1 text-center font-mono text-[color:var(--theme-fg-muted,#666666)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
                       {idx + 1}
                     </span>
                     <div className="col-span-8 flex flex-col pr-2">
-                      <span className="font-semibold text-white group-hover:text-[#E5A00D] transition-colors truncate">
+                      <span className="font-semibold text-[color:var(--theme-fg-primary,#ffffff)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate">
                         {tItem.title}
                       </span>
-                      <span className="text-[11px] text-[#777777] truncate">{tItem.artist}</span>
+                      <span className="text-[11px] text-[color:var(--theme-fg-muted,#777777)] truncate">{tItem.artist}</span>
                     </div>
                     <div className="col-span-3 flex items-center justify-end gap-3">
-                      <span className="font-mono text-[#888888]">
+                      <span className="font-mono text-[color:var(--theme-fg-muted,#888888)]">
                         {formatDuration(tItem.duration)}
                       </span>
                       <button
@@ -390,7 +390,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                           const item = toPlaylistItem(tItem);
                           if (item) setPlaylistItems([item]);
                         }}
-                        className="rounded-md p-1.5 text-[#777777] hover:bg-[#2A2A2A] hover:text-[#E5A00D]"
+                        className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
                         title={t("playlists.addTrack")}
                       >
                         <ListPlus size={15} />
@@ -402,16 +402,16 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
             )}
           </div>
         ) : loading ? (
-          <div className="h-60 flex items-center justify-center text-xs text-[#666666]">
+          <div className="h-60 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
             {t("plex.loading")}
           </div>
         ) : filtered.length === 0 ? (
-          <div className="h-60 flex flex-col items-center justify-center text-[#666666] space-y-2">
-            <Heart size={36} className="opacity-30 text-[#E5A00D]" />
+          <div className="h-60 flex flex-col items-center justify-center text-[color:var(--theme-fg-muted,#666666)] space-y-2">
+            <Heart size={36} className="opacity-30 text-[color:var(--theme-fg-accent,#E5A00D)]" />
             <span className="text-xs">
               {activeTab === "local" ? t("favorites.emptyLocal") : t("favorites.emptyPlex")}
             </span>
-            <span className="text-[11px] text-[#555555]">{t("favorites.emptyHint")}</span>
+            <span className="text-[11px] text-[color:var(--theme-fg-faint,#555555)]">{t("favorites.emptyHint")}</span>
           </div>
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
@@ -423,7 +423,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                   onClick={() => handleOpenAlbum(fav)}
                   className={`group flex flex-col cursor-pointer ${isMissing ? "opacity-60" : ""}`}
                 >
-                  <div className="relative aspect-square w-full rounded-lg bg-[#202020] overflow-hidden mb-2.5 shadow-md">
+                  <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md">
                     {fav.source === "plex" && fav.plex_image ? (
                       <PlexImage
                         image={fav.plex_image}
@@ -431,7 +431,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                         className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
                         loading="lazy"
                         fallback={
-                          <div className="w-full h-full flex items-center justify-center text-[#444444]">
+                          <div className="w-full h-full flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]">
                             <Disc3 size={40} />
                           </div>
                         }
@@ -444,29 +444,29 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                         loading="lazy"
                       />
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center text-[#444444]">
+                      <div className="w-full h-full flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]">
                         <Disc3 size={40} />
                       </div>
                     )}
-                    <button
+                    <button data-theme-surface="contrast"
                       onClick={(e) => handleToggleFav(e, fav)}
-                      className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-[#E5A00D] transition-transform active:scale-90 cursor-pointer shadow"
+                      className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black/80 text-[color:var(--theme-fg-accent,#E5A00D)] transition-transform active:scale-90 cursor-pointer shadow"
                       title={t("favorites.removeFavorite")}
                     >
                       <Heart size={14} fill="#E5A00D" />
                     </button>
 
                     {isMissing && (
-                      <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center p-3 text-center">
-                        <AlertTriangle size={24} className="text-[#FFB020] mb-1" />
-                        <span className="text-[11px] font-bold text-white">
+                      <div data-theme-surface="contrast" className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center p-3 text-center">
+                        <AlertTriangle size={24} className="text-[color:var(--theme-fg-accent,#FFB020)] mb-1" />
+                        <span className="text-[11px] font-bold text-[color:var(--theme-fg-primary,#ffffff)]">
                           {t("favorites.missingDisk")}
                         </span>
                       </div>
                     )}
 
                     {!isMissing && (
-                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                      <div data-theme-surface="contrast" className="absolute inset-0 bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.4))] opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                         <button
                           onClick={(e) => handleQuickPlayCard(e, fav)}
                           disabled={!isPlaybackAvailable}
@@ -479,13 +479,13 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                     )}
                   </div>
 
-                  <span className="text-sm font-semibold text-white truncate" title={fav.title}>
+                  <span className="text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)] truncate" title={fav.title}>
                     {fav.title}
                   </span>
-                  <span className="text-xs text-[#999999] truncate mt-0.5" title={fav.artist}>
+                  <span className="text-xs text-[color:var(--theme-fg-secondary,#999999)] truncate mt-0.5" title={fav.artist}>
                     {fav.artist}
                   </span>
-                  <span className="text-[11px] text-[#666666] mt-0.5">
+                  <span className="text-[11px] text-[color:var(--theme-fg-muted,#666666)] mt-0.5">
                     {fav.year ? `${fav.year} • ` : ""}
                     {fav.source === "local" ? t("favorites.tabLocal") : t("favorites.tabPlex")}
                   </span>

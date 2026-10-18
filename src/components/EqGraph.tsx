@@ -16,7 +16,7 @@ export function EqGraph({preset,budget,selected,onSelect,onChange,onAdd,showGain
  const path=(v:number[])=>v.map((db,i)=>`${i?'L':'M'}${X+i*W/240},${y(db)}`).join(' ');
  const curves={individual:samples.individual.map(v=>v?path(v):null),requested:path(samples.requested),combined:samples.combined?path(samples.combined):null};
  const pos=(e:React.PointerEvent<SVGSVGElement>|React.MouseEvent<SVGSVGElement>)=>{return graphPoint(e.clientX,e.clientY,e.currentTarget.getBoundingClientRect())};
- return <figure className="rounded-xl border border-white/10 bg-[#111214] p-3" aria-label={t('equalizer.curve')}>
+ return <figure data-theme-surface="instrument" className="rounded-xl border border-white/10 bg-[#111214] p-3" aria-label={t('equalizer.curve')}>
   <svg id="equalizer-graph" tabIndex={0} preserveAspectRatio="xMidYMid meet" role="group" aria-label={t('equalizer.graphHelp')} viewBox="0 0 1000 350" className="w-full min-h-56 max-h-96" style={{touchAction:'pan-y'}}
    onDoubleClick={e=>{if(disabled||drag.current||e.target!==e.currentTarget&&((e.target as Element).tagName==='circle'))return;const p=pos(e);if(p&&p.x>=X&&p.x<=X+W&&p.y>=Y&&p.y<=Y+H)onAdd(xFrequency((p.x-X)/W),yGain(p.y))}}
    onPointerMove={e=>{if(!drag.current||disabled)return;const p=pos(e);if(!p)return;onChange(drag.current.id,{frequency_hz:xFrequency((p.x-X)/W),gain_db:yGain(p.y)})}}

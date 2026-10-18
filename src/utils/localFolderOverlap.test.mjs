@@ -82,7 +82,7 @@ test("first setup recognizes only the exact overlap error and both locales expla
 
 test("actual Plex Connect and sidebar handlers choose each opening independently and retain busy guards", async () => {
   const f = saveHarness("LOCAL_SOURCE_NEW_OVERLAP");
-  const plex = '<h2 className="text-xl font-bold text-white mb-2">{t("plex.disconnectedTitle")}';
+  const plex = '{t("plex.disconnectedTitle")}';
   const normal = '<SidebarNavItem diagnosticAction="settings"';
   f.click(plex);
   assert.equal(f.effects.opened, true); assert.equal(f.effects.page, "plex");

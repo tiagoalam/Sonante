@@ -40,15 +40,15 @@ export function LocalFileInfoModal({ path, displayName, available, onClose }: {
   const error = !available ? "stale" : state?.path === path ? state.error : undefined;
   return <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4">
     <div ref={dialog} role="dialog" aria-modal="true" aria-labelledby="local-file-info-title" tabIndex={-1}
-      className="w-full max-w-md rounded-xl border border-[#333] bg-[#181818] p-5 text-[#ddd] shadow-xl">
+      className="w-full max-w-md rounded-xl border border-[color:var(--theme-border-soft,#333)] bg-[var(--theme-surface-panel,#181818)] p-5 text-[color:var(--theme-fg-primary,#ddd)] shadow-xl">
       <div className="flex items-center justify-between gap-4">
         <h2 id="local-file-info-title" className="text-lg font-semibold">{t("fileInfo.title")}</h2>
-        <button type="button" onClick={onClose} aria-label={t("fileInfo.close")} className="rounded p-2 hover:bg-[#333]"><X size={18} /></button>
+        <button type="button" onClick={onClose} aria-label={t("fileInfo.close")} className="rounded p-2 hover:bg-[var(--theme-surface-hover,#333)]"><X size={18} /></button>
       </div>
       <p className="my-3 break-words text-sm">{displayName}</p>
       <div role="status" aria-live="polite" aria-busy={!info && !error}>
         {error ? <p>{t(`fileInfo.errors.${error}`)}</p> : !info ? <p>{t("fileInfo.loading")}</p> : <>
-          <p className="mb-3 text-xs text-[#aaa]">{t(info.provenance === "original_file_container_headers" ? "fileInfo.containerProvenance" : info.provenance === "original_file_mpeg_headers" ? "fileInfo.mp3Provenance" : info.provenance === "original_file_dsd_header" ? "fileInfo.dsdProvenance" : "fileInfo.provenance")}</p>
+          <p className="mb-3 text-xs text-[color:var(--theme-fg-secondary,#aaa)]">{t(info.provenance === "original_file_container_headers" ? "fileInfo.containerProvenance" : info.provenance === "original_file_mpeg_headers" ? "fileInfo.mp3Provenance" : info.provenance === "original_file_dsd_header" ? "fileInfo.dsdProvenance" : "fileInfo.provenance")}</p>
           <dl className="grid grid-cols-2 gap-2 text-sm">
             <dt>{t("fileInfo.format")}</dt><dd>{info.format}</dd>
             <dt>{t("fileInfo.codec")}</dt><dd>{info.codec}</dd>
@@ -63,12 +63,12 @@ export function LocalFileInfoModal({ path, displayName, available, onClose }: {
             <dt>{t("fileInfo.channels")}</dt><dd>{info.channels}</dd>
             <dt>{t("fileInfo.duration")}</dt><dd>{info.duration_seconds === null ? t(info.codec === "MP3" || info.provenance === "original_file_container_headers" ? "fileInfo.mp3DurationUnknown" : "fileInfo.unknown") : t("fileInfo.durationValue", { seconds: info.duration_seconds.toLocaleString(i18n.resolvedLanguage, { maximumFractionDigits: 3 }) })}</dd>
           </dl>
-          {info.codec === "MP3" && <p className="mt-3 text-xs text-[#aaa]">{t("fileInfo.frameBitrateHint")}</p>}
-          {info.codec === "Opus" && <p className="mt-3 text-xs text-[#aaa]">{t("fileInfo.opusHint")}</p>}
-          {info.sample_rate_basis === "aac_core_header" && <p className="mt-3 text-xs text-[#aaa]">{t("fileInfo.aacCoreHint")}</p>}
-          {info.sample_type === "float" && <p className="mt-3 text-xs text-[#aaa]">{t("fileInfo.floatHint")}</p>}
-          {info.compression === "hybrid" && <p className="mt-3 text-xs text-[#aaa]">{t("fileInfo.hybridHint")}</p>}
-          <p className="mt-4 text-xs text-[#aaa]">{t("fileInfo.limits")}</p>
+          {info.codec === "MP3" && <p className="mt-3 text-xs text-[color:var(--theme-fg-secondary,#aaa)]">{t("fileInfo.frameBitrateHint")}</p>}
+          {info.codec === "Opus" && <p className="mt-3 text-xs text-[color:var(--theme-fg-secondary,#aaa)]">{t("fileInfo.opusHint")}</p>}
+          {info.sample_rate_basis === "aac_core_header" && <p className="mt-3 text-xs text-[color:var(--theme-fg-secondary,#aaa)]">{t("fileInfo.aacCoreHint")}</p>}
+          {info.sample_type === "float" && <p className="mt-3 text-xs text-[color:var(--theme-fg-secondary,#aaa)]">{t("fileInfo.floatHint")}</p>}
+          {info.compression === "hybrid" && <p className="mt-3 text-xs text-[color:var(--theme-fg-secondary,#aaa)]">{t("fileInfo.hybridHint")}</p>}
+          <p className="mt-4 text-xs text-[color:var(--theme-fg-secondary,#aaa)]">{t("fileInfo.limits")}</p>
         </>}
       </div>
     </div>

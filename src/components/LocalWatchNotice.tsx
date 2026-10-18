@@ -26,11 +26,11 @@ export function LocalWatchNotice({ onOpenSettings }: { onOpenSettings: () => voi
   }, []);
   if (!needsCheck) return null;
   return (
-    <div role="alert" className="fixed bottom-28 left-6 z-40 flex max-w-sm items-start gap-2 rounded-lg border border-amber-700 bg-[#1D1D1D] p-3 text-xs text-white shadow-xl">
-      <CircleAlert size={16} className="shrink-0 text-amber-300" />
+    <div role="alert" className="fixed bottom-28 left-6 z-40 flex max-w-sm items-start gap-2 rounded-lg border border-[color:var(--theme-border-accent,var(--color-amber-700))] bg-[var(--theme-surface-panel,#1D1D1D)] p-3 text-xs text-[color:var(--theme-fg-primary,#ffffff)] shadow-xl">
+      <CircleAlert size={16} className="shrink-0 text-[color:var(--theme-fg-accent,var(--color-amber-300))]" />
       <div>
         <p>{t("settings.localWatchNeedsCheck")}</p>
-        <button type="button" onClick={onOpenSettings} className="mt-2 text-[#E5A00D] underline">{t("settings.pages.local")}</button>
+        <button type="button" onClick={onOpenSettings} className="mt-2 text-[color:var(--theme-fg-accent,#E5A00D)] underline">{t("settings.pages.local")}</button>
       </div>
       <button type="button" onClick={() => setNeedsCheck(false)} aria-label={t("settings.dismissStatus")}><X size={14} /></button>
     </div>

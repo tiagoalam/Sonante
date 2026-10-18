@@ -62,7 +62,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
 
   return (
     <section
-      className="np-visualizer relative flex flex-col rounded-2xl border border-white/10 bg-[#050708]/95 px-10 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.045),0_16px_40px_rgba(0,0,0,0.25)]"
+      data-theme-surface="instrument" className="np-visualizer relative flex flex-col rounded-2xl border border-white/10 bg-[#050708]/95 px-10 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.045),0_16px_40px_rgba(0,0,0,0.25)]"
       aria-label={modeLabel}
     >
       <span className="absolute left-3 top-3 h-1.5 w-1.5 rounded-full bg-white/15 shadow-[0_0_0_1px_rgba(0,0,0,0.8)]" />
