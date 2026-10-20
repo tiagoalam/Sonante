@@ -9,8 +9,8 @@
     "apply": "Aplicar à rota",
     "preset": "Preset",
     "reset": "Flat / restaurar",
-    "preamp": "Pré-amplificação",
-    "preampValue": "Valor da pré-amplificação em dB",
+    "preamp": "Nível manual",
+    "preampValue": "Nível manual em dB",
     "stereo": "estéreo",
     "band": "Banda",
     "on": "Ativa",
@@ -27,7 +27,7 @@
     "curveHelp": "Curva calculada a 48 kHz; visualização limitada a ±24 dB. Não é uma medição da saída.",
     "headroom": "Ganhos positivos podem causar clipping. Reserve margem com o pré-amplificador; não há limitador nem compensação automática de ganho.",
     "persistenceHelp": "Salvar e selecionar presets nunca muda o som. Aplicar envia o rascunho inteiro; o EQ inicia desligado.",
-    "draftPending": "Rascunho com alterações ainda não aplicadas ao preset da rota.",
+    "draftPending": "Alterações pendentes · use Aplicar",
     "sharedOnly": "O EQ processa apenas a saída Shared. Em Direct, você pode editar presets; o áudio continua no caminho original.",
     "audioPreferences": "Abrir preferências de áudio",
     "runtimeMissing": "Runtime CamillaDSP privado não selecionado. Abra o DEV pelo launcher preparado para EQ; o caminho de áudio atual continua disponível.",
@@ -56,7 +56,7 @@
     "flat": "Flat",
     "audioGroup": "Áudio",
     "discard": "Descartar alterações",
-    "draftClean": "Rascunho igual ao preset da rota ou ao selecionado.",
+    "draftClean": "Sem alterações pendentes",
     "activeBands": "{{count}} / 10 pontos ativos",
     "addBand": "Adicionar ponto",
     "selectBand": "Selecionar banda",
@@ -69,9 +69,9 @@
     "graphHelp": "Clique duas vezes para adicionar um ponto ou use Adicionar ponto. Arraste para alterar frequência e ganho; as setas também funcionam (Shift para ajuste fino). Edite Q abaixo. Escape desmarca; Delete remove.",
     "graphLegend": "Âmbar: soma dos filtros do rascunho, sem preamp. Cores: filtros individuais. Tracejado opcional: resposta após o ganho global protegido. Curvas calculadas, não medidas.",
     "appliedGain": "Preamp aplicado: {{effective}} dB (solicitado {{requested}} dB).",
-    "protectionValue": "Rascunho após Aplicar: ganho global {{effective}} dB · redução preventiva extra {{attenuation}} dB.",
+    "protectionValue": "Previsto ao aplicar: {{effective}} dB",
     "protectionRefused": "A combinação ultrapassa a margem admitida ou contém valores inválidos. Reduza ganho, Q ou a quantidade de filtros antes de aplicar.",
-    "protectionHelp": "A margem conservadora considera filtros sobrepostos, resposta transitória e o resampler selecionado. A atenuação extra vem antes dos filtros. Não usa clipper, limiter ou ganho de compensação. Reduz sobrecarga do EQ; não garante todos os equipamentos ou picos analógicos.",
+    "protectionHelp": "O orçamento considera os transientes da cadeia completa de filtros com uma reserva de saída. Ganho manual positivo não substitui a margem de proteção. A redução é aplicada antes dos filtros, sem clipper, limiter ou compensação automática. Isso reduz sobrecarga do EQ; não garante todos os dispositivos ou picos analógicos.",
     "bypassLevel": "O bypass remove o DSP e retorna ao nível original do Shared, que pode ser mais alto. O volume do sistema e do DAC não é alterado.",
     "tonalHelp": "Presets de fábrica são preferências tonais genéricas, não correções medidas de fone ou ambiente.",
     "transition": {
@@ -140,15 +140,16 @@
       "source": "Preset de comparação: {{name}}",
       "referenceInRoute": "Referência A · DSP mantido",
       "interrupted": "Outra ação interrompeu a comparação. A configuração audível foi mantida; use Aplicar ou Bypass para escolher o que ouvir.",
-      "failed": "A comparação não foi concluída. Confira o estado atual; outra ação ou indisponibilidade do DSP pode ter impedido a troca."
+      "failed": "A comparação não foi concluída. Confira o estado atual; outra ação ou indisponibilidade do DSP pode ter impedido a troca.",
+      "helpTitle": "Como funciona A/B"
     },
     "gainLabel": {
-      "requested_preamp_db": "Preamp do preset",
-      "effective_preamp_db": "Ganho do processamento",
-      "attenuation_db": "Redução preventiva extra"
+      "requested_preamp_db": "Preamp manual solicitado",
+      "effective_preamp_db": "Ganho global efetivo",
+      "attenuation_db": "Redução automática"
     },
     "routePreset": "Preset na rota: {{name}}",
-    "showGlobalGain": "Mostrar o efeito do ganho global",
+    "showGlobalGain": "Mostrar ganho previsto",
     "protectionDetails": "Por que o nível é reduzido?",
     "descriptions": {
       "flat": "Sem mudança tonal; ponto de partida neutro.",
@@ -176,7 +177,17 @@
     },
     "collectionHelp": "Escolha um Estilo ou Clima por vez. São sugestões tonais subjetivas, não correções medidas. Selecionar não muda o áudio: use Aplicar.",
     "graphScale": "Escala: ±{{range}} dB",
-    "graphExpanded": "ampliada para mostrar todas as curvas"
+    "graphExpanded": "ampliada para mostrar todas as curvas",
+    "presetDetails": "Sobre os presets",
+    "graphHelpTitle": "Como editar",
+    "gainBreakdown": "Após Aplicar: manual {{requested}} dB · redução automática {{attenuation}} dB · ganho efetivo {{effective}} dB.",
+    "sharedBadge": "Somente Shared",
+    "routeDetails": "Saída e nível",
+    "routedGain": "Ganho na rota",
+    "helpFor": "Ajuda: {{topic}}",
+    "closeHelp": "Fechar ajuda",
+    "editBand": "Banda {{number}}",
+    "draftCurve": "Curva dos filtros do rascunho"
   },
   "app": {
     "bootstrapError": "Não foi possível carregar as configurações iniciais.",
@@ -278,7 +289,10 @@
     "queue": "Fila de Reprodução",
     "mute": "Silenciar",
     "unmute": "Restaurar Volume",
+    "directControlFailed": "Não foi possível confirmar a mudança de mute/ganho. Confira o estado atualizado antes de tentar novamente; a reprodução não será retomada automaticamente.",
+    "directVolumeChoiceConfirm": "No Direct, controle o volume no DAC ou amplificador. O Sonante usará ganho unitário, sem ajuste gradual. Reduza primeiro o volume no equipamento. Esta escolha vale para a saída e o modo de transporte configurados; o mesmo identificador pode corresponder a outro equipamento após reconexão. Ao salvar uma troca de dispositivo ou modo de saída, a reprodução poderá ser retomada após sucesso se estava tocando antes e não houver nova intervenção. Ao confirmar um pedido de Play, ele poderá iniciar. Continuar?",
     "volumeBackend": {
+      "direct_equipment": "Equipamento",
       "alsa_hardware": "ALSA Hardware",
       "pipewire": "PipeWire",
       "mpd_software": "Software",
@@ -291,8 +305,9 @@
     "engineUnavailable": "Motor de áudio indisponível",
     "engineTransitioning": "Motor de áudio em transição",
     "lastKnown": "Último estado conhecido",
-    "volumeOnDevice": "Ajuste o volume no DAC ou amplificador",
-    "volumeOnDeviceShort": "Volume no DAC"
+    "volumeOnDevice": "Volume controlado no equipamento",
+    "volumeOnDeviceShort": "Volume no DAC",
+    "sharedMuteFailed": "Não foi possível alterar o mute com segurança. Atualize o estado da saída ou escolha o nível no controle de volume; não há restauração para um nível padrão."
   },
   "nowPlaying": {
     "detach": "Destacar janela",
@@ -778,7 +793,7 @@
     "sharedModeCaption": "ALSA default · roteamento compartilhado do sistema",
     "defaultEndpointNotice": "O endpoint ALSA selecionado é default. O MPD usará a rota compartilhada; selecione um dispositivo físico hw:* para acesso direto ao hardware.",
     "processingNotice": "ReplayGain ajusta o volume percebido. Ele pode modificar as amostras PCM, assim como o controle de volume por software.",
-    "volumeNotice": "Conforme os recursos detectados na configuração da saída, o volume Compartilhado pode usar controles do sistema e o Direct pode usar um mixer de hardware. O volume por software também é uma possibilidade. Este diagrama não informa o mixer ativo.",
+    "volumeNotice": "Em Shared, o volume continua ajustável no Sonante. Em Direct, ajuste o volume no DAC ou amplificador; no Sonante há mute/unmute. A escolha é confirmada ao selecionar a saída ou no primeiro Play de uma configuração antiga. Depois, no mesmo contexto confirmado, abra e dê Play normalmente. O mute intencional é preservado. Não há reprodução automática ao abrir ou salvar a saída.",
     "dopTransportNotice": "DoP transporta DSD em quadros PCM quando MPD, caminho ALSA e DAC são compatíveis. Ativá-lo não comprova DSD nativo nem o formato recebido pelo DAC.",
     "bufferNotice": "O buffer armazena áudio na memória do MPD. Um buffer maior usa mais RAM e pode ajudar em leituras lentas; não melhora a resolução. Gravar uma alteração reinicia o MPD privado e restaura a sessão pausada, ou parada se já estava parada.",
     "signal": {
@@ -887,6 +902,7 @@
     "conditions": {
       "title": "Condições da rota",
       "summary": {
+        "directPending": "Aguardando reprodução pelo Sonante. O ganho será verificado antes de iniciar; se necessário, confirme o volume no equipamento ao dar Play.",
         "inactive": "Disponível durante a reprodução",
         "partial": "Verificação parcial · amostras não comparadas",
         "attention": "Processamento ou diferenças de formato reportados",
@@ -938,6 +954,8 @@
         "crossfadeOn": "Habilitado: {{value}} segundos",
         "mixrampOff": "Desativado pelo parâmetro informado",
         "mixrampPossible": "Sobreposição não descartada",
+        "directChanged": "Ganho alterado. Verifique a saída nas configurações antes de reproduzir.",
+        "directPending": "Aguardando reprodução pelo Sonante. O ganho será verificado antes de iniciar; se necessário, confirme o volume no equipamento ao dar Play.",
         "volumeChanged": "Leituras de volume divergentes; aguardando atualização.",
         "engineIdentified": "Compilação do motor identificada.",
         "deviceObserved": "{{model}} · USB {{vendor}}:{{product}}",
@@ -1006,6 +1024,7 @@
     "sharedExplanation": "ALSA default segue o roteamento do sistema, que pode envolver PipeWire, PulseAudio ou dmix, com possíveis etapas de mistura e conversão. O endpoint não é medido aqui.",
     "directExplanation": "Direct utiliza o endpoint ALSA de hardware selecionado. A observação mostra o fluxo e o formato em reprodução; volume e processamento são apresentados nas condições da rota.",
     "assessment": {
+      "directPending": "Aguardando reprodução",
       "compatible": "Condições monitoradas preservadas",
       "attention": "Condições requerem atenção",
       "partial": "Verificação incompleta",
@@ -1490,5 +1509,81 @@
     "dsdHiRes": "Hi-Res: nível DSD da origem comprovado.",
     "formatOnly": "Formato identificado; Hi-Res não comprovado.",
     "limit": "Os metadados da origem não autenticam o master nem confirmam reprodução bit-perfect ou o formato no DAC."
+  },
+  "indexCoverage": {
+    "partial": "Último relatório: indexação concluída com omissões. Veja quantos arquivos foram incluídos, inclusive se o total for zero. As referências existentes foram mantidas.",
+    "confirmed": "Último relatório de indexação: arquivos selecionados conciliados no escopo observado.",
+    "unknown": "Sem relatório de indexação nesta sessão. A cobertura e as omissões são desconhecidas.",
+    "details": "Detalhes da indexação",
+    "source": "Fonte {{name}}",
+    "counts": "Arquivos de áudio selecionados: {{audio}}; grupos CUE selecionados: {{cues}}; arquivos de áudio indexados: {{cataloged}}; faixas virtuais indexadas: {{virtual}}; arquivos/grupos omitidos: {{omitted}}; outros arquivos excluídos pela política: {{excluded}}.",
+    "full": "Escopo observado: a geração percorrida pelo scan.",
+    "paths": "Escopo observado: apenas caminhos alterados; a biblioteca inteira não foi verificada.",
+    "limits": "Omissão não comprova corrupção ou formato incompatível. A presença de um grupo CUE não certifica todos os segmentos. Indexação não verifica decodificação integral ou reprodução. As fontes usam seu identificador gerenciado, sem caminhos absolutos.",
+    "failed": "A indexação não pôde ser confirmada: uma fonte ou arquivo selecionado mudou, o catálogo era inválido ou itens antes catalogados estão ausentes sem remoção confirmada. As referências foram mantidas. Confira as fontes e tente novamente após o fim das alterações."
+  },
+  "libraryRecovery": {
+    "title": "Analisar e recuperar a biblioteca",
+    "explanation": "A análise verifica os registros locais sem alterar a biblioteca ou iniciar áudio. A recuperação só poderá ser oferecida quando houver provas suficientes do estado a restaurar.",
+    "analyze": "Analisar bloqueio",
+    "again": "Analisar novamente",
+    "analyzing": "Analisando registros locais…",
+    "cancel": "Cancelar análise",
+    "export": "Salvar relatório",
+    "exporting": "Escolha onde salvar o relatório…",
+    "failed": "Não foi possível concluir a análise. Tente novamente; a biblioteca continua bloqueada.",
+    "cancelFailed": "A análise foi dispensada nesta janela, mas o cancelamento no backend não foi confirmado. Nenhuma recuperação foi solicitada.",
+    "exportFailed": "Não foi possível salvar o relatório. Escolha um arquivo novo e tente novamente.",
+    "exported": "Relatório salvo. Ele contém somente o diagnóstico, sem caminhos pessoais ou credenciais.",
+    "unavailable": "Recuperação automática indisponível para este diagnóstico.",
+    "guidance": "Preserve os arquivos da biblioteca. Salve este relatório para orientar a revisão e a escolha de um backup completo. Não apague registros ou pastas para tentar liberar a abertura.",
+    "details": "Detalhes da análise",
+    "intentVersion": "Registro de transação: versão {{version}}.",
+    "queueVersion": "Backup de fila no registro: versão {{version}}.",
+    "observationOnly": "Esta observação não comprova cobertura do catálogo nem restauração da fila ou das músicas. O relatório descreve este momento; outro aplicativo pode alterar os arquivos depois.",
+    "config": {
+      "previous": "A configuração corresponde ao estado anterior registrado.",
+      "next": "A configuração corresponde ao próximo estado registrado.",
+      "both": "A configuração corresponde aos dois estados registrados.",
+      "unbound": "Não há vínculo comprovado entre a configuração e um estado recuperável.",
+      "unknown": "Não foi possível validar a configuração."
+    },
+    "reasons": {
+      "intent_valid": "Há uma transação de pastas pendente com registro íntegro. Isso não comprova sua conclusão.",
+      "intent_invalid": "O registro de transação está inválido, incompleto ou não pode ser lido com segurança.",
+      "orphan_staging": "Há uma geração de biblioteca em preparação sem registro que comprove sua conclusão.",
+      "config_missing": "A configuração local está ausente.",
+      "config_invalid": "A configuração não pôde ser validada com segurança.",
+      "config_divergent": "A configuração difere dos dois estados registrados na transação.",
+      "mirror_missing": "A geração principal da biblioteca está ausente.",
+      "mirror_invalid": "Uma geração ou seu manifesto não pôde ser validado com segurança.",
+      "generation_divergent": "Uma geração encontrada difere das identidades registradas na transação.",
+      "database_missing": "O banco local do catálogo está ausente.",
+      "database_unproven": "O banco está presente, mas a cobertura do catálogo não foi comprovada. Nenhum banco foi carregado ou reindexado nesta análise.",
+      "ledger_missing": "O par de arquivos do histórico de identidades está ausente ou incompleto. IDs não serão recriados automaticamente.",
+      "ledger_divergent": "O histórico de identidades ou sua âncora não pôde ser validado com os manifestos encontrados.",
+      "unsafe_entry": "Um arquivo ou diretório está indisponível, substituído ou não atende às verificações de segurança.",
+      "filesystem_changed": "Os arquivos mudaram ou ficaram indisponíveis durante a análise. Execute uma nova análise antes de decidir.",
+      "ownership_unknown": "Esta análise não comprova exclusividade sobre o perfil nem ausência de outra instância.",
+      "no_pending_marker": "Não foi encontrado registro de transação nem geração em preparação. Isso não libera o áudio nem confirma que a configuração esteja válida.",
+      "recovery_set_unproven": "O conjunto de recuperação está ausente, incompleto, mudou ou não atende aos requisitos para execução segura."
+    },
+    "executionFailed": "A recuperação não foi concluída. Os registros e backups foram preservados. Analise novamente; o áudio continua bloqueado.",
+    "reopenFailed": "Não foi possível reabrir. Feche o Sonante normalmente e abra pelo launcher atual; os guards serão verificados de novo.",
+    "executing": "Criando backup, executando e validando o plano…",
+    "reopening": "Encerrando esta sessão para reabrir normalmente…",
+    "completed": "Estado validado e recuperação concluída.",
+    "backupRetained": "O backup desta operação foi preservado. A reprodução só começa por comando seu.",
+    "planReady": "Há um plano sustentado por um conjunto completo de recuperação.",
+    "choices": {
+      "restore_previous": "Restaurar o estado anterior comprovado",
+      "finish_confirmed": "Finalizar o estado já confirmado"
+    },
+    "impact": "O plano revalida os arquivos e a identidade das origens antes de qualquer efeito. Preserva favoritos, playlists e reservas de IDs atuais. Na restauração, configuração e catálogo voltam ao estado comprovado; a fila anterior só é reposta quando há prova específica. Referências a fontes novas podem ficar indisponíveis.",
+    "proof": "O catálogo anterior contém {{tracks}} faixas. O backup dos controles precisa de pelo menos {{bytes}} bytes, mais a estrutura virtual. Sem espaço ou provas atuais, nada é liberado.",
+    "noMusicBackup": "Este backup não copia músicas nem NAS. Ele não restaura música física alterada ou removida.",
+    "resumePlan": "Este plano retoma uma operação interrompida a partir das etapas e arquivos que ainda puderem ser comprovados.",
+    "execute": "Criar backup e executar este plano",
+    "reopen": "Reabrir normalmente"
   }
 }

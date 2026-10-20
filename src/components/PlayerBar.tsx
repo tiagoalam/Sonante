@@ -2,7 +2,7 @@ import { SourceAudioBadges } from "./SourceAudioBadges";
 import type { PlayerSourceInfo } from "../types/sourceAudio";
 import { currentMediaKey } from "../utils/playerNavigation";
 import { PlaybackOptionsControls } from "./PlaybackOptionsControls";
-import { requiresDeviceVolumeControl } from "../utils/signalPath";
+import { requiresDeviceVolumeControl, canToggleMute, muteLabel, directMuteRequest, sharedMuteRequest } from "../utils/signalPath";
 import { SignalPath } from "./SignalPath";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useState, useRef } from "react";
@@ -48,7 +48,6 @@ export const PlayerBar: React.FC<Props> = ({
   const { t } = useTranslation();
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekValue, setSeekValue] = useState(0.0);
-  const [prevVolume, setPrevVolume] = useState(100);
 
   const isSeekingRef = useRef(false);
   useEffect(() => {
@@ -111,15 +110,14 @@ export const PlayerBar: React.FC<Props> = ({
   };
 
   const handleToggleMute = async () => {
-    if (!isAvailable || !status.volume.available || !status.volume.writable) return;
-    const current = status.volume.value;
-    if (!status.volume.muted && current > 0) {
-      setPrevVolume(current);
-      await handleVolumeChange(0);
-    } else {
-      const restoreVolume = status.volume.muted && current > 0 ? current : prevVolume;
-      await handleVolumeChange(restoreVolume > 0 ? restoreVolume : 100);
+    if (!isAvailable || !canToggleMute(status)) return;
+    if (status.volume.backend === "direct_equipment") {
+      const request = directMuteRequest(status);
+      if (request) try { await audioService.setDirectMute(request); } catch (error) { logError("player.volume", error); window.alert(t("player.directControlFailed")); }
+      return;
     }
+    const request=sharedMuteRequest(status);
+    if(request) try {await audioService.setSharedMute(request);} catch(error){logError("player.volume",error);window.alert(t("player.sharedMuteFailed"));}
   };
 
   const formatTime = (secs: number) => {
@@ -141,7 +139,7 @@ export const PlayerBar: React.FC<Props> = ({
     : status.artist || (status.album ? status.album : "Sonante");
   const deviceVolume = requiresDeviceVolumeControl(route, status);
   const isVolumeAvailable =
-    isAvailable && status.volume.available && status.volume.writable;
+    isAvailable && canToggleMute(status);
   const isMuted = status.volume.muted || status.volume.value === 0;
   const volumeBackendLabel = t(`player.volumeBackend.${status.volume.backend}`);
   const volumeStatusLabel =
@@ -319,13 +317,14 @@ export const PlayerBar: React.FC<Props> = ({
         <div data-player-area="signal" className="min-w-0 max-w-[190px] flex-1">
           <SignalPath compact route={route} status={status} health={health} />
         </div>
-        <div className="flex shrink-0 flex-col items-end gap-1.5">
+        <div className="flex min-w-0 max-w-[176px] shrink-0 flex-col items-end gap-1.5">
           <div className="flex items-center gap-2.5">
             <button
               onClick={handleToggleMute}
               disabled={!isVolumeAvailable}
               className="text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
-              title={isVolumeAvailable ? (isMuted ? t("player.unmute") : t("player.mute")) : undefined}
+              aria-label={t(muteLabel(status))}
+              title={isVolumeAvailable ? t(muteLabel(status)) : undefined}
             >
               {isVolumeAvailable && isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
             </button>
@@ -341,8 +340,8 @@ export const PlayerBar: React.FC<Props> = ({
             />}
           </div>
 
-          <span title={deviceVolume ? t("player.volumeOnDevice") : volumeStatusLabel} className="max-w-full truncate text-[9px] leading-none text-[color:var(--theme-fg-muted,#777777)] pr-0.5">
-            {deviceVolume ? t("player.volumeOnDeviceShort") : volumeStatusLabel}
+          <span title={deviceVolume ? `${t("player.volumeOnDevice")} · ${t(muteLabel(status))}` : volumeStatusLabel} className="max-w-full whitespace-normal text-right text-[10px] leading-snug text-[color:var(--theme-fg-muted,#777777)] pr-0.5">
+            {deviceVolume ? <>{t("player.volumeOnDevice")}</> : volumeStatusLabel}
           </span>
         </div>
 

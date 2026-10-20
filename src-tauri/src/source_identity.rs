@@ -260,6 +260,40 @@ fn validate_file(file: &File, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Structural validation only: no Parent::open, hardening, locks or physical
+/// Origin::capture. The caller supplies bounded bytes from anchored readonly fds.
+pub(crate) fn validate_recovery_extension(old:&[u8],anchor:&[u8],current:&[u8],current_anchor:&[u8])->Result<(),String>{
+    let a:Registry=serde_json::from_slice(old).map_err(|_|"LIBRARY_RECOVERY_LEDGER_DIVERGENT")?;
+    let b:Registry=serde_json::from_slice(current).map_err(|_|"LIBRARY_RECOVERY_LEDGER_DIVERGENT")?;
+    a.validate()?;b.validate()?;
+    if a.namespace!=b.namespace||anchor!=a.namespace.as_bytes()||current_anchor!=anchor
+        || a.ids.iter().any(|(id,reservation)|b.ids.get(id)!=Some(reservation)) {
+        return Err("LIBRARY_RECOVERY_LEDGER_DIVERGENT".into());
+    }
+    Ok(())
+}
+pub(crate) fn verify_recovery_origins(bytes:&[u8],sources:&BTreeMap<String,PathBuf>)->Result<(),String>{
+    let registry:Registry=serde_json::from_slice(bytes).map_err(|_|"LIBRARY_RECOVERY_LEDGER_DIVERGENT")?;
+    registry.validate()?;verify_registered_origins(&registry,sources)
+}
+
+pub(crate) fn validate_recovery_snapshot(
+    bytes: &[u8], anchor: &[u8], manifests: &[crate::local_media::mirror::MirrorManifest],
+) -> Result<(), ()> {
+    if bytes.len() as u64 > MAX_BYTES { return Err(()); }
+    let registry: Registry = serde_json::from_slice(bytes).map_err(|_| ())?;
+    registry.validate().map_err(|_| ())?;
+    if anchor != registry.namespace.as_bytes() { return Err(()); }
+    for manifest in manifests {
+        if let Some(namespace) = &manifest.registry_id {
+            if namespace != &registry.namespace || manifest.sources.iter().any(|(id, root)| {
+                registry.ids.get(id).is_none_or(|r| r.root.as_ref() != Some(root) || r.origin.is_none())
+            }) { return Err(()); }
+        }
+    }
+    Ok(())
+}
+
 /// Read-only v2 manifest validation. History is outside generations, so cleanup
 /// or rollback cannot discard reservations. Older v1 manifests remain readable.
 pub(crate) fn check_manifest(
@@ -583,6 +617,33 @@ mod tests {
         map.iter()
             .map(|(id, r)| (id.clone(), Some(r.clone())))
             .collect()
+    }
+
+    #[test]
+    fn readonly_recovery_ledger_validation_never_captures_physical_roots_or_reserves_ids() {
+        let f = Fixture::new();
+        let root = f.root("Music"); f.seed(&[root.clone()]);
+        let manifest = mirror::read_manifest(&f.library()).unwrap();
+        let bytes = fs::read(f.0.join(NAME)).unwrap();
+        let anchor = fs::read(f.0.join(LOCK)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert!(validate_recovery_snapshot(&bytes, &anchor, &[manifest.clone()]).is_ok());
+        for malformed in [b"truncated".to_vec(), {
+            let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            json["checksum"] = "invalid".into(); serde_json::to_vec(&json).unwrap()
+        }] { assert!(validate_recovery_snapshot(&malformed, &anchor, &[manifest.clone()]).is_err()); }
+        assert!(validate_recovery_snapshot(&bytes, b"", &[manifest.clone()]).is_err());
+        assert!(validate_recovery_snapshot(&bytes, &[b'f'; 32], &[manifest.clone()]).is_err());
+        let mut changed = manifest.clone(); changed.registry_id = Some("0".repeat(32));
+        assert!(validate_recovery_snapshot(&bytes, &anchor, &[changed]).is_err());
+        let mut changed = manifest; *changed.sources.values_mut().next().unwrap() = PathBuf::from("/synthetic-unavailable-root");
+        assert!(validate_recovery_snapshot(&bytes, &anchor, &[changed]).is_err());
+        assert_eq!(fs::read(f.0.join(NAME)).unwrap(), bytes);
+        assert_eq!(fs::read(f.0.join(LOCK)).unwrap(), anchor);
+        assert!(!root.exists());
+        let observed = crate::managed_save_intent::inspect_recovery(&f.0, 99, &||false).unwrap();
+        assert!(!observed.reasons.contains(&crate::library_recovery::Reason::LedgerDivergent));
+        assert!(!observed.recovery_available);
     }
 
     #[test]

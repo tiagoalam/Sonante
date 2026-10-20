@@ -1,3 +1,4 @@
+import * as plexMetadata from '../src/utils/plexTrackMetadata.ts';
 import test from 'node:test';
 import { discoverPush } from '../src/utils/discoverNavigation.ts';
 import assert from 'node:assert/strict';
@@ -10,7 +11,7 @@ import i18next from 'i18next';
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:{en:{translation:JSON.parse(readFileSync(new URL('../src/locales/en.json',import.meta.url),'utf8'))}}});
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{resolve,reject,promise};};
 const flush=async()=>{for(let i=0;i<40;i++)await Promise.resolve();};
-let host,plays=0;const calls=[];
+let host,plays=0;const calls=[],playPayloads=[];
 const album=(title='Synthetic album')=>({rating_key:'12',artist_rating_key:'88',title,artist:'Synthetic artist',server_id:'server-a',library_id:'2',thumb:null});
 const service={getArtistAlbums:async key=>{calls.push(['albums',key]);return[album()];},getArtistTopTracks:async key=>{calls.push(['tracks',key]);return Array.from({length:10},(_,i)=>({rating_key:String(i+1),title:`Synthetic track ${i}`,duration_ms:1000,media_locator:{kind:'plex',server_id:'server-a',part_key:`/library/parts/${i+1}/file`}}));}};
 const equal=(a,b)=>a?.length===b?.length&&a.every((v,i)=>Object.is(v,b[i]));
@@ -20,9 +21,9 @@ const hooks={
  useEffect(fn,deps){effect(fn,deps,false);},useLayoutEffect(fn,deps){effect(fn,deps,true);}
 };
 function effect(fn,deps,layout){const index=host.cursor++,h=host,slot=h.slots[index]??={};if(!equal(slot.deps,deps)){(layout?h.layouts:h.effects).push(()=>{slot.cleanup?.();slot.deps=deps;slot.cleanup=fn();});}}
-const deps={react:{__esModule:true,...React,...hooks,default:React},'react/jsx-runtime':await import('react/jsx-runtime'),'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,
+const deps={'../utils/plexTrackMetadata':plexMetadata,react:{__esModule:true,...React,...hooks,default:React},'react/jsx-runtime':await import('react/jsx-runtime'),'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,
   '../utils/usePlaybackAttempt':{usePlaybackAttempt:()=>({failure:null,run:action=>action({current:()=>true})})},'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},
- '../utils/frontendDiagnostics':{logError(){}},'../services/plex':{plexService:service},'../services/audio':{audioService:{playTracks:async()=>plays++,togglePlay:async()=>plays++}},
+ '../utils/frontendDiagnostics':{logError(){}},'../services/plex':{plexService:service},'../services/audio':{audioService:{playTracks:async(...args)=>{plays++;playPayloads.push(args)},togglePlay:async()=>plays++}},
  './PlexImage':{PlexImage:()=>React.createElement('div',{'data-synthetic-image':true})},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null}};
 const compile=source=>ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2020}}).outputText;
 const exports={};new Function('require','exports',compile(readFileSync(new URL('../src/components/ArtistView.tsx',import.meta.url),'utf8')))(name=>deps[name],exports);
@@ -90,4 +91,10 @@ test('retained AlbumView restores its own scroll and focused artist link without
  viewport.props.onScroll({currentTarget:{scrollTop:480}});viewport.props.onFocusCapture({target:link});
  nodes(tree,n=>n.type==='button'&&n.props.ref)[0].props.onClick();assert.equal(selected.server_id,'server-a');assert.equal(selected.library_id,'2');
  p={...p,active:false};h.render(p);node.scrollTop=0;p={...p,active:true};h.render(p);assert.equal(node.scrollTop,480);assert.deepEqual(focused,[{preventScroll:true}]);assert.equal(loads,1);h.unmount();
+});
+
+test('ArtistView carries duration in seconds into the real playback payload',async()=>{
+ playPayloads.length=0;const h=new Harness(),p=props();h.render(p);await flush();const tree=h.render(p);
+ const row=nodes(tree,n=>n.type==='div'&&n.props.onClick&&n.props['aria-disabled']!==undefined&&nodes(n,x=>x.props.children==='Synthetic track 0').length)[0];assert(row);await row.props.onClick();
+ assert.equal(playPayloads[0][0][0].duration,1);assert.equal(playPayloads[0][0][0].media_locator.part_key,'/library/parts/1/file');h.unmount();
 });

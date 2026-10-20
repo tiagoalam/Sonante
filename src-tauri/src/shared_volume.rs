@@ -65,15 +65,58 @@ pub(crate) fn set_pipewire_volume(value: u32) -> Result<(), String> {
     Ok(())
 }
 
+
+// Address the inspected node, not a possibly changed default, for a mute gesture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Target { pub id: String, pub serial: String }
+impl Target { pub(crate) fn token(&self) -> String { format!("{}:{}",self.id,self.serial) } }
+fn parse_target(output: &[u8]) -> Result<Target,String> {
+    let text=std::str::from_utf8(output).map_err(|_|"SHARED_MUTE_CONTEXT_CHANGED")?;
+    let id=text.lines().next().and_then(|line|line.trim().strip_prefix("id "))
+        .and_then(|line|line.split(',').next()).filter(|id|!id.is_empty()&&id.bytes().all(|b|b.is_ascii_digit())).ok_or("SHARED_MUTE_CONTEXT_CHANGED")?;
+    let serial=text.lines().filter_map(|line|line.trim().trim_start_matches("* ").split_once(" = "))
+        .find_map(|(key,value)|(key=="object.serial").then_some(value.trim_matches('"')))
+        .filter(|v|!v.is_empty()&&v.bytes().all(|b|b.is_ascii_digit())).ok_or("SHARED_MUTE_CONTEXT_CHANGED")?;
+    Ok(Target{id:id.into(),serial:serial.into()})
+}
+pub(crate) fn read_target() -> Result<Target,String> {
+    parse_target(&run_wpctl(&["inspect",DEFAULT_SINK]).map_err(|_|"SHARED_MUTE_CONTEXT_CHANGED")?)
+}
+pub(crate) fn read_target_volume(target:&Target)->Result<PipeWireVolume,String> {
+    parse_volume(&run_wpctl(&["get-volume",&target.id]).map_err(|_|"SHARED_MUTE_CONTEXT_CHANGED")?)
+        .map_err(|_|"SHARED_MUTE_CONTEXT_CHANGED".into())
+}
+pub(crate) fn apply_mute_action(target:&Target,action:crate::shared_mute::Action)->Result<(),String> {
+    apply_mute_action_with(target,action,run_wpctl)
+}
+fn apply_mute_action_with(target:&Target,action:crate::shared_mute::Action,mut run:impl FnMut(&[&str])->Result<Vec<u8>,WpctlError>)->Result<(),String> {
+    let confirmed=parse_target(&run(&["inspect",&target.id]).map_err(|_|"SHARED_MUTE_CONTEXT_CHANGED")?)?;
+    if confirmed!=*target {return Err("SHARED_MUTE_CONTEXT_CHANGED".into());}
+    use crate::shared_mute::Action;
+    match action {
+        Action::None=>Ok(()),
+        Action::Mute(muted)=>run(&["set-mute",&target.id,if muted {"1"}else{"0"}]).map(|_|()).map_err(|_|"SHARED_MUTE_FAILED".into()),
+        Action::Volume(value)=> {
+            run(&["set-volume",&target.id,&format!("{}%",value)]).map_err(|_|"SHARED_MUTE_FAILED")?;
+            if value>0 {run(&["set-mute",&target.id,"0"]).map_err(|_|"SHARED_MUTE_FAILED")?;}
+            Ok(())
+        }
+    }
+}
+
 pub(crate) fn normalize_volume(value: u32) -> u32 {
     value.min(100)
 }
 
 fn run_wpctl(args: &[&str]) -> Result<Vec<u8>, WpctlError> {
-    run_command("wpctl", args, WPCTL_TIMEOUT)
+    if args.first()==Some(&"inspect") {run_command_limit("wpctl",args,WPCTL_TIMEOUT,64*1024)}
+    else {run_command("wpctl",args,WPCTL_TIMEOUT)}
 }
 
 fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8>, WpctlError> {
+    run_command_limit(program,args,timeout,MAX_STDOUT_BYTES)
+}
+fn run_command_limit(program: &str, args: &[&str], timeout: Duration, max_stdout_bytes:u64) -> Result<Vec<u8>, WpctlError> {
     let mut child = Command::new(program)
         .args(args)
         .env("LC_ALL", "C")
@@ -87,7 +130,7 @@ fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8
     let reader = thread::spawn(move || {
         let mut output = Vec::new();
         stdout
-            .take(MAX_STDOUT_BYTES + 1)
+            .take(max_stdout_bytes + 1)
             .read_to_end(&mut output)
             .map(|_| output)
     });
@@ -121,7 +164,7 @@ fn run_command(program: &str, args: &[&str], timeout: Duration) -> Result<Vec<u8
     if !status.success() {
         return Err(WpctlError::Failed);
     }
-    if output.len() > MAX_STDOUT_BYTES as usize {
+    if output.len() > max_stdout_bytes as usize {
         return Err(WpctlError::MalformedOutput);
     }
     Ok(output)
@@ -174,6 +217,41 @@ fn parse_volume(output: &[u8]) -> Result<PipeWireVolume, WpctlError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_mute_addresses_the_confirmed_node_without_changing_volume_or_using_default() {
+        let target=Target{id:"52".into(),serial:"829".into()};
+        let mut calls=Vec::new();
+        apply_mute_action_with(&target,crate::shared_mute::Action::Mute(false),|args|{
+            calls.push(args.iter().map(|s|s.to_string()).collect::<Vec<_>>());
+            Ok(if args[0]=="inspect" {b"id 52, type Node\nobject.serial = \"829\"\n".to_vec()}else{vec![]})
+        }).unwrap();
+        assert_eq!(calls,vec![vec!["inspect","52"],vec!["set-mute","52","0"]]);
+    }
+    #[test]
+    fn replaced_node_or_failed_native_mute_never_falls_back_to_set_volume() {
+        let target=Target{id:"52".into(),serial:"829".into()};
+        let mut calls=0;
+        assert!(apply_mute_action_with(&target,crate::shared_mute::Action::Mute(false),|args|{
+            calls+=1;assert_eq!(args[0],"inspect");Ok(b"id 52, type Node\nobject.serial = \"999\"\n".to_vec())
+        }).is_err());assert_eq!(calls,1);
+        assert!(apply_mute_action_with(&target,crate::shared_mute::Action::Mute(false),|args|{
+            assert_ne!(args[0],"set-volume");if args[0]=="inspect" {Ok(b"id 52, type Node\nobject.serial = \"829\"\n".to_vec())}else{Err(WpctlError::Failed)}
+        }).is_err());
+    }
+    #[test]
+    fn inspect_can_read_bounded_node_properties_larger_than_a_volume_response() {
+        let text=format!("id 52, type Node\nobject.serial = \"829\"\n{}","p".repeat(6000));
+        let output=run_command_limit("printf",&["%s",&text],WPCTL_TIMEOUT,64*1024).unwrap();
+        assert_eq!(parse_target(&output).unwrap().token(),"52:829");
+        assert_eq!(run_command("printf",&["%s",&text],WPCTL_TIMEOUT),Err(WpctlError::MalformedOutput));
+    }
+    #[test]
+    fn mute_target_requires_node_id_and_serial() {
+        let t=parse_target(b"id 52, type PipeWire:Interface:Node\n    object.serial = \"829\"\n").unwrap();
+        assert_eq!(t.token(),"52:829");
+        assert!(parse_target(b"id 52, type PipeWire:Interface:Node\n").is_err());
+        assert!(parse_target(b"id default, type Node\nobject.serial = \"829\"\n").is_err());
+    }
     #[test]
     fn parses_regular_volume() {
         assert_eq!(

@@ -1,7 +1,8 @@
+import {favoriteLocalTracks,favoritePlexTracks} from '../utils/favoriteTracks';
 import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { logError } from "../utils/frontendDiagnostics";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   Heart,
   Play,
@@ -47,29 +48,34 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
   const [loadingTracks, setLoadingTracks] = useState(false);
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
 
+  const albumGeneration=useRef(0),alive=useRef(true);
+  const selectedIdentity=JSON.stringify([selectedAlbum?.source,selectedAlbum?.id,selectedAlbum?.path_or_key]);
+  const selectedIdentityRef=useRef(selectedIdentity);selectedIdentityRef.current=selectedIdentity;
+  const closeAlbum=()=>{albumGeneration.current++;setSelectedAlbum(null);setTracks([]);setLoadingTracks(false);setPlaylistItems(null);};
+  const loadFavoriteTracks=(fav:FavoriteAlbum)=>fav.source==='local'?favoriteLocalTracks(fav,audioService):plexService.getAlbumTracks(fav.path_or_key).then(items=>favoritePlexTracks(items,fav));
   const loadFavorites = async () => {
     try {
       const data = await favoritesService.getFavorites();
-      setFavorites(data || []);
+      if(alive.current)setFavorites(data || []);
     } catch (err) {
-      logError("favorites.load", err);
+      if(alive.current)logError("favorites.load", err);
     } finally {
-      setLoading(false);
+      if(alive.current)setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadFavorites();
+    alive.current=true;void loadFavorites();
+    return()=>{alive.current=false;albumGeneration.current++;};
   }, []);
 
   const handleToggleFav = async (e: React.MouseEvent, fav: FavoriteAlbum) => {
     e.stopPropagation();
     try {
       await favoritesService.toggleFavorite(fav);
+      if(!alive.current)return;
       setFavorites((prev) => prev.filter((item) => !(item.id === fav.id && item.source === fav.source)));
-      if (selectedAlbum?.id === fav.id && selectedAlbum?.source === fav.source) {
-        setSelectedAlbum(null);
-      }
+      if(selectedIdentityRef.current===JSON.stringify([fav.source,fav.id,fav.path_or_key]))closeAlbum();
       if (onFavoritesChanged) {
         onFavoritesChanged();
       }
@@ -79,47 +85,24 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
   };
 
   const handleOpenAlbum = async (fav: FavoriteAlbum) => {
+    if(!alive.current)return;
     if (fav.source === "local" && fav.exists === false) {
       alert(t("favorites.missingDiskAlert"));
       return;
     }
 
-    setSelectedAlbum(fav);
-    setLoadingTracks(true);
-    try {
-      if (fav.source === "local") {
-        const localFiles = await audioService.listLocalDirectory(fav.path_or_key);
-        const fileOnly = localFiles.filter((i) => i.item_type === "file");
-        setTracks(
-          fileOnly.map((f) => ({
-            title: f.title || f.name,
-            artist: f.artist || fav.artist,
-            duration: f.duration,
-            uri: f.path,
-          }))
-        );
-      } else {
-        const plexTracks = await plexService.getAlbumTracks(fav.path_or_key);
-        setTracks(
-          plexTracks.map((t) => ({
-            title: t.title,
-            artist: fav.artist,
-            duration: t.duration ? t.duration / 1000 : undefined,
-            media_locator: t.media_locator,
-          }))
-        );
-      }
-    } catch (err) {
-      logError("favorites.load-tracks", err);
-    } finally {
-      setLoadingTracks(false);
-    }
+    const generation=++albumGeneration.current;
+    setSelectedAlbum(fav);setTracks([]);setPlaylistItems(null);setLoadingTracks(true);
+    const current=()=>alive.current&&generation===albumGeneration.current;
+    try {const loaded=await loadFavoriteTracks(fav);if(current())setTracks(loaded);}
+    catch(err){if(current())logError("favorites.load-tracks",err);}
+    finally {if(current())setLoadingTracks(false);}
   };
 
-  const request = usePlaybackAttempt(JSON.stringify([selectedAlbum?.id, activeTab, search, isPlaybackAvailable]));
+  const request = usePlaybackAttempt(JSON.stringify([selectedIdentity, activeTab, search, isPlaybackAvailable]));
   const handlePlayAll = (startIndex = 0) => {
     if (!isPlaybackAvailable) return;
-    if (!selectedAlbum || tracks.length === 0) return;
+    if (loadingTracks || !selectedAlbum || tracks.length === 0) return;
     const meta = tracks.map((t) => ({
       title: t.title,
       artist: t.artist,
@@ -128,6 +111,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
       plex_image: selectedAlbum.source === "plex" ? selectedAlbum.plex_image || null : null,
       uri: t.uri,
       media_locator: t.media_locator,
+      duration: t.duration,
     }));
     void request.run(intent => audioService.playTracks(meta, startIndex, intent));
   };
@@ -141,28 +125,10 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
     }
 
     await request.run(async intent => {
-      if (fav.source === "local") {
-        const items = await audioService.listLocalDirectory(fav.path_or_key);
-        const files = items.filter((i) => i.item_type === "file");
-        const meta = files.map((f) => ({
-          title: f.title || f.name,
-          artist: f.artist || fav.artist,
-          album: fav.title,
-          thumb: fav.thumb || null,
-          uri: f.path,
-        }));
-        if (meta.length > 0) await audioService.playTracks(meta, 0, intent);
-      } else {
-        const plexTracks = await plexService.getAlbumTracks(fav.path_or_key);
-        const meta = plexTracks.map((t) => ({
-          title: t.title,
-          artist: fav.artist,
-          album: fav.title,
-          plex_image: fav.plex_image || null,
-          media_locator: t.media_locator,
-        }));
-        if (meta.length > 0) await audioService.playTracks(meta, 0, intent);
-      }
+      const loaded=await loadFavoriteTracks(fav);
+      if(!intent.current())return;
+      const meta=loaded.map(track=>({...track,album:fav.title,thumb:fav.source==='local'?fav.thumb||null:null,plex_image:fav.source==='plex'?fav.plex_image||null:null}));
+      if(meta.length)await audioService.playTracks(meta,0,intent);
     });
   };
 
@@ -177,7 +143,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
     const mediaLocator = track.media_locator ?? (track.uri
       ? { kind: "local" as const, uri: track.uri }
       : null);
-    if (!mediaLocator || !selectedAlbum) return null;
+    if (loadingTracks || !mediaLocator || !selectedAlbum) return null;
     return {
       media_locator: mediaLocator,
       metadata: {
@@ -206,7 +172,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
         <div className="flex items-center space-x-3">
           {selectedAlbum && (
             <button
-              onClick={() => setSelectedAlbum(null)}
+              onClick={closeAlbum}
               className="p-1.5 rounded-lg bg-[var(--theme-surface-raised,#1E1E1E)] border border-[color:var(--theme-border-soft,#333333)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer mr-1"
               title={t("favorites.back")}
             >
@@ -244,7 +210,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
               <button
                 onClick={() => {
                   setActiveTab("local");
-                  setSelectedAlbum(null);
+                  closeAlbum();
                 }}
                 className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
                   activeTab === "local"
@@ -259,7 +225,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
               <button
                 onClick={() => {
                   setActiveTab("plex");
-                  setSelectedAlbum(null);
+                  closeAlbum();
                 }}
                 className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
                   activeTab === "plex"

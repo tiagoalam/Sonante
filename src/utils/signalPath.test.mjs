@@ -80,7 +80,7 @@ test("both variants use translated reported metadata and detailed view has compa
       assert.match(html, /np-signal-format/); assert.match(html, /width="24"/);
       for (const key of ["rate", "depth", "channels"]) assert.ok(html.includes(t(`signalPath.${key}`)));
       assert.match(html, /<dd[^>]*>2<\/dd>/);
-      assert.ok(html.includes(mode === "shared" ? "grid-cols-5" : "grid-cols-4"));
+      assert.ok(html.includes(`grid-template-columns:repeat(${mode === "shared" ? 5 : 4}, minmax(0, 1fr))`));
       assert.doesNotMatch(html, /flex-col items-center gap-1 rounded-lg/);
       assert.equal(html.includes(`${t("signalPath.endpointShort")}:`), mode === "direct");
       assert.ok(html.includes(mode === "shared" ? "ALSA default" : "ALSA hw"));
@@ -298,4 +298,33 @@ test("actual App status polling carries and clears ALSA and engine evidence thro
     assert.equal(values[0].output_observation, output ?? null);
     assert.deepEqual(status.output_observation, undefined); assert.equal(status.engine_evidence, undefined); cleanup();
   }
+});
+
+
+test("the grid reserves one column per real stage, including Shared EQ's sixth output stage", async () => {
+  for (const language of ["en", "pt-BR"]) {
+    const i18n = i18next.createInstance();
+    await i18n.init({ lng: language, resources: { [language]: { translation: resource(language) } } });
+    const SignalPath = signalComponent(i18n.t.bind(i18n));
+    for (const horizontal of [false, true]) {
+      const playback = { ...status, shared_dsp: { in_path: true, phase: "active", verified: true } };
+      const html = renderToStaticMarkup(React.createElement(SignalPath, { route: { mode: "shared", endpoint: "default" }, status: playback, health, horizontal }));
+      const stages = html.match(/<ol[^>]*>(.*?)<\/ol>/s)[1];
+      assert.equal((stages.match(/<li /g) ?? []).length, 6);
+      assert.match(html, /grid-template-columns:repeat\(6, minmax\(0, 1fr\)\)/);
+      assert.ok(stages.includes(i18n.t("signalPath.output")));
+      assert.ok(stages.includes(i18n.t("equalizer.state.active")));
+      assert.match(stages, /PipeWire/);
+    }
+  }
+});
+
+test('Pending describes normal playback authorization without granting a seal or hiding unrelated differences',async()=>{
+ const route={mode:'direct',endpoint:'hw:Fixture,0'};const playback={...status,audio_format:'44100:16:2',snapshot_consistent:true,volume:{backend:'direct_equipment',available:true,writable:false,value:0,muted:false,direct_gain:'pending',direct_token:'1:1'},engine_evidence:{state:'identified',evidence_id:'mpd-strict-ubuntu2204-remap-20261018',scope:'pcm_dsd_route_strict',pcm_eof_flush:true},output_observation:{state:'observed',configured_endpoint:route.endpoint,card:0,device:0,subdevice:0,format:'S32_LE',rate:44100,channels:2},processing:{mpd_volume:0,crossfade_seconds:0,mixramp:'off',replay_gain:{state:'off'}}};
+ const evidence=routeConditions(route,playback,health);assert.equal(evidence.bitPerfect,false);assert.equal(evidence.assessment,'partial');assert.deepEqual(evidence.issues.map(r=>r.message),['directPending']);
+ for(const lng of['en','pt-BR']){const i18n=i18next.createInstance();await i18n.init({lng,resources:{[lng]:{translation:resource(lng)}}});const t=i18n.t.bind(i18n);
+  for(const view of['SignalPath','SignalPathDetails']){const C=signalComponent(t,view),html=renderToStaticMarkup(React.createElement(C,{route,status:playback,health,compact:true}));assert.ok(html.includes(t('signalPath.assessment.directPending')));assert.doesNotMatch(html,/data-bitperfect="route"/);assert.ok(!html.includes(t('signalPath.conditions.summary.attention')));
+   const other=renderToStaticMarkup(React.createElement(C,{route,status:{...playback,processing:{...playback.processing,crossfade_seconds:2}},health,compact:true}));assert.ok(other.includes(t('signalPath.assessment.attention')));
+  }
+ }
 });

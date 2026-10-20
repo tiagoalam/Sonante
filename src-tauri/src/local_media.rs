@@ -302,6 +302,7 @@ pub(crate) mod mirror {
         pub staging_path: PathBuf,
         pub manifest: MirrorManifest,
         pub refresh_plan: ManagedRefreshPlan,
+        pub coverage: crate::index_coverage::Inventory,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -519,6 +520,7 @@ pub(crate) mod mirror {
         files: Vec<ScannedFile>,
         playable: HashSet<PathBuf>,
         cues: Vec<PathBuf>,
+        excluded: usize,
     }
 
     #[derive(Debug)]
@@ -583,8 +585,9 @@ pub(crate) mod mirror {
         let build_result = (|| -> Result<MirrorBuildResult, String> {
             before_publish()?;
             crate::source_identity::verify_origins(staging_path, &sources)?;
+            let mut coverage = crate::index_coverage::Inventory::new(generation_id, &sources, true)?;
             for (source_id, source) in &scanned {
-                publish_source(staging_path, source_id, source)?;
+                publish_source(staging_path, source_id, source, &mut coverage)?;
             }
             let manifest = MirrorManifest {
                 schema_version: MIRROR_SCHEMA_VERSION,
@@ -602,6 +605,7 @@ pub(crate) mod mirror {
                 staging_path: staging_path.to_path_buf(),
                 manifest,
                 refresh_plan: ManagedRefreshPlan::Full,
+                coverage,
             })
         })();
 
@@ -1998,6 +2002,7 @@ pub(crate) mod mirror {
             files: Vec::new(),
             playable: HashSet::new(),
             cues: Vec::new(),
+            excluded: 0,
         };
         scan_directory(root, root, &mut source)?;
         Ok(source)
@@ -2025,6 +2030,7 @@ pub(crate) mod mirror {
             }
             let class = classify_path(&physical);
             if class == LocalMediaClass::Ignored {
+                source.excluded += 1;
                 continue;
             }
             let relative = physical
@@ -2050,9 +2056,14 @@ pub(crate) mod mirror {
         staging: &Path,
         source_id: &str,
         source: &ScannedSource,
+        coverage: &mut crate::index_coverage::Inventory,
     ) -> Result<(), String> {
+        coverage.exclude(source_id, source.excluded);
         for file in &source.files {
-            publish_link(staging, source_id, file)?;
+            let metadata = publish_link(staging, source_id, file)?;
+            if classify_path(&file.physical) == LocalMediaClass::PlayableAudio {
+                coverage.observe(source_id, &file.relative, &file.physical, crate::index_coverage::Kind::Audio, &metadata)?;
+            }
         }
         for cue in &source.cues {
             if cue_targets(cue, &source.root, &source.playable)? == CueDisposition::Publish {
@@ -2060,21 +2071,22 @@ pub(crate) mod mirror {
                     .strip_prefix(&source.root)
                     .map_err(|_| "CUE escapou da root durante publicação.".to_string())?
                     .to_path_buf();
-                publish_link(
+                let metadata = publish_link(
                     staging,
                     source_id,
                     &ScannedFile {
                         physical: cue.clone(),
-                        relative,
+                        relative: relative.clone(),
                     },
                 )?;
-            }
+                coverage.observe(source_id, &relative, cue, crate::index_coverage::Kind::Cue, &metadata)?;
+            } else { coverage.exclude(source_id, 1); }
         }
         Ok(())
     }
 
-    fn publish_link(staging: &Path, source_id: &str, file: &ScannedFile) -> Result<(), String> {
-        validate_publishable_file(&file.physical)?;
+    fn publish_link(staging: &Path, source_id: &str, file: &ScannedFile) -> Result<fs::Metadata, String> {
+        let metadata = publishable_file_metadata(&file.physical)?;
         let destination = staging.join(source_id).join(&file.relative);
         let parent = destination
             .parent()
@@ -2082,7 +2094,8 @@ pub(crate) mod mirror {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Falha ao criar diretório virtual: {error}"))?;
         symlink(&file.physical, &destination)
-            .map_err(|error| format!("Falha ao publicar symlink filtrado: {error}"))
+            .map_err(|error| format!("Falha ao publicar symlink filtrado: {error}"))?;
+        Ok(metadata)
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2207,7 +2220,9 @@ pub(crate) mod mirror {
                 && matches!(bytes[2], b'/' | b'\\'))
     }
 
-    fn validate_publishable_file(path: &Path) -> Result<(), String> {
+    fn validate_publishable_file(path: &Path) -> Result<(), String> { publishable_file_metadata(path).map(|_| ()) }
+
+    fn publishable_file_metadata(path: &Path) -> Result<fs::Metadata, String> {
         let metadata = fs::symlink_metadata(path).map_err(|error| {
             format!(
                 "Arquivo selecionado indisponível ({}): {error}",
@@ -2220,7 +2235,7 @@ pub(crate) mod mirror {
                 path.display()
             ));
         }
-        Ok(())
+        Ok(metadata)
     }
 
     fn validate_published_links(
@@ -2265,7 +2280,7 @@ pub(crate) mod mirror {
         Ok(())
     }
 
-    fn validate_manifest(manifest: &MirrorManifest) -> Result<(), String> {
+    pub(crate) fn validate_manifest(manifest: &MirrorManifest) -> Result<(), String> {
         if !matches!(
             (manifest.schema_version, manifest.registry_id.as_deref()),
             (1, None) | (2, Some(_))

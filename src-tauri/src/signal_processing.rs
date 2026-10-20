@@ -218,7 +218,7 @@ fn io_error(error: std::io::Error) -> ReadFailure {
 }
 // A fixed read-only command. Nonblocking connect avoids waiting in a full Unix
 // socket backlog; all subsequent reads/writes share a 150ms absolute budget.
-fn connect(path: &Path, expected_pid: u32, deadline: Instant) -> Result<UnixStream, ReadFailure> {
+pub(crate) fn connect(path: &Path, expected_pid: u32, deadline: Instant) -> Result<UnixStream, ReadFailure> {
     remaining(deadline)?;
     let bytes = path.as_os_str().as_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };

@@ -107,11 +107,12 @@ fn rewritten_and_atomically_replaced_existing_uri_update_once_without_publicatio
         );
         let (socket, server) = crate::tests::fake_restorative_rescan_mpd(vec![
             ("status", "state: stop\nOK\n"),
+            ("listall", "file: Music/Album/track.wav\nOK\n"),
             ("rescan \"Music/Album\"", "updating_db: 7\nOK\n"),
             ("status", "state: stop\nOK\n"),
             ("listall", "file: Music/Album/track.wav\nOK\n"),
         ]);
-        assert!(refresh_existing_local_content(&socket, &plan.refresh, || false).unwrap());
+        assert_eq!(run_local_content_coverage(&socket, &plan.refresh, plan.coverage.clone(), &f.library, || false).unwrap().outcome, index_coverage::Outcome::Confirmed);
         server.join().unwrap();
         let after = fs::metadata(&f.library).unwrap();
         assert_eq!(
@@ -238,15 +239,16 @@ fn content_mpd_failure_and_shutdown_do_not_recover_or_publish() {
     let plan = batch.plan(&f.library).unwrap().unwrap();
     let (socket, server) = crate::tests::fake_restorative_rescan_mpd(vec![
         ("status", "state: stop\nOK\n"),
+        ("listall", "file: Music/Album/track.wav\nOK\n"),
         (
             "rescan \"Music/Album\"",
             "ACK [50@0] {update} fixture failure\n",
         ),
     ]);
-    assert!(refresh_existing_local_content(&socket, &plan.refresh, || false).is_err());
+    assert!(run_local_content_coverage(&socket, &plan.refresh, plan.coverage.clone(), &f.library, || false).is_err());
     server.join().unwrap();
     assert!(
-        refresh_existing_local_content("/must-not-connect", &plan.refresh, || true)
+        run_local_content_coverage("/must-not-connect", &plan.refresh, plan.coverage.clone(), &f.library, || true)
             .unwrap_err()
             .starts_with(library_refresh::CANCELLED)
     );

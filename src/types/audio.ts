@@ -41,7 +41,10 @@ export interface VolumeStatus {
   muted: boolean;
   writable: boolean;
   available: boolean;
-  backend: "alsa_hardware" | "pipewire" | "mpd_software" | "unavailable";
+  direct_gain?: "pending" | "unity" | "muted" | "changed";
+  direct_token?: string;
+  shared_token?: string;
+  backend: "direct_equipment" | "alsa_hardware" | "pipewire" | "mpd_software" | "unavailable";
 }
 
 export interface PlaybackDiagnostic {
@@ -69,7 +72,7 @@ export interface SignalProcessing {
 
 export interface EngineEvidence {
   state: "identified";
-  evidence_id: "mpd-pcm-eof-20261017" | "mpd-route-20261017" | "mpd-strict-route-20261017";
+  evidence_id: "mpd-pcm-eof-20261017" | "mpd-route-20261017" | "mpd-strict-route-20261017" | "mpd-strict-ubuntu2204-remap-20261018";
   scope: "pcm24_96000_stereo_gapless" | "pcm_dsd_route" | "pcm_dsd_route_strict";
   pcm_eof_flush: boolean;
 }

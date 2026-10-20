@@ -1,0 +1,53 @@
+# Local private inputs only; generated checksums identify the exact snapshot.
+# No public Git tag/branch download. Generate inputs with prepare-private-arch.py.
+pkgname=sonante-private
+pkgver=0.5.3
+pkgrel=1
+pkgdesc='Sonante private work snapshot with verified application-owned runtimes'
+arch=('x86_64')
+license=('GPL-3.0-only' 'GPL-2.0-or-later' 'MPL-2.0')
+url='https://github.com/tiagoalam/Sonante'
+provides=('sonante=0.5.3')
+conflicts=('sonante' 'sonante-bin')
+options=('!debug' '!strip') # Runtime identities must not change during packaging.
+depends=(@DEPENDENCIES@)
+makedepends=('python' 'binutils')
+source=('sonante-private-source.tar' 'sonante-private-runtimes.tar' '@SIDECAR_FILE@' 'sonante-private-application')
+noextract=('@SIDECAR_FILE@' 'sonante-private-application') # Corresponding sources travel alongside; never install this archive.
+sha256sums=('@SOURCE_SHA256@' '@RUNTIME_SHA256@' '@SIDECAR_SHA256@' '@APPLICATION_SHA256@')
+
+# Application is the exact Ubuntu 22.04 release/custom-protocol build supplied
+# alongside the exact source snapshot. Do not rebuild on the Manjaro host:
+# that would silently raise the application's GLIBC requirement.
+
+package() {
+    cd "$srcdir/sonante-private-source"
+    test ! -e "$srcdir/sonante-private-runtimes/DISTRIBUTION_BLOCKED"
+    python3 scripts/verify-private-runtime-stage.py "$srcdir/sonante-private-runtimes"
+    install -Dm755 "$srcdir/sonante-private-application" "$pkgdir/usr/bin/sonante"
+    python3 - "$pkgdir/usr/bin/sonante" <<'PYABI'
+import re,subprocess,sys
+text=subprocess.check_output(['readelf','--version-info',sys.argv[1]],text=True)
+versions=re.findall(r'\bGLIBC_(\d+(?:\.\d+)+)',text)
+if max(tuple(map(int,v.split('.'))) for v in versions)>(2,35):raise SystemExit('Application exceeds GLIBC 2.35')
+PYABI
+    install -Dm644 sonante-arch/sonante.desktop "$pkgdir/usr/share/applications/sonante.desktop"
+    for size in 32 128; do
+        install -Dm644 "src-tauri/icons/${size}x${size}.png" "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/sonante.png"
+    done
+    install -Dm644 src-tauri/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/sonante.png"
+    install -Dm644 src-tauri/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/sonante.png"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/sonante/LICENSE"
+    install -Dm644 AUTHORS "$pkgdir/usr/share/doc/sonante/AUTHORS"
+    install -Dm644 THIRD_PARTY_NOTICES "$pkgdir/usr/share/doc/sonante/THIRD_PARTY_NOTICES"
+    cp -a "$srcdir/sonante-private-runtimes/usr/." "$pkgdir/usr/"
+    # Check the final staged app/runtimes for private build-path leakage as well.
+    python3 - "$pkgdir" <<'PY'
+from pathlib import Path
+import re,sys
+root=Path(sys.argv[1])
+for path in [root/'usr/bin/sonante',*list((root/'usr/lib/sonante/runtimes/v1').glob('*'))]:
+    if path.is_file() and re.search(rb'/home/[^/\x00\s]+/',path.read_bytes()):
+        raise SystemExit('Private build paths remain in '+path.name)
+PY
+}

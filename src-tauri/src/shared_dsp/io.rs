@@ -13,6 +13,11 @@ pub(crate) struct Environment {
 }
 impl Environment {
     pub fn command(&self, program: &str) -> Command {
+        let fixed;
+        let program = if !cfg!(debug_assertions) && matches!(program, "pw-dump" | "pw-link" | "pw-cli") {
+            fixed = format!("/usr/bin/{program}");
+            fixed.as_str()
+        } else { program };
         let mut c = Command::new(program);
         for (k, v) in &self.vars {
             c.env(k, v);

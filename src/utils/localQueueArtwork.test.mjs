@@ -1,3 +1,4 @@
+import * as signalPathHelpers from "./signalPath.ts";
 import * as playbackIntents from "./playbackIntent.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -14,7 +15,7 @@ import { VisibleQueueArtwork } from "./visibleQueueArtwork.ts";
 import { localAlbumForMedia } from "./playerNavigation.ts";
 import { logError } from "./frontendDiagnostics.ts";
 const read = file => readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
-function compile(file,deps){const js=ts.transpileModule(read(file),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};new Function("require","exports",js)(id=>{if(id === "../utils/playbackIntent") return playbackIntents; assert.ok(id in deps,id);return deps[id];},exports);return exports;}
+function compile(file,deps){const js=ts.transpileModule(read(file),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};new Function("require","exports",js)(id=>{if(id === "../utils/playbackIntent") return playbackIntents; if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; if(id==="../utils/signalPath")return signalPathHelpers; assert.ok(id in deps,id);return deps[id];},exports);return exports;}
 const flush=async()=>{for(let i=0;i<60;i++)await Promise.resolve();};
 const defer=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};};
 const album=(id,folder)=>({id,title:"Same title",artist:"Same artist",folder_path:folder,discs:[],source_id:folder.split("/")[0],track_count:2});

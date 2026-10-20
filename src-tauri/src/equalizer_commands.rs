@@ -60,10 +60,18 @@ fn runtime_snapshot(app: &AppHandle) -> shared_dsp::Snapshot {
 
 #[tauri::command]
 pub(crate) async fn get_equalizer(app: AppHandle) -> Result<Catalog, String> {
-    let result = tauri::async_runtime::spawn_blocking(load)
+    let result = tauri::async_runtime::spawn_blocking(|| {
+        load().map(|loaded| {
+            // Availability is not activation. Hash resources on the blocking
+            // worker without starting any child or holding configuration locks.
+            let available = shared_dsp::binary_path().is_ok()
+                && crate::mpd_engine::MpdEngine::resolve_eq().is_ok();
+            (loaded, available)
+        })
+    })
         .await
         .map_err(|_| "EQ_STORE_UNAVAILABLE")??;
-    let (mut config, revision) = result;
+    let ((mut config, revision), runtime_available) = result;
     config.enabled = false; // Stored desire is never runtime truth.
     let shared = app
         .state::<ConfigState>()
@@ -71,10 +79,6 @@ pub(crate) async fn get_equalizer(app: AppHandle) -> Result<Catalog, String> {
         .lock()
         .map(|c| crate::is_shared_output(&c))
         .unwrap_or(false);
-    // Presence only; verifying the pinned executable belongs to activation,
-    // not catalog loading or normal playback/startup.
-    let runtime_available =
-        cfg!(debug_assertions) && std::env::var_os("SONANTE_EQ_CAMILLA_PATH").is_some() && std::env::var_os("SONANTE_EQ_MPD_PATH").is_some();
     Ok(Catalog {
         built_ins: crate::equalizer::built_in_presets(),
         builtin_groups: crate::equalizer::builtin_groups(),

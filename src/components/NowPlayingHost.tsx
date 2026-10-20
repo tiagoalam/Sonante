@@ -1,3 +1,4 @@
+import { canToggleMute, directMuteRequest, sharedMuteRequest } from "../utils/signalPath";
 import { PlaybackOptionsControls } from "./PlaybackOptionsControls";
 import { NowPlayingPresentation } from "./NowPlayingPresentation";
 import { NowPlayingQueue } from "./NowPlayingQueue";
@@ -43,7 +44,6 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekValue, setSeekValue] = useState(0);
-  const [previousVolume, setPreviousVolume] = useState(100);
   const [controlFailed, setControlFailed] = useState(false);
   const [levels, setLevels] = useState<AudioLevelFrame>(zeroLevels);
   const [analyzerAvailable, setAnalyzerAvailable] = useState(false);
@@ -55,9 +55,8 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
   const health = snapshot?.health;
   const isAvailable = health?.state === "available" && !busy && !!owner;
   const isVolumeAvailable = Boolean(
-    isAvailable && status?.volume.available && status.volume.writable,
+    isAvailable && canToggleMute(status),
   );
-  const isMuted = Boolean(status?.volume.muted || status?.volume.value === 0);
 
   useEffect(() => {
     isSeekingRef.current = isSeeking;
@@ -155,14 +154,13 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
 
   const handleToggleMute = () => {
     if (!status || !isVolumeAvailable) return;
-    const currentVolume = status.volume.value;
-    if (!isMuted && currentVolume > 0) {
-      setPreviousVolume(currentVolume);
-      void runControl(() => audioService.setVolume(0));
-    } else {
-      const restoredVolume = currentVolume > 0 ? currentVolume : previousVolume;
-      void runControl(() => audioService.setVolume(restoredVolume > 0 ? restoredVolume : 100));
+    if (status.volume.backend === "direct_equipment") {
+      const request = directMuteRequest(status);
+      if (request) void runControl(() => audioService.setDirectMute(request));
+      return;
     }
+    const request=sharedMuteRequest(status);
+    if(request) void runControl(()=>audioService.setSharedMute(request));
   };
 
   const handleFullscreen = async () => {

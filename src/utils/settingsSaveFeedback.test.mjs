@@ -18,9 +18,9 @@ test("App keeps local Save pending and confirms success only after backend compl
   assert.match(app, /if \(configSaveInProgressRef\.current\) return false/);
   assert.match(app, /response\.status === "accepted"\) \{\s*queueClearFlowRef\.current\.accepted\(response\.operation\.id\);\s*monitor\.accepted\(response\.operation\);\s*\} else/);
   assert.doesNotMatch(app, /setConfig\(nextConfig\)/);
-  assert.match(app, /operation\.phase === "completed"[\s\S]*?await configService\.getConfig\(\)[\s\S]*?setConfigSaveNotice\(\{ kind: "success" \}\)/);
+  assert.match(app, /operation\.phase === "completed"[\s\S]*?await configService\.getConfig\(\)[\s\S]*?setConfigSaveNotice\(operation\.coverage\?\.outcome === "partial" \? null : \{ kind: "success" \}\)/);
   assert.match(app, /monitorConfigSave\(configService\.getSaveOperation/);
-  assert.match(app, /setConfigSaveNotice\(\{[\s\S]*?kind: "error",[\s\S]*?detail: refusal \? undefined : detail,[\s\S]*?reloadFailed,[\s\S]*?refusal,/);
+  assert.match(app, /setConfigSaveNotice\(\{[\s\S]*?kind: "error",[\s\S]*?detail: refusal \? undefined : reason\.startsWith\("LOCAL_INDEX_"\) \? t\("indexCoverage\.failed"\) : detail,[\s\S]*?reloadFailed,[\s\S]*?refusal,/);
   assert.match(app, /finally \{\s*if \(isCurrent\(\)\) finishConfigSave\(\)/);
   assert.match(app, /t\(localSavePhase === "preparing"/);
   assert.match(app, /onSaveFinished=\{finishConfigSave\}/);
@@ -80,7 +80,7 @@ test("App localizes full-rescan refusal and staging cleanup failure without mask
   assert.match(app, /reason === "LOCAL_SOURCE_FULL_RESCAN_REQUIRED" \? "fullRescan"/);
   assert.match(app, /reason === "LOCAL_SOURCE_TARGETED_PLAN_CHANGED" \? "planChanged"/);
   assert.match(app, /Boolean\(refusal\) && cleanup === "LOCAL_SOURCE_STAGING_CLEANUP_FAILED"/);
-  assert.match(app, /detail: refusal \? undefined : detail/);
+  assert.match(app, /detail: refusal \? undefined : reason\.startsWith\("LOCAL_INDEX_"\) \? t\("indexCoverage\.failed"\) : detail/);
   assert.match(app, /t\("settings\.fullIndexRequired"\)/);
   assert.match(app, /t\("settings\.fullIndexNotStarted"\)/);
   assert.match(app, /t\("settings\.noChangesApplied"\)/);

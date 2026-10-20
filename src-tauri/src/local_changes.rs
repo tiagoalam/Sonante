@@ -171,6 +171,7 @@ pub(crate) struct Batch {
 pub(crate) struct Plan {
     pub refresh: ManagedRefreshPlan,
     pub needs_mirror: bool,
+    pub coverage: crate::index_coverage::Inventory,
 }
 
 impl Batch {
@@ -180,6 +181,9 @@ impl Batch {
         if self.paths.len() > MAX_DIRTY_PATHS {
             return Err("LOCAL_WATCH_OVERFLOW".into());
         }
+        let sources = self.context.sources.iter().map(|(id,s)|(id.clone(),s.root.clone())).collect();
+        let generation = self.context.manifest.as_ref().map(|m|m.generation_id.as_str()).unwrap_or("legacy-dirty");
+        let mut coverage = crate::index_coverage::Inventory::new(generation, &sources, false)?;
         let mut directories = BTreeSet::new();
         let mut needs_mirror = false;
         let mut changed = 0;
@@ -226,6 +230,9 @@ impl Batch {
                     return Err("LOCAL_WATCH_UNSAFE_PATH".into());
                 }
                 bound = true;
+                if class == LocalMediaClass::PlayableAudio {
+                    if let Some(meta) = metadata.as_ref().filter(|m| m.is_file()) { coverage.observe(id, relative, path, crate::index_coverage::Kind::Audio, meta)?; }
+                }
                 let published = library.join(&uri);
                 let existing = class != LocalMediaClass::ControlSidecar
                     && metadata.as_ref().is_some_and(|m| m.is_file())
@@ -256,6 +263,7 @@ impl Batch {
         Ok(Some(Plan {
             refresh: targeted(directories, changed),
             needs_mirror,
+            coverage,
         }))
     }
 }

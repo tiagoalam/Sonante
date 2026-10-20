@@ -1,4 +1,5 @@
-mod alsa_mixer;
+mod direct_volume;
+mod direct_playback;
 mod alsa_preflight;
 mod alsa_observation;
 mod analyzer;
@@ -17,12 +18,19 @@ mod diagnostics;
 mod bounded_artwork_io;
 mod favorites;
 mod library_doctor;
+mod library_recovery;
+mod recovery_fs;
+mod recovery_catalog;
+mod recovery_sandbox;
+mod recovery_set;
+mod profile_lease;
 mod local_media;
 mod library_refresh;
 mod source_identity;
 mod local_import_preview;
 mod local_import_artwork;
 mod local_watcher;
+mod index_coverage;
 mod local_changes;
 mod local_own_writes;
 #[allow(dead_code)]
@@ -36,8 +44,10 @@ mod persistence;
 mod playlists;
 mod plex;
 mod shared_volume;
+mod shared_mute;
 mod supervisor;
 mod mpd_engine;
+mod installed_runtimes;
 mod tags;
 mod local_file_info;
 mod player_source_info;
@@ -229,6 +239,7 @@ fn is_local_folders_only_change(current: &AppConfig, next: &AppConfig) -> bool {
     }
     let mut expected = current.clone();
     expected.local_folders = next.local_folders.clone();
+    expected.direct_volume_choice = next.direct_volume_choice.clone(); // Explicit route policy metadata does not change folders/output.
     expected == *next
 }
 
@@ -618,11 +629,26 @@ fn wait_saved_folders_job(
     }
 }
 
+#[cfg(test)]
 fn request_refresh_and_audit_traced(
     socket_path: &str,
     refresh_plan: &local_media::mirror::ManagedRefreshPlan,
     diagnostics: Option<&SettingsSaveDiagnostics>,
     operation: Option<&config_save_operation::Operation>,
+) -> Result<(), String> {
+    request_refresh_and_inspect(socket_path, refresh_plan, diagnostics, operation, || {
+        let audit = AudioEngine::audit_mpd_local_catalog_at(socket_path)?;
+        if !audit.is_clean() { return Err(format!("A auditoria do catálogo encontrou {} URI(s) local(is) inválida(s).", audit.invalid_count)); }
+        Ok(())
+    })
+}
+
+fn request_refresh_and_inspect(
+    socket_path: &str,
+    refresh_plan: &local_media::mirror::ManagedRefreshPlan,
+    diagnostics: Option<&SettingsSaveDiagnostics>,
+    operation: Option<&config_save_operation::Operation>,
+    inspect: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let mut refresh_duration = Duration::ZERO;
     let mut wait_duration = Duration::ZERO;
@@ -702,26 +728,13 @@ fn request_refresh_and_audit_traced(
             operation.phase(config_save_operation::Phase::Validating);
         }
         let started = Instant::now();
-        let audit = AudioEngine::audit_mpd_local_catalog_at(socket_path);
+        let audit = inspect();
         audit_duration += started.elapsed();
         if let Some(diagnostics) = diagnostics {
-            let outcome = match &audit {
-                Ok(audit) if audit.is_clean() => "ok",
-                Ok(_) => "invalid_catalog",
-                Err(_) => "error",
-            };
-            diagnostics.stage("audit", started, outcome);
-            if outcome == "ok" {
-                diagnostics.mpd_last_confirmed.set("available_at_audit");
-            }
+            diagnostics.stage("audit", started, if audit.is_ok() { "ok" } else { "error" });
+            if audit.is_ok() { diagnostics.mpd_last_confirmed.set("available_at_audit"); }
         }
-        let audit = audit?;
-        if !audit.is_clean() {
-            return Err(format!(
-                "A auditoria do catálogo encontrou {} URI(s) local(is) inválida(s).",
-                audit.invalid_count
-            ));
-        }
+        audit?;
         Ok(())
     })();
     eprintln!(
@@ -906,6 +919,11 @@ where
             "{primary_error}; mirror revertido e geração rejeitada limpa, mas MPD, catálogo e reprodução não foram recuperados porque a aplicação está sendo encerrada."
         )),
     }
+}
+
+fn route_save_resume_requested(current:&AppConfig,next:&AppConfig)->bool {
+    !current.first_run && !next.first_run
+        && (current.alsa_device!=next.alsa_device || is_shared_output(current)!=is_shared_output(next))
 }
 
 fn stop_supervisor(supervisor: &Mutex<MpdSupervisor>) -> Result<(), String> {
@@ -1098,11 +1116,11 @@ fn run_managed_mirror_refresh_admitted(
         &staging_path,
         &roots,
         &generation_id,
-        mode == ManagedMirrorRefreshMode::Manual,
+        mode == ManagedMirrorRefreshMode::Manual || dirty_plan.is_some(),
     )?;
     let local_media::mirror::ManagedGenerationPreparation::Prepared(prepared) = preparation else {
         return match dirty_plan {
-            Some(plan) => refresh_existing_local_content(&socket_path, plan, || transaction_state.shutdown_requested()),
+            Some(_) => Err(index_coverage::INVALID.into()),
             None => finish_unchanged_managed_generation(mode, &socket_path),
         };
     };
@@ -1143,6 +1161,16 @@ fn run_managed_mirror_refresh_admitted(
             }
         }
     }
+    let coverage_token = app.state::<index_coverage::State>().begin()?;
+    let coverage_check = if combined_plan == local_media::mirror::ManagedRefreshPlan::MetadataOnly { None } else {
+        let previous_ids = match local_media::mirror::read_manifest(&live_path) {
+            Ok(manifest) => manifest.sources.keys().cloned().collect(),
+            Err(_) => local_media::resolve_local_sources(&live_path, &config.local_folders).map_err(|e|e.to_string())?.sources().keys().cloned().collect(),
+        };
+        Some(prepare_index_check(&socket_path, prepared.coverage.clone(), previous_ids, ||transaction_state.shutdown_requested(), None)
+            .map_err(|error|error_with_rollback(error,local_media::mirror::cleanup_prepared_managed_generation(&prepared)))?)
+    };
+    let coverage_report = std::cell::RefCell::new(None);
     let refresh_plan = prepared.refresh_plan.clone();
     let publication = match local_media::mirror::publish_prepared_managed_generation(
         &live_path,
@@ -1172,18 +1200,17 @@ fn run_managed_mirror_refresh_admitted(
     let effective_plan = if mode == ManagedMirrorRefreshMode::Manual {
         &local_media::mirror::ManagedRefreshPlan::Full
     } else { &combined_plan };
-    let result = if dirty_plan.is_some() {
-        library_refresh::refresh_filesystem(&socket_path, effective_plan, || transaction_state.shutdown_requested())
-    } else {
-        library_refresh::refresh(&socket_path, effective_plan, true, || transaction_state.shutdown_requested())
-    };
-    library_refresh::finish(result, |refresh_result| complete_published_mirror_refresh(
+    let result = library_refresh::refresh_inspected(&socket_path, effective_plan, true, || transaction_state.shutdown_requested(), dirty_plan.is_some(), || {
+        let (report, _) = coverage_check.as_ref().ok_or(index_coverage::INVALID)?.finish_at(&socket_path, &live_path)?;
+        *coverage_report.borrow_mut() = Some(report); Ok(())
+    });
+    let completion = library_refresh::finish(result, |refresh_result| complete_published_mirror_refresh(
         || refresh_result.clone(),
         || AudioEngine::capture_mpd_playback_snapshot(&socket_path),
         || stop_supervisor(&supervisor_state.0),
         || publication.rollback(),
         |snapshot| {
-            match previous_kind {
+            let outcome = match previous_kind {
                 Some(previous_kind) => restore_previous_after_manual_rescan(
                     &transaction_state,
                     &supervisor_state.0,
@@ -1197,15 +1224,19 @@ fn run_managed_mirror_refresh_admitted(
                     "A primeira publicação não possui geração anterior para restaurar."
                         .to_string(),
                 ),
-            }
+            }?;
+            covered_index_recovery(outcome, coverage_check.as_ref(), &socket_path)
         },
         || publication.cleanup_rejected_after_rollback(),
         || Ok(()),
         || if refresh_plan == local_media::mirror::ManagedRefreshPlan::MetadataOnly {
             publication.cleanup_previous_durable()
         } else { publication.cleanup_previous() },
-    ))
-    .map(|_| true)
+    ));
+    if completion.is_ok() {
+        if let Some(report) = coverage_report.into_inner() { publish_index_coverage(app, coverage_token, &config.local_folders, report); } else { inherit_index_coverage(app,coverage_token,&config.local_folders); }
+    }
+    completion.map(|_| true)
 }
 
 fn persist_experimental_local_folders_config(
@@ -1235,6 +1266,7 @@ fn persist_experimental_local_folders_config(
             expected_current.save()
         }));
     }
+    app.state::<Arc<direct_playback::Gate>>().commit_choice(new_config);
     plex_guard.update_config(new_config);
     *config_guard = new_config.clone();
     Ok(())
@@ -1325,6 +1357,7 @@ impl RemovalCatalogExpectation {
         Some(Self(remaining))
     }
 
+    #[cfg(test)]
     fn validate(&self, socket_path: &str) -> Result<(), String> {
         if AudioEngine::read_validated_local_catalog_at(socket_path)? != self.0 {
             return Err("LOCAL_SOURCE_REMOVAL_CATALOG_MISMATCH".to_string());
@@ -1334,6 +1367,7 @@ impl RemovalCatalogExpectation {
 }
 
 struct RemovalRefreshExpectation {
+    before_catalog: std::collections::HashSet<String>,
     catalog: RemovalCatalogExpectation,
     queue: audio::MpdQueueStructure,
 }
@@ -1701,15 +1735,16 @@ fn admit_removal_refresh(
     };
     if logical.len() != queue.entries.len() { return Ok(None); }
     let before = AudioEngine::read_validated_local_catalog_at(socket_path)?;
-    let Some(catalog) = RemovalCatalogExpectation::from_before(plan, before) else { return Ok(None) };
+    let Some(catalog) = RemovalCatalogExpectation::from_before(plan, before.clone()) else { return Ok(None) };
     if !removal_queue_matches_remaining_sources(plan, &logical, &queue, &catalog)
         || !removal_queue_before_publish(socket_path, &queue)?
     {
         return Ok(None);
     }
-    Ok(Some((reservation, RemovalRefreshExpectation { catalog, queue })))
+    Ok(Some((reservation, RemovalRefreshExpectation { before_catalog: before, catalog, queue })))
 }
 
+#[cfg(test)]
 fn request_removal_refresh_and_validate(
     socket_path: &str,
     plan: &local_media::mirror::PureSourceRemoval,
@@ -1786,6 +1821,8 @@ fn run_experimental_local_folders_save_inner(
     queue_clear_authorization: Option<&QueueClearAuthorization>,
 ) -> Result<(), String> {
     let transaction_state = app.state::<ConfigTransactionState>();
+    let profile_owner = app.state::<profile_lease::State>().lease()?;
+    profile_owner.validate()?;
     // The operation owns the transaction slot from admission through durable
     // completion. Reacquiring begin() here would race shutdown or self-deadlock.
     if operation.shutdown_requested() { return Err(config_save_operation::INTERRUPTED.to_string()); }
@@ -1833,6 +1870,9 @@ fn run_experimental_local_folders_save_inner(
             uncertain.set(matches!(&error, ConfigSaveError::AfterRenameUnconfirmed(_)));
             config_save_error_message(&error)
         });
+        if result.is_ok() && !uncertain.get() {
+            if let Ok(token)=app.state::<index_coverage::State>().begin(){inherit_index_coverage(app,token,&new_config.local_folders);}
+        }
         return after_confirmed_local_folders_save(result, uncertain.get(), || install_committed_local_watcher(app, Some(prepared_watch)));
     };
 
@@ -1946,6 +1986,21 @@ fn run_experimental_local_folders_save_inner(
             local_media::mirror::cleanup_prepared_managed_generation(&prepared),
         ));
     }
+    let coverage_token = app.state::<index_coverage::State>().begin()?;
+    let coverage_check = if refresh_plan == local_media::mirror::ManagedRefreshPlan::MetadataOnly { None } else {
+        let before = confirmed_removal.as_ref().map(|c| c.catalog_before.clone())
+            .or_else(|| removal_guard.as_ref().map(|(_,proof)|proof.before_catalog.clone()));
+        Some(prepare_index_check(&socket_path, prepared.coverage.clone(), previous_sources.sources().keys().cloned().collect(),
+            || operation.shutdown_requested(), before).map_err(|error|error_with_rollback(error, local_media::mirror::cleanup_prepared_managed_generation(&prepared)))?)
+    };
+    let coverage_report = std::cell::RefCell::new(None);
+    let coverage_catalog = std::cell::RefCell::new(None);
+    let queue_capture = (|| -> Result<(), String> {
+        let queue_tracks = audio_state.0.lock().map_err(|_|"LIBRARY_RECOVERY_QUEUE_UNPROVEN")?.get_queue();
+        let queue_cache = profile_owner.root().read("queue_cache.json",16*1024*1024,&||operation.shutdown_requested())?;
+        recovery_set::validate_queue_capture(queue_cache.as_deref(),&queue_tracks)
+    })();
+    queue_capture.map_err(|error|error_with_rollback(error,local_media::mirror::cleanup_prepared_managed_generation(&prepared)))?;
     let mut intent = match &confirmed_removal {
         Some(confirmed) => managed_save_intent::SaveIntent::create_with_queue_backup(
             &MpdSupervisor::sonante_config_dir(),
@@ -1961,6 +2016,10 @@ fn run_experimental_local_folders_save_inner(
             &prepared,
         ),
     }?;
+    let prior_catalog = coverage_check.as_ref().map(|check|check.previous_records());
+    if let Err(error)=recovery_set::capture_before(&profile_owner,prior_catalog.as_ref(),&||operation.shutdown_requested(),&recovery_catalog::inspect){
+        return Err(error_with_rollback(error,intent.abort_unpublished(&prepared)));
+    }
     if let Some(confirmed) = confirmed_removal.as_mut() {
         // Arm before any destructive effect; panic/early return keeps the fence.
         clear_confirmed_removal_queue(confirmed, &audio_state.0, &mut intent, operation)?;
@@ -2044,24 +2103,21 @@ fn run_experimental_local_folders_save_inner(
             }
         }
     }
-    let refresh_result = match (&removal_plan, &removal_guard, &confirmed_removal) {
-        (Some(plan), Some((_, proof)), _) => request_removal_refresh_and_validate(
-            &socket_path, plan, proof, Some(diagnostics), Some(operation),
-        ),
-        (Some(plan), _, Some(confirmed)) => request_removal_refresh_and_validate(
-            &socket_path,
-            plan,
-            &RemovalRefreshExpectation {
-                catalog: confirmed.catalog_after.clone(),
-                queue: confirmed.queue.clone(),
-            },
-            Some(diagnostics),
-            Some(operation),
-        ),
-        _ => request_refresh_and_audit_traced(
-            &socket_path, managed_plan, Some(diagnostics), Some(operation),
-        ),
-    };
+    let refresh_result = request_refresh_and_inspect(&socket_path, managed_plan, Some(diagnostics), Some(operation), || {
+        let check = coverage_check.as_ref().ok_or(index_coverage::INVALID)?;
+        let (report, catalog) = check.finish_at(&socket_path, &live_path)?;
+        let expected = removal_guard.as_ref().map(|(_,proof)|proof);
+        if let Some(expected) = expected {
+            if catalog.records != expected.catalog.0 { return Err("LOCAL_SOURCE_REMOVAL_CATALOG_MISMATCH".into()); }
+            if AudioEngine::capture_mpd_queue_structure(&socket_path).map_err(|e|e.to_string())? != expected.queue { return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CHANGED".into()); }
+        } else if let Some(confirmed) = confirmed_removal.as_ref() {
+            if catalog.records != confirmed.catalog_after.0 { return Err("LOCAL_SOURCE_REMOVAL_CATALOG_MISMATCH".into()); }
+            if AudioEngine::capture_mpd_queue_structure(&socket_path).map_err(|e|e.to_string())? != confirmed.queue { return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CHANGED".into()); }
+        }
+        *coverage_catalog.borrow_mut() = Some(catalog.records.clone());
+        *coverage_report.borrow_mut() = Some(report);
+        Ok(())
+    });
     drop(removal_guard);
     let refresh_result = if confirmed_removal.is_some() {
         refresh_result.and_then(|_| intent.check_queue_cache_completion())
@@ -2123,6 +2179,7 @@ fn run_experimental_local_folders_save_inner(
                 Some(diagnostics),
             );
             let result = result.and_then(|outcome| {
+                let outcome = covered_index_recovery(outcome, coverage_check.as_ref(), &socket_path)?;
                 if let (RestorePreviousOutcome::Restored, Some(confirmed)) =
                     (&outcome, confirmed_removal.as_mut())
                 {
@@ -2153,8 +2210,9 @@ fn run_experimental_local_folders_save_inner(
             Ok(())
         },
         || {
-            let result =
-                persist_experimental_local_folders_config(app, &current_config, new_config);
+            let result = persist_experimental_local_folders_config(app, &current_config, new_config)
+                .and_then(|_| recovery_set::confirm_next(&profile_owner,coverage_catalog.borrow().as_ref(),&||operation.shutdown_requested(),&recovery_catalog::inspect)
+                    .map_err(ConfigSaveError::AfterRenameUnconfirmed));
             if result.is_err() {
                 config_persistence_failed.set(true);
             }
@@ -2166,7 +2224,12 @@ fn run_experimental_local_folders_save_inner(
             Ok(())
         },
     );
-    let (result, unconfirmed) = intent.conclude_transaction(result, completed.get());
+    let (mut result, mut unconfirmed) = intent.conclude_transaction(result, completed.get());
+    if !unconfirmed {
+        if let Err(error)=recovery_set::finish_save(&profile_owner,&||operation.shutdown_requested(),&recovery_catalog::inspect){
+            result=Err(format!("{error}; {}: conclusão do conjunto de recuperação pendente.",managed_save_intent::BLOCKED));unconfirmed=true;
+        }
+    }
     uncertain.set(unconfirmed);
     if let Some(confirmed) = confirmed_removal.as_mut() {
         if unconfirmed {
@@ -2177,6 +2240,12 @@ fn run_experimental_local_folders_save_inner(
         } else {
             confirmed.owner.release_after_confirmed_completion();
         }
+    }
+    if result.is_ok() && !unconfirmed {
+        if let Some(report) = coverage_report.into_inner() {
+            operation.coverage(report.clone());
+            publish_index_coverage(app, coverage_token, &new_config.local_folders, report);
+        } else { inherit_index_coverage(app,coverage_token,&new_config.local_folders); }
     }
     after_confirmed_local_folders_save(result, unconfirmed, || install_committed_local_watcher(app, Some(prepared_watch)))
 }
@@ -2387,6 +2456,8 @@ async fn get_playback_status(app: AppHandle, diagnostic_id: Option<u64>) -> Resu
     tauri::async_runtime::spawn_blocking(move || {
         let mut diagnostic = diagnostic;
         let result = (|| {
+            let shared_before = app.state::<SupervisorState>().0.lock().map_err(|_| "Controle de volume indisponível.")?.shared_mute_context();
+            let before = app.state::<SupervisorState>().0.lock().map_err(|_| "Controle de volume indisponível.")?.volume_context();
             diagnostic.phase("wait.audio");
             let audio = app.state::<AudioState>();
             let audio = audio.0.lock().map_err(|_| "Estado de reprodução indisponível.".to_string())?;
@@ -2397,10 +2468,11 @@ async fn get_playback_status(app: AppHandle, diagnostic_id: Option<u64>) -> Resu
             let supervisor = app.state::<SupervisorState>();
             let supervisor = supervisor.0.lock().map_err(|_| "Controle de volume indisponível.".to_string())?;
             diagnostic.phase("volume.backend");
-            let backend = supervisor.volume_backend();
+            let after = supervisor.volume_context();
             drop(supervisor);
             diagnostic.phase("volume.read");
-            apply_volume_backend(&mut playback, backend);
+            apply_volume_context(&mut playback, &before, &after);
+            attach_shared_mute(&mut playback,&app.state::<SupervisorState>().0,shared_before)?;
             Ok(playback)
         })();
         diagnostic.result(&result);
@@ -2514,8 +2586,33 @@ fn unavailable_snapshot(health: MpdHealth) -> MpdStatusSnapshot {
     }
 }
 
+fn apply_volume_context(playback: &mut PlaybackStatus, before: &direct_volume::Context, after: &direct_volume::Context) {
+    if before.backend != after.backend {
+        playback.snapshot_consistent = false;
+        playback.volume = VolumeStatus::pipewire_unavailable();
+    } else if !before.apply(after, playback) {
+        apply_volume_backend(playback, after.backend);
+    }
+}
+
 fn apply_volume_backend(playback: &mut PlaybackStatus, backend: VolumeBackend) {
-    apply_volume_backend_with(playback, backend, shared_volume::read_pipewire_volume);
+    if backend==VolumeBackend::PipeWire {
+        playback.volume=match shared_volume::read_target().and_then(|target|shared_volume::read_target_volume(&target).map(|v|(target,v))) {
+            Ok((target,v))=>{let mut volume=VolumeStatus::pipewire(v.value,v.muted);volume.shared_token=Some(target.token());volume},
+            Err(_)=>VolumeStatus::pipewire_unavailable(),
+        };
+    } else { apply_volume_backend_with(playback,backend,shared_volume::read_pipewire_volume); }
+}
+fn attach_shared_mute(playback:&mut PlaybackStatus,supervisor:&Mutex<MpdSupervisor>,before:Option<String>)->Result<(),String>{
+    if !matches!(playback.volume.backend,VolumeBackend::PipeWire|VolumeBackend::MpdSoftware) {return Ok(());}
+    let sup=supervisor.lock().map_err(|_|"SHARED_MUTE_CONTEXT_CHANGED")?;
+    let after=sup.shared_mute_context();
+    if before.is_none()||before!=after {playback.snapshot_consistent=false;playback.volume=VolumeStatus::pipewire_unavailable();return Ok(());}
+    let base=after.ok_or("SHARED_MUTE_CONTEXT_CHANGED")?;
+    let token=if playback.volume.backend==VolumeBackend::PipeWire {format!("{}:{}",base,playback.volume.shared_token.as_deref().ok_or("SHARED_MUTE_CONTEXT_CHANGED")?)} else {base};
+    // Poll replies may predate a volume gesture. They supply context only;
+    // restoration history is captured from a fresh read inside the command.
+    playback.volume.shared_token=Some(token);Ok(())
 }
 
 fn apply_volume_backend_with<F>(
@@ -2550,6 +2647,8 @@ fn collect_mpd_status_snapshot_with_diagnostic(
         return Ok(unavailable_snapshot(health));
     }
 
+    let shared_before = supervisor.lock().map_err(|_| "Controle de volume indisponível.")?.shared_mute_context();
+    let before = supervisor.lock().map_err(|_| "Controle de volume indisponível.")?.volume_context();
     diagnostic.phase("wait.audio");
     let playback_result = {
         let audio = audio.lock().map_err(|e| format!("Falha ao acessar o cliente MPD: {}", e))?;
@@ -2559,7 +2658,7 @@ fn collect_mpd_status_snapshot_with_diagnostic(
 
     match playback_result {
         Ok(mut playback) => {
-            let (health, volume_backend) = {
+            let (health, after) = {
                 diagnostic.phase("wait.supervisor");
                 let mut supervisor = supervisor
                     .lock()
@@ -2568,7 +2667,7 @@ fn collect_mpd_status_snapshot_with_diagnostic(
                 match supervisor.observe_health()? {
                     MpdProcessObservation::Running => {
                         let health = supervisor.mark_available();
-                        (health, supervisor.volume_backend())
+                        (health, supervisor.volume_context())
                     }
                     MpdProcessObservation::NotRunning(health) => {
                         return Ok(unavailable_snapshot(health));
@@ -2576,7 +2675,8 @@ fn collect_mpd_status_snapshot_with_diagnostic(
                 }
             };
             diagnostic.phase("volume.read");
-            apply_volume_backend(&mut playback, volume_backend);
+            apply_volume_context(&mut playback, &before, &after);
+            attach_shared_mute(&mut playback,supervisor,shared_before)?;
             Ok(MpdStatusSnapshot {
                 health,
                 playback: Some(playback),
@@ -2636,9 +2736,10 @@ fn change_playback_option(
 
 #[tauri::command]
 fn toggle_playback(
-    config_state: State<ConfigState>,
-    audio_state: State<AudioState>,
-) -> Result<(), String> {
+    config_state: State<ConfigState>, audio_state: State<AudioState>,
+    transactions: State<ConfigTransactionState>, intent: Option<String>, want_play:Option<bool>,
+) -> Result<(),String> {
+    audio_state.note_transport_intervention();
     let is_shared = {
         let config = config_state
             .0
@@ -2646,18 +2747,16 @@ fn toggle_playback(
             .map_err(|e| format!("Falha ao acessar configuração durante Play/Resume: {e}"))?;
         is_shared_output(&config)
     };
-    audio_state
-        .0
-        .lock()
-        .map_err(|e| format!("Falha ao acessar reprodução durante Play/Resume: {e}"))?
-        .toggle_play_pause(is_shared)
+    let token=admit_or_validate_playback(&audio_state.0,&transactions,intent)?;
+    finish_playback_intent(&audio_state.0,&transactions,&token,|audio|match want_play{Some(true)=>audio.play(is_shared),Some(false)=>audio.pause(),None=>audio.toggle_play_pause(is_shared)})
 }
 
 #[tauri::command]
 fn next_track(
-    config_state: State<ConfigState>,
-    audio_state: State<AudioState>,
-) -> Result<(), String> {
+    config_state: State<ConfigState>, audio_state: State<AudioState>,
+    transactions: State<ConfigTransactionState>, intent: Option<String>,
+) -> Result<(),String> {
+    audio_state.note_transport_intervention();
     let is_shared = {
         let config = config_state
             .0
@@ -2665,18 +2764,16 @@ fn next_track(
             .map_err(|e| format!("Falha ao acessar configuração durante Next: {}", e))?;
         is_shared_output(&config)
     };
-    audio_state
-        .0
-        .lock()
-        .map_err(|e| format!("Falha ao acessar reprodução durante Next: {}", e))?
-        .next(is_shared)
+    let token=admit_or_validate_playback(&audio_state.0,&transactions,intent)?;
+    finish_playback_intent(&audio_state.0,&transactions,&token,|audio|audio.next(is_shared))
 }
 
 #[tauri::command]
 fn previous_track(
-    config_state: State<ConfigState>,
-    audio_state: State<AudioState>,
-) -> Result<(), String> {
+    config_state: State<ConfigState>, audio_state: State<AudioState>,
+    transactions: State<ConfigTransactionState>, intent: Option<String>,
+) -> Result<(),String> {
+    audio_state.note_transport_intervention();
     let is_shared = {
         let config = config_state
             .0
@@ -2684,11 +2781,8 @@ fn previous_track(
             .map_err(|e| format!("Falha ao acessar configuração durante Previous: {}", e))?;
         is_shared_output(&config)
     };
-    audio_state
-        .0
-        .lock()
-        .map_err(|e| format!("Falha ao acessar reprodução durante Previous: {}", e))?
-        .previous(is_shared)
+    let token=admit_or_validate_playback(&audio_state.0,&transactions,intent)?;
+    finish_playback_intent(&audio_state.0,&transactions,&token,|audio|audio.previous(is_shared))
 }
 
 #[tauri::command]
@@ -2698,6 +2792,7 @@ fn seek_playback(
     config_state: State<ConfigState>,
     audio_state: State<AudioState>,
 ) -> Result<(), String> {
+    audio_state.note_transport_intervention();
     let is_shared = {
         let config = config_state
             .0
@@ -2749,6 +2844,7 @@ async fn resolve_and_apply_playback_intent<P, T>(
 
 #[tauri::command]
 fn admit_playback_intent(audio: State<AudioState>, transactions: State<ConfigTransactionState>) -> Result<String, String> {
+    audio.note_transport_intervention();
     admit_or_validate_playback(&audio.0, &transactions, None)
 }
 
@@ -2849,6 +2945,37 @@ async fn restore_cached_queue_after_ready(app: AppHandle) {
     }
 }
 
+const INDEX_COVERAGE_EVENT: &str = "local-library-index-coverage";
+#[tauri::command]
+fn get_local_index_coverage(app: AppHandle) -> index_coverage::Snapshot {
+    let folders = app.state::<ConfigState>().0.lock().map(|c| c.local_folders.clone()).unwrap_or_default();
+    app.state::<index_coverage::State>().snapshot(&folders)
+}
+fn publish_index_coverage(app: &AppHandle, token:u64, folders:&[String], report:index_coverage::Report) {
+    if let Some(snapshot) = app.state::<index_coverage::State>().publish(token, folders, report) {
+        if app.emit(INDEX_COVERAGE_EVENT, snapshot).is_err() { eprintln!("[Mirror] coverage_notification=unavailable"); }
+    }
+}
+fn inherit_index_coverage(app:&AppHandle,token:u64,folders:&[String]) {
+    if let Some(snapshot)=app.state::<index_coverage::State>().inherit(token,folders){if app.emit(INDEX_COVERAGE_EVENT,snapshot).is_err(){eprintln!("[Mirror] coverage_notification=unavailable");}}
+}
+fn covered_index_recovery(outcome:RestorePreviousOutcome, check:Option<&index_coverage::Check>,socket:&str)->Result<RestorePreviousOutcome,String>{
+    match outcome {
+        RestorePreviousOutcome::SkippedForShutdown|RestorePreviousOutcome::CancelledDuringRecovery=>Ok(RestorePreviousOutcome::CancelledDuringRecovery),
+        outcome=>{if let Some(check)=check{check.verify_recovered(socket)?;}Ok(outcome)}
+    }
+}
+fn prepare_index_check(socket:&str, inventory:index_coverage::Inventory, ids:std::collections::BTreeSet<String>, mut shutdown:impl FnMut()->bool, before:Option<std::collections::HashSet<String>>) -> Result<index_coverage::Check,String> {
+    if shutdown() { return Err(library_refresh::CANCELLED.into()); }
+    if let Some(before) = before { return index_coverage::Check::from_catalog(inventory, index_coverage::Catalog::from_records(before)?, ids); }
+    match AudioEngine::wait_for_managed_mpd_update(socket, None, MANUAL_RESCAN_POLL_INTERVAL, &mut shutdown) {
+        Ok(MpdRefreshCompletion::Completed) => {},
+        Err(()) => return Err(library_refresh::CANCELLED.into()),
+        Ok(_) => return Err("LOCAL_INDEX_PREVIOUS_UNAVAILABLE".into()),
+    }
+    index_coverage::Check::prepare(inventory, socket, ids)
+}
+
 #[tauri::command]
 fn get_local_watch_needs_check(watcher: State<LocalWatcherState>) -> bool { watcher.needs_check() }
 
@@ -2873,18 +3000,22 @@ fn install_committed_local_watcher(app: &AppHandle, prepared: Option<local_watch
     }
 }
 
-fn refresh_existing_local_content(socket: &str, plan: &local_media::mirror::ManagedRefreshPlan, shutdown: impl Fn() -> bool) -> Result<bool, String> {
-    match AudioEngine::wait_for_managed_mpd_update(socket, None, MANUAL_RESCAN_POLL_INTERVAL, &shutdown) {
-        Err(()) => return Err(library_refresh::CANCELLED.into()),
-        Ok(MpdRefreshCompletion::Completed) => {},
-        Ok(_) => return Err("LOCAL_WATCH_MPD_UNAVAILABLE".into()),
+fn run_local_content_coverage(socket:&str,plan:&local_media::mirror::ManagedRefreshPlan,inventory:index_coverage::Inventory,library:&Path,shutdown:impl Fn()->bool)->Result<index_coverage::Report,String>{
+    let ids=inventory.source_ids();
+    let check=prepare_index_check(socket,inventory,ids,&shutdown,None)?;
+    let report=std::cell::RefCell::new(None);
+    match library_refresh::refresh_inspected(socket,plan,true,&shutdown,true,||{
+        let(result,_)=check.finish_at(socket,library)?;*report.borrow_mut()=Some(result);Ok(())
+    })? {
+        library_refresh::Outcome::Cancelled=>Err(library_refresh::CANCELLED.into()),
+        library_refresh::Outcome::Completed=>report.into_inner().ok_or(index_coverage::INVALID.into()),
     }
-    // Content update has no mirror publication to roll back and must never
-    // restart audio on failure. A blocked batch produces a needs-check notice.
-    match library_refresh::refresh_filesystem(socket, plan, shutdown)? {
-        library_refresh::Outcome::Completed => Ok(true),
-        library_refresh::Outcome::Cancelled => Err(library_refresh::CANCELLED.into()),
-    }
+}
+fn refresh_existing_local_content(app:&AppHandle,socket:&str,plan:&local_media::mirror::ManagedRefreshPlan,inventory:index_coverage::Inventory,folders:&[String],shutdown:impl Fn()->bool)->Result<bool,String>{
+    let token=app.state::<index_coverage::State>().begin()?;
+    // No mirror exists to roll back here; errors become the existing needs-check.
+    let report=run_local_content_coverage(socket,plan,inventory,&MpdSupervisor::library_dir(),shutdown)?;
+    publish_index_coverage(app,token,folders,report);Ok(true)
 }
 
 fn run_local_filesystem_batch(app: &AppHandle, batch: local_changes::Batch) -> local_watcher::Reconcile {
@@ -2911,7 +3042,7 @@ fn run_local_filesystem_batch(app: &AppHandle, batch: local_changes::Batch) -> l
             changed
         } else {
             let socket = app.state::<AudioState>().0.lock().map_err(|_| "LOCAL_WATCH_AUDIO_UNAVAILABLE")?.local_album_socket_path();
-            refresh_existing_local_content(&socket, &plan.refresh, || transactions.shutdown_requested())?
+            refresh_existing_local_content(app, &socket, &plan.refresh, plan.coverage, &folders, || transactions.shutdown_requested())?
         };
         if changed {
             // A failed notification must not repeat an already confirmed job.
@@ -2964,6 +3095,7 @@ async fn complete_startup_after_ready(app: AppHandle) {
             }
         }
         Ok(Err(error)) => {
+            local_watch_needs_check(&app, "startup_index_unconfirmed");
             eprintln!(
                 "[Mirror] Automatic startup reconciliation failed: {}",
                 crate::diagnostics::error_summary(&error)
@@ -3001,24 +3133,114 @@ fn set_volume(
     volume: u32,
     sup_state: State<SupervisorState>,
     audio_state: State<AudioState>,
+    transactions: State<ConfigTransactionState>,
 ) -> Result<(), String> {
-    let backend = sup_state
-        .0
-        .lock()
-        .map_err(|e| format!("Falha ao acessar o controle de volume: {}", e))?
-        .shared_volume_backend();
-    set_volume_with_backend(
-        backend,
-        volume,
-        shared_volume::set_pipewire_volume,
-        |value| {
-            audio_state
-                .0
-                .lock()
-                .map_err(|e| format!("Falha ao acessar o volume do MPD: {}", e))?
-                .set_volume(value)
-        },
-    )
+    audio_state.note_transport_intervention();
+    let _transaction = begin_volume_transaction(&transactions)?;
+    let supervisor = sup_state.0.lock().map_err(|_| "Controle de volume indisponível.")?;
+    require_gradual_volume(supervisor.volume_backend())?;
+    let backend = supervisor.shared_volume_backend();
+    drop(supervisor);
+    set_volume_with_backend(backend, volume, shared_volume::set_pipewire_volume, |value| {
+        audio_state.0.lock().map_err(|_| "Volume do MPD indisponível.")?.set_volume(value)
+    })
+}
+
+// One idempotent request shared by shortcuts, PlayerBar and both Now Playing hosts.
+#[tauri::command]
+fn set_shared_mute(muted:bool,token:String,sup_state:State<SupervisorState>,audio_state:State<AudioState>,transactions:State<ConfigTransactionState>)->Result<(),String>{
+    audio_state.note_transport_intervention();
+    let _transaction=begin_volume_transaction(&transactions)?;
+    let mut supervisor=sup_state.0.lock().map_err(|_|"SHARED_MUTE_CONTEXT_CHANGED")?;
+    let base=supervisor.shared_mute_context().ok_or("SHARED_MUTE_CONTEXT_CHANGED")?;
+    if supervisor.volume_backend()==VolumeBackend::PipeWire {
+        let target=shared_volume::read_target()?;
+        let context=format!("{}:{}",base,target.token());
+        let actual=shared_volume::read_target_volume(&target)?;
+        let action=supervisor.shared_mute.plan(&token,&context,actual.value,actual.muted,true,muted)?;
+        shared_volume::apply_mute_action(&target,action)
+    } else {
+        let audio=audio_state.0.lock().map_err(|_|"SHARED_MUTE_CONTEXT_CHANGED")?;
+        let value=audio.observed_software_volume()?;
+        let action=supervisor.shared_mute.plan(&token,&base,value,value==0,false,muted)?;
+        match action {shared_mute::Action::None=>Ok(()),shared_mute::Action::Volume(value)=>audio.set_volume(value),_=>Err("SHARED_MUTE_CONTEXT_CHANGED".into())}
+    }
+}
+
+fn require_gradual_volume(backend: VolumeBackend) -> Result<(), String> {
+    match backend {
+        VolumeBackend::DirectEquipment => Err(direct_volume::GRADUAL.into()),
+        VolumeBackend::Unavailable => Err(direct_volume::STALE.into()),
+        _ => Ok(()),
+    }
+}
+
+// First ordinary playback may migrate a legacy Direct choice. This writes
+// policy only, under the normal lifecycle and durable config writer; never gain.
+#[tauri::command]
+async fn confirm_direct_volume_choice(app:AppHandle,expected_config:AppConfig,intent:String)->Result<(),String>{
+    tauri::async_runtime::spawn_blocking(move||{
+        let transactions=app.state::<ConfigTransactionState>();
+        let _permit=begin_volume_transaction(&transactions)?;
+        let mut config=app.state::<ConfigState>().0.lock().map_err(|_|direct_volume::STALE)?.clone();
+        managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())?;
+        if config.first_run || config!=expected_config || AppConfig::load()?!=config{return Err(direct_volume::STALE.into());}
+        app.state::<AudioState>().0.lock().map_err(|_|direct_volume::STALE)?.validate_playback_intent(&intent)?;
+        config.direct_volume_choice=config.direct_context();
+        if config.direct_volume_choice.is_none(){return Err(direct_volume::STALE.into());}
+        if transactions.shutdown_requested(){return Err(config_save_operation::INTERRUPTED.into());}
+        if let Err(error)=config.save(){app.state::<Arc<direct_playback::Gate>>().forget_choice();return Err(error.to_string());}
+        *app.state::<ConfigState>().0.lock().map_err(|_|direct_volume::STALE)?=config.clone();
+        app.state::<Arc<direct_playback::Gate>>().commit_choice(&config);
+        if transactions.shutdown_requested(){return Err(config_save_operation::INTERRUPTED.into());}
+        app.state::<AudioState>().0.lock().map_err(|_|direct_volume::STALE)?.validate_playback_intent(&intent)?;
+        Ok(())
+    }).await.map_err(|_|direct_volume::STALE.to_string())?
+}
+
+#[tauri::command]
+async fn set_direct_mute(app: AppHandle, muted: bool, token: String) -> Result<(), String> {
+    app.state::<AudioState>().note_transport_intervention();
+    tauri::async_runtime::spawn_blocking(move || {
+        let transactions = app.state::<ConfigTransactionState>();
+        let _transaction = begin_volume_transaction(&transactions)?;
+        let state = app.state::<SupervisorState>();
+        let context = state.0.lock().map_err(|_| "Controle de volume indisponível.")?.volume_context();
+        admit_direct_volume_playback(&context, &token, &app.state::<AudioState>().0)?;
+        let supervisor = state.0.lock().map_err(|_| "Controle de volume indisponível.")?;
+        if !muted {
+            let current=app.state::<ConfigState>().0.lock().map_err(|_|direct_volume::STALE)?.clone();
+            managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())?;
+            if AppConfig::load()?!=current{return Err(direct_volume::STALE.into());}
+        }
+        supervisor.set_direct_mute(muted, &token, || transactions.shutdown_requested())?;
+        drop(supervisor);
+        let mut config=app.state::<ConfigState>().0.lock().map_err(|_|direct_volume::STALE)?.clone();
+        config.direct_muted=muted;
+        if let Err(error)=config.save(){app.state::<Arc<direct_playback::Gate>>().forget_choice();return Err(error.to_string());}
+        *app.state::<ConfigState>().0.lock().map_err(|_|direct_volume::STALE)?=config;
+        Ok(())
+    }).await.map_err(|_| "Controle de volume indisponível.".to_string())?
+}
+
+// A volume gesture must never wait behind a Save and execute minutes later.
+// Reuse the existing nonblocking lifecycle reservation, including shutdown.
+fn begin_volume_transaction(transactions: &ConfigTransactionState) -> Result<config_save_operation::Transaction<'_>, String> {
+    transactions.operations.try_begin_background().map_err(|_| {
+        transactions.operations.reject_active().err().unwrap_or_else(|| config_save_operation::BUSY.into())
+    })
+}
+
+fn admit_direct_volume_playback(context: &direct_volume::Context, token: &str, audio: &Mutex<AudioEngine>) -> Result<(), String> {
+    context.validate_token(token)?;
+    invalidate_direct_volume_playback(audio)
+}
+
+fn invalidate_direct_volume_playback(audio: &Mutex<AudioEngine>) -> Result<(), String> {
+    let mut audio = audio.lock().map_err(|_| "Estado de reprodução indisponível.")?;
+    audio.invalidate_playback_intents();
+    audio.note_eq_intervention();
+    Ok(())
 }
 
 fn set_volume_with_backend<P, M>(
@@ -3979,6 +4201,7 @@ async fn rescan_library(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn get_config(app: AppHandle) -> Result<AppConfig, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        app.state::<profile_lease::State>().lease()?.validate()?;
         read_config_after_startup_reconciliation(
             &app.state::<ConfigState>(),
             &app.state::<ConfigTransactionState>(),
@@ -3987,6 +4210,58 @@ async fn get_config(app: AppHandle) -> Result<AppConfig, String> {
     })
     .await
     .map_err(|error| format!("Falha na tarefa de leitura da configuração: {error}"))?
+}
+
+// These commands are available before config/bootstrap. Analysis is read-only,
+// and the State rejects calls after a normal admitted startup.
+#[tauri::command]
+async fn analyze_library_recovery(app: AppHandle, request_id: String) -> Result<library_recovery::Observation, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<library_recovery::State>().analyze(
+            &MpdSupervisor::sonante_config_dir(), &request_id,
+            app.state::<profile_lease::State>().lease().and_then(|o|o.validate()).is_ok(),
+            || app.state::<ConfigTransactionState>().shutdown_requested(),
+        )
+    }).await.map_err(|_| library_recovery::UNAVAILABLE.to_string())?
+}
+
+#[tauri::command]
+fn cancel_library_recovery_analysis(state: State<library_recovery::State>, request_id: String) {
+    state.cancel(&request_id);
+}
+
+#[tauri::command]
+async fn export_library_recovery_report(app: AppHandle, analysis_id: u64) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<library_recovery::State>();
+        let shutdown = || app.state::<ConfigTransactionState>().shutdown_requested();
+        state.report(analysis_id, shutdown)?;
+        // No state/transaction/audio mutex is held while the native dialog runs.
+        let Some(path) = rfd::FileDialog::new().set_file_name("sonante-library-diagnostic.json")
+            .add_filter("JSON", &["json"]).save_file() else { return Ok(false); };
+        let report = state.report(analysis_id, shutdown)?;
+        library_recovery::save_report(&path, report.as_bytes())?;
+        Ok(true)
+    }).await.map_err(|_| library_recovery::UNAVAILABLE.to_string())?
+}
+
+#[tauri::command]
+async fn execute_library_recovery(app:AppHandle,analysis_id:u64,plan_id:String)->Result<recovery_set::ResultDto,String>{
+    let owner=app.state::<profile_lease::State>().lease()?;owner.validate()?;
+    let admission=app.state::<library_recovery::State>().admission(analysis_id,&plan_id)?;
+    let(_,operation)=app.state::<ConfigTransactionState>().operations.reserve_recovery(admission)?;
+    tauri::async_runtime::spawn_blocking(move||{
+        let result=app.state::<library_recovery::State>().execute(&owner,analysis_id,&plan_id,||operation.shutdown_requested());
+        drop(owner);
+        operation.finish(result.as_ref().map(|_|()).map_err(|e|e.clone()),result.is_err());result
+    }).await.map_err(|_|library_recovery::UNAVAILABLE.to_string())?
+}
+#[tauri::command]
+fn reopen_library_after_recovery(app:AppHandle,plan_id:String)->Result<(),String>{
+    app.state::<profile_lease::State>().lease()?.validate()?;
+    if app.state::<ConfigTransactionState>().shutdown_requested(){return Err(library_recovery::UNAVAILABLE.into())}
+    app.state::<library_recovery::State>().allow_reopen(&plan_id,&MpdSupervisor::sonante_config_dir())?;
+    app.state::<profile_lease::State>().request_reopen();start_coordinated_shutdown(&app,0);Ok(())
 }
 
 fn read_config_after_startup_reconciliation(
@@ -4161,7 +4436,7 @@ impl<F: FnMut(&analyzer::AnalyzerOwner) -> Result<(), String>> Drop for Analyzer
 
 #[tauri::command]
 async fn save_config(
-    new_config: AppConfig,
+    mut new_config: AppConfig,
     queue_clear_authorization: Option<QueueClearAuthorization>,
     app: AppHandle,
     config_state: State<'_, ConfigState>,
@@ -4182,6 +4457,8 @@ async fn save_config(
         .map_err(|e| format!("Falha ao acessar a configuração atual: {}", e))?
         .clone();
 
+    new_config.validate_direct_choice()?;
+    new_config.direct_muted=observed_cfg.direct_muted;
     validate_config_save_scope(&observed_cfg, &new_config)?;
 
     if observed_cfg.first_run || local_folders_changed(&observed_cfg, &new_config) {
@@ -4234,6 +4511,10 @@ async fn save_config(
             || observed_cfg.dop_enabled != new_config.dop_enabled
             || observed_cfg.audio_buffer_size_kb != new_config.audio_buffer_size_kb
             || observed_cfg.replay_gain != new_config.replay_gain);
+    // Only explicit device/mode Save may resume; buffer/ReplayGain/DoP-only,
+    // folders and startup retain their existing contract.
+    let route_save_resume = route_save_resume_requested(&observed_cfg,&new_config);
+    let route_save_watch = audio_state.0.lock().map_err(|_|"Playback unavailable")?.watch_eq_transition();
     let switch_queue = if output_change_expected {
         let plex_client = plex_state
             .0
@@ -4275,6 +4556,20 @@ async fn save_config(
     let mut library_changed_during_start = false;
     let mut restore_outcome = audio::DeviceSwitchRestoreOutcome::Complete;
     let mut playback_snapshot = None;
+    let source_muted = if route_save_resume {
+        if is_shared_output(&current_cfg) {
+            let backend=sup_state.0.lock().map_err(|_|"OUTPUT_SAVE_VOLUME_UNAVAILABLE")?.shared_volume_backend();
+            if backend==Some(shared_volume::SharedVolumeBackend::PipeWire) {
+                let value=shared_volume::read_pipewire_volume()?; value.muted||value.value==0
+            } else {
+                audio_state.0.lock().map_err(|_|"OUTPUT_SAVE_VOLUME_UNAVAILABLE")?.observed_software_volume()?==0
+            }
+        } else { current_cfg.direct_muted }
+    } else { false };
+    // Carry intentional silence into a new Direct process before it can start.
+    if route_save_resume && new_config.direct_context().is_some() && source_muted {
+        new_config.direct_muted=true;
+    }
     let mut resume_analyzer = AnalyzerSwitchResume::new(|capture| {
         let Some(_restart_permit) = transaction_state.try_begin_restart() else {
             return Ok(());
@@ -4309,20 +4604,12 @@ async fn save_config(
         };
     } else if should_prepare_device_switch(audio_hw_changed, finishing_first_run) {
         // 1. Captura o estado e segundo atual da música sem destruir a fila
-        let preparation = audio_state
-            .0
-            .lock()
-            .map_err(|e| {
-                format!(
-                    "Falha ao preparar troca de saída: não foi possível acessar o estado de reprodução: {}",
-                    e
-                )
-            })?
-            .prepare_reserved_device_switch(
-                switch_queue
-                    .as_ref()
-                    .ok_or("Fila da troca de saída indisponível.")?,
-            );
+        let preparation = {
+            let mut audio=audio_state.0.lock().map_err(|e|format!("Falha ao preparar troca de saída: {e}"))?;
+            let queue=switch_queue.as_ref().ok_or("Fila da troca de saída indisponível.")?;
+            if route_save_resume {audio.prepare_reserved_route_save(queue)}
+            else {audio.prepare_reserved_device_switch(queue)}
+        };
         playback_snapshot = match preparation {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -4391,16 +4678,12 @@ async fn save_config(
 
         // 3. Restaura fila/faixa/posição quando possível; Playing/Paused terminam pausados e Stopped permanece parado
         let restore_result = match audio_state.0.lock() {
-            Ok(audio) => audio.restore_after_reserved_device_switch(
-                playback_snapshot,
-                switch_queue
-                    .as_ref()
-                    .ok_or("Fila da troca de saída indisponível.")?,
-            ),
-            Err(e) => Err(format!(
-                "não foi possível acessar a fila após trocar a saída: {}",
-                e
-            )),
+            Ok(mut audio) => {
+                let queue=switch_queue.as_ref().ok_or("Fila da troca de saída indisponível.")?;
+                if route_save_resume {audio.restore_for_route_save(playback_snapshot,queue)}
+                else {audio.restore_after_reserved_device_switch(playback_snapshot,queue)}
+            },
+            Err(e) => Err(format!("não foi possível acessar a fila após trocar a saída: {e}")),
         };
         restore_outcome = finish_device_switch_restore(restore_result, || {
             let rollback = resume_analyzer.after_rollback(rollback_audio_switch(
@@ -4457,6 +4740,29 @@ async fn save_config(
         }
     }
 
+    if route_save_resume && source_muted && is_shared_output(&new_config) {
+        // Never mute the system sink as an incidental effect of route Save.
+        // An owned software mixer can preserve silence; a PW sink must already
+        // be observed muted, otherwise refuse and roll back without any Play.
+        let preserved=(||->Result<(),String>{
+            let backend=sup_state.0.lock().map_err(|_|"OUTPUT_SAVE_MUTE_UNCONFIRMED")?.shared_volume_backend();
+            if backend==Some(shared_volume::SharedVolumeBackend::PipeWire) {
+                let value=shared_volume::read_pipewire_volume()?;
+                if !value.muted&&value.value!=0{return Err("OUTPUT_SAVE_CANNOT_PRESERVE_MUTE_WITHOUT_CHANGING_SYSTEM_VOLUME".into());}
+            } else {
+                let audio=audio_state.0.lock().map_err(|_|"OUTPUT_SAVE_MUTE_UNCONFIRMED")?;
+                audio.set_volume(0)?;
+                if audio.observed_software_volume()?!=0{return Err("OUTPUT_SAVE_MUTE_UNCONFIRMED".into());}
+            }
+            Ok(())
+        })();
+        if let Err(error)=preserved {
+            return Err(error_with_rollback(error,resume_analyzer.after_rollback(rollback_applied_config_change(
+                finishing_first_run,audio_hw_changed,folders_changed,&current_cfg,playback_snapshot,switch_queue.as_ref(),&sup_state,&audio_state,
+            ))));
+        }
+    }
+
     let mut config_guard = match config_state.0.lock() {
         Ok(guard) => guard,
         Err(e) => {
@@ -4494,6 +4800,7 @@ async fn save_config(
     };
 
     if let Err(save_error) = new_config.save() {
+        if matches!(save_error,ConfigSaveError::AfterRenameUnconfirmed(_)){app.state::<Arc<direct_playback::Gate>>().forget_choice();}
         drop(plex_guard);
         drop(config_guard);
         let error = config_save_failure_with_rollback(save_error, || {
@@ -4513,12 +4820,30 @@ async fn save_config(
         return Err(config_save_error_message(&error));
     }
 
+    app.state::<Arc<direct_playback::Gate>>().commit_choice(&new_config);
     plex_guard.update_config(&new_config);
+    let target_shared=is_shared_output(&new_config);
     *config_guard = new_config;
     drop(plex_guard);
     drop(config_guard);
 
     resume_analyzer.confirmed = true;
+    if route_save_resume && restore_outcome==audio::DeviceSwitchRestoreOutcome::Complete {
+        if let Some(_restart)=transaction_state.try_begin_restart() {
+            let backend=sup_state.0.lock().map_err(|_|"OUTPUT_SAVE_COMMITTED_PLAYBACK_UNAVAILABLE")?.shared_volume_backend();
+            let mut audio=audio_state.0.lock().map_err(|_|"OUTPUT_SAVE_COMMITTED_PLAYBACK_UNAVAILABLE")?;
+            audio.resume_saved_route(playback_snapshot,switch_queue.as_ref().ok_or("OUTPUT_SAVE_QUEUE_UNAVAILABLE")?,&route_save_watch,&_transaction_guard,|audio|{
+                if source_muted&&target_shared {
+                    if backend==Some(shared_volume::SharedVolumeBackend::PipeWire) {
+                        let value=shared_volume::read_pipewire_volume()?;
+                        if !value.muted&&value.value!=0{return Err("OUTPUT_SAVE_MUTE_UNCONFIRMED".into());}
+                    } else if audio.observed_software_volume()?!=0{return Err("OUTPUT_SAVE_MUTE_UNCONFIRMED".into());}
+                }
+                Ok(())
+            })
+                .map_err(|error|format!("OUTPUT_SAVE_COMMITTED_RESUME_FAILED: saída salva; reprodução não confirmada. {error}"))?;
+        }
+    }
     Ok(config_save_operation::SaveResponse::completed(restore_outcome))
 }
 
@@ -5045,6 +5370,7 @@ async fn get_plex_image(
 
 fn shutdown_controlled_resources(app_handle: &AppHandle) {
     mpris::shutdown(app_handle);
+    if app_handle.state::<library_recovery::State>().should_persist_shutdown_queue() {
     if let Some(audio_state) = app_handle.try_state::<AudioState>() {
         match audio_state.0.lock() {
             Ok(mut audio) => {
@@ -5057,6 +5383,7 @@ fn shutdown_controlled_resources(app_handle: &AppHandle) {
             }
             Err(_) => eprintln!("[Audio] Failed to access position during shutdown."),
         }
+    }
     }
     if let Some(state) = app_handle.try_state::<AnalyzerState>() {
         if let Ok(mut analyzer) = state.0.lock() {
@@ -5103,6 +5430,10 @@ fn start_coordinated_shutdown(app_handle: &AppHandle, exit_code: i32) {
             shutdown_app.state::<shared_dsp::State>().join();
             transaction_state.mark_shutdown_complete();
         }
+        if shutdown_app.state::<profile_lease::State>().reopen_requested() {
+            shutdown_app.state::<profile_lease::State>().release();
+            shutdown_app.restart();
+        }
         shutdown_app.exit(exit_code);
     });
 }
@@ -5113,9 +5444,11 @@ pub fn run() {
     // Read the stop marker before loading configuration or starting the supervisor.
     // A pending/invalid record must never trigger rescan, reconcile or rollback.
     let mut managed_startup_allowed = false;
+    let profile_owner = profile_lease::State::new(&MpdSupervisor::sonante_config_dir());
     let (initial_config, config_valid) = match managed_save_intent::guard_startup(
         &MpdSupervisor::sonante_config_dir(),
         || {
+            profile_owner.lease()?.validate()?;
             managed_startup_allowed = true;
             AppConfig::load()
         },
@@ -5148,7 +5481,11 @@ pub fn run() {
         false
     };
 
+    let transactions=ConfigTransactionState::new();
+    let playback_gate=Arc::new(direct_playback::Gate::new(transactions.operations.clone()));
+    playback_gate.commit_choice(&initial_config);
     let mut supervisor = MpdSupervisor::new(&socket_path);
+    supervisor.attach_playback_gate(playback_gate.clone());
     let mpd_started = if should_start_mpd {
         match supervisor.start(&initial_config) {
             Ok(_) => true,
@@ -5165,10 +5502,11 @@ pub fn run() {
         false
     };
 
-    let audio_engine = AudioEngine::new(
+    let mut audio_engine = AudioEngine::new(
         &socket_path,
         &MpdSupervisor::library_dir().to_string_lossy(),
     );
+    audio_engine.attach_direct_playback(playback_gate.clone());
     let audio_analyzer = AudioAnalyzer::new(
         socket_path.clone(),
         MpdSupervisor::analyzer_fifo_path(),
@@ -5191,17 +5529,26 @@ pub fn run() {
             }
             Ok(())
         })
-        .manage(AudioState(Mutex::new(audio_engine)))
+        .manage(AudioState::new(audio_engine))
         .manage(AnalyzerState(Mutex::new(audio_analyzer)))
         .manage(PlexState(Mutex::new(plex_client)))
         .manage(SupervisorState(Mutex::new(supervisor)))
         .manage(ConfigState(Mutex::new(initial_config)))
-        .manage(ConfigTransactionState::new())
+        .manage(transactions)
+        .manage(playback_gate)
+        .manage(library_recovery::State::new(!config_valid))
+        .manage(profile_owner)
         .manage(LocalWatcherState::new())
+        .manage(index_coverage::State::default())
         .manage(shared_dsp::State::new())
         .manage(PlaylistState(Mutex::new(PlaylistStore::default())))
         .manage(mpris::MprisState::default())
         .invoke_handler(tauri::generate_handler![
+            analyze_library_recovery,
+            cancel_library_recovery_analysis,
+            export_library_recovery_report,
+            execute_library_recovery,
+            reopen_library_after_recovery,
             get_playback_status,
             get_mpd_status_snapshot,
             claim_audio_analyzer_host,
@@ -5219,6 +5566,9 @@ pub fn run() {
             cancel_playback_intent,
             playback_intent_current,
             set_volume,
+            set_shared_mute,
+            set_direct_mute,
+            confirm_direct_volume_choice,
             get_queue,
             play_queue_index,
             clear_queue,
@@ -5260,6 +5610,7 @@ pub fn run() {
             check_local_library,
             rescan_library,
             get_local_watch_needs_check,
+            get_local_index_coverage,
             get_config,
             equalizer_commands::get_equalizer,
             equalizer_commands::pick_equalizer_preset,
@@ -5356,6 +5707,21 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn route_save_resume_scope_excludes_startup_aliases_and_non_route_settings(){
+        let mut current=AppConfig::default();current.first_run=false;
+        for kind in ["buffer","gain","dop","folders","alias"] {
+            let mut next=current.clone();match kind {
+                "buffer"=>next.audio_buffer_size_kb+=1,"gain"=>next.replay_gain="album".into(),"dop"=>next.dop_enabled=!next.dop_enabled,"folders"=>next.local_folders.push("/fixture".into()),_=>next.audio_output_type="shared".into()
+            }
+            assert!(!route_save_resume_requested(&current,&next),"{kind}");
+        }
+        let mut direct=current.clone();direct.audio_output_type="alsa".into();direct.alsa_device="hw:CARD=A,DEV=0".into();
+        assert!(route_save_resume_requested(&current,&direct));assert!(route_save_resume_requested(&direct,&current));
+        let mut other=direct.clone();other.alsa_device="hw:CARD=B,DEV=0".into();assert!(route_save_resume_requested(&direct,&other));
+        current.first_run=true;assert!(!route_save_resume_requested(&current,&direct));direct.first_run=true;assert!(!route_save_resume_requested(&other,&direct));
+    }
 
     #[test]
     fn favorites_pending_io_preserves_executor_capacity_and_recovers_after_failure() {
@@ -6731,10 +7097,31 @@ mod tests {
                 writable: true,
                 available: true,
                 backend: audio::VolumeBackend::MpdSoftware,
+                direct_gain: None, direct_token: None,
+                shared_token: None,
             },
             is_updating: false,
             playback_error: None,
         }
+    }
+
+    #[test]
+    fn direct_gradual_volume_is_rejected_centrally_and_shared_remains_available() {
+        assert_eq!(require_gradual_volume(VolumeBackend::DirectEquipment), Err(direct_volume::GRADUAL.into()));
+        assert!(require_gradual_volume(VolumeBackend::Unavailable).is_err());
+        for backend in [VolumeBackend::PipeWire, VolumeBackend::MpdSoftware] { assert!(require_gradual_volume(backend).is_ok()); }
+    }
+
+    #[test]
+    fn direct_session_replacement_and_stale_telemetry_cannot_publish_unity() {
+        let make = || direct_volume::Session::initialize(|cmd| Ok(if cmd=="status" {vec!["state: stop".into(),"volume: 0".into()]} else {vec![]})).unwrap();
+        let session=make(); let other=make();
+        let before=direct_volume::Context::new(VolumeBackend::DirectEquipment,Some(session.clone()));
+        let after=direct_volume::Context::new(VolumeBackend::DirectEquipment,Some(other));
+        let mut playback=playback_with_mpd_volume(100);
+        apply_volume_context(&mut playback,&before,&after);
+        assert!(!playback.snapshot_consistent);assert!(!playback.volume.available);assert!(!playback.volume.writable);assert_eq!(playback.volume.direct_gain,Some(direct_volume::Gain::Changed));
+        session.invalidate();let mut playback=playback_with_mpd_volume(0);apply_volume_context(&mut playback,&before,&before);assert!(!playback.snapshot_consistent);assert!(!playback.volume.muted);
     }
 
     #[test]
@@ -9312,6 +9699,7 @@ mod tests {
             &socket,
             &fixture.plan,
             &RemovalRefreshExpectation {
+                before_catalog: confirmed.catalog_before.clone(),
                 catalog: confirmed.catalog_after.clone(),
                 queue: confirmed.queue.clone(),
             },
@@ -9447,7 +9835,8 @@ mod tests {
                     &worker_socket,
                     &plan,
                     &RemovalRefreshExpectation {
-                        catalog: confirmed.catalog_after.clone(),
+                        before_catalog: confirmed.catalog_before.clone(),
+                catalog: confirmed.catalog_after.clone(),
                         queue: confirmed.queue.clone(),
                     },
                     None,
@@ -9964,6 +10353,7 @@ mod tests {
             &socket,
             &fixture.plan,
             &RemovalRefreshExpectation {
+                before_catalog: confirmed.catalog_before.clone(),
                 catalog: confirmed.catalog_after.clone(),
                 queue: confirmed.queue.clone(),
             },
@@ -10161,6 +10551,7 @@ mod tests {
             audio.lock().unwrap().play_uris(removal_queue_uris(), 0).unwrap();
         }
         let (guard, proof) = admit_removal_refresh(&audio, &socket, &plan).unwrap().unwrap();
+        assert_eq!(proof.before_catalog, REMOVAL_BEFORE.lines().filter(|l| *l != "OK").map(str::to_owned).collect());
         assert!(audio.try_lock().is_ok());
         let concurrent_audio = Arc::clone(&audio);
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -10638,59 +11029,8 @@ mod tests {
     }
 
     #[test]
-    fn local_index_gap_diagnostic_synthetic_partial_and_empty_catalogs_allow_commit() {
-        // Scripted protocol responses, NOT observations of a real MPD decoder.
-        // Neither a missing newly added source nor an entirely empty catalog
-        // fails today's syntax-only audit after a completed update.
-        for catalog in ["file: Existing/old.flac\nOK\n", "OK\n"] {
-            let (socket, server) = fake_restorative_rescan_mpd(vec![
-                ("update \"Added\"", "updating_db: 107\nOK\n"),
-                ("status", "state: stop\nOK\n"),
-                ("listall", catalog),
-            ]);
-            let state = Arc::new(config_save_operation::Coordinator::new());
-            let (_, operation) = state.reserve().unwrap();
-            let committed = Cell::new(false);
-            let cleaned = Cell::new(false);
-            let result = complete_published_mirror_refresh(
-                || {
-                    request_refresh_and_audit_traced(
-                        &socket,
-                        &local_media::mirror::ManagedRefreshPlan::Targeted {
-                            directories: vec!["Added".to_string()],
-                            changed_files: 2,
-                        },
-                        None,
-                        Some(&operation),
-                    )
-                },
-                || -> Result<(), String> {
-                    panic!("unexpected capture in diagnostic success");
-                },
-                || panic!("unexpected stop in diagnostic success"),
-                || panic!("unexpected rollback in diagnostic success"),
-                |_| panic!("unexpected restore in diagnostic success"),
-                || panic!("unexpected rejected cleanup in diagnostic success"),
-                || {
-                    committed.set(true);
-                    Ok(())
-                },
-                || {
-                    cleaned.set(true);
-                    Ok(())
-                },
-            );
-            server.join().unwrap();
-            assert_eq!(result, Ok(()));
-            assert!(committed.get() && cleaned.get());
-            operation.finish(result, false);
-            let outcome = state.snapshot().unwrap().unwrap();
-            assert_eq!(outcome.phase, config_save_operation::Phase::Completed);
-            assert!(outcome.error.is_none());
-            // The operation is terminal, so a fresh explicit retry is admissible.
-            let (_, retry) = state.reserve().unwrap();
-            retry.finish(Ok(()), false);
-        }
+    fn local_index_gap_partial_warns_but_survivor_loss_never_commits() {
+        crate::index_coverage::tests::assert_partial_executor_contract();
     }
 
     #[test]
@@ -11110,6 +11450,49 @@ mod playback_intent_regressions {
             assert_eq!(result.unwrap_err(),"PLAYBACK_SUPERSEDED");assert_eq!(effects.get(),1);
         }
     }
+    #[test]
+    fn direct_volume_intervention_supersedes_delayed_local_and_plex_play_without_queue_changes() {
+        for resolver_failed in [false, true] {
+            let audio = Mutex::new(audio::reliability_tests::fixture());
+            let transactions = ConfigTransactionState::new();
+            let token = admit_or_validate_playback(&audio, &transactions, None).unwrap();
+            let queue = audio.lock().unwrap().get_queue();
+            let prepare = async {
+                let _transaction = transactions.begin().unwrap();
+                invalidate_direct_volume_playback(&audio).unwrap();
+                if resolver_failed { Err("old resolver failed".into()) } else { Ok(()) }
+            };
+            let result = tauri::async_runtime::block_on(resolve_and_apply_playback_intent(&audio, &transactions, &token, prepare,
+                |_, _| -> Result<(), String> { panic!("late playback must never run at prepared unity gain") }));
+            assert_eq!(result.unwrap_err(), "PLAYBACK_SUPERSEDED");
+            assert_eq!(audio.lock().unwrap().get_queue(), queue);
+        }
+    }
+
+    #[test]
+    fn direct_volume_admission_refuses_busy_and_shutdown_instead_of_queueing_a_gesture() {
+        let transactions = ConfigTransactionState::new();
+        let active = transactions.begin().unwrap();
+        assert!(matches!(begin_volume_transaction(&transactions), Err(ref error) if error == config_save_operation::BUSY));
+        drop(active);
+        assert!(begin_volume_transaction(&transactions).is_ok());
+        transactions.request_shutdown();
+        assert!(begin_volume_transaction(&transactions).is_err());
+    }
+
+    #[test]
+    fn stale_direct_volume_dialog_does_not_cancel_a_current_playback_intent() {
+        let audio = Mutex::new(audio::reliability_tests::fixture());
+        let transactions = ConfigTransactionState::new();
+        let play = admit_or_validate_playback(&audio, &transactions, None).unwrap();
+        let session = direct_volume::Session::initialize(|command| Ok(if command=="status" {vec!["state: stop".into(), "volume: 0".into()]} else {vec![]})).unwrap();
+        let context = direct_volume::Context::new(VolumeBackend::DirectEquipment, Some(session.clone()));
+        assert!(admit_direct_volume_playback(&context, "stale:token", &audio).is_err());
+        assert!(audio.lock().unwrap().validate_playback_intent(&play).is_ok());
+        admit_direct_volume_playback(&context, &session.token(), &audio).unwrap();
+        assert!(audio.lock().unwrap().validate_playback_intent(&play).is_err());
+    }
+
     #[test]
     fn shutdown_or_configuration_invalidation_stops_prepared_effect_without_stopping_music() {
         for shutdown in [false,true] {

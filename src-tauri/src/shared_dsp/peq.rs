@@ -229,7 +229,7 @@ pub fn convert_preset(
     Ok(config)
 }
 
-/// Identity reference retains the SOURCE's effective negative gain and pinned resampler.
+/// Identity reference retains the SOURCE's effective negative gain and fixed topology.
 /// It never substitutes a new user preset or changes requested/store data.
 pub(super) fn convert_reference(source: &EqPreset, format: PcmFormat) -> Result<CamillaPeqConfig,PeqConversionError> {
     let mut config=convert_preset(source,format)?;
@@ -507,7 +507,7 @@ fn comparison_reference_retains_exact_source_gain_and_full_transient_budget() {
             let budget=super::safety::assess(&p,48000).unwrap();let reference=convert_reference(&p,format).unwrap();
             assert_eq!(p,original);assert_eq!(reference.filters.len(),1);
             let CamillaFilter::Gain{parameters}=reference.filters.get("peq_preamp").unwrap() else{panic!("reference filter")};
-            assert_eq!(parameters.gain,budget.effective_preamp_db);assert!(parameters.gain<=-13.0411998);
+            assert_eq!(parameters.gain,budget.effective_preamp_db);assert!(parameters.gain<=super::safety::CEILING_DB);
             assert!(super::safety::RESAMPLER_BOUND*10f64.powf(parameters.gain/20.)<=10f64.powf(super::safety::CEILING_DB/20.)*(1.+1e-12));
         }
     }

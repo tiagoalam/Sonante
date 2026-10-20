@@ -5,7 +5,7 @@ import { ArrowDownLeft, ArrowUpRight, ListMusic, Maximize2, Minimize2, Pause, Pl
 import { useTranslation } from "react-i18next";
 import type { AudioLevelFrame, NowPlayingSnapshot } from "../types/audio";
 import { TrackArtwork } from "./TrackArtwork";
-import { requiresDeviceVolumeControl } from "../utils/signalPath";
+import { requiresDeviceVolumeControl, canToggleMute, muteLabel } from "../utils/signalPath";
 import { SignalPath } from "./SignalPath";
 import { VisualizerPanel } from "./visualizer/VisualizerPanel";
 import "./nowPlaying.css";
@@ -56,7 +56,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
   const interactive = available && !props.controlsDisabled;
   const hasTrack = Boolean(status?.current_media && status.title);
   const deviceVolume = requiresDeviceVolumeControl(props.snapshot?.route, status);
-  const volumeAvailable = Boolean(interactive && status?.volume.available && status.volume.writable);
+  const volumeAvailable = Boolean(interactive && canToggleMute(status));
   const muted = Boolean(status?.volume.muted || status?.volume.value === 0);
   const volumeBackend = status?.volume.backend ?? "unavailable";
   const volumeLabel = available && status?.volume.available && volumeBackend !== "unavailable"
@@ -120,11 +120,11 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
                 {props.optionsControls}
               </div>
               <div className="np-volume">
-                <div><button type="button" disabled={!volumeAvailable} onClick={props.onMute} aria-label={t(muted ? "player.unmute" : "player.mute")} title={t(muted ? "player.unmute" : "player.mute")}>
+                <div><button type="button" disabled={!volumeAvailable} onClick={props.onMute} aria-label={t(muteLabel(status))} title={t(muteLabel(status))}>
                   {muted ? <VolumeX size={19} /> : <Volume2 size={19} />}</button>
                   {!deviceVolume && <input type="range" aria-label={t("signalPath.volume")} min={0} max={100} value={volumeAvailable ? status.volume.value : 0} disabled={!volumeAvailable}
                     onChange={event => props.onVolume(Number(event.target.value))} />}</div>
-                <span>{deviceVolume ? t("player.volumeOnDevice") : volumeLabel}</span>
+                <span>{deviceVolume ? <>{t("player.volumeOnDevice")}</> : volumeLabel}</span>
               </div>
             </>}
           </div>

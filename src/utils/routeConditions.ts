@@ -100,9 +100,14 @@ export function routeConditions(route: ConfiguredSignalRoute | null, status: Pla
   const volume = processing?.mpd_volume;
   // The badge describes the route configuration during an intentional mute,
   // not sample identity of the silence being played. Require coherent readings.
-  const muted = status.volume.backend === "mpd_software" && status.volume.available
+  const direct = status.volume.backend === "direct_equipment";
+  const muted = (status.volume.backend === "mpd_software" || (direct && status.volume.direct_gain === "muted")) && status.volume.available
     && status.volume.muted === true && status.volume.value === 0 && volume === 0;
-  if (status.volume.backend === "mpd_software" && status.volume.available && validNumber(volume,100) && Number.isInteger(volume)) {
+  if (direct) {
+    if (status.volume.direct_gain === "unity" && status.volume.available && volume === 100 && status.volume.value === 100) add("volume", "softwareUnity", "info");
+    else if (muted) add("volume", "softwareMuted", "info");
+    else add("volume", status.volume.direct_gain === "pending" ? "directPending" : "directChanged", status.volume.direct_gain === "pending" ? "unknown" : "attention");
+  } else if (status.volume.backend === "mpd_software" && status.volume.available && validNumber(volume,100) && Number.isInteger(volume)) {
     if ((dsd || volume === 100) && status.volume.value !== volume) add("volume", "volumeChanged");
     else if (muted) add("volume", "softwareMuted", "info");
     else if (dsd) add("volume", volume > 0 ? "dsdSoftwareBypass" : "dsdMuted", volume > 0 ? "info" : "attention");
@@ -130,7 +135,7 @@ export function routeConditions(route: ConfiguredSignalRoute | null, status: Pla
     if (row && !messages.some(message => message === row.message) && !issues.includes(row)) issues.push(row);
   }
   const compatible = !attention && !!observed && (!!pcm || dsd) && issues.length === 0
-    && status.volume.backend === "mpd_software" && status.volume.available === true && (muted || status.volume.value === 100 || (dsd && status.volume.value > 0));
+    && (direct || status.volume.backend === "mpd_software") && status.volume.available === true && (muted || status.volume.value === 100 || (!direct && dsd && status.volume.value > 0));
   return {
     summary: attention ? "attention" : compatible ? "preserved" : "partial", rows,
     assessment: attention ? "attention" : compatible ? "compatible" : "partial",

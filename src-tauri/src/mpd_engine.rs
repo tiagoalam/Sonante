@@ -1,4 +1,4 @@
-//! Explicit development-only selection of the private PCM EOF candidate.
+//! Pinned package-owned runtimes, with explicit debug-only development overrides.
 //! This identifies a build; it does not certify a live audio route.
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 
 const PRIVATE_SHA256: &str = "46ea7b1eaa1969f377698155b041589e9475998a3859a4c96f7937565fda7841";
+const INSTALLED_DIRECT_SHA256: &str = "7bf2a6c96fad672ee6a056335c1b8054a71107975c637b76f549751b43d0d4b1";
+const INSTALLED_EQ_SHA256: &str = "6b9cb9820c1704175af312377fae6f20ad80486f69ee17cd190bc6390bc1d5ff";
 const MAX_ENGINE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -49,6 +51,9 @@ pub(crate) struct MpdEngine {
 
 impl MpdEngine {
     pub(crate) fn resolve() -> Result<Self, String> {
+        if !cfg!(debug_assertions) {
+            return Ok(Self { program: crate::installed_runtimes::release(crate::installed_runtimes::Kind::Direct,"SONANTE_DEV_MPD_PATH")?, private_sha256: Some(INSTALLED_DIRECT_SHA256.into()) });
+        }
         Self::resolve_override(
             std::env::var_os("SONANTE_DEV_MPD_PATH").as_deref(),
             cfg!(all(debug_assertions, target_os = "linux")),
@@ -58,8 +63,11 @@ impl MpdEngine {
 
     /// EQ-only variant: the proven Direct binary and its evidence remain unchanged.
     pub(crate) fn resolve_eq() -> Result<Self,String> {
+        if !cfg!(debug_assertions) {
+            return Ok(Self { program: crate::installed_runtimes::release(crate::installed_runtimes::Kind::Eq,"SONANTE_EQ_MPD_PATH")?, private_sha256: Some(INSTALLED_EQ_SHA256.into()) });
+        }
         let value=std::env::var_os("SONANTE_EQ_MPD_PATH").ok_or("EQ_MPD_RUNTIME_MISSING")?;
-        Self::resolve_override(Some(value.as_os_str()),cfg!(all(debug_assertions,target_os="linux")),"129049cb2cd36b392c9ac31dc8634990a31015db21e6d0d37ff00a58df8f1227")
+        Self::resolve_override(Some(value.as_os_str()),cfg!(all(debug_assertions,target_os="linux")),"6b9cb9820c1704175af312377fae6f20ad80486f69ee17cd190bc6390bc1d5ff")
     }
 
     fn resolve_override(
@@ -107,9 +115,9 @@ impl MpdEngine {
     // Cached only after the owned child's executable has been verified.
     // This is build provenance, never a current-stream bit comparison.
     pub(crate) fn evidence(&self, is_shared: bool) -> Option<EngineEvidence> {
-        (self.private_sha256.as_deref() == Some(PRIVATE_SHA256)).then_some(
+        (self.private_sha256.as_deref() == Some(PRIVATE_SHA256) || self.private_sha256.as_deref() == Some(INSTALLED_DIRECT_SHA256)).then_some(
             EngineEvidence::Identified {
-                evidence_id: "mpd-strict-route-20261017",
+                evidence_id: if self.private_sha256.as_deref() == Some(INSTALLED_DIRECT_SHA256) { "mpd-strict-ubuntu2204-remap-20261018" } else { "mpd-strict-route-20261017" },
                 scope: "pcm_dsd_route_strict",
                 pcm_eof_flush: !is_shared,
             },

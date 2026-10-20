@@ -158,132 +158,140 @@ pub(crate) fn built_in_presets() -> Vec<EqPreset> {
     }
     let mut presets = vec![flat];
     for (id, name, preamp, bands) in [
+        // Broad listening preferences; band count follows tonal purpose, not a quota.
         (
             "gentle_bass",
             "Gentle bass",
-            -3.,
-            vec![(EqFilterType::LowShelf, 100., 3., 0.707)],
+            0.0,
+            vec![
+                (EqFilterType::LowShelf, 80.0, 3.0, 0.707),
+            ],
         ),
         (
             "voices",
             "Voices",
-            -3.,
+            0.0,
             vec![
-                (EqFilterType::Peak, 1800., 2., 0.8),
-                (EqFilterType::LowShelf, 150., -1.5, 0.707),
+                (EqFilterType::LowShelf, 100.0, -1.5, 0.707),
+                (EqFilterType::Peak, 350.0, -1.0, 0.65),
+                (EqFilterType::Peak, 2000.0, 2.0, 0.65),
             ],
         ),
         (
             "smooth",
             "Smooth",
-            -2.,
-            vec![(EqFilterType::HighShelf, 6000., -3., 0.707)],
+            0.0,
+            vec![
+                (EqFilterType::LowShelf, 120.0, 0.8, 0.707),
+                (EqFilterType::HighShelf, 4000.0, -2.0, 0.707),
+            ],
         ),
         (
             "light_loudness",
             "Light loudness",
-            -4.,
+            0.0,
             vec![
-                (EqFilterType::LowShelf, 110., 2.5, 0.707),
-                (EqFilterType::HighShelf, 6500., 1.5, 0.707),
+                (EqFilterType::LowShelf, 80.0, 2.5, 0.707),
+                (EqFilterType::Peak, 650.0, -0.7, 0.6),
+                (EqFilterType::HighShelf, 6500.0, 1.5, 0.707),
             ],
         ),
-        // Original, broad tonal preferences. Style names are listening suggestions,
-        // not recording/hardware corrections or calibrated genre targets.
         (
             "style_rock",
             "Rock",
-            -2.,
+            0.0,
             vec![
-                (EqFilterType::LowShelf, 110., 2., 0.707),
-                (EqFilterType::Peak, 400., -1., 0.8),
-                (EqFilterType::HighShelf, 4500., 1., 0.707),
+                (EqFilterType::LowShelf, 90.0, 2.0, 0.707),
+                (EqFilterType::Peak, 350.0, -1.2, 0.65),
+                (EqFilterType::Peak, 2200.0, 1.2, 0.65),
+                (EqFilterType::HighShelf, 8500.0, 0.7, 0.707),
             ],
         ),
         (
             "style_reggae",
             "Reggae",
-            -3.,
+            0.0,
             vec![
-                (EqFilterType::LowShelf, 85., 3., 0.707),
-                (EqFilterType::Peak, 700., -1., 0.8),
-                (EqFilterType::HighShelf, 6500., -1., 0.707),
+                (EqFilterType::LowShelf, 70.0, 3.0, 0.707),
+                (EqFilterType::Peak, 350.0, -0.8, 0.65),
+                (EqFilterType::HighShelf, 5500.0, -0.8, 0.707),
             ],
         ),
         (
             "style_jazz",
             "Jazz",
-            -1.,
+            0.0,
             vec![
-                (EqFilterType::Peak, 300., 1., 0.7),
-                (EqFilterType::Peak, 2500., -1., 0.8),
-                (EqFilterType::HighShelf, 8000., 1., 0.707),
+                (EqFilterType::LowShelf, 100.0, 0.7, 0.707),
+                (EqFilterType::Peak, 2200.0, 0.9, 0.6),
+                (EqFilterType::HighShelf, 9000.0, 0.5, 0.707),
             ],
         ),
         (
             "style_electronic",
             "Electronic",
-            -3.,
+            0.0,
             vec![
-                (EqFilterType::LowShelf, 65., 3., 0.707),
-                (EqFilterType::Peak, 350., -1., 0.8),
-                (EqFilterType::HighShelf, 7000., 2., 0.707),
+                (EqFilterType::LowShelf, 60.0, 3.5, 0.707),
+                (EqFilterType::Peak, 400.0, -1.0, 0.65),
+                (EqFilterType::HighShelf, 7000.0, 1.5, 0.707),
             ],
         ),
         (
             "style_pop",
             "Pop",
-            -2.,
+            0.0,
             vec![
-                (EqFilterType::LowShelf, 100., 1.5, 0.707),
-                (EqFilterType::Peak, 2200., 1., 0.8),
-                (EqFilterType::HighShelf, 8000., 0.5, 0.707),
+                (EqFilterType::LowShelf, 90.0, 1.8, 0.707),
+                (EqFilterType::Peak, 2300.0, 1.2, 0.65),
+                (EqFilterType::HighShelf, 9500.0, 0.8, 0.707),
             ],
         ),
         (
             "style_acoustic",
             "Acoustic",
-            -2.,
+            0.0,
             vec![
-                (EqFilterType::LowShelf, 120., -1., 0.707),
-                (EqFilterType::Peak, 1500., 1.5, 0.7),
-                (EqFilterType::HighShelf, 7000., 1., 0.707),
+                (EqFilterType::LowShelf, 150.0, -1.0, 0.707),
+                (EqFilterType::Peak, 1700.0, 1.3, 0.65),
+                (EqFilterType::HighShelf, 9500.0, 0.7, 0.707),
             ],
         ),
         (
             "mood_balanced",
             "Balanced",
-            -1.,
+            0.0,
             vec![
-                (EqFilterType::Peak, 350., -1., 0.6),
-                (EqFilterType::Peak, 2500., 0.5, 0.7),
+                (EqFilterType::LowShelf, 100.0, 0.7, 0.707),
+                (EqFilterType::HighShelf, 7500.0, 0.5, 0.707),
             ],
         ),
         (
             "mood_relaxing",
             "Relaxing",
-            -1.,
+            0.0,
             vec![
-                (EqFilterType::Peak, 2800., -1.5, 0.7),
-                (EqFilterType::HighShelf, 6500., -2., 0.707),
+                (EqFilterType::LowShelf, 150.0, 1.2, 0.707),
+                (EqFilterType::HighShelf, 2500.0, -1.8, 0.707),
             ],
         ),
         (
             "mood_energetic",
             "Energetic",
-            -2.,
+            0.0,
             vec![
-                (EqFilterType::LowShelf, 110., 2., 0.707),
-                (EqFilterType::Peak, 2500., 1.5, 0.8),
+                (EqFilterType::LowShelf, 80.0, 2.2, 0.707),
+                (EqFilterType::Peak, 2600.0, 1.4, 0.7),
+                (EqFilterType::HighShelf, 9000.0, 0.8, 0.707),
             ],
         ),
         (
             "mood_cozy",
             "Cozy",
-            -2.,
+            0.0,
             vec![
-                (EqFilterType::LowShelf, 180., 1.5, 0.707),
-                (EqFilterType::HighShelf, 4500., -2., 0.707),
+                (EqFilterType::LowShelf, 180.0, 1.5, 0.707),
+                (EqFilterType::HighShelf, 4500.0, -1.5, 0.707),
             ],
         ),
     ] {
@@ -348,20 +356,17 @@ mod collection_tests {
     use super::*;
 
     #[test]
-    fn legacy_curves_and_references_survive_without_schema_migration() {
+    fn factory_updates_keep_legacy_refs_and_personal_copies_without_migration() {
         let old: Vec<EqPreset> = serde_json::from_str(include_str!("../../tests/fixtures/equalizer-legacy-builtins.json")).unwrap();
-        let builtins = built_in_presets();
+        let builtins=built_in_presets();
         for p in old {
-            assert_eq!(builtins.iter().find(|v| v.id == p.id), Some(&p));
-            let raw = serde_json::json!({"schema_version":1,"enabled":false,"active_preset":{"kind":"built_in","id":p.id},"user_presets":[]});
-            let mut config: EqualizerConfig = serde_json::from_value(raw).unwrap();
-            config.validate().unwrap();
-            let reference = config.active_preset.clone();
-            config.link_equipment(None, "Existing headphones", reference.clone()).unwrap();
-            assert_eq!(config.preset(&reference).unwrap(), p);
-            let copy = config.create_user_preset("Rock", Some(&reference)).unwrap();
-            assert_eq!(config.preset(&PresetRef::User { id: copy.id }).unwrap().bands, p.bands);
-            assert!(!config.enabled);
+            let current=builtins.iter().find(|v|v.id==p.id).unwrap().clone();
+            assert_eq!(current.name,p.name);if p.id=="flat"{assert_eq!(current,p);}else{assert_ne!(current.bands,p.bands);assert_eq!(current.preamp_db,0.);}
+            let raw=serde_json::json!({"schema_version":1,"enabled":false,"active_preset":{"kind":"built_in","id":p.id},"user_presets":[]});
+            let mut config:EqualizerConfig=serde_json::from_value(raw).unwrap();config.validate().unwrap();let reference=config.active_preset.clone();config.link_equipment(None,"Existing headphones",reference.clone()).unwrap();assert_eq!(config.preset(&reference).unwrap(),current);
+            let copy=config.create_user_preset("Rock",Some(&reference)).unwrap();assert_eq!(config.preset(&PresetRef::User{id:copy.id}).unwrap().bands,current.bands);
+            let mut personal=p.clone();personal.id=format!("legacy_saved_{}",p.id);personal.name="Existing personal copy".into();let user=PresetRef::User{id:personal.id.clone()};config.user_presets.push(personal.clone());config.set_active_preset(user.clone()).unwrap();config.link_equipment(None,"Saved personal association",user.clone()).unwrap();
+            let reopened:EqualizerConfig=serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();reopened.validate().unwrap();assert_eq!(reopened.preset(&user).unwrap(),personal);assert_eq!(reopened.preset(&user).unwrap().bands,p.bands);assert_eq!(reopened.preset(&user).unwrap().preamp_db,p.preamp_db);assert!(!reopened.enabled);
         }
     }
 

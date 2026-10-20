@@ -24,6 +24,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { SettingsPages, type SettingsPage } from "./SettingsPages";
 import { AppearanceSetting } from "./AppearanceSetting";
+import { LocalIndexCoverageStatus } from "./LocalIndexCoverage";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
 import { AppConfig, ConfigSaveOperation, ConfigSaveWarning } from "../types/config";
 import { AudioDevice } from "../types/audio";
@@ -104,6 +105,9 @@ export const SettingsModal: React.FC<Props> = ({
   const [loadingServers, setLoadingServers] = useState(false);
   const [showManualPlex, setShowManualPlex] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
+  const authGenerationRef = useRef(0);
+  const authActiveRef = useRef(false);
   const originalConfigRef = useRef<AppConfig | null>(null);
   const saveInProgressRef = useRef(false);
   const scanInProgressRef = useRef(false);
@@ -113,31 +117,39 @@ export const SettingsModal: React.FC<Props> = ({
   const availabilityQueryRef = useRef<ReturnType<typeof createDeviceAvailabilityQuery> | null>(null);
 
   useEffect(() => {
+    mountedRef.current = true;
     const query = createDeviceAvailabilityQuery(configService.checkDirectDeviceAvailability, setAvailability);
     availabilityQueryRef.current = query;
     return () => {
+      mountedRef.current = false;
+      authGenerationRef.current++;
+      authActiveRef.current = false;
       query.dispose();
       availabilityQueryRef.current = null;
     };
   }, []);
 
   useEffect(() => {
+    let active = true;
     Promise.all([configService.getConfig(), configService.getAudioDevices()])
       .then(([cfg, devs]) => {
+        if (!active) return;
         originalConfigRef.current = { ...cfg, local_folders: [...cfg.local_folders] };
         setConfig(initialDraft ? { ...initialDraft, local_folders: [...initialDraft.local_folders] } : cfg);
         setDevices(devs);
         if (cfg.plex_token && cfg.plex_token.trim().length > 0) {
+          const generation = authGenerationRef.current;
+          const current = () => active && mountedRef.current && generation === authGenerationRef.current;
           setLoadingServers(true);
-          plexService
-            .getServers(cfg.plex_token)
-            .then(setDiscoveredServers)
-            .catch(error => logError("plex.servers-discover", error))
-            .finally(() => setLoadingServers(false));
+          plexService.getServers(cfg.plex_token)
+            .then(servers => { if (current()) setDiscoveredServers(servers); })
+            .catch(error => { if (current()) logError("plex.servers-discover", error); })
+            .finally(() => { if (current()) setLoadingServers(false); });
         }
       })
-      .catch(error => logError("settings.load", error))
-      .finally(() => setLoading(false));
+      .catch(error => { if (active) logError("settings.load", error); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
@@ -194,7 +206,7 @@ export const SettingsModal: React.FC<Props> = ({
       );
       setScanUnchanged(!changed);
     } catch (err) {
-      setScanError(formatConfigError(err));
+      setScanError(formatConfigError(err).includes("LOCAL_INDEX_") ? t("indexCoverage.failed") : formatConfigError(err));
     } finally {
       scanInProgressRef.current = false;
       setScanning(null);
@@ -213,36 +225,51 @@ export const SettingsModal: React.FC<Props> = ({
         onLibraryRescanned,
       );
     } catch (err) {
-      setScanError(formatConfigError(err));
+      setScanError(formatConfigError(err).includes("LOCAL_INDEX_") ? t("indexCoverage.failed") : formatConfigError(err));
     } finally {
       scanInProgressRef.current = false;
       setScanning(null);
     }
   };
 
+  const handleCancelPlexAuth = () => {
+    authGenerationRef.current++;
+    authActiveRef.current = false;
+    setIsPollingPin(false);
+    setPinId(null);
+    setPinCode(null);
+    setLoadingServers(false);
+    if (pollTimerRef.current !== null) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
   const handleStartPlexAuth = async () => {
+    if (!mountedRef.current || authActiveRef.current || saveInProgressRef.current) return;
+    const generation = ++authGenerationRef.current;
+    const current = () => mountedRef.current && generation === authGenerationRef.current;
+    authActiveRef.current = true;
     setIsPollingPin(true);
     setPinCode(null);
+    setPinId(null);
+    setLoadingServers(false);
     try {
       const pin = await plexService.createPin();
+      if (!current()) return;
       setPinCode(pin.code);
       setPinId(pin.id);
       await plexService.openExternalUrl(pin.auth_url);
     } catch (err) {
+      if (!current()) return;
+      handleCancelPlexAuth();
       logError("plex.pin-create", err);
-      setIsPollingPin(false);
       alert(t("settings.plexConnectionError"));
     }
   };
 
-  const handleCancelPlexAuth = () => {
-    setIsPollingPin(false);
-    setPinId(null);
-    setPinCode(null);
-    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-  };
-
   const handleDisconnectPlex = () => {
+    handleCancelPlexAuth();
     if (!config) return;
     setConfig({
       ...config,
@@ -255,45 +282,60 @@ export const SettingsModal: React.FC<Props> = ({
   };
 
   useEffect(() => {
-    if (!pinId || !isPollingPin || !config) return;
-
-    pollTimerRef.current = window.setInterval(async () => {
+    if (!pinId || !isPollingPin) return;
+    const generation = authGenerationRef.current;
+    const current = () => mountedRef.current && generation === authGenerationRef.current;
+    let reading = false;
+    let stopped = false;
+    const timer = window.setInterval(async () => {
+      if (stopped || reading || !current()) return;
+      reading = true;
+      let discovering = false;
       try {
         const token = await plexService.checkPin(pinId);
+        if (stopped || !current()) return;
         if (token) {
+          clearInterval(timer);
+          if (pollTimerRef.current === timer) pollTimerRef.current = null;
           setIsPollingPin(false);
           setPinId(null);
           setPinCode(null);
           setConfig((prev) => (prev ? { ...prev, plex_token: token } : null));
-
           setLoadingServers(true);
+          discovering = true;
           const servers = await plexService.getServers(token);
+          // Successful authentication stops polling; its discovery still belongs
+          // to this attempt until cancellation, replacement or unmount.
+          if (!current()) return;
           setDiscoveredServers(servers);
           setLoadingServers(false);
-
+          authActiveRef.current = false;
           if (servers.length > 0) {
             const server = servers[0];
-            setConfig((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    plex_url: server.chosen_uri,
-                    plex_server_id: server.client_identifier,
-                    plex_server_name: server.name,
-                  }
-                : null,
-            );
+            setConfig((prev) => prev ? {
+              ...prev,
+              plex_url: server.chosen_uri,
+              plex_server_id: server.client_identifier,
+              plex_server_name: server.name,
+            } : null);
           }
         }
       } catch (err) {
+        if (!current()) return;
         logError("plex.pin-status", err);
-      }
+        if (discovering) {
+          setLoadingServers(false);
+          authActiveRef.current = false;
+        }
+      } finally { reading = false; }
     }, 1500);
-
+    pollTimerRef.current = timer;
     return () => {
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      stopped = true;
+      clearInterval(timer);
+      if (pollTimerRef.current === timer) pollTimerRef.current = null;
     };
-  }, [pinId, isPollingPin, config]);
+  }, [pinId, isPollingPin]);
 
   const handleSave = async () => {
     if (!config || saveInProgressRef.current) return;
@@ -338,6 +380,7 @@ export const SettingsModal: React.FC<Props> = ({
       onClose();
     } catch (err) {
       const diagnostic = formatConfigError(err);
+      if(diagnostic === "DIRECT_CHOICE_CANCELLED") return; // Preserve this complete draft.
       logError("settings.save", err);
       if (diagnostic === "LOCAL_SOURCE_NEW_OVERLAP") {
         alert(t("settings.localFolderOverlap"));
@@ -686,6 +729,7 @@ export const SettingsModal: React.FC<Props> = ({
             </div>
           </>}
           local={<>
+            <LocalIndexCoverageStatus />
             {/* Fontes e atualização */}
             <div className="space-y-3 pt-3 border-t border-[color:var(--theme-border-soft,#242424)]">
               <div className="flex flex-wrap items-center justify-between gap-2">

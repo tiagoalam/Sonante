@@ -1,3 +1,4 @@
+import {plexTrackDurationSeconds} from '../utils/plexTrackMetadata';
 import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { logError } from "../utils/frontendDiagnostics";
@@ -111,6 +112,7 @@ export const ArtistView: React.FC<Props> = ({
       album: t.album_title || "Single",
       plex_image: t.thumb || artistThumb || null,
       media_locator: t.media_locator,
+      duration: plexTrackDurationSeconds(t),
     }));
 
     await request.run(intent => audioService.playTracks(metaTracks, index, intent));
@@ -122,7 +124,7 @@ export const ArtistView: React.FC<Props> = ({
       title: track.title,
       artist: track.artist || artist.name,
       album: track.album_title || "",
-      duration: track.duration_ms ? track.duration_ms / 1000 : track.duration,
+      duration: plexTrackDurationSeconds(track),
     },
   });
 

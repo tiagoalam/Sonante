@@ -1,4 +1,6 @@
-use crate::alsa_mixer::{self, MixerSelection};
+use crate::audio::AudioEngine;
+use crate::direct_volume::{Context as VolumeContext, Session as DirectVolumeSession};
+use std::sync::Arc;
 use crate::audio::VolumeBackend;
 use crate::config::AppConfig;
 use crate::shared_volume::SharedVolumeBackend;
@@ -23,6 +25,11 @@ pub struct MpdSupervisor {
     health: MpdHealth,
     shared_volume_backend: Option<SharedVolumeBackend>,
     volume_backend: VolumeBackend,
+    pub(crate) shared_mute: crate::shared_mute::Memory,
+    shared_mute_generation: u64,
+    direct_volume: Option<Arc<DirectVolumeSession>>,
+    playback_gate: Option<Arc<crate::direct_playback::Gate>>,
+    shared_software_volume: Option<u32>,
     engine_evidence: Option<crate::mpd_engine::EngineEvidence>,
     shared_eq_pipe: Option<PathBuf>,
     output_only_restart: bool,
@@ -88,6 +95,11 @@ impl MpdSupervisor {
             health: MpdHealth::Starting,
             shared_volume_backend: None,
             volume_backend: VolumeBackend::Unavailable,
+            shared_mute: Default::default(),
+            shared_mute_generation: 0,
+            direct_volume: None,
+            playback_gate: None,
+            shared_software_volume: None,
             engine_evidence: None,
             shared_eq_pipe: None,
             output_only_restart: false,
@@ -105,6 +117,11 @@ impl MpdSupervisor {
             health: MpdHealth::Starting,
             shared_volume_backend: None,
             volume_backend: VolumeBackend::Unavailable,
+            shared_mute: Default::default(),
+            shared_mute_generation: 0,
+            direct_volume: None,
+            playback_gate: None,
+            shared_software_volume: None,
             engine_evidence: None,
             shared_eq_pipe: None,
             output_only_restart: false,
@@ -123,6 +140,16 @@ impl MpdSupervisor {
         self.process.is_some()
     }
 
+    fn capture_shared_software_volume(&mut self, read: impl FnOnce() -> Result<Vec<String>, String>) -> Result<(), String> {
+        // If capture fails, a later rollback must not fall back to MPD's100%.
+        // This is memory only: the current process's volume is not changed.
+        self.shared_software_volume = Some(0);
+        self.shared_software_volume = Some(crate::direct_volume::observed_software_volume(read()?)?);
+        Ok(())
+    }
+
+    pub(crate) fn attach_playback_gate(&mut self,gate:Arc<crate::direct_playback::Gate>) {self.playback_gate=Some(gate);}
+
     pub(crate) fn shared_volume_backend(&self) -> Option<SharedVolumeBackend> {
         self.shared_volume_backend
     }
@@ -131,6 +158,27 @@ impl MpdSupervisor {
     pub(crate) fn observed_process_pid(&self) -> Option<u32> {
         if self.health != MpdHealth::Available || !self.owns_runtime_files { return None; }
         self.process.as_ref().map(Child::id)
+    }
+
+    pub(crate) fn shared_mute_context(&self) -> Option<String> {
+        let pid=self.observed_process_pid()?;
+        matches!(self.volume_backend,VolumeBackend::PipeWire|VolumeBackend::MpdSoftware)
+            .then(||format!("{}:{}:{:?}",self.shared_mute_generation,pid,self.volume_backend))
+    }
+
+    pub(crate) fn volume_context(&self) -> VolumeContext {
+        if self.observed_process_pid().is_none() { return VolumeContext::new(VolumeBackend::Unavailable, None); }
+        VolumeContext::new(self.volume_backend, self.direct_volume.clone())
+    }
+
+    pub(crate) fn set_direct_mute(&self, muted: bool, token: &str, cancelled: impl Fn() -> bool) -> Result<(), String> {
+        if !muted {self.playback_gate.as_ref().ok_or(crate::direct_volume::STALE)?.require_choice()?;}
+        let pid = self.observed_process_pid().ok_or(crate::direct_volume::STALE)?;
+        self.direct_volume.as_ref().ok_or(crate::direct_volume::STALE)?
+            .set_mute(muted, !muted, token, |cmd| {
+                if cancelled() { return Err(crate::config_save_operation::INTERRUPTED.into()); }
+                AudioEngine::send_owned_command_to_socket(&self.socket_path, pid, cmd)
+            })
     }
 
     pub(crate) fn volume_backend(&self) -> VolumeBackend {
@@ -195,6 +243,9 @@ impl MpdSupervisor {
                     Ok(PidFileIdentity::Matches)
                 );
                 self.process.take();
+                if let Some(session) = self.direct_volume.take() { session.invalidate(); }
+                if let Some(gate)=&self.playback_gate {gate.clear();}
+                self.volume_backend = VolumeBackend::Unavailable;
                 self.health = MpdHealth::Unavailable(MpdUnavailableReason::ProcessExited);
                 if let Err(error) =
                     self.cleanup_owned_runtime_files(Some(child_pid), pid_was_confirmed)
@@ -216,12 +267,14 @@ impl MpdSupervisor {
     pub(crate) fn mark_available(&mut self) -> MpdHealth {
         if self.process.is_some() {
             self.health = MpdHealth::Available;
+            if let Some(gate)=&self.playback_gate {gate.set_available(true);}
         }
         self.health.clone()
     }
 
     pub(crate) fn mark_unavailable(&mut self, reason: MpdUnavailableReason) -> MpdHealth {
         self.health = MpdHealth::Unavailable(reason);
+        if let Some(gate)=&self.playback_gate {gate.set_available(false);}
         self.health.clone()
     }
 
@@ -450,14 +503,10 @@ impl MpdSupervisor {
             || cfg.audio_output_type == "shared"
             || cfg.alsa_device == "default";
 
-        let mixer_selection = if is_shared {
-            MixerSelection::Software
-        } else {
-            alsa_mixer::detect_for_pcm(&cfg.alsa_device)
-        };
+        // Direct never probes or writes the physical mixer. Its owned software
+        // gain is controlled exclusively by the session's unity/mute protocol.
         let volume_backend = Self::public_volume_backend(
             is_shared,
-            &mixer_selection,
             shared_volume_backend,
         );
         let audio_output_section = if let Some(pipe) = &self.shared_eq_pipe {
@@ -466,7 +515,6 @@ impl MpdSupervisor {
             is_shared,
             &alsa_device_value,
             dop_flag,
-            &mixer_selection,
             shared_volume_backend,
         )? };
         let audio_output_section = engine.configure_output(audio_output_section, is_shared)?;
@@ -586,7 +634,6 @@ decoder {{
 
     fn public_volume_backend(
         is_shared: bool,
-        mixer_selection: &MixerSelection,
         shared_volume_backend: Option<SharedVolumeBackend>,
     ) -> VolumeBackend {
         if is_shared {
@@ -596,10 +643,7 @@ decoder {{
             };
         }
 
-        match mixer_selection {
-            MixerSelection::Hardware { .. } => VolumeBackend::AlsaHardware,
-            MixerSelection::Software => VolumeBackend::MpdSoftware,
-        }
+        VolumeBackend::DirectEquipment
     }
 
     fn database_section(database_path: &Path) -> Result<String, String> {
@@ -618,7 +662,6 @@ decoder {{
         is_shared: bool,
         alsa_device_value: &str,
         dop_flag: &str,
-        mixer_selection: &MixerSelection,
         shared_volume_backend: Option<SharedVolumeBackend>,
     ) -> Result<String, String> {
         if is_shared {
@@ -634,35 +677,15 @@ decoder {{
 }}"#, mixer_type));
         }
 
-        let mixer_config = match mixer_selection {
-            MixerSelection::Software => "    mixer_type \"software\"".to_string(),
-            MixerSelection::Hardware {
-                mixer_device,
-                control,
-            } => {
-                let mixer_device = Self::escape_config_value(mixer_device)?;
-                let mixer_control = Self::escape_config_value(&control.name)?;
-                let mixer_index = if control.index == 0 {
-                    String::new()
-                } else {
-                    format!("\n    mixer_index \"{}\"", control.index)
-                };
-                format!(
-                    "    mixer_type \"hardware\"\n    mixer_device \"{}\"\n    mixer_control \"{}\"{}",
-                    mixer_device, mixer_control, mixer_index
-                )
-            }
-        };
-
         Ok(format!(
             r#"audio_output {{
     type "alsa"
     name "Sonante Output"
     device "{}"
     dop "{}"
-{}
+    mixer_type "software"
 }}"#,
-            alsa_device_value, dop_flag, mixer_config
+            alsa_device_value, dop_flag
         ))
     }
 
@@ -720,6 +743,15 @@ decoder {{
             SharedVolumeBackend::detect(is_shared, configured_as_pipewire)
         });
 
+        if self.volume_backend == VolumeBackend::MpdSoftware && self.health == MpdHealth::Available {
+            let pid = self.observed_process_pid().ok_or(crate::direct_volume::STALE)?;
+            let socket = self.socket_path.clone();
+            self.capture_shared_software_volume(|| AudioEngine::send_owned_command_to_socket(&socket, pid, "status"))?;
+        } else if self.volume_backend == VolumeBackend::DirectEquipment && self.shared_software_volume.is_none() {
+            // No previous Shared value is known: enter it silently rather than
+            // copying Direct's unity gain or assuming a previous listening level.
+            self.shared_software_volume = Some(0);
+        }
         self.stop()
             .map_err(|e| format!("Falha ao encerrar a instância anterior do MPD: {}", e))?;
         self.health = MpdHealth::Starting;
@@ -785,9 +817,34 @@ decoder {{
                 crate::diagnostics::error_summary(&error)
             );
         }
+        let pid = self.process.as_ref().ok_or(crate::direct_volume::STALE)?.id();
+        if volume_backend == VolumeBackend::DirectEquipment {
+            match DirectVolumeSession::initialize(|cmd| AudioEngine::send_owned_command_to_socket(&self.socket_path, pid, cmd)) {
+                Ok(session) => {
+                    if cfg.direct_muted {
+                        if let Err(error)=session.set_mute(true,false,&session.token(),|cmd|AudioEngine::send_owned_command_to_socket(&self.socket_path,pid,cmd)) {
+                            return Err(self.cleanup_after_start_failure(error));
+                        }
+                    }
+                    self.direct_volume = Some(session);
+                },
+                Err(error) => return Err(self.cleanup_after_start_failure(error)),
+            }
+        } else if volume_backend == VolumeBackend::MpdSoftware {
+            if let Some(value) = self.shared_software_volume {
+                // Only a value observed in our previous Shared software session.
+                // The new MPD is stopped; Direct gain is never copied here.
+                if let Err(error) = crate::direct_volume::restore_shared_software(value, |cmd| AudioEngine::send_owned_command_to_socket(&self.socket_path, pid, cmd)) {
+                    return Err(self.cleanup_after_start_failure(error));
+                }
+            }
+        }
         self.shared_volume_backend = shared_volume_backend;
         self.volume_backend = volume_backend;
+        self.shared_mute_generation = self.shared_mute_generation.wrapping_add(1);
+        self.shared_mute = Default::default();
         self.engine_evidence = engine.evidence(is_shared);
+        if let Some(gate)=&self.playback_gate {gate.bind(cfg,pid,self.direct_volume.clone());}
         Ok(library_sync)
     }
 
@@ -1178,6 +1235,8 @@ decoder {{
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
+        if let Some(session) = self.direct_volume.take() { session.invalidate(); }
+        if let Some(gate)=&self.playback_gate {gate.clear();}
         self.engine_evidence = None;
         self.health = MpdHealth::Stopping;
         self.volume_backend = VolumeBackend::Unavailable;
@@ -2037,22 +2096,10 @@ mod tests {
 
     #[test]
     fn shared_output_with_software_backend_keeps_software_mixer() {
-        let hardware = MixerSelection::Hardware {
-            mixer_device: "hw:CARD=Ignored".to_string(),
-            control: crate::alsa_mixer::PlaybackVolumeControl {
-                name: "Ignored".to_string(),
-                index: 0,
-                channels: vec!["Front Left".to_string()],
-                min: 0,
-                max: 100,
-            },
-        };
-
         let section = MpdSupervisor::audio_output_section(
             true,
             "ignored",
             "yes",
-            &hardware,
             Some(SharedVolumeBackend::MpdSoftware),
         )
         .unwrap();
@@ -2080,7 +2127,6 @@ mod tests {
             true,
             "ignored",
             "no",
-            &MixerSelection::Software,
             Some(SharedVolumeBackend::PipeWire),
         )
         .unwrap();
@@ -2092,109 +2138,39 @@ mod tests {
     }
 
     #[test]
-    fn direct_output_without_safe_control_keeps_software_mixer() {
-        let section = MpdSupervisor::audio_output_section(
-            false,
-            "hw:CARD=NoMixer,DEV=0",
-            "no",
-            &MixerSelection::Software,
-            None,
-        )
-        .unwrap();
-
-        assert!(section.contains("device \"hw:CARD=NoMixer,DEV=0\""));
-        assert!(section.contains("dop \"no\""));
-        assert!(section.contains("mixer_type \"software\""));
-        assert!(!section.contains("mixer_control"));
+    fn direct_pcm_and_dop_always_use_software_mixer_without_hardware_controls() {
+        for device in ["hw:CARD=SoundBar,DEV=0", "hw:2,0"] {
+            for dop in ["no", "yes"] {
+                let section = MpdSupervisor::audio_output_section(false, device, dop, None).unwrap();
+                assert!(section.contains(&format!("device \"{}\"", device)));
+                assert!(section.contains(&format!("dop \"{}\"", dop)));
+                assert!(section.contains("mixer_type \"software\""));
+                for hardware in ["mixer_device", "mixer_control", "mixer_index", "mixer_type \"hardware\""] {
+                    assert!(!section.contains(hardware));
+                }
+            }
+        }
     }
 
     #[test]
-    fn direct_output_with_safe_control_generates_hardware_mixer_config() {
-        let selection = MixerSelection::Hardware {
-            mixer_device: "hw:CARD=SoundBar".to_string(),
-            control: crate::alsa_mixer::PlaybackVolumeControl {
-                name: "USB Playback".to_string(),
-                index: 2,
-                channels: vec!["Front Left".to_string(), "Front Right".to_string()],
-                min: 0,
-                max: 127,
-            },
-        };
-
-        let section = MpdSupervisor::audio_output_section(
-            false,
-            "hw:CARD=SoundBar,DEV=0",
-            "yes",
-            &selection,
-            None,
-        )
-        .unwrap();
-
-        assert!(section.contains("mixer_type \"hardware\""));
-        assert!(section.contains("mixer_device \"hw:CARD=SoundBar\""));
-        assert!(section.contains("mixer_control \"USB Playback\""));
-        assert!(section.contains("mixer_index \"2\""));
-        assert!(!section.contains("mixer_type \"software\""));
+    fn shared_volume_capture_failure_keeps_rollback_silent_instead_of_assuming_unity() {
+        let mut supervisor=MpdSupervisor::new("/unused/owned-shared-volume.socket");
+        supervisor.capture_shared_software_volume(||Ok(vec!["volume: 43".into(),"state: play".into()])).unwrap();
+        assert_eq!(supervisor.shared_software_volume,Some(43));
+        assert!(supervisor.capture_shared_software_volume(||Err("timeout".into())).is_err());
+        assert_eq!(supervisor.shared_software_volume,Some(0));
+        assert!(supervisor.capture_shared_software_volume(||Ok(vec!["state: stop".into()])).is_err());
+        assert_eq!(supervisor.shared_software_volume,Some(0));
     }
 
     #[test]
-    fn public_volume_backend_matches_the_effective_mixer() {
-        let hardware = MixerSelection::Hardware {
-            mixer_device: "hw:CARD=SoundBar".to_string(),
-            control: crate::alsa_mixer::PlaybackVolumeControl {
-                name: "USB Playback".to_string(),
-                index: 0,
-                channels: vec!["Front Left".to_string(), "Front Right".to_string()],
-                min: 0,
-                max: 127,
-            },
-        };
-
-        assert_eq!(
-            MpdSupervisor::public_volume_backend(false, &hardware, None),
-            VolumeBackend::AlsaHardware
-        );
-        assert_eq!(
-            MpdSupervisor::public_volume_backend(false, &MixerSelection::Software, None),
-            VolumeBackend::MpdSoftware
-        );
-        assert_eq!(
-            MpdSupervisor::public_volume_backend(
-                true,
-                &MixerSelection::Software,
-                Some(SharedVolumeBackend::PipeWire),
-            ),
-            VolumeBackend::PipeWire
-        );
-        assert_eq!(
-            MpdSupervisor::public_volume_backend(
-                true,
-                &MixerSelection::Software,
-                Some(SharedVolumeBackend::MpdSoftware),
-            ),
-            VolumeBackend::MpdSoftware
-        );
-    }
-
-    #[test]
-    fn hardware_mixer_default_index_is_not_written_to_mpd_config() {
-        let selection = MixerSelection::Hardware {
-            mixer_device: "hw:2".to_string(),
-            control: crate::alsa_mixer::PlaybackVolumeControl {
-                name: "Playback".to_string(),
-                index: 0,
-                channels: vec!["Mono".to_string()],
-                min: 0,
-                max: 10,
-            },
-        };
-
-        let section =
-            MpdSupervisor::audio_output_section(false, "hw:2,0", "no", &selection, None)
-                .unwrap();
-
-        assert!(section.contains("mixer_control \"Playback\""));
-        assert!(!section.contains("mixer_index"));
+    fn public_volume_backend_matches_direct_policy_and_shared_backend() {
+        for shared in [None, Some(SharedVolumeBackend::PipeWire), Some(SharedVolumeBackend::MpdSoftware)] {
+            assert_eq!(MpdSupervisor::public_volume_backend(false, shared), VolumeBackend::DirectEquipment);
+        }
+        assert_eq!(MpdSupervisor::public_volume_backend(true, None), VolumeBackend::MpdSoftware);
+        assert_eq!(MpdSupervisor::public_volume_backend(true, Some(SharedVolumeBackend::PipeWire)), VolumeBackend::PipeWire);
+        assert_eq!(MpdSupervisor::public_volume_backend(true, Some(SharedVolumeBackend::MpdSoftware)), VolumeBackend::MpdSoftware);
     }
 
     #[test]

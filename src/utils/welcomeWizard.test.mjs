@@ -355,10 +355,14 @@ test("reopened collection wizard prefills existing sources, cancel/reopen is rea
 });
 
 
-const appearanceSelect = f => {
+const appearanceRadios = f => {
   const child=find(f.tree,node=>node.type?.name==="AppearanceSetting");
-  return find(child.type(child.props),node=>node.type==="select");
+  return nodes(child.type(child.props)).filter(node=>node.type==="input"&&node.props.type==="radio");
 };
+const appearanceSelect = f => ({props:{
+ value:appearanceRadios(f).find(node=>node.props.checked).props.value,
+ onChange:event=>appearanceRadios(f).find(node=>node.props.value===event.target.value).props.onChange(),
+}});
 
 test("appearance is the first initial step; reconfiguration starts at Sources by identity, with correct counters and focus",()=>{
  const f=wizard();assert.match(text(f.tree),/wizard.appearanceTitle/);assert.match(text(f.tree),/wizard.step:1\/5/);

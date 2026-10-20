@@ -1,3 +1,4 @@
+import { ensureDirectOutputChoice } from "./config";
 import { beginPlaybackIntent, playbackIntentToken, type PlaybackIntent } from "../utils/playbackIntent";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -29,5 +30,5 @@ export const playlistsService = {
   resolveItems: (playlistId: string): Promise<PlaylistItemAvailability[]> =>
     invoke<PlaylistItemAvailability[]>("resolve_playlist_items", { playlistId }),
   play: async (playlistId: string, startItemId?: string, shuffle = false, intent: PlaybackIntent = beginPlaybackIntent()): Promise<{ skipped_count: number }> =>
-    invoke<{ skipped_count: number }>("play_playlist", { playlistId, startItemId, shuffle, intent: await playbackIntentToken(intent) }),
+    (async()=>{const token=await playbackIntentToken(intent);await ensureDirectOutputChoice(intent);if(!intent.current())throw "PLAYBACK_SUPERSEDED";return invoke<{ skipped_count: number }>("play_playlist", { playlistId, startItemId, shuffle, intent:token });})(),
 };

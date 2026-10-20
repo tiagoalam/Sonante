@@ -655,7 +655,6 @@ mod tests {
             include_str!("supervisor.rs"),
             include_str!("mpris.rs"),
             include_str!("analyzer.rs"),
-            include_str!("alsa_mixer.rs"),
             include_str!("local_watcher.rs"),
             include_str!("artwork_progress.rs"),
             include_str!("local_media.rs"),

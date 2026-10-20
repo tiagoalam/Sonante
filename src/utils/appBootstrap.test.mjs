@@ -21,9 +21,8 @@ test("Local Browser has no source before configuration resolves", () => {
   assert.equal(initialMediaSource({ plex_token: " token " }), "plex");
 });
 
-test("App gates LocalBrowserView behind initial config and devices", () => {
+test("App gates LocalBrowserView behind admitted initial config", () => {
   const source = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
-  assert.ok(source.includes("Promise.all([configService.getConfig(), configService.getAudioDevices()])"));
   assert.ok(source.indexOf("if (!config || mediaSource === null)") < source.indexOf("<LocalBrowserView"));
 });
 

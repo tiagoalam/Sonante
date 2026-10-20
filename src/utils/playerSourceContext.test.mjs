@@ -1,3 +1,4 @@
+import * as directVolumeHelpers from "./signalPath.ts";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -36,7 +37,7 @@ function mount({media=plex(),readInfo=async m=>response(m),updating=false}={}){
 async function settle(f){f.render();await flush();f.render();await flush();return f.render();}
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(lng=>[lng,{translation:JSON.parse(read(`../locales/${lng}.json`))}]))});
 const noop=()=>null,renderHooks={...React,default:React,useState:v=>[v,()=>{}],useEffect(){},useRef:v=>({current:v})};
-const deps={react:{...React,default:React},'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,'../utils/sourceAudio':{sourceAudioBadge,albumAudioBadge},'../utils/playerNavigation':{currentMediaKey},'../utils/signalPath':{requiresDeviceVolumeControl},'./SignalPath':{SignalPath:noop},'./PlexImage':{PlexImage:noop},'./PlaybackOptionsControls':{PlaybackOptionsControls:noop},'../utils/frontendDiagnostics':{logError(){}},'../services/audio':{audioService:new Proxy({},{get(){return()=>assert.fail('labels cannot command audio');}})}};
+const deps={react:{...React,default:React},'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,'../utils/sourceAudio':{sourceAudioBadge,albumAudioBadge},'../utils/playerNavigation':{currentMediaKey},'../utils/signalPath':{...directVolumeHelpers,requiresDeviceVolumeControl},'./SignalPath':{SignalPath:noop},'./PlexImage':{PlexImage:noop},'./PlaybackOptionsControls':{PlaybackOptionsControls:noop},'../utils/frontendDiagnostics':{logError(){}},'../services/audio':{audioService:new Proxy({},{get(){return()=>assert.fail('labels cannot command audio');}})}};
 const {SourceAudioBadges}=compile('../components/SourceAudioBadges.tsx',deps);deps['./SourceAudioBadges']={SourceAudioBadges};
 const {PlayerBar}=compile('../components/PlayerBar.tsx',{...deps,react:renderHooks});
 const {NowPlayingPresentation}=compile('../components/NowPlayingPresentation.tsx',{...deps,'./TrackArtwork':{TrackArtwork:noop},'./visualizer/VisualizerPanel':{VisualizerPanel:noop},'./nowPlaying.css':{}});

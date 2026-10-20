@@ -27,7 +27,8 @@ export const SignalPathDetails: React.FC<Props> = ({ route, status, health }) =>
     : t(`signalPath.observation.${observationReason}`);
   const observationTitle = t(observed ? "signalPath.observation.observedTitle" : "signalPath.observation.title");
   const conditions = routeConditions(route, status, health);
-  const conditionsSummary = t(`signalPath.conditions.summary.${conditions.summary}`);
+  const awaitingPlay=conditions.issues?.length===1&&conditions.issues[0].message==="directPending";
+  const conditionsSummary = t(`signalPath.conditions.summary.${awaitingPlay ? "directPending" : conditions.summary}`);
   return <section aria-label={t("signalPath.conditions.title")} className="min-w-0 space-y-4">
     {route?.mode === "shared" && <section data-shared-dsp className="rounded border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.1))] p-3 text-xs text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.65))]">
       <p className="font-semibold">{t("equalizer.title")} · {t(`equalizer.state.${status.shared_dsp?.phase ?? "off"}`)}</p>
@@ -47,7 +48,7 @@ export const SignalPathDetails: React.FC<Props> = ({ route, status, health }) =>
           className={`inline-flex rounded-full border px-2 py-1 text-[10px] leading-snug ${conditions.assessment === "compatible"
             ? "border-[color:var(--theme-border-accent,#E5A00D)]/35 bg-[#E5A00D]/10 text-[color:var(--theme-fg-accent,#D1B475)]"
             : conditions.assessment === "attention" ? "border-[color:var(--theme-border-accent,var(--color-amber-400))]/30 text-[color:var(--theme-fg-accent,var(--color-amber-200))]" : "border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] text-[color:var(--theme-fg-muted,rgb(255_255_255_/_0.55))]"}`}>
-          {t(`signalPath.assessment.${conditions.assessment}`)}
+          {t(`signalPath.assessment.${awaitingPlay ? "directPending" : conditions.assessment}`)}
         </span>}
         {route?.mode === "direct" && conditions.assessment !== "compatible" && conditions.issues?.[0] &&
           <p data-route-reason className="mt-1 text-[10px] leading-snug text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.65))]">
@@ -119,6 +120,7 @@ export function SignalPathInfo({ children, title, openLabel, closeLabel }: {
 export const SignalPath: React.FC<Props> = ({ route, status, health, compact = false, horizontal = false }) => {
   const { t } = useTranslation();
   const conditions = routeConditions(route, status, health);
+  const awaitingPlay=conditions.issues?.length===1&&conditions.issues[0].message==="directPending";
   const information = signalPathInformation(status, health);
   const format = information.format;
   const formatLabel = format.kind === "pcm"
@@ -150,7 +152,7 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
     { label: route?.mode === "direct" ? "DAC" : t("signalPath.output"), icon: Speaker },
   ];
   const label = conditions.bitPerfect ? t("signalPath.seal.label")
-    : conditions.assessment ? t(`signalPath.assessment.${conditions.assessment}`)
+    : conditions.assessment ? t(`signalPath.assessment.${awaitingPlay ? "directPending" : conditions.assessment}`)
       : t(`signalPath.${information.state}`);
   const badge = <div data-signal-badge className="inline-flex max-w-full items-center gap-1">
     {route?.mode !== "shared" && <span data-route-assessment={conditions.assessment} data-bitperfect={conditions.bitPerfect ? "route" : undefined}
@@ -178,7 +180,7 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
       </div>
     </div>
       {route && (
-        <ol className={`np-signal-stages mt-3 grid items-start gap-3 ${route.mode === "shared" ? "grid-cols-5" : "grid-cols-4"}`} aria-label={t("signalPath.configured")}>
+        <ol className="np-signal-stages mt-3 grid items-start gap-3" style={{ gridTemplateColumns: `repeat(${stages.length}, minmax(0, 1fr))` }} aria-label={t("signalPath.configured")}>
           {stages.map(({ label, icon: Icon }, index) => (
             <li key={index} className="relative flex min-w-0 flex-col items-center gap-2 text-center">
               {index > 0 && <ArrowRight size={12} className="absolute -left-2 top-1.5 text-[color:var(--theme-fg-accent,color-mix(in_srgb,#E5A00D_65%,transparent))]" aria-hidden="true" />}

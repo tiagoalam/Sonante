@@ -1,3 +1,4 @@
+import * as directVolumeHelpers from "../src/utils/signalPath.ts";
 import * as playbackIntents from "../src/utils/playbackIntent.ts";
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,7 +15,7 @@ import { routeConditions } from '../src/utils/routeConditions.ts';
 import { signalPathInformation, requiresDeviceVolumeControl } from '../src/utils/signalPath.ts';
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(l=>[l,{translation:JSON.parse(readFileSync(new URL(`../src/locales/${l}.json`,import.meta.url)))}]))});
 globalThis.window={localStorage:{getItem:()=>null,setItem(){}},screen:{availWidth:1920,availHeight:1040},crypto:{randomUUID:()=> 'synthetic-session'},setTimeout,clearTimeout,addEventListener(){},removeEventListener(){}};
-const dependencies={'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
+const dependencies={'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
 const compile=(file,extra={})=>{const js=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',js)(name=>{assert.ok(name in extra||name in dependencies,name);return extra[name]??dependencies[name];},ex);return ex;};
 dependencies['./PlexImage']={PlexImage:({alt,className})=>React.createElement('div',{'data-plex-artwork':true,'aria-label':alt,className})};
 dependencies['./TrackArtwork']=compile('components/TrackArtwork.tsx');
@@ -383,7 +384,7 @@ test('both player hosts explain paused, stopped and unavailable states instead o
 
 test('host guidance distinguishes blocked DSD in Direct from unavailable DSD in Shared without audio actions',()=>{
  for(const embedded of [true,false])for(const mode of ['direct','shared'])for(const reason of ['current_audio_format_is_dsd','current_file_is_dsd','reader_error',null,'unknown/private?token=fixture']){
-  let cursor=0;const states=[false,false,false,0,100,false,props.levels,false,reason];
+  let cursor=0;const states=[false,false,false,0,false,props.levels,false,reason];
   const hooks={...React,default:React,useState:initial=>[states[cursor++]??initial,()=>{}],useEffect(){},useRef:initial=>({current:initial})};
   const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{startAudioAnalyzer:()=>assert.fail('unexpected read'),stopAudioAnalyzer:()=>assert.fail('unexpected stop')}});
   const tree=NowPlayingHost({snapshot:{...snapshot,route:{mode,endpoint:mode==='shared'?'default':'hw:Fixture,0'}},owner,embedded,onReady(){}});
@@ -398,15 +399,34 @@ test('analyzer start rejection produces an explanatory failure state without ret
  NowPlayingHost({snapshot,owner,embedded:true,onReady(){}});const cleanup=effects[2]();await flush();assert.ok(values.includes('initial_reconcile_failed'));assert.deepEqual(calls,['start']);cleanup();await flush();assert.deepEqual(calls,['start','stop']);
 });
 
-test('Now Playing retains Direct PCM volume and hides only gradual software DSD gain while preserving mute',async()=>{
+test('Now Playing hides gradual volume for all Direct transports and retains mute',async()=>{
  for(const lng of ['en','pt-BR']){await i18n.changeLanguage(lng);
   for(const embedded of [false,true])for(const [mode,audio_format,backend,slider] of [
-   ['direct','96000:24:2','mpd_software',true],['direct','dsd64:2','mpd_software',false],
-   ['direct','705600:dsd:2','mpd_software',false],['direct','dsd128:2','alsa_hardware',true],['shared','dsd64:2','pipewire',true]]){
-   let muted=0;const tree=View({...props,embedded,onMute:()=>{muted++},snapshot:{...snapshot,route:{mode,endpoint:mode==='direct'?'hw:Fixture,0':'default'},playback:{...snapshot.playback,audio_format,volume:{...snapshot.playback.volume,backend}}}});
+   ['direct','96000:24:2','direct_equipment',false],['direct','dsd64:2','direct_equipment',false],
+   ['direct','705600:dsd:2','direct_equipment',false],['direct','dsd128:2','direct_equipment',false],['shared','dsd64:2','pipewire',true]]){
+   let muted=0;const tree=View({...props,embedded,onMute:()=>{muted++},snapshot:{...snapshot,route:{mode,endpoint:mode==='direct'?'hw:Fixture,0':'default'},playback:{...snapshot.playback,audio_format,volume:{...snapshot.playback.volume,backend,...(mode==='direct'?{value:100,writable:false,direct_gain:'unity',direct_token:'1:65'}:{})}}}});
    const ranges=nodes(tree,n=>n.type==='input'&&n.props['aria-label']===i18n.t('signalPath.volume'));assert.equal(ranges.length,slider?1:0);
    const mute=nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('player.mute'))[0];assert.ok(mute);mute.props.onClick();assert.equal(muted,1);
    if(!slider)assert.ok(renderToStaticMarkup(tree).includes(i18n.t('player.volumeOnDevice')));
   }
  }await i18n.changeLanguage('en');
 });
+
+test('embedded and detached hosts use explicit mute without an independent preparation flow',async()=>{
+ const hooks={...React,default:React,useState:initial=>[initial,()=>{}],useEffect(){},useRef:initial=>({current:initial})};
+ for(const embedded of [true,false])for(const [gain,value,muted]of [['pending',0,false],['unity',100,false],['muted',0,true],['changed',43,false]]){
+  const calls=[];window.confirm=()=>assert.fail('no prepare ritual');
+  const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{},'@tauri-apps/api/window':{},'../services/audio':{audioService:{setDirectMute:async r=>calls.push(r),setVolume:()=>assert.fail()}},'../services/nowPlayingWindow':{}});
+  const tree=NowPlayingHost({snapshot:{...snapshot,route:{mode:'direct',endpoint:'hw:Fixture,0'},playback:{...snapshot.playback,volume:{backend:'direct_equipment',available:true,writable:false,value,muted,direct_gain:gain,direct_token:'old:1'}}},owner,embedded,onReady(){}});
+  tree.props.onMute();await flush();assert.deepEqual(calls,[{muted:!muted,token:'old:1'}]);
+ }delete window.confirm;
+});
+
+ test('Now Playing Shared unmute uses backend context instead of an independent default volume',async()=>{
+  const calls=[];
+  const hooks={...React,default:React,useState:initial=>[initial,()=>{}],useEffect(){},useRef:initial=>({current:initial})};
+  const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{},'@tauri-apps/api/window':{},'../services/audio':{audioService:{setSharedMute:async request=>calls.push(request),setVolume:()=>assert.fail('must not choose a level')}},'../services/nowPlayingWindow':{}});
+  const owner={host:'main',session:'fixture',generation:1};
+  const tree=NowPlayingHost({snapshot:{...snapshot,playback:{...snapshot.playback,volume:{value:0,muted:true,writable:true,available:true,backend:'mpd_software',shared_token:'shared-session'}}},owner,embedded:true,onReady(){}});
+  tree.props.onMute();await flush();assert.deepEqual(calls,[{muted:false,token:'shared-session'}]);
+ });

@@ -78,13 +78,9 @@
 .np-signal-path .np-signal-format-volume { overflow-wrap: anywhere; }
 .np-signal-endpoint { margin-top: 4px; font-size: 10px; color: var(--theme-fg-muted,#ffffff88); }.np-signal-endpoint summary { cursor: pointer; }.np-signal-endpoint p { overflow-wrap: anywhere; margin-top: 4px; }
 @container signal-strip (max-width: 1000px) {
- .np-signal-path { gap: 8px 12px; grid-template-columns: fit-content(160px) minmax(230px,1fr) minmax(220px,260px); }
-}
-@container signal-strip (max-width: 720px) {
  .np-signal-path { grid-template-columns: minmax(0,1fr) minmax(220px,260px); gap: 10px 16px; }
- .np-signal-path .np-signal-heading { grid-column: 1 / -1; grid-row: 1; flex-direction: row; align-items: center; justify-content: space-between; }
- .np-signal-path .np-signal-stages { grid-column: 1; grid-row: 2; }
- .np-signal-path .np-signal-metadata { grid-column: 2; grid-row: 2; }
+ .np-signal-path .np-signal-stages { grid-column: 1 / -1; grid-row: 2; }
+ .np-signal-path .np-signal-metadata { grid-column: 2; grid-row: 1; }
 }
 @container signal-strip (max-width: 540px) {
  .np-signal-path { grid-template-columns: minmax(0,1fr); }

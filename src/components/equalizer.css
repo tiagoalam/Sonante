@@ -1,0 +1,66 @@
+/* The EQ page owns its scroll area; the player remains the App's flex sibling. */
+.eq-page { padding: 12px 20px 28px; scroll-padding-block: 104px 24px; }
+.eq-content { max-width: 1200px; margin-inline: auto; display: flex; flex-direction: column; gap: 10px; }
+.eq-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.eq-heading { min-width: 0; display: grid; grid-template-columns: auto auto; gap: 2px 14px; align-items: center; }
+.eq-heading h1 { grid-row: 1; grid-column: 1; }
+.eq-return { grid-column: 2; grid-row: 1; }
+.eq-subtitle { grid-column: 1 / -1; }
+.eq-route-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.eq-state { font-size: 12px; font-weight: 600; }
+.eq-route-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 20px; color: var(--theme-fg-secondary, #b2b4b9); font-size: 11px; }
+.eq-route-summary dl { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.eq-route-summary dl > div { display: flex; flex-wrap: wrap; gap: 4px; }
+.eq-route-summary dt { color: var(--theme-fg-muted, #a1a3aa); }
+.eq-route-summary dd { font-variant-numeric: tabular-nums; }
+.eq-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; position: sticky; top: 0; z-index: 10; padding-block: 8px; background: var(--theme-surface-base, #121212); border-bottom: 1px solid var(--theme-border-soft, #303238); }
+.eq-toolbar-controls { flex: 1 1 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.eq-preset { display: flex; align-items: center; gap: 8px; flex: 0 1 280px; min-width: 180px; }
+.eq-preset-select { flex: 1; min-width: 0; width: 240px; max-width: 280px; }
+.eq-draft { flex: 0 1 225px; font-size: 11px; line-height: 1.35; }
+.eq-help { font-size: 11px; color: var(--theme-fg-muted, #a1a3aa); }
+.eq-help summary { cursor: pointer; width: fit-content; text-decoration: underline; text-underline-offset: 3px; }
+.eq-help > p { margin-top: 6px; line-height: 1.5; max-width: 90ch; }
+.eq-preset-description { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+.eq-preset-description > details[open] { flex-basis: 100%; }
+.eq-comparison { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding-block: 2px 8px; border-bottom: 1px solid var(--theme-border-soft, #303238); }
+.eq-comparison-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.eq-comparison > p, .eq-comparison > details[open] { flex-basis: 100%; margin-top: 0; }
+.eq-graph { padding: 10px 12px; }
+.eq-page #equalizer-graph { display: block; height: clamp(240px, calc(100dvh - 450px), 390px); }
+.eq-page:has(.eq-comparison [aria-pressed]) #equalizer-graph { height: clamp(240px, calc(100dvh - 480px), 380px); }
+.eq-graph-caption { font-size: 11px; line-height: 1.45; color: #a1a3aa; }
+.eq-graph-options { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 20px; margin-block: 3px 5px; }
+.eq-graph-options > details { color: inherit; }
+.eq-graph-options > details[open] { flex-basis: 100%; }
+.eq-page :is(button, input, select, summary, [tabindex]) { scroll-margin-block: 104px 24px; }
+.eq-page :is(button, input, select, summary, [tabindex]):focus-visible { outline: 2px solid var(--theme-control-accent, #e5a00d); outline-offset: 3px; }
+.eq-page #equalizer-graph:focus-visible, .eq-page #equalizer-graph circle:focus-visible { outline: 2px solid #f4c84e; }
+@media (max-width: 1000px), (max-height: 600px) {
+ .eq-page { padding: 12px 14px 24px; }
+ .eq-page #equalizer-graph, .eq-page:has(.eq-comparison [aria-pressed]) #equalizer-graph { height: 350px; }
+ .eq-route-actions { gap: 8px; }
+}
+@media (max-width: 740px) {
+ .eq-header { gap: 8px; }
+ .eq-preset { flex-basis: 100%; }
+ .eq-preset-select { max-width: 280px; }
+ .eq-page { scroll-padding-top: 152px; }
+ .eq-page :is(button, input, select, summary, [tabindex]) { scroll-margin-top: 152px; }
+}
+
+/* Secondary explanations use the same native top-layer help as SignalPath. */
+.eq-page [data-signal-info] { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; padding: 4px; }
+.eq-page .eq-help-content { display: grid; gap: 12px; font-size: 14px; line-height: 1.6; }
+.eq-page .eq-help-content dl > div { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px 20px; }
+.eq-page .eq-help-content dd { font-weight: 600; font-variant-numeric: tabular-nums; }
+.eq-route-summary { font-size: 12px; gap: 6px 24px; }
+.eq-current-gain strong { margin-left: 5px; color: var(--theme-fg-primary, #eee); font-size: 14px; }
+.eq-draft { font-size: 12px; }
+.eq-curve-label { font-size: 12px; color: #c2c4ca; }
+.eq-band-card[aria-pressed="true"] { outline: 2px solid var(--theme-fg-primary, #eee); outline-offset: 2px; background: var(--theme-surface-raised, #26282d); }
+.eq-band-editor { border-color: var(--theme-border-soft, #555860); }
+.eq-band-heading { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+.eq-band-badge { display: inline-flex; width: 26px; height: 26px; align-items: center; justify-content: center; border-radius: 50%; font-weight: 700; color: #111214; }
+.eq-page input[role="spinbutton"] { font-variant-numeric: tabular-nums; }
+.eq-page input[role="spinbutton"][aria-invalid="true"] { border-color: var(--theme-border-error, #e97a7a); }

@@ -414,3 +414,14 @@ test('strict capability is distinct from historical USB profiles and installed c
  assert.equal(row(current,'negotiation').message,'directStrict');assert.equal(routeConditions(route,current,health).bitPerfect,true);assert.equal(routeConditions(route,current,health).profile,undefined);
  assert.equal(row(playback,'negotiation').message,'directCompatibility');
 });
+
+// A remapped, newly pinned build identifies policy, not historical USB capture.
+test("Ubuntu remap identity retains strict policy without inheriting a USB profile", async () => {
+ const evidence = await import("./routeEvidenceProfiles.ts");
+ const current={state:"identified",evidence_id:"mpd-strict-ubuntu2204-remap-20261018",scope:"pcm_dsd_route_strict",pcm_eof_flush:true};
+ assert.equal(evidence.identifiedRouteEngine(current),true);
+ assert.equal(evidence.strictDirectEngine(current),true);
+ assert.equal(evidence.reportsDsdTransport(current),true);
+ assert.deepEqual(evidence.engineProfiles(current),[]);
+ assert.equal(evidence.identifiedRouteEngine({...current,scope:"pcm_dsd_route"}),false);
+});

@@ -53,9 +53,27 @@ export function signalPathInformation(status: PlaybackStatus, health: MpdHealth)
   };
 }
 
-// MPD does not provide gradual software gain for a native DSD/DoP stream.
-// PCM in Direct and an actual ALSA hardware mixer remain adjustable.
+// Direct uses equipment volume for every transport, including PCM.
 export function requiresDeviceVolumeControl(route: ConfiguredSignalRoute | null | undefined, status: PlaybackStatus | null | undefined): boolean {
-  return route?.mode === "direct" && status?.volume.backend === "mpd_software"
-    && parseReportedMpdFormat(status.audio_format).kind === "dsd";
+  return route?.mode === "direct" || status?.volume.backend === "direct_equipment";
+}
+
+export function canToggleMute(status: PlaybackStatus | null | undefined): boolean {
+  const volume = status?.volume;
+  return !!volume?.available && (volume.backend === "direct_equipment" ? !!volume.direct_token : volume.writable);
+}
+
+export function muteLabel(status: PlaybackStatus | null | undefined): string {
+ if(status?.volume.backend==="direct_equipment")return status.volume.muted?"player.unmute":"player.mute";
+ return status?.volume.muted||status?.volume.value===0?"player.unmute":"player.mute";
+}
+export function directMuteRequest(status:PlaybackStatus){
+ if(status.volume.backend!=="direct_equipment"||!canToggleMute(status))return null;
+ return{muted:!status.volume.muted,token:status.volume.direct_token!};
+}
+
+export function sharedMuteRequest(status:PlaybackStatus){
+ const v=status.volume;
+ if(!v.available||!v.writable||!v.shared_token||!['pipewire','mpd_software'].includes(v.backend))return null;
+ return{muted:!(v.muted||v.value===0),token:v.shared_token};
 }

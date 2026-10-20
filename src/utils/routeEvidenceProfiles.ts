@@ -47,13 +47,13 @@ export function identifiedRouteEngine(engine: EngineEvidence | null | undefined)
   return engine?.state === "identified" && engine.pcm_eof_flush === true && (
     (engine.evidence_id === "mpd-pcm-eof-20261017" && engine.scope === "pcm24_96000_stereo_gapless") ||
     (engine.evidence_id === "mpd-route-20261017" && engine.scope === "pcm_dsd_route") ||
-    (engine.evidence_id === "mpd-strict-route-20261017" && engine.scope === "pcm_dsd_route_strict")
+    (["mpd-strict-route-20261017", "mpd-strict-ubuntu2204-remap-20261018"].includes(engine.evidence_id) && engine.scope === "pcm_dsd_route_strict")
   );
 }
 export function reportsDsdTransport(engine: EngineEvidence | null | undefined): boolean {
-  return identifiedRouteEngine(engine) && ["mpd-route-20261017", "mpd-strict-route-20261017"].includes(engine?.evidence_id ?? "");
+  return identifiedRouteEngine(engine) && ["mpd-route-20261017", "mpd-strict-route-20261017", "mpd-strict-ubuntu2204-remap-20261018"].includes(engine?.evidence_id ?? "");
 }
 
 export function strictDirectEngine(engine: EngineEvidence | null | undefined): boolean {
-  return identifiedRouteEngine(engine) && engine?.evidence_id === "mpd-strict-route-20261017" && engine.scope === "pcm_dsd_route_strict";
+  return identifiedRouteEngine(engine) && ["mpd-strict-route-20261017", "mpd-strict-ubuntu2204-remap-20261018"].includes(engine?.evidence_id ?? "") && engine?.scope === "pcm_dsd_route_strict";
 }

@@ -9,8 +9,8 @@
     "apply": "Apply to route",
     "preset": "Preset",
     "reset": "Flat / reset",
-    "preamp": "Preamp",
-    "preampValue": "Preamp value in dB",
+    "preamp": "Manual level",
+    "preampValue": "Manual level in dB",
     "stereo": "stereo",
     "band": "Band",
     "on": "Enabled",
@@ -27,7 +27,7 @@
     "curveHelp": "Calculated at 48 kHz; plot limited to ±24 dB. This is not an output measurement.",
     "headroom": "Positive gains can clip. Leave headroom with the preamp; there is no limiter or automatic gain compensation.",
     "persistenceHelp": "Saving and selecting presets never changes the sound. Apply sends the whole draft; EQ starts off.",
-    "draftPending": "Draft changes have not been applied to the routed preset.",
+    "draftPending": "Changes pending · use Apply",
     "sharedOnly": "EQ processes Shared output only. You can edit presets in Direct; audio keeps its original path.",
     "audioPreferences": "Open audio preferences",
     "runtimeMissing": "Private CamillaDSP runtime not selected. Open DEV with the EQ launcher; the current audio path remains available.",
@@ -56,7 +56,7 @@
     "flat": "Flat",
     "audioGroup": "Audio",
     "discard": "Discard changes",
-    "draftClean": "Draft matches the routed or selected preset.",
+    "draftClean": "No pending changes",
     "activeBands": "{{count}} / 10 active points",
     "addBand": "Add point",
     "selectBand": "Select band",
@@ -69,9 +69,9 @@
     "graphHelp": "Double-click to add a point, or use Add point. Drag a point to change frequency and gain; arrow keys work too (Shift for fine changes). Q is edited below. Escape deselects; Delete removes.",
     "graphLegend": "Amber: sum of draft filters, without preamp. Colors: individual filters. Optional dashed curve: response after protected global gain. Calculated, not measured.",
     "appliedGain": "Applied preamp: {{effective}} dB (requested {{requested}} dB).",
-    "protectionValue": "Draft after Apply: global gain {{effective}} dB · extra preventive reduction {{attenuation}} dB.",
+    "protectionValue": "After Apply: {{effective}} dB",
     "protectionRefused": "This combination exceeds the gain budget or contains invalid values. Reduce gain, Q or the number of filters before applying.",
-    "protectionHelp": "A conservative budget includes overlapping filters, their transient response and the selected resampler. Extra attenuation is applied before the filters. No clipper, limiter or makeup gain is used. This reduces EQ overload; it does not guarantee every device or analog peak.",
+    "protectionHelp": "The budget covers transients from the complete filter chain with an output reserve. Positive manual gain does not override the protection margin. Reduction is applied before the filters, without a clipper, limiter or automatic makeup gain. This reduces EQ overload; it does not guarantee every device or analog peak.",
     "bypassLevel": "Bypass removes DSP and returns to the original Shared level, which can be louder. System and DAC volume are never changed.",
     "tonalHelp": "Built-in presets are generic tonal preferences, not measured headphone or room corrections.",
     "transition": {
@@ -140,15 +140,16 @@
       "source": "Comparison preset: {{name}}",
       "referenceInRoute": "Reference A · DSP retained",
       "interrupted": "Another action interrupted comparison. The audible configuration was retained; use Apply or Bypass to choose what to hear.",
-      "failed": "Comparison did not complete. Check current status; another action or DSP unavailability may have prevented the change."
+      "failed": "Comparison did not complete. Check current status; another action or DSP unavailability may have prevented the change.",
+      "helpTitle": "How A/B works"
     },
     "gainLabel": {
-      "requested_preamp_db": "Preset preamp",
-      "effective_preamp_db": "Processing gain",
-      "attenuation_db": "Extra preventive reduction"
+      "requested_preamp_db": "Requested manual preamp",
+      "effective_preamp_db": "Effective global gain",
+      "attenuation_db": "Automatic reduction"
     },
     "routePreset": "Routed preset: {{name}}",
-    "showGlobalGain": "Show the global gain effect",
+    "showGlobalGain": "Show predicted gain",
     "protectionDetails": "Why is the level reduced?",
     "descriptions": {
       "flat": "No tonal change; a neutral starting point.",
@@ -176,7 +177,17 @@
     },
     "collectionHelp": "Choose one Style or Mood at a time. These are subjective tonal suggestions, not measured corrections. Selecting does not change audio: use Apply.",
     "graphScale": "Scale: ±{{range}} dB",
-    "graphExpanded": "expanded to show all curves"
+    "graphExpanded": "expanded to show all curves",
+    "presetDetails": "About presets",
+    "graphHelpTitle": "Editing tips",
+    "gainBreakdown": "After Apply: manual {{requested}} dB · automatic reduction {{attenuation}} dB · effective gain {{effective}} dB.",
+    "sharedBadge": "Shared only",
+    "routeDetails": "Output and level",
+    "routedGain": "Routed gain",
+    "helpFor": "Help: {{topic}}",
+    "closeHelp": "Close help",
+    "editBand": "Band {{number}}",
+    "draftCurve": "Draft filter curve"
   },
   "app": {
     "bootstrapError": "Could not load initial settings.",
@@ -278,7 +289,10 @@
     "queue": "Play Queue",
     "mute": "Mute",
     "unmute": "Unmute",
+    "directControlFailed": "The mute/gain change could not be confirmed. Check the updated state before trying again; playback will not resume automatically.",
+    "directVolumeChoiceConfirm": "In Direct, control volume on your DAC or amplifier. Sonante uses unity gain without gradual adjustment. Lower the equipment volume first. This choice applies to the configured output and transport mode; the same identifier may refer to different equipment after reconnection. After a successful device or output-mode change, saving may resume playback if it was playing before the change and no newer intervention occurred. Confirming a Play request may start it. Continue?",
     "volumeBackend": {
+      "direct_equipment": "Equipment",
       "alsa_hardware": "ALSA Hardware",
       "pipewire": "PipeWire",
       "mpd_software": "Software",
@@ -291,8 +305,9 @@
     "engineUnavailable": "Audio engine unavailable",
     "engineTransitioning": "Audio engine is changing state",
     "lastKnown": "Last known playback",
-    "volumeOnDevice": "Adjust volume on the DAC or amplifier",
-    "volumeOnDeviceShort": "DAC volume"
+    "volumeOnDevice": "Volume controlled on equipment",
+    "volumeOnDeviceShort": "DAC volume",
+    "sharedMuteFailed": "Mute could not be changed safely. Refresh the output status or choose a volume with the slider; no default restoration level is used."
   },
   "nowPlaying": {
     "detach": "Detach window",
@@ -778,7 +793,7 @@
     "sharedModeCaption": "ALSA default · shared system routing",
     "defaultEndpointNotice": "The selected ALSA endpoint is default. MPD will use the shared route; select a physical hw:* device for Direct hardware access.",
     "processingNotice": "ReplayGain adjusts loudness. It can modify PCM samples, as can software volume control.",
-    "volumeNotice": "Depending on capabilities detected at setup, Shared volume may use system controls and Direct volume may use a hardware mixer. Software volume is also possible. This diagram does not report the active mixer.",
+    "volumeNotice": "In Shared, volume remains adjustable in Sonante. In Direct, use your DAC or amplifier volume; Sonante provides mute/unmute. Confirm this choice when selecting the output or on the first Play with a legacy configuration. After that, open and press Play normally in the same confirmed context. Intentional mute is preserved. Opening or saving an output never starts playback automatically.",
     "dopTransportNotice": "DoP carries DSD in PCM frames when MPD, the ALSA path and the DAC are compatible. Enabling it does not prove native DSD or the format received by the DAC.",
     "bufferNotice": "The buffer holds audio in MPD memory. A larger buffer uses more RAM and may help with slow reads; it does not improve resolution. Saving a change restarts the private MPD and restores the session paused, or stopped if it was already stopped.",
     "signal": {
@@ -887,6 +902,7 @@
     "conditions": {
       "title": "Route conditions",
       "summary": {
+        "directPending": "Waiting for playback through Sonante. Gain will be checked before starting; if needed, confirm equipment volume control when you press Play.",
         "inactive": "Available during playback",
         "partial": "Partial verification · audio samples not compared",
         "attention": "Reported processing or format differences",
@@ -938,6 +954,8 @@
         "crossfadeOn": "Enabled: {{value}} seconds",
         "mixrampOff": "Disabled by the reported parameter",
         "mixrampPossible": "Overlap cannot be ruled out",
+        "directChanged": "Gain changed. Check the output in settings before playing.",
+        "directPending": "Waiting for playback through Sonante. Gain will be checked before starting; if needed, confirm equipment volume control when you press Play.",
         "volumeChanged": "Volume readings differ; waiting for an update.",
         "engineIdentified": "Engine build identified.",
         "deviceObserved": "{{model}} · USB {{vendor}}:{{product}}",
@@ -1006,6 +1024,7 @@
     "sharedExplanation": "ALSA default follows system routing, which may involve PipeWire, PulseAudio or dmix, with possible mixing and conversion. The endpoint is not measured here.",
     "directExplanation": "Direct uses the selected ALSA hardware endpoint. Observation shows the playing stream and format; volume and processing appear in the route conditions.",
     "assessment": {
+      "directPending": "Waiting for playback",
       "compatible": "Monitored conditions preserved",
       "attention": "Conditions require attention",
       "partial": "Incomplete verification",
@@ -1490,5 +1509,81 @@
     "dsdHiRes": "Hi-Res: verified source DSD level.",
     "formatOnly": "Format identified; Hi-Res is not established.",
     "limit": "Source metadata does not authenticate the master or confirm bit-perfect playback or the DAC format."
+  },
+  "indexCoverage": {
+    "partial": "Last report: indexing finished with omissions. See how many files were included, including a possible total of zero. Existing references were kept.",
+    "confirmed": "Last indexing report: selected files were reconciled within the observed scope.",
+    "unknown": "No indexing report is available in this session. Coverage and omissions are unknown.",
+    "details": "Indexing details",
+    "source": "Source {{name}}",
+    "counts": "Selected audio files: {{audio}}; selected CUE groups: {{cues}}; indexed audio files: {{cataloged}}; indexed virtual tracks: {{virtual}}; omitted files/groups: {{omitted}}; other files excluded by policy: {{excluded}}.",
+    "full": "Observed scope: the scanned generation.",
+    "paths": "Observed scope: changed paths only; the whole library was not checked.",
+    "limits": "An omission does not prove corruption or an unsupported format. CUE group presence does not certify every segment. Indexing does not verify complete decoding or playback. Sources use their managed identifier, without absolute paths.",
+    "failed": "Indexing could not be confirmed: a source or selected file changed, the catalog was invalid, or previously indexed items are missing without a confirmed removal. References were kept. Review the sources and try again when changes have finished."
+  },
+  "libraryRecovery": {
+    "title": "Analyze and recover the library",
+    "explanation": "Analysis checks local records without changing the library or starting audio. Recovery can only be offered with sufficient evidence of the state to restore.",
+    "analyze": "Analyze startup block",
+    "again": "Analyze again",
+    "analyzing": "Analyzing local records…",
+    "cancel": "Cancel analysis",
+    "export": "Save report",
+    "exporting": "Choose where to save the report…",
+    "failed": "Analysis could not be completed. Try again; the library remains blocked.",
+    "cancelFailed": "Analysis was dismissed in this window, but backend cancellation was not confirmed. No recovery was requested.",
+    "exportFailed": "The report could not be saved. Choose a new file and try again.",
+    "exported": "Report saved. It contains only the diagnosis, without personal paths or credentials.",
+    "unavailable": "Automatic recovery is unavailable for this diagnosis.",
+    "guidance": "Preserve the library files. Save this report to guide review and the choice of a complete backup. Do not delete records or folders to bypass the startup block.",
+    "details": "Analysis details",
+    "intentVersion": "Transaction record: version {{version}}.",
+    "queueVersion": "Queue backup in the record: version {{version}}.",
+    "observationOnly": "This observation does not prove catalog coverage or restoration of the queue or music. The report describes this moment; another application may change the files later.",
+    "config": {
+      "previous": "Configuration matches the recorded previous state.",
+      "next": "Configuration matches the recorded next state.",
+      "both": "Configuration matches both recorded states.",
+      "unbound": "Configuration is not proven to belong to a recoverable state.",
+      "unknown": "Configuration could not be validated."
+    },
+    "reasons": {
+      "intent_valid": "A pending folder transaction has an intact record. This does not prove completion.",
+      "intent_invalid": "The transaction record is invalid, incomplete, or cannot be read safely.",
+      "orphan_staging": "A staged library generation has no record proving its completion.",
+      "config_missing": "Local configuration is missing.",
+      "config_invalid": "Configuration could not be safely validated.",
+      "config_divergent": "Configuration differs from both states in the transaction record.",
+      "mirror_missing": "The main library generation is missing.",
+      "mirror_invalid": "A generation or its manifest could not be safely validated.",
+      "generation_divergent": "An observed generation differs from the identities recorded in the transaction.",
+      "database_missing": "The local catalog database is missing.",
+      "database_unproven": "The database is present, but catalog coverage is unproven. No database was loaded or reindexed during analysis.",
+      "ledger_missing": "The identity history file pair is missing or incomplete. IDs will not be recreated automatically.",
+      "ledger_divergent": "Identity history or its anchor could not be validated against the observed manifests.",
+      "unsafe_entry": "A file or directory is unavailable, replaced, or fails safety checks.",
+      "filesystem_changed": "Files changed or became unavailable during analysis. Analyze again before deciding.",
+      "ownership_unknown": "This analysis does not prove exclusive profile ownership or the absence of another instance.",
+      "no_pending_marker": "No transaction record or staged generation was found. This does not enable audio or confirm a valid configuration.",
+      "recovery_set_unproven": "The recovery set is missing, incomplete, changed, or does not meet safe execution requirements."
+    },
+    "executionFailed": "Recovery did not complete. Records and backups were preserved. Analyze again; audio remains blocked.",
+    "reopenFailed": "The app could not reopen. Close Sonante normally and open it with the current launcher; startup guards will run again.",
+    "executing": "Creating a backup, executing and validating the plan…",
+    "reopening": "Closing this session to reopen normally…",
+    "completed": "State validated and recovery completed.",
+    "backupRetained": "This operation’s backup was preserved. Playback starts only on your command.",
+    "planReady": "A complete recovery set supports an executable plan.",
+    "choices": {
+      "restore_previous": "Restore the proven previous state",
+      "finish_confirmed": "Finalize the already confirmed state"
+    },
+    "impact": "The plan rechecks files and source identities before any effect. It preserves current favorites, playlists and reserved IDs. Restoration returns configuration and catalog to the proven state; an earlier queue is restored only with specific evidence. References to new sources may become unavailable.",
+    "proof": "The previous catalog contains {{tracks}} tracks. The control backup requires at least {{bytes}} bytes, plus the virtual structure. Missing space or current evidence keeps audio blocked.",
+    "noMusicBackup": "This backup does not copy music or NAS data. It cannot restore physical music that was changed or removed.",
+    "resumePlan": "This plan resumes an interrupted operation using only stages and files that can still be proven.",
+    "execute": "Create backup and execute this plan",
+    "reopen": "Reopen normally"
   }
 }

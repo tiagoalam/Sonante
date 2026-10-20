@@ -487,8 +487,12 @@ pub(crate) fn sync_mirror(path: &Path, depth: usize) -> Result<(), String> {
 }
 
 fn read_record(parent: &Parent) -> Result<Record, String> {
-    let bytes = read_regular(&parent.entry(NAME), true)?;
-    let record: Record = serde_json::from_slice(&bytes)
+    parse_record(&read_regular(&parent.entry(NAME), true)?)
+}
+
+fn parse_record(bytes: &[u8]) -> Result<Record, String> {
+    if bytes.len() as u64 > MAX_RECORD_BYTES { return Err(blocked("Registro excede limite.")); }
+    let record: Record = serde_json::from_slice(bytes)
         .map_err(|_| blocked("Registro de intenção inválido ou incompleto."))?;
     let version_valid = match (record.intent.version, &record.intent.queue_backup) {
         (1, None) => true,
@@ -510,6 +514,51 @@ fn read_record(parent: &Parent) -> Result<Record, String> {
     Ok(record)
 }
 
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoveryBinding {
+    pub record_hash: String,
+    pub previous_config: [u8; 32],
+    pub next_config: [u8; 32],
+    pub previous_identity: crate::recovery_fs::Identity,
+    pub next_identity: crate::recovery_fs::Identity,
+    pub previous_manifest: Option<MirrorManifest>,
+    pub next_manifest: Option<MirrorManifest>,
+    pub queue_cache: Option<Vec<u8>>,
+}
+pub(crate) fn recovery_binding(bytes: &[u8]) -> Result<RecoveryBinding, String> {
+    let record = parse_record(bytes)?;
+    Ok(RecoveryBinding {
+        record_hash: crate::recovery_fs::hash(bytes),
+        previous_config: record.intent.previous_config, next_config: record.intent.next_config,
+        previous_identity: crate::recovery_fs::Identity { dev: record.intent.previous.device, ino: record.intent.previous.inode },
+        next_identity: crate::recovery_fs::Identity { dev: record.intent.next.device, ino: record.intent.next.inode },
+        previous_manifest: record.intent.previous.manifest, next_manifest: record.intent.next.manifest,
+        queue_cache: record.intent.queue_backup.map(|b|b.recovery_cache()).transpose()?,
+    })
+}
+pub(crate) fn recovery_config_hash(bytes:&[u8])->Result<[u8;32],String>{
+    let mut config:AppConfig=serde_json::from_slice(bytes).map_err(|_|blocked("Configuração inválida."))?;
+    config.apply_legacy_migrations(); fingerprint(&config)
+}
+impl QueueBackup {
+    fn recovery_cache(&self)->Result<Vec<u8>,String>{
+        self.validate()?;
+        let tracks=self.tracks.iter().map(|t| {
+            let (uri,locator)=match &t.media {
+                BackupMedia::Local{uri}=>(uri.clone(),serde_json::json!({"kind":"local","uri":uri})),
+                BackupMedia::Plex{server_id,part_key,rating_key,file_path}=>(String::new(),serde_json::json!({"kind":"plex","server_id":server_id,"part_key":part_key,"rating_key":rating_key,"file_path":file_path})),
+            };
+            serde_json::json!({"title":t.title,"artist":t.artist,"album":t.album,"duration":t.duration,"uri":uri,"media_locator":locator})
+        }).collect::<Vec<_>>();
+        let resume=self.logical_resume.as_ref().map(|r|(r.queue_index,r.elapsed))
+            .or_else(||self.current_index.map(|i|(i,self.elapsed)));
+        let mut cache=serde_json::json!({"version":2,"tracks":tracks});
+        if let Some((index,elapsed))=resume{cache["resume"]=serde_json::json!({"queue_index":index,"elapsed":elapsed,"state":"paused"});}
+        serde_json::to_vec(&cache).map_err(|_|blocked("Fila recuperável indisponível."))
+    }
+}
+
 pub(crate) fn check_startup(config_dir: &Path) -> Result<(), String> {
     check_startup_state(config_dir, false)
 }
@@ -527,6 +576,16 @@ fn check_startup_state(config_dir: &Path, startup_owns_staging: bool) -> Result<
         Ok(_) => {}
     }
     let parent = Parent::inspect(config_dir)?;
+    match fs::symlink_metadata(parent.entry(crate::recovery_set::SEAL)) {
+        Ok(_) => return Err(blocked("Selo de recuperação sem finalização durável.")),
+        Err(e) if e.kind()==ErrorKind::NotFound => {},
+        Err(_) => return Err(blocked("Selo de recuperação indisponível.")),
+    }
+    match fs::symlink_metadata(parent.entry(crate::recovery_set::PENDING)) {
+        Ok(_) => return Err(blocked("Conjunto de recuperação sem finalização durável.")),
+        Err(e) if e.kind()==ErrorKind::NotFound => {},
+        Err(_) => return Err(blocked("Conjunto de recuperação indisponível.")),
+    }
     match fs::symlink_metadata(parent.entry(NAME)) {
         Ok(_) => {
             read_record(&parent)?;
@@ -551,6 +610,146 @@ pub(crate) fn guard_startup<T>(
 ) -> Result<T, String> {
     check_startup(config_dir)?;
     ready()
+}
+
+/// Diagnose only. Valid intent/config/mirror correspondence never authorizes
+/// startup, rollback, cleanup, DB repair, or audio. Physical roots stay unopened.
+pub(crate) fn inspect_recovery(
+    config_dir: &Path, analysis_id: u64, cancelled: &dyn Fn() -> bool,
+) -> Result<crate::library_recovery::Observation, String> {
+    use crate::library_recovery::{ConfigMatch, Observation, Reason, CANCELLED};
+    let mut result = Observation::new(analysis_id);
+    let check = || if cancelled() { Err(CANCELLED.to_string()) } else { Ok(()) };
+    check()?;
+    let parent = match Parent::inspect(config_dir) {
+        Ok(parent) => parent,
+        Err(_) => { result.note(Reason::UnsafeEntry); return Ok(result); }
+    };
+    // All paths have fixed backend-owned names. No path comes from IPC.
+    let names = [NAME, "config.json", "library", "library.next", "mpd-v2.db",
+        "queue_cache.json", "favorites.json", "playlists.json", "mpd.conf",
+        "local-source-identities.json", "local-source-identities.lock", "equalizer-shared-v1.json"];
+    let stamp = |name: &str| -> Result<Option<(u64, u64, u64, u32, i64, i64, i64, i64)>, ()> {
+        match fs::symlink_metadata(parent.entry(name)) {
+            Ok(m) => Ok(Some((m.dev(), m.ino(), m.size(), m.mode(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()))),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(()),
+        }
+    };
+    let before = names.iter().map(|n| stamp(n)).collect::<Vec<_>>();
+    let present = |name: &str| matches!(stamp(name), Ok(Some(_)));
+    for name in [NAME, "config.json", "local-source-identities.json", "local-source-identities.lock"] {
+        if present(name) && open_regular(&parent.entry(name), true).is_err() { result.note(Reason::UnsafeEntry); }
+    }
+    let record = if present(NAME) {
+        match read_record(&parent) {
+            Ok(record) => {
+                result.note(Reason::IntentValid);
+                result.intent_version = Some(record.intent.version);
+                result.queue_backup_version = record.intent.queue_backup.as_ref().map(|b| b.version);
+                Some(record)
+            }
+            Err(_) => { result.note(Reason::IntentInvalid); None }
+        }
+    } else { None };
+    if !present(NAME) {
+        result.note(if present("library.next") { Reason::OrphanStaging } else { Reason::NoPendingMarker });
+    }
+    check()?;
+    let config = if present("config.json") {
+        match parent.config_fingerprint() {
+            Ok(hash) => {
+                result.config_matches = match &record {
+                    Some(r) => match (hash == r.intent.previous_config, hash == r.intent.next_config) {
+                        (true, true) => ConfigMatch::Both, (true, false) => ConfigMatch::Previous,
+                        (false, true) => ConfigMatch::Next,
+                        _ => { result.note(Reason::ConfigDivergent); ConfigMatch::Unbound }
+                    },
+                    None => ConfigMatch::Unbound,
+                };
+                Some(hash)
+            }
+            Err(_) => { result.note(Reason::ConfigInvalid); None }
+        }
+    } else { result.note(Reason::ConfigMissing); None };
+    let mut generations = Vec::new();
+    for name in ["library", "library.next"] {
+        check()?;
+        if !present(name) {
+            if name == "library" { result.note(Reason::MirrorMissing); }
+            continue;
+        }
+        if fs::symlink_metadata(parent.entry(name)).is_ok_and(|m|
+            !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o022 != 0)
+        { result.note(Reason::UnsafeEntry); }
+        match generation(&parent.entry(name)) {
+            Ok(g) => {
+                if let Some(manifest) = &g.manifest {
+                    if mirror::validate_manifest(manifest).is_err() { result.note(Reason::MirrorInvalid); }
+                }
+                if let Some(r) = &record {
+                    if g != r.intent.previous && g != r.intent.next { result.note(Reason::GenerationDivergent); }
+                }
+                generations.push((name, g));
+            }
+            Err(_) => result.note(Reason::MirrorInvalid),
+        }
+    }
+    // Only inspect types/identity for these controls. DB presence is explicitly
+    // unproven coverage; this phase never hashes/loads the DB or queries MPD.
+    for name in ["mpd-v2.db", "queue_cache.json", "favorites.json", "playlists.json", "mpd.conf", "equalizer-shared-v1.json"] {
+        check()?;
+        if present(name) {
+            if open_regular(&parent.entry(name), name != "mpd-v2.db" && name != "mpd.conf").is_err() {
+                result.note(Reason::UnsafeEntry);
+            }
+        }
+    }
+    result.note(if present("mpd-v2.db") { Reason::DatabaseUnproven } else { Reason::DatabaseMissing });
+    let ledger = "local-source-identities.json";
+    let lock = "local-source-identities.lock";
+    // Ledger may exceed the intent's own bound. Limit and cancel chunked reads
+    // explicitly, while retaining the original nofollow/type/UID/nlink gates.
+    let bounded = |name: &str, limit: u64| -> Result<Vec<u8>, String> {
+        let path = parent.entry(name);
+        let mut file = open_regular(&path, true)?;
+        let mut bytes = Vec::new();
+        loop {
+            check()?;
+            let mut chunk = [0u8; 16_384];
+            let n = file.read(&mut chunk).map_err(|_| blocked("Leitura não confirmada."))?;
+            if n == 0 { break; }
+            if bytes.len() as u64 + n as u64 > limit { return Err(blocked("Limite de inspeção excedido.")); }
+            bytes.extend_from_slice(&chunk[..n]);
+        }
+        require_file_identity(&path, &file)?;
+        Ok(bytes)
+    };
+    let manifests = generations.iter().filter_map(|(_, g)| g.manifest.clone()).collect::<Vec<_>>();
+    if present(ledger) && present(lock) {
+        let pair = bounded(ledger, 16 * 1024 * 1024).and_then(|bytes| {
+            let anchor = bounded(lock, 32)?;
+            crate::source_identity::validate_recovery_snapshot(&bytes, &anchor, &manifests)
+                .map_err(|_| blocked("Identidades divergentes."))
+        });
+        if pair.is_err() { check()?; result.note(Reason::LedgerDivergent); }
+    } else {
+        result.note(Reason::LedgerMissing);
+    }
+    check()?;
+    // Parent and entry fences reject replacement/in-place edits observed during
+    // inspection. This is not an atomic snapshot of a concurrent filesystem.
+    if parent.validate_inspection().is_err()
+        || before.iter().any(Result::is_err)
+        || names.iter().zip(&before).any(|(n, prior)| stamp(n).as_ref() != prior.as_ref())
+        || config.is_some_and(|hash| parent.config_fingerprint().ok() != Some(hash))
+        || generations.iter().any(|(name, expected)| generation(&parent.entry(name)).ok().as_ref() != Some(expected))
+    {
+        result.note(Reason::FilesystemChanged);
+    }
+    result.note(Reason::OwnershipUnknown);
+    check()?;
+    Ok(result)
 }
 
 pub(crate) struct SaveIntent {
@@ -763,6 +962,25 @@ impl SaveIntent {
         };
         guard.before_exchange()?;
         Ok(guard)
+    }
+
+    /// Live, unpublished draft only: no queue clear, exchange, update or config
+    /// commit has occurred. This is not a crash-recovery escape hatch.
+    pub(crate) fn abort_unpublished(&self,prepared:&MirrorBuildResult)->Result<(),String>{
+        self.before_exchange()?;
+        if self.parent.entry(crate::recovery_set::PENDING).try_exists().map_err(|_|blocked("Conjunto incerto."))?
+            ||self.parent.entry(crate::recovery_set::SEAL).try_exists().map_err(|_|blocked("Selo incerto."))?{return Err(blocked("Conjunto parcial preservado."))}
+        mirror::cleanup_prepared_managed_generation(prepared)?;
+        self.validate_record()?;
+        if self.parent.config_fingerprint()?!=self.record.intent.previous_config
+            ||generation(&self.parent.entry("library"))?!=self.record.intent.previous
+            ||self.parent.entry("library.next").try_exists().map_err(|_|blocked("Staging incerta."))?{
+            return Err(blocked("Draft alterado; intenção preservada."));
+        }
+        self.parent.sync_with(&File::sync_all)?;
+        require_file_identity(&self.parent.entry(NAME),&self.file)?;
+        fs::remove_file(self.parent.entry(NAME)).map_err(|_|blocked("Intenção não removida."))?;
+        self.parent.sync_with(&File::sync_all)
     }
 
     fn validate_record(&self) -> Result<(), String> {
@@ -1137,6 +1355,110 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn readonly_recovery_diagnoses_valid_invalid_orphan_and_versions_without_cleanup() {
+        use crate::library_recovery::{ConfigMatch, Reason};
+        for kind in ["orphan", "v1", "v2", "invalid", "different_config", "next_config"] {
+            let fixture = Fixture::new();
+            let _intent = match kind {
+                "orphan" => None,
+                "v2" => Some(create_backup(&fixture, &logical_backup_fixture(PlaybackState::Paused)).unwrap()),
+                _ => Some(fixture.intent()),
+            };
+            if kind == "invalid" { fs::write(fixture.config_dir.join(NAME), b"truncated").unwrap(); }
+            if kind == "different_config" {
+                let mut changed = fixture.previous.clone(); changed.first_run = true; fixture.persist(&changed).unwrap();
+            }
+            if kind == "next_config" { fixture.persist(&fixture.next).unwrap(); }
+            let config = fs::read(fixture.config_dir.join("config.json")).unwrap();
+            let intent = fs::read(fixture.config_dir.join(NAME)).ok();
+            let old = generation(&fixture.config_dir.join("library")).unwrap();
+            let next = generation(&fixture.config_dir.join("library.next")).unwrap();
+            let observed = inspect_recovery(&fixture.config_dir, 7, &|| false).unwrap();
+            assert!(!observed.recovery_available);
+            assert_eq!(observed.analysis_id, 7);
+            assert!(observed.reasons.contains(&Reason::DatabaseUnproven));
+            assert!(observed.reasons.contains(&Reason::OwnershipUnknown));
+            match kind {
+                "orphan" => assert!(observed.reasons.contains(&Reason::OrphanStaging)),
+                "invalid" => assert!(observed.reasons.contains(&Reason::IntentInvalid)),
+                "different_config" => assert!(observed.reasons.contains(&Reason::ConfigDivergent)),
+                "next_config" => assert_eq!(observed.config_matches, ConfigMatch::Next),
+                "v2" => { assert_eq!(observed.intent_version, Some(2)); assert_eq!(observed.queue_backup_version, Some(2)); }
+                _ => { assert_eq!(observed.intent_version, Some(1)); assert_eq!(observed.config_matches, ConfigMatch::Previous); }
+            }
+            assert_eq!(fs::read(fixture.config_dir.join("config.json")).unwrap(), config);
+            assert_eq!(fs::read(fixture.config_dir.join(NAME)).ok(), intent);
+            assert_eq!(generation(&fixture.config_dir.join("library")).unwrap(), old);
+            assert_eq!(generation(&fixture.config_dir.join("library.next")).unwrap(), next);
+            fixture.assert_startup_blocked();
+        }
+    }
+
+    #[test]
+    fn readonly_recovery_rejects_replaced_generations_and_never_follows_control_symlinks() {
+        use crate::library_recovery::Reason;
+        for kind in ["generation", "db_symlink", "intent_symlink", "parent_mode", "config_missing"] {
+            let fixture = Fixture::new(); let _intent = fixture.intent();
+            match kind {
+                "generation" => {
+                    fs::rename(fixture.config_dir.join("library"), fixture.config_dir.join("old-library")).unwrap();
+                    fs::create_dir(fixture.config_dir.join("library")).unwrap();
+                }
+                "db_symlink" => {
+                    fs::remove_file(fixture.config_dir.join("mpd-v2.db")).unwrap();
+                    std::os::unix::fs::symlink("/synthetic-missing-db-target", fixture.config_dir.join("mpd-v2.db")).unwrap();
+                }
+                "intent_symlink" => {
+                    fs::remove_file(fixture.config_dir.join(NAME)).unwrap();
+                    std::os::unix::fs::symlink("/synthetic-missing-intent-target", fixture.config_dir.join(NAME)).unwrap();
+                }
+                "config_missing" => { fs::remove_file(fixture.config_dir.join("config.json")).unwrap(); }
+                _ => fs::set_permissions(&fixture.config_dir, fs::Permissions::from_mode(0o777)).unwrap(),
+            }
+            let observed = inspect_recovery(&fixture.config_dir, 8, &|| false).unwrap();
+            let expected = match kind { "generation" => Reason::GenerationDivergent,
+                "config_missing" => Reason::ConfigMissing, _ => Reason::UnsafeEntry };
+            assert!(observed.reasons.contains(&expected), "{kind}: {:?}", observed.reasons);
+            assert!(!observed.recovery_available);
+        }
+    }
+
+    #[test]
+    fn readonly_recovery_reports_mid_inspection_changes_and_cancels_without_effects() {
+        use crate::library_recovery::Reason;
+        let fixture = Fixture::new(); let _intent = fixture.intent();
+        let calls = Cell::new(0);
+        let result = inspect_recovery(&fixture.config_dir, 9, &|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 4 { fixture.persist(&fixture.next).unwrap(); }
+            false
+        }).unwrap();
+        assert!(result.reasons.contains(&Reason::FilesystemChanged));
+        let intent = fs::read(fixture.config_dir.join(NAME)).unwrap();
+        let calls = Cell::new(0);
+        assert_eq!(inspect_recovery(&fixture.config_dir, 10, &|| {
+            calls.set(calls.get() + 1); calls.get() >= 3
+        }).unwrap_err(), crate::library_recovery::CANCELLED);
+        assert_eq!(fs::read(fixture.config_dir.join(NAME)).unwrap(), intent);
+        fixture.assert_startup_blocked();
+    }
+
+    #[test]
+    fn readonly_recovery_missing_media_and_legacy_permissions_are_preserved() {
+        use crate::library_recovery::Reason;
+        let fixture = Fixture::new(); let _intent = fixture.intent();
+        // Both source roots and media are absent. Analysis only reads manifests.
+        fs::remove_dir_all(fixture.root.join("Old")).unwrap();
+        fs::remove_dir_all(fixture.root.join("Added")).unwrap();
+        fs::set_permissions(&fixture.config_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let observed = inspect_recovery(&fixture.config_dir, 11, &|| false).unwrap();
+        assert!(observed.reasons.contains(&Reason::IntentValid));
+        assert!(!observed.reasons.contains(&Reason::FilesystemChanged));
+        assert_eq!(fs::metadata(&fixture.config_dir).unwrap().mode() & 0o777, 0o755);
+        assert!(!fixture.root.join("Old").exists());
     }
 
     #[test]
@@ -2618,5 +2940,7 @@ mod tests {
             }
         }
     }
+
+    include!("managed_save_intent/recovery_tests.rs");
 
 }

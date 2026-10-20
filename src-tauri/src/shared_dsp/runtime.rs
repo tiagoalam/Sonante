@@ -305,12 +305,11 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
                 .pointer("/devices/target_level")
                 .and_then(Value::as_u64)
                 != Some(4096)
-            || config.pointer("/devices/resampler")
-                != Some(&json!({"type":"AsyncSinc","profile":"Balanced"}))
+            || config.pointer("/devices/resampler").is_some_and(|v| !v.is_null())
             || config
                 .pointer("/devices/enable_rate_adjust")
                 .and_then(Value::as_bool)
-                != Some(true)
+                != Some(false)
             || config
                 .pointer("/devices/capture_samplerate")
                 .is_some_and(|v| !v.is_null() && v.as_u64() != Some(48000))
@@ -725,6 +724,22 @@ mod tests {
             sample_rate_hz: rate,
             channels: 2,
         }
+    }
+
+    #[test]
+    fn consumer_clock_topology_requires_no_resampler_and_disabled_rate_adjust() {
+        let (controller,state)=fixture(48000);let preset=flat_preset();
+        let dsp=serde_json::to_value(convert_preset(&preset,pcm(48000)).unwrap()).unwrap();
+        let baseline=json!({"title":"private_token","devices":{"samplerate":48000,"target_level":4096,"enable_rate_adjust":false,"capture":{"type":"RawFile","channels":2,"format":"S32_LE","filename":"cap"},"playback":{"node_name":"play"}},"filters":dsp["filters"],"pipeline":dsp["pipeline"]});
+        *state.config.lock().unwrap()=baseline.clone();controller.confirm_initial(&preset,pcm(48000)).unwrap();
+        for resampler in [json!({"type":"AsyncSinc","profile":"Balanced"}),json!({"type":"AsyncPoly","interpolation":"Linear"})] {
+            let mut wrong=baseline.clone();wrong["devices"]["resampler"]=resampler;*state.config.lock().unwrap()=wrong;
+            assert_eq!(controller.confirm_initial(&preset,pcm(48000)),Err(RuntimeError::UnexpectedConfig));
+        }
+        let mut wrong=baseline.clone();wrong["devices"]["enable_rate_adjust"]=json!(true);*state.config.lock().unwrap()=wrong;
+        assert_eq!(controller.confirm_initial(&preset,pcm(48000)),Err(RuntimeError::UnexpectedConfig));
+        let mut with_null=baseline;with_null["devices"]["resampler"]=Value::Null;*state.config.lock().unwrap()=with_null;
+        controller.confirm_initial(&preset,pcm(48000)).unwrap();assert_eq!(state.patches.load(Ordering::SeqCst),0);
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub enum CurrentMedia {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VolumeBackend {
+    DirectEquipment,
     AlsaHardware,
     #[serde(rename = "pipewire")]
     PipeWire,
@@ -119,6 +120,12 @@ pub struct VolumeStatus {
     pub writable: bool,
     pub available: bool,
     pub backend: VolumeBackend,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub direct_gain: Option<crate::direct_volume::Gain>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub direct_token: Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub shared_token: Option<String>,
 }
 
 impl VolumeStatus {
@@ -130,6 +137,9 @@ impl VolumeStatus {
             muted: available && value == 0,
             writable: available,
             available,
+            direct_gain: None,
+            direct_token: None,
+            shared_token: None,
             backend: if available {
                 VolumeBackend::MpdSoftware
             } else {
@@ -145,6 +155,9 @@ impl VolumeStatus {
             writable: true,
             available: true,
             backend: VolumeBackend::PipeWire,
+            direct_gain: None,
+            direct_token: None,
+            shared_token: None,
         }
     }
 
@@ -155,6 +168,9 @@ impl VolumeStatus {
             writable: false,
             available: false,
             backend: VolumeBackend::Unavailable,
+            direct_gain: None,
+            direct_token: None,
+            shared_token: None,
         }
     }
 
@@ -768,6 +784,7 @@ pub struct AudioEngine {
     cache_persistence_pending: bool,
     playback_intent: u64,
     eq_intervention:Arc<AtomicU64>,
+    direct_playback:Option<Arc<crate::direct_playback::Gate>>,
 }
 
 const QUEUE_STRUCTURE_RESERVED: u8 = 1;
@@ -2804,7 +2821,7 @@ impl AudioEngine {
             restored_resume,
             startup_restore,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
         }
     }
 
@@ -2860,6 +2877,36 @@ impl AudioEngine {
         resolved: &ResolvedDeviceSwitchQueue,
         watch: &EqTransitionWatch,
     ) -> Result<&'static str, String> {
+        self.resume_checked_output_switch(saved,resolved,watch,false,|audio,_|audio.send_command("pause 0"))
+    }
+    pub(crate) fn resume_saved_route(
+        &mut self,
+        saved: Option<DeviceSwitchSnapshot>,
+        resolved: &ResolvedDeviceSwitchQueue,
+        watch: &EqTransitionWatch,
+        owner: &crate::config_save_operation::Transaction<'_>,
+        verify_mute: impl FnOnce(&Self)->Result<(),String>,
+    ) -> Result<&'static str,String> {
+        let result=self.resume_checked_output_switch(saved,resolved,watch,true,|audio,expected| {
+            let s=saved.ok_or("OUTPUT_SAVE_RESUME_INVALID")?;
+            audio.direct_playback.as_ref().ok_or("OUTPUT_SAVE_RESUME_GUARD_UNAVAILABLE")?
+                .start_saved_route(&audio.socket_path,owner,||watch.current(),s.queue_index,s.elapsed,||{
+                    let actual=Self::capture_mpd_queue_structure(&audio.socket_path).map_err(|_|"OUTPUT_SAVE_RESUME_QUEUE_UNCONFIRMED")?;
+                    if actual.playlist_version!=expected.playlist_version||actual.entries!=expected.entries {
+                        return Err("OUTPUT_SAVE_RESUME_QUEUE_CHANGED".into());
+                    }
+                    let status=Self::parse_mpd_queue_status(&audio.send_command("status")?)?;
+                    if status.state!=PlaybackState::Stopped{return Err("OUTPUT_SAVE_RESUME_CONTEXT_CHANGED".into());}
+                    verify_mute(audio)
+                })
+        });
+        if matches!(result,Ok("resumed")){self.restored_resume=None;}
+        result
+    }
+    fn resume_checked_output_switch(
+        &mut self,saved:Option<DeviceSwitchSnapshot>,resolved:&ResolvedDeviceSwitchQueue,
+        watch:&EqTransitionWatch,logical:bool,resume:impl FnOnce(&Self,&MpdQueueStructure)->Result<Vec<String>,String>,
+    )->Result<&'static str,String> {
         let Some(s) = saved else { return Ok("stopped") };
         if s.state != PlaybackState::Playing {
             return Ok(if s.state == PlaybackState::Stopped {
@@ -2876,11 +2923,14 @@ impl AudioEngine {
         }
         self.validate_device_switch_queue(resolved)?;
         let before = Self::parse_mpd_queue_status(&self.send_command("status")?)?;
-        if before.state != PlaybackState::Paused
-            || before.current_index != Some(s.queue_index)
-            || !before.elapsed.is_finite()
-            || (before.elapsed - s.elapsed).abs() > 0.25
-        {
+        let context_valid=if logical {
+            before.state==PlaybackState::Stopped
+                && self.restored_resume==Some(PlaybackResumeSnapshot{queue_index:s.queue_index,elapsed:s.elapsed,state:PlaybackState::Paused})
+        } else {
+            before.state==PlaybackState::Paused && before.current_index==Some(s.queue_index)
+                && before.elapsed.is_finite() && (before.elapsed-s.elapsed).abs()<=0.25
+        };
+        if !context_valid {
             return Err("EQ_RESUME_CONTEXT_CHANGED".into());
         }
         let structure = Self::capture_mpd_queue_structure(&self.socket_path)
@@ -2898,7 +2948,7 @@ impl AudioEngine {
         if !watch.current() {
             return Ok("superseded");
         }
-        if self.send_command("pause 0").is_err() {
+        if resume(self,&structure).is_err() {
             let _ = self.send_command("pause 1");
             return Err("EQ_RESUME_UNCONFIRMED".into());
         }
@@ -2966,6 +3016,10 @@ impl AudioEngine {
         }
     }
 
+    pub(crate) fn observed_software_volume(&self) -> Result<u32,String> {
+        crate::direct_volume::observed_software_volume(self.send_command("status")?)
+    }
+
     pub fn set_volume(&self, volume: u32) -> Result<(), String> {
         let clamped = volume.min(100);
         self.send_command(&format!("setvol {}", clamped)).map(|_| ())
@@ -2987,11 +3041,15 @@ impl AudioEngine {
         Ok(())
     }
 
+    pub(crate) fn attach_direct_playback(&mut self,gate:Arc<crate::direct_playback::Gate>){self.direct_playback=Some(gate);}
+    fn send_with_gate(socket:&str,gate:Option<&crate::direct_playback::Gate>,command:&str)->Result<Vec<String>,String>{
+        match gate{Some(gate)=>gate.send(socket,command),None=>Self::send_command_to_socket(socket,command)}
+    }
     fn send_command(&self, command: &str) -> Result<Vec<String>, String> {
-        Self::send_command_to_socket(&self.socket_path, command)
+        Self::send_with_gate(&self.socket_path,self.direct_playback.as_deref(),command)
     }
 
-    fn send_command_to_socket(socket_path: &str, command: &str) -> Result<Vec<String>, String> {
+    pub(crate) fn send_command_to_socket(socket_path: &str, command: &str) -> Result<Vec<String>, String> {
         Self::send_command_to_socket_before(socket_path, command, None)
     }
 
@@ -3001,9 +3059,19 @@ impl AudioEngine {
         deadline: Option<Instant>,
     ) -> Result<Vec<String>, String> {
         mpd_deadline_timeout(deadline)?;
-        let mut stream = UnixStream::connect(socket_path)
+        let stream = UnixStream::connect(socket_path)
             .map_err(|e| format!("Falha ao conectar no socket MPD: {}", e))?;
+        Self::send_command_on_stream(stream, command, deadline)
+    }
 
+    pub(crate) fn send_owned_command_to_socket(socket_path: &str, pid: u32, command: &str) -> Result<Vec<String>, String> {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let stream = crate::signal_processing::connect(Path::new(socket_path), pid, deadline)
+            .map_err(|_| crate::direct_volume::STALE.to_string())?;
+        Self::send_command_on_stream(stream, command, Some(deadline))
+    }
+
+    fn send_command_on_stream(mut stream: UnixStream, command: &str, deadline: Option<Instant>) -> Result<Vec<String>, String> {
         stream
             .set_read_timeout(Some(Duration::from_millis(500)))
             .map_err(|e| format!("Falha ao configurar timeout de leitura do MPD: {}", e))?;
@@ -3428,6 +3496,19 @@ impl AudioEngine {
         self.prepare_device_switch()
     }
 
+    pub(crate) fn prepare_reserved_route_save(&mut self,resolved:&ResolvedDeviceSwitchQueue)->Result<Option<DeviceSwitchSnapshot>,DeviceSwitchPreparationError>{
+        let logical=self.restored_resume;
+        let captured=self.prepare_reserved_device_switch(resolved)?;
+        if captured.is_some_and(|s|s.state==PlaybackState::Stopped) {
+            if let Some(cursor)=logical.filter(|s|s.valid_for(self.queue.len())) {
+                // A stopped daemon with a logical paused cursor is never a
+                // Playing origin. Keep its position across successive Saves.
+                return Ok(Some(DeviceSwitchSnapshot{queue_index:cursor.queue_index,elapsed:cursor.elapsed,state:PlaybackState::Paused}));
+            }
+        }
+        Ok(captured)
+    }
+
     pub(crate) fn queue_has_logical_resume(&self) -> bool {
         self.restored_resume.is_some()
     }
@@ -3637,6 +3718,17 @@ impl AudioEngine {
         )
     }
 
+    /// Route Save stages only the queue and a logical paused cursor. It sends no
+    /// play/seek before durable commit, including on an unattenuated Shared sink.
+    pub(crate) fn restore_for_route_save(&mut self,saved:Option<DeviceSwitchSnapshot>,resolved:&ResolvedDeviceSwitchQueue)->Result<DeviceSwitchRestoreOutcome,String>{
+        self.validate_device_switch_queue(resolved)?;
+        if saved.is_some_and(|s|!s.elapsed.is_finite()||s.elapsed<0.||s.queue_index>=self.queue.len()){return Err("OUTPUT_SAVE_RESUME_INVALID".into());}
+        let command=self.device_switch_queue_restore_commands(None,&resolved.playback_uris)?;
+        if Self::send_command_to_socket(&self.socket_path,&command).is_err(){self.mark_queue_uncertain();return Err("PLAYBACK_QUEUE_UNCERTAIN".into());}
+        self.restored_resume=saved.filter(|s|s.state!=PlaybackState::Stopped).map(|s|PlaybackResumeSnapshot{queue_index:s.queue_index,elapsed:s.elapsed,state:PlaybackState::Paused});
+        Ok(DeviceSwitchRestoreOutcome::Complete)
+    }
+
     pub(crate) fn restore_after_reserved_device_switch(
         &self,
         saved_state: Option<DeviceSwitchSnapshot>,
@@ -3645,7 +3737,7 @@ impl AudioEngine {
         self.restore_after_reserved_device_switch_with(
             saved_state,
             resolved,
-            &mut |command| self.send_command(command),
+            &mut |command| Self::send_command_to_socket(&self.socket_path,command),
             &mut std::thread::sleep,
         )
     }
@@ -3831,8 +3923,9 @@ impl AudioEngine {
     pub fn play_tracks(&mut self, tracks: Vec<TrackMetadata>, playback_uris: Vec<String>, start_index: usize) -> Result<(), String> {
         self.note_eq_intervention();
         let socket = self.socket_path.clone();
+        let gate=self.direct_playback.clone();
         self.play_tracks_with_io(tracks, playback_uris, start_index,
-            |command| Self::send_command_to_socket(&socket, command), |audio| audio.save_queue_cache())
+            |command| Self::send_with_gate(&socket,gate.as_deref(),command), |audio| audio.save_queue_cache())
     }
 
     fn play_tracks_with_io(
@@ -3875,7 +3968,8 @@ impl AudioEngine {
         }
         batch.push_str(&format!("play {}\ncommand_list_end", start_index));
 
-        if send(&batch).is_err() {
+        if let Err(error) = send(&batch) {
+            if crate::direct_playback::is_admission_refusal(&error){return Err(error);}
             // A command list is sequential, never transactional. ACK/lost reply
             // cannot establish which effects ran; retain the last durable cache.
             self.mark_queue_uncertain();
@@ -4085,7 +4179,8 @@ impl AudioEngine {
         self.note_eq_intervention();
         self.invalidate_playback_intents();
         let socket_path = self.socket_path.clone();
-        let mut send_command = |command: &str| Self::send_command_to_socket(&socket_path, command);
+        let gate=self.direct_playback.clone();
+        let mut send_command = |command: &str| Self::send_with_gate(&socket_path,gate.as_deref(),command);
         self.change_track_with(
             "next",
             is_shared,
@@ -4098,7 +4193,8 @@ impl AudioEngine {
         self.note_eq_intervention();
         self.invalidate_playback_intents();
         let socket_path = self.socket_path.clone();
-        let mut send_command = |command: &str| Self::send_command_to_socket(&socket_path, command);
+        let gate=self.direct_playback.clone();
+        let mut send_command = |command: &str| Self::send_with_gate(&socket_path,gate.as_deref(),command);
         self.change_track_with(
             "previous",
             is_shared,
@@ -4374,8 +4470,9 @@ impl AudioEngine {
         let started = Instant::now();
         let deadline = std::cell::Cell::new(None::<Instant>);
         let mut pre_status = true;
+        let gate=self.direct_playback.clone();
         let mut send_command = |command: &str| {
-            let result = Self::send_command_to_socket_before(&socket_path, command, deadline.get());
+            let result = if !is_shared {Self::send_with_gate(&socket_path,gate.as_deref(),command)}else{Self::send_command_to_socket_before(&socket_path, command, deadline.get())};
             // Activate only after observing Shared Playing. Direct, paused,
             // stopped and logical restored seeks retain their original I/O path.
             if is_shared && pre_status && command == "status" {
@@ -4833,7 +4930,14 @@ impl AudioEngine {
     }
 }
 
-pub struct AudioState(pub Mutex<AudioEngine>);
+pub struct AudioState(pub Mutex<AudioEngine>, Arc<AtomicU64>);
+impl AudioState {
+    pub fn new(engine:AudioEngine)->Self {
+        let epoch=engine.eq_intervention.clone(); Self(Mutex::new(engine),epoch)
+    }
+    // The same existing epoch, reachable before waiting for AudioState's mutex.
+    pub(crate) fn note_transport_intervention(&self) { self.1.fetch_add(1,Ordering::AcqRel); }
+}
 
 #[cfg(test)]
 mod tests {
@@ -6482,6 +6586,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn owned_direct_volume_socket_accepts_only_the_expected_process() {
+        let (path, server) = fake_album_mpd(vec![("setvol 0", "OK\n")]);
+        AudioEngine::send_owned_command_to_socket(&path, std::process::id(), "setvol 0").unwrap();
+        server.join().unwrap();
+        let id=ALBUM_TEST_ID.fetch_add(1,Ordering::Relaxed);
+        let path=std::env::temp_dir().join(format!("sonante-owned-volume-{}-{id}.sock",std::process::id()));
+        let listener=UnixListener::bind(&path).unwrap();
+        let server=thread::spawn(move || {let(mut stream,_)=listener.accept().unwrap();stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();let mut bytes=[0u8;256];assert_eq!(std::io::Read::read(&mut stream,&mut bytes).unwrap(),0,"foreign server must receive no command");});
+        assert_eq!(AudioEngine::send_owned_command_to_socket(path.to_str().unwrap(),std::process::id()+1,"setvol 100"),Err(crate::direct_volume::STALE.into()));
+        server.join().unwrap();std::fs::remove_file(path).unwrap();
+    }
+
     fn fake_album_mpd(responses: Vec<(&'static str, &'static str)>) -> (String, thread::JoinHandle<()>) {
         let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("sonante-albums-{}-{id}.sock", std::process::id()));
@@ -7148,7 +7265,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
         };
 
         assert_eq!(
@@ -7408,7 +7525,7 @@ mod tests {
                 restored_resume: None,
                 startup_restore: StartupQueueRestore::Ready,
                 queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
             };
             if command == "update" {
                 AudioEngine::update_library(&audio.socket_path).unwrap();
@@ -7426,7 +7543,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
         };
         assert!(AudioEngine::update_library(&audio.socket_path).is_err());
         server.join().unwrap();
@@ -8451,7 +8568,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
         }
     }
 
@@ -10694,7 +10811,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
         };
 
         assert_eq!(
@@ -10744,7 +10861,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
         };
         let status = PlaybackStatus {
             snapshot_consistent: true,
@@ -10785,7 +10902,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
         };
 
         assert!(matches!(
@@ -10866,6 +10983,56 @@ mod tests {
         assert_eq!(engine.resume_eq_switch(saved,&resolved,&watch).unwrap(),"resumed");server.join().unwrap();
         for origin in [PlaybackState::Paused,PlaybackState::Stopped]{let mut e=engine_with_track("fixture.wav");let r=e.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into()]).unwrap();let w=e.watch_eq_transition();assert_eq!(e.resume_eq_switch(Some(DeviceSwitchSnapshot{queue_index:0,elapsed:17.,state:origin}),&r,&w).unwrap(),if origin==PlaybackState::Paused{"paused"}else{"stopped"});}
     }
+    #[test]
+    fn route_save_successive_save_preserves_logical_paused_cursor_without_resume(){
+        let(path,server)=fake_album_mpd(vec![("status","playlist: 9\nplaylistlength: 2\nstate: stop\nOK\n")]);
+        let mut engine=engine_with_track("fixture.wav");engine.queue.push(engine.queue[0].clone());engine.socket_path=path;engine.restored_resume=Some(PlaybackResumeSnapshot{queue_index:1,elapsed:17.,state:PlaybackState::Paused});
+        let resolved=engine.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into();2]).unwrap();
+        let saved=engine.prepare_reserved_route_save(&resolved).unwrap().unwrap();assert_eq!(saved.state,PlaybackState::Paused);assert_eq!(saved.queue_index,1);assert_eq!(saved.elapsed,17.);server.join().unwrap();
+    }
+
+    #[test]
+    fn route_save_staging_has_no_play_or_seek_unlike_previous_restore() {
+        for legacy in [true,false] {
+            let id=ALBUM_TEST_ID.fetch_add(1,Ordering::Relaxed);let path=std::env::temp_dir().join(format!("route-stage-{}-{id}.sock",std::process::id()));let listener=UnixListener::bind(&path).unwrap();
+            let server=thread::spawn(move||{
+                let mut sent=Vec::new();
+                for _ in 0..if legacy{2}else{1} {
+                    let(mut stream,_)=listener.accept().unwrap();stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();stream.write_all(b"OK MPD 0.24.15\n").unwrap();
+                    let mut reader=BufReader::new(stream.try_clone().unwrap());let mut first=String::new();reader.read_line(&mut first).unwrap();sent.push(first.trim().to_string());
+                    if first=="command_list_begin\n" {loop{let mut line=String::new();assert!(reader.read_line(&mut line).unwrap()>0);sent.push(line.trim().to_string());if line=="command_list_end\n"{break}}}
+                    stream.write_all(b"OK\n").unwrap();
+                }
+                std::fs::remove_file(path).unwrap();sent
+            });
+            let mut engine=engine_with_track("fixture.wav");engine.queue.push(engine.queue[0].clone());engine.socket_path=std::env::temp_dir().join(format!("route-stage-{}-{id}.sock",std::process::id())).to_string_lossy().into_owned();
+            let resolved=engine.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into();2]).unwrap();let saved=Some(DeviceSwitchSnapshot{queue_index:1,elapsed:0.,state:PlaybackState::Playing});
+            if legacy {engine.restore_after_reserved_device_switch(saved,&resolved).unwrap();}else{engine.restore_for_route_save(saved,&resolved).unwrap();assert_eq!(engine.restored_resume,Some(PlaybackResumeSnapshot{queue_index:1,elapsed:0.,state:PlaybackState::Paused}));}
+            let sent=server.join().unwrap();assert_eq!(sent.iter().any(|c|c.starts_with("play ")),legacy);if !legacy {assert!(!sent.iter().any(|c|c.starts_with("seek")||c.starts_with("pause")));}assert_eq!(sent.iter().filter(|c|c.starts_with("add ")).count(),2);
+        }
+    }
+
+    #[test]
+    fn route_save_intervention_epoch_can_revoke_while_audio_mutex_is_held() {
+        let state=AudioState::new(engine_with_track("fixture.wav"));
+        let audio=state.0.lock().unwrap();let watch=audio.watch_eq_transition();
+        state.note_transport_intervention();assert!(!watch.current());drop(audio);
+    }
+    #[test]
+    fn route_save_shared_resume_reuses_verified_queue_cursor_and_owner() {
+        let pause="playlist: 9\nplaylistlength: 1\nstate: stop\nOK\n";
+        let play="playlist: 9\nplaylistlength: 1\nsong: 0\nelapsed: 17.001\nstate: play\nOK\n";
+        let(path,server)=fake_album_mpd(vec![("status",pause),("status",pause),("playlistinfo","file: fixture.wav\nPos: 0\nId: 7\nOK\n"),("status",pause),("status",pause),("playlistinfo","file: fixture.wav\nPos: 0\nId: 7\nOK\n"),("status",pause),("status",pause),("seek 0 17.000","OK\n"),("status",play)]);
+        let mut engine=engine_with_track("fixture.wav");engine.socket_path=path;
+        let operations=Arc::new(crate::config_save_operation::Coordinator::new());
+        let gate=Arc::new(crate::direct_playback::Gate::new(operations.clone()));let cfg=crate::config::AppConfig::default();gate.bind(&cfg,1,None);engine.attach_direct_playback(gate);
+        let resolved=engine.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into()]).unwrap();let watch=engine.watch_eq_transition();engine.restored_resume=Some(PlaybackResumeSnapshot{queue_index:0,elapsed:17.,state:PlaybackState::Paused});let owner=operations.begin().unwrap();
+        assert_eq!(engine.resume_saved_route(Some(DeviceSwitchSnapshot{queue_index:0,elapsed:17.,state:PlaybackState::Playing}),&resolved,&watch,&owner,|_|Ok(())).unwrap(),"resumed");server.join().unwrap();
+        for origin in [PlaybackState::Paused,PlaybackState::Stopped] {
+            assert_eq!(engine.resume_saved_route(Some(DeviceSwitchSnapshot{queue_index:0,elapsed:17.,state:origin}),&resolved,&watch,&owner,|_|Ok(())).unwrap(),if origin==PlaybackState::Paused{"paused"}else{"stopped"});
+        }
+    }
+
     #[test]
     fn eq_resume_human_transport_callers_revoke_even_if_transport_refused(){
         for action in 0..8{let mut e=engine_with_track("fixture.wav");let r=e.capture_device_switch_queue().unwrap().bind_resolved_uris(vec!["fixture.wav".into()]).unwrap();let w=e.watch_eq_transition();
@@ -11313,7 +11480,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
         };
         let first = engine
             .device_switch_queue_restore_commands(
@@ -11609,7 +11776,7 @@ mod tests {
             restored_resume: None,
             startup_restore: StartupQueueRestore::Ready,
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
-            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)),
+            queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
         };
         assert!(engine.restore_after_device_switch(None, &[]).is_ok());
     }
@@ -11805,3 +11972,11 @@ pub(crate) mod reliability_tests;
 #[cfg(test)]
 #[path = "audio_strict_tests.rs"]
 mod strict_tests;
+
+#[cfg(test)]
+#[path="normal_direct_tests.rs"]
+mod normal_direct_tests;
+
+#[cfg(test)]
+#[path="route_save_real_tests.rs"]
+mod route_save_real_tests;

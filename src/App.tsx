@@ -1,5 +1,8 @@
+import {plexTrackArtist,plexTrackDurationSeconds} from './utils/plexTrackMetadata';
+import { canToggleMute, directMuteRequest, sharedMuteRequest } from "./utils/signalPath";
 import { SlidersHorizontal } from "lucide-react";
 import { EqualizerView } from "./components/EqualizerView";
+import { LibraryRecoveryPanel } from "./components/LibraryRecoveryPanel";
 import { LocalWatchNotice } from "./components/LocalWatchNotice";
 import { usePlaybackAttempt } from "./utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./components/PlaybackRequestNotice";
@@ -614,6 +617,12 @@ export function App() {
   // Navegação interna Plex
   const [activeCollection, setActiveCollection] = useState<PlexCollection | null>(null);
   const [collectionAlbums, setCollectionAlbums] = useState<PlexAlbum[]>([]);
+  const collectionGeneration=useRef(0),collectionAlive=useRef(true);
+  const [loadingCollection,setLoadingCollection]=useState(false);
+  const collectionContext=useMemo(()=>({identity:JSON.stringify([plexBrowserIdentity,selectedLibrary?.key,centralSection,plexArea])}),[plexBrowserIdentity,selectedLibrary?.key,centralSection,plexArea]);
+  const collectionContextRef=useRef(collectionContext);collectionContextRef.current=collectionContext;
+  useEffect(()=>{collectionAlive.current=true;return()=>{collectionAlive.current=false;collectionGeneration.current++;};},[]);
+  const clearCollection=()=>{collectionGeneration.current++;setActiveCollection(null);setCollectionAlbums([]);setLoadingCollection(false);};
   const [activeAlbum, setActiveAlbum] = useState<PlexAlbum | null>(null);
   const [activeArtist, setActiveArtist] = useState<SelectedArtist | null>(null);
   const [fallbackPlexArtist, setFallbackPlexArtist] = useState<PlexArtistSummary | null>(null);
@@ -742,7 +751,7 @@ export function App() {
     if (!isCurrent()) return;
     setConfigSaveNotice({
       kind: "error",
-      detail: refusal ? undefined : detail,
+      detail: refusal ? undefined : reason.startsWith("LOCAL_INDEX_") ? t("indexCoverage.failed") : detail,
       reloadFailed,
       refusal,
       stagingCleanupFailed: Boolean(refusal) && cleanup === "LOCAL_SOURCE_STAGING_CLEANUP_FAILED",
@@ -781,7 +790,7 @@ export function App() {
             setConfig(confirmed);
             localAlbumCatalog.setSaveBlocked(false);
             setLocalCatalogRevision((revision) => revision + 1);
-            setConfigSaveNotice({ kind: "success" });
+            setConfigSaveNotice(operation.coverage?.outcome === "partial" ? null : { kind: "success" });
           } else {
             await reportLocalFoldersSaveFailure(operation.error ?? operation.phase, operation.phase === "uncertain", isCurrent);
           }
@@ -873,11 +882,15 @@ export function App() {
   // Carga inicial de configurações e dispositivos
   useEffect(() => {
     let disposed = false;
-    Promise.all([configService.getConfig(), configService.getAudioDevices()])
-      .then(([cfg, devs]) => {
+    configService.getConfig()
+      .then(async (cfg) => {
         if (disposed) return;
+        if (cfg.first_run) {
+          const devs = await configService.getAudioDevices();
+          if (disposed) return;
+          setDevices(devs);
+        }
         setConfig(cfg);
-        setDevices(devs);
         mainSectionPreference.restore(cfg);
       })
       .catch((error) => {
@@ -1083,11 +1096,14 @@ export function App() {
         audioService.setVolume(prevVol).catch(error => logError("player.volume", error));
       } else if (e.key.toLowerCase() === "m") {
         e.preventDefault();
-        if (!current.volume.available || !current.volume.writable) return;
-        const currentVol = current.volume.value;
-        audioService
-          .setVolume(!current.volume.muted && currentVol > 0 ? 0 : currentVol || 100)
-          .catch(error => logError("player.volume", error));
+        if (e.repeat || !canToggleMute(current)) return;
+        if (current.volume.backend === "direct_equipment") {
+          const request = directMuteRequest(current);
+          if (request) audioService.setDirectMute(request).catch(error => { logError("player.volume", error); window.alert(t("player.directControlFailed")); });
+          return;
+        }
+        const request=sharedMuteRequest(current);
+        if(request) audioService.setSharedMute(request).catch(error=>{logError("player.volume",error);window.alert(t("player.sharedMuteFailed"));});
       }
     };
 
@@ -1105,7 +1121,7 @@ export function App() {
       setAlbums([]);
       setCollections([]);
       setActiveAlbum(null);
-      setActiveCollection(null);
+      clearCollection();
       setActiveArtist(null);
       setFallbackPlexArtist(null);
       setSelectedPlexDecade(null);
@@ -1166,7 +1182,7 @@ export function App() {
     let disposed = false;
 
     setActiveAlbum(null);
-    setActiveCollection(null);
+    clearCollection();
     setActiveArtist(null);
     setFallbackPlexArtist(null);
     setSelectedPlexDecade(null);
@@ -1248,16 +1264,15 @@ export function App() {
   }, [searchQuery, selectedLibrary, centralSection, plexArea]);
 
   const handleSelectCollection = async (col: PlexCollection) => {
-    setActiveCollection(col);
-    setLoading(true);
+    if(!collectionAlive.current||collectionContextRef.current!==collectionContext)return;
+    const generation=++collectionGeneration.current,context=collectionContext;
+    const current=()=>collectionAlive.current&&generation===collectionGeneration.current&&collectionContextRef.current===context;
+    setActiveCollection(col);setCollectionAlbums([]);setLoadingCollection(true);
     try {
-      const items = await getCachedCollectionAlbums(col.server_id, col.rating_key, true);
-      setCollectionAlbums(items);
-    } catch (err) {
-      logError("plex.collection-albums", err);
-    } finally {
-      setLoading(false);
-    }
+      const items=await getCachedCollectionAlbums(col.server_id,col.rating_key,true);
+      if(current())setCollectionAlbums(items);
+    } catch(err) {if(current())logError("plex.collection-albums",err);}
+    finally {if(current())setLoadingCollection(false);}
   };
 
   const appPlayback = usePlaybackAttempt(JSON.stringify([centralSection, mediaSource, selectedLibrary?.key, searchQuery, plexArea, activeAlbum?.rating_key, showSettings, showAbout, !!playerTarget]));
@@ -1308,7 +1323,7 @@ export function App() {
     setPlexViewMode(mode);
     setActiveAlbum(null);
     setActiveArtist(null);
-    setActiveCollection(null);
+    clearCollection();
     setFallbackPlexArtist(null);
     setSelectedPlexDecade(null);
     setSelectedPlexYear(null);
@@ -1325,7 +1340,7 @@ export function App() {
     plexDiscover.cancelArtist();
     setLocalSelectedArtist(null);
     setActiveAlbum(null);
-    setActiveCollection(null);
+    clearCollection();
     setActiveArtist(null);
     setFallbackPlexArtist(null);
     setSelectedPlexDecade(null);
@@ -1361,7 +1376,7 @@ export function App() {
     setHasCollections(false);
     setLoading(true);
     setActiveAlbum(null);
-    setActiveCollection(null);
+    clearCollection();
     setActiveArtist(null);
     setFallbackPlexArtist(null);
     setSelectedPlexDecade(null);
@@ -1506,7 +1521,7 @@ export function App() {
 
   const handlePlexContextBack = () => {
     if (activeCollection) {
-      setActiveCollection(null);
+      clearCollection();
     } else if (fallbackPlexArtist) {
       setFallbackPlexArtist(null);
     } else if (activePlexGenre !== null) {
@@ -1522,12 +1537,13 @@ export function App() {
 
   if (!config || mediaSource === null) {
     return (
-      <main className="h-screen w-screen flex items-center justify-center bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-primary,#E0E0E0)]">
+      <main className="h-screen w-screen overflow-y-auto flex items-start justify-center py-12 bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-primary,#E0E0E0)]">
         <div className="max-w-xl px-6 text-center">
           <h1 className="text-xl font-black tracking-wider text-[color:var(--theme-fg-accent,#E5A00D)]">SONANTE</h1>
           <p className="mt-3 text-sm text-[color:var(--theme-fg-muted,#888888)]">
             {t(managedSavePending ? "app.managedSavePending" : bootstrapError ? "app.bootstrapError" : "wizard.starting")}
           </p>
+          {bootstrapError && <LibraryRecoveryPanel />}
         </div>
       </main>
     );
@@ -2048,11 +2064,11 @@ export function App() {
                                 const meta = [
                                   {
                                     title: track.title,
-                                    artist: track.album_title || "Plex Track",
+                                    artist: plexTrackArtist(track),
                                     album: track.album_title || "",
                                     plex_image: track.thumb || null,
                                     media_locator: track.media_locator,
-                                    duration: track.duration_ms ? track.duration_ms / 1000 : undefined,
+                                    duration: plexTrackDurationSeconds(track),
                                   },
                                 ];
                                 void appPlayback.run(intent => audioService.playTracks(meta, 0, intent));
@@ -2122,7 +2138,7 @@ export function App() {
                     {t("plex.noResults", { query: searchQuery })}
                   </div>
                 )
-              ) : loading ? (
+              ) : (loading || (activeCollection && loadingCollection)) ? (
                 <div className="h-full flex items-center justify-center text-[color:var(--theme-fg-muted,#666666)]">
                   {t("plex.loading")}
                 </div>

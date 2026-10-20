@@ -30,6 +30,8 @@ pub(crate) struct Snapshot {
     pub id: String,
     pub phase: Phase,
     pub error: Option<String>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub coverage: Option<crate::index_coverage::Report>,
 }
 
 #[derive(Serialize)]
@@ -191,6 +193,10 @@ impl Drop for PreviewLease {
 }
 
 impl Coordinator {
+    pub(crate) fn shutdown_requested(&self)->bool {
+        self.inner.lock().map_or(true,|inner|inner.shutdown)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(Inner::default()),
@@ -269,6 +275,42 @@ impl Coordinator {
             id: inner.next_id.to_string(),
             phase: Phase::Preparing,
             error: None,
+            coverage: None,
+        };
+        inner.operation = Some(snapshot.clone());
+        inner.preview = None;
+        inner.preview_offsets.clear();
+        inner.busy = true;
+        Ok((
+            snapshot.clone(),
+            Operation {
+                coordinator: Arc::clone(self),
+                id: snapshot.id,
+                finished: false,
+            },
+        ))
+    }
+
+    // Explicit startup recovery may resume its own uncertain operation. The
+    // admission capability is issued only for the current analyzed plan.
+    pub(crate) fn reserve_recovery(self: &Arc<Self>, _admission: crate::library_recovery::RecoveryAdmission) -> Result<(Snapshot, Operation), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "Controle de Save indisponível.")?;
+        if inner.shutdown { return Err(INTERRUPTED.into()); }
+        if inner.busy {
+            return Err(BUSY.into());
+        }
+        inner.next_id = inner
+            .next_id
+            .checked_add(1)
+            .ok_or("Identidade de Save esgotada.")?;
+        let snapshot = Snapshot {
+            id: inner.next_id.to_string(),
+            phase: Phase::Preparing,
+            error: None,
+            coverage: None,
         };
         inner.operation = Some(snapshot.clone());
         inner.preview = None;
@@ -383,6 +425,12 @@ impl Coordinator {
     }
 }
 
+impl Transaction<'_> {
+    pub(crate) fn belongs_to(&self, coordinator: &Coordinator) -> bool {
+        std::ptr::eq(self.coordinator, coordinator)
+    }
+}
+
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         let mut inner = self
@@ -461,6 +509,12 @@ impl Operation {
             coordinator: Arc::clone(&self.coordinator),
             id: self.id.clone(),
             job,
+        }
+    }
+
+    pub(crate) fn coverage(&self, report: crate::index_coverage::Report) {
+        if let Ok(mut inner) = self.coordinator.inner.lock() {
+            if let Some(op) = inner.operation.as_mut().filter(|op| op.id == self.id && !op.phase.terminal()) { op.coverage = Some(report); }
         }
     }
 

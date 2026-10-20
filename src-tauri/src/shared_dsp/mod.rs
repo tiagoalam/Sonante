@@ -536,7 +536,8 @@ fn pcm() -> peq::PcmFormat {
 
 pub(crate) fn binary_path() -> Result<PathBuf, Error> {
     if !cfg!(debug_assertions) {
-        return Err(Error::RuntimeMissing);
+        return crate::installed_runtimes::release(crate::installed_runtimes::Kind::Camilla,"SONANTE_EQ_CAMILLA_PATH")
+            .map_err(|e| if e == "SONANTE_RUNTIME_MISSING" { Error::RuntimeMissing } else { Error::RuntimeUntrusted });
     }
     let path = std::env::var_os("SONANTE_EQ_CAMILLA_PATH")
         .map(PathBuf::from)
@@ -676,7 +677,7 @@ impl Session {
             RuntimeEndpoint::reserve(id, pipe.to_string_lossy().into_owned(), stream_name.clone())
                 .map_err(|_| Error::RuntimeStartFailed)?;
         let filters = peq::convert_preset(&preset, pcm()).map_err(|_| Error::ApplyFailed)?;
-        let config = json!({"title":endpoint.title,"devices":{"samplerate":48000,"chunksize":1024,"target_level":4096,"volume_ramp_time":runtime::VOLUME_RAMP_MS,"capture":{"type":"RawFile","channels":2,"filename":pipe,"format":"S32_LE"},"playback":{"type":"PipeWire","channels":2,"node_name":stream_name,"node_description":"Sonante Equalizer · Shared","node_group_name":format!("sonante_eq_{token}"),"autoconnect_to":null},"enable_rate_adjust":true,"resampler":{"type":"AsyncSinc","profile":"Balanced"}},"filters":filters.filters,"pipeline":filters.pipeline});
+        let config = json!({"title":endpoint.title,"devices":{"samplerate":48000,"chunksize":1024,"target_level":4096,"volume_ramp_time":runtime::VOLUME_RAMP_MS,"capture":{"type":"RawFile","channels":2,"filename":pipe,"format":"S32_LE"},"playback":{"type":"PipeWire","channels":2,"node_name":stream_name,"node_description":"Sonante Equalizer · Shared","node_group_name":format!("sonante_eq_{token}"),"autoconnect_to":null},"enable_rate_adjust":false},"filters":filters.filters,"pipeline":filters.pipeline});
         let config_path = root.join("camilla.json");
         let mut file = OpenOptions::new()
             .write(true)
@@ -694,6 +695,7 @@ impl Session {
             return Err(Error::Cancelled);
         }
         let mut command = env.command(binary.to_str().ok_or(Error::RuntimeUntrusted)?);
+        crate::installed_runtimes::configure_camilla(&mut command);
         command
             .args(["--address", "127.0.0.1", "--port"])
             .arg(endpoint.port.to_string())

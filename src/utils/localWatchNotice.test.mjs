@@ -12,7 +12,7 @@ function mount(lang='pt-BR',query=async()=>false){
  const strings=JSON.parse(readFileSync(new URL(`../locales/${lang}.json`,import.meta.url),'utf8'));
  const t=key=>key.split('.').reduce((v,k)=>v[k],strings);
  const listeners=new Map(),cleaned=[];let value=false,effect,cleanup,invocations=0,opened=0;
- const deps={react:{useState:()=>[value,v=>{value=v;}],useEffect:fn=>{effect??=fn;}},'@tauri-apps/api/core':{invoke:async cmd=>{assert.equal(cmd,'get_local_watch_needs_check');invocations++;return query();}},'@tauri-apps/api/event':{listen:async(event,fn)=>{listeners.set(event,fn);return()=>{listeners.delete(event);cleaned.push(event);};}},'react-i18next':{useTranslation:()=>({t})},'lucide-react':icons,'react/jsx-runtime':jsx};
+ const deps={'../services/indexCoverage':{useIndexCoverage:()=>({revision:0,report:null})},'./LocalIndexCoverage':{IndexCoverageDetails:()=>null},react:{useState:()=>[value,v=>{value=v;}],useEffect:fn=>{effect??=fn;}},'@tauri-apps/api/core':{invoke:async cmd=>{assert.equal(cmd,'get_local_watch_needs_check');invocations++;return query();}},'@tauri-apps/api/event':{listen:async(event,fn)=>{listeners.set(event,fn);return()=>{listeners.delete(event);cleaned.push(event);};}},'react-i18next':{useTranslation:()=>({t})},'lucide-react':icons,'react/jsx-runtime':jsx};
  const exports={};new Function('require','exports',ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText)(name=>{assert.ok(name in deps,name);return deps[name];},exports);
  const draw=()=>exports.LocalWatchNotice({onOpenSettings:()=>opened++});
  draw();cleanup=effect();

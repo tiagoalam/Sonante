@@ -21,11 +21,16 @@ pub(crate) fn refresh(
     refresh_runtime(socket, plan, audit, shutdown, false)
 }
 
-pub(crate) fn refresh_filesystem(socket: &str, plan: &ManagedRefreshPlan, shutdown: impl FnMut() -> bool) -> Result<Outcome, String> {
-    refresh_runtime(socket, plan, true, shutdown, true)
-}
 
 fn refresh_runtime(socket: &str, plan: &ManagedRefreshPlan, audit: bool, shutdown: impl FnMut() -> bool, force_paths: bool) -> Result<Outcome, String> {
+    refresh_inspected(socket, plan, audit, shutdown, force_paths, || {
+        let result = AudioEngine::audit_mpd_local_catalog_at(socket)?;
+        if !result.is_clean() { return Err(format!("A auditoria do catálogo encontrou {} URI(s) local(is) inválida(s).", result.invalid_count)); }
+        Ok(())
+    })
+}
+
+pub(crate) fn refresh_inspected(socket: &str, plan: &ManagedRefreshPlan, audit: bool, shutdown: impl FnMut() -> bool, force_paths: bool, inspect: impl FnMut() -> Result<(), String>) -> Result<Outcome, String> {
     let started = std::time::Instant::now();
     let result = refresh_with(
         plan,
@@ -45,16 +50,7 @@ fn refresh_runtime(socket: &str, plan: &ManagedRefreshPlan, audit: bool, shutdow
                 shutdown,
             )
         },
-        || {
-            let result = AudioEngine::audit_mpd_local_catalog_at(socket)?;
-            if !result.is_clean() {
-                return Err(format!(
-                    "A auditoria do catálogo encontrou {} URI(s) local(is) inválida(s).",
-                    result.invalid_count
-                ));
-            }
-            Ok(())
-        },
+        inspect,
     );
     let strategy = match plan {
         ManagedRefreshPlan::MetadataOnly => "metadata",

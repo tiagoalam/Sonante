@@ -1,3 +1,4 @@
+import * as directVolumeHelpers from "./signalPath.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -27,7 +28,7 @@ async function fixture(language = "en") {
   const i18n = i18next.createInstance();
   await i18n.init({ lng: language, resources: { [language]: { translation: resource(language) } }, interpolation: { escapeValue: false } });
   const t = i18n.t.bind(i18n), calls = [];
-  const dependencies = { react: { ...React, default: React, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons, "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": { signalPathInformation, requiresDeviceVolumeControl }, "../utils/routeConditions": { routeConditions } };
+  const dependencies = { react: { ...React, default: React, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons, "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": {...directVolumeHelpers, signalPathInformation, requiresDeviceVolumeControl }, "../utils/routeConditions": { routeConditions } };
   const SignalPath = compile("SignalPath", dependencies);
   const SourceAudioBadges = compile("SourceAudioBadges", { ...dependencies, "../utils/sourceAudio": { sourceAudioBadge, albumAudioBadge } });
   const hooks = { ...React, useState: initial => [initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
@@ -36,7 +37,7 @@ async function fixture(language = "en") {
     "./SignalPath": { SignalPath }, "./PlexImage": { PlexImage: () => null },
     "./SourceAudioBadges": { SourceAudioBadges }, "../utils/playerNavigation": { currentMediaKey },
     "../utils/frontendDiagnostics": { logError() { assert.fail("Unexpected diagnostic"); } },
-    "../services/audio": { audioService: Object.fromEntries(["togglePlay", "next", "previous", "seek", "setVolume", "changePlaybackOption"].map(name => [name, async (...args) => { calls.push([name, ...args]); }])) },
+    "../services/audio": { audioService: Object.fromEntries(["togglePlay", "next", "previous", "seek", "setVolume", "setDirectMute", "changePlaybackOption"].map(name => [name, async (...args) => { calls.push([name, ...args]); }])) },
   };
   const PlaybackOptionsControls = compile("PlaybackOptionsControls", controlled);
   const PlayerBar = compile("PlayerBar", { ...controlled, "./PlaybackOptionsControls": { PlaybackOptionsControls } });
@@ -180,7 +181,7 @@ test("player routing area restores audio format and keeps detailed route conditi
 
 test("navigation, playback, seek, volume and actions retain their handlers", async () => {
   const { render, calls, t } = await fixture();
-  const tree = render(), all = nodes(tree);
+  const tree = render({route:{mode:"shared",endpoint:"default"}}), all = nodes(tree);
   const click = async title => { const button = all.find(node => node.type === "button" && node.props.title === title); assert.ok(button); await button.props.onClick(); };
   await click(status.title); await click(status.album); await click(status.artist);
   await click(t("player.previous")); await click(t("player.pause")); await click(t("player.next"));
@@ -259,18 +260,18 @@ test("unmute, unknown format and missing route remain conservative", async () =>
   assert.deepEqual(calls, [["setVolume", 100]]);
 });
 
-test("Direct PCM keeps volume, Direct software DSD keeps only mute, Shared and hardware DSD stay adjustable",async()=>{
+test("All Direct transports use equipment volume and dedicated mute; Shared stays adjustable",async()=>{
  for(const lng of ['en','pt-BR']){
   const {render,t,calls}=await fixture(lng);
   for(const [mode,audio_format,backend,slider] of [
-   ['direct','96000:24:2','mpd_software',true],['direct','dsd64:2','mpd_software',false],
-   ['direct','352800:dsd:2','mpd_software',false],['direct','dsd128:2','alsa_hardware',true],
+   ['direct','96000:24:2','direct_equipment',false],['direct','dsd64:2','direct_equipment',false],
+   ['direct','352800:dsd:2','direct_equipment',false],['direct','dsd128:2','direct_equipment',false],
    ['shared','dsd64:2','pipewire',true],['shared','96000:24:2','pipewire',true]]){
-   const tree=render({route:{mode,endpoint:mode==='direct'?'hw:Fixture,0':'default'},status:{...status,audio_format,volume:{...status.volume,backend}}});
+   const tree=render({route:{mode,endpoint:mode==='direct'?'hw:Fixture,0':'default'},status:{...status,audio_format,volume:{...status.volume,backend,...(mode==='direct'?{value:100,writable:false,direct_gain:'unity',direct_token:'1:65'}:{})}}});
    const ranges=nodes(tree).filter(n=>n.type==='input'&&n.props.type==='range');
    assert.equal(ranges.length,slider?2:1,JSON.stringify({mode,audio_format,backend}));
    const mute=nodes(tree).find(n=>n.type==='button'&&n.props.title===t('player.mute'));assert.ok(mute);assert.equal(mute.props.disabled,false);
-   if(!slider){await mute.props.onClick();assert.deepEqual(calls.pop(),['setVolume',0]);const html=renderToStaticMarkup(tree);assert.ok(html.includes(t('player.volumeOnDeviceShort')));}
+   if(!slider){await mute.props.onClick();assert.deepEqual(calls.pop(),['setDirectMute',{muted:true,token:'1:65'}]);const html=renderToStaticMarkup(tree);assert.ok(html.includes(t('player.volumeOnDevice')));}
   }
  }
 });

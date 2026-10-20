@@ -422,15 +422,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   }, [selectedAlbum, metadataMode]);
 
   useEffect(() => {
+    let active = true;
     if (!metadataMode && viewMode === "folders") {
       setLoadingFolders(true);
       audioService.listLocalDirectory(currentPath)
         .then((data) => {
-          setItems(data);
+          if (active) setItems(data);
         })
-        .catch(error => logError("local.directory-list", error))
-        .finally(() => setLoadingFolders(false));
+        .catch(error => { if (active) logError("local.directory-list", error); })
+        .finally(() => { if (active) setLoadingFolders(false); });
     }
+    return () => { active = false; };
   }, [currentPath, viewMode, metadataMode]);
 
   useEffect(() => { setFolderCover(null); }, [currentPath]);

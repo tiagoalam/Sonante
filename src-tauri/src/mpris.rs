@@ -435,6 +435,7 @@ struct SonanteMpris {
 
 impl SonanteMpris {
     async fn control(&self, action: BasicMediaAction) -> fdo::Result<()> {
+        if let Some(state)=self.app.try_state::<AudioState>() {state.note_transport_intervention();}
         let app = self.app.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let is_shared = if matches!(
@@ -563,6 +564,7 @@ impl PlayerInterface for SonanteMpris {
     }
 
     async fn stop(&self) -> fdo::Result<()> {
+        if let Some(state)=self.app.try_state::<AudioState>() {state.note_transport_intervention();}
         Err(fdo::Error::NotSupported("Stop não é suportado.".into()))
     }
 
@@ -1402,6 +1404,8 @@ mod tests {
                 writable: false,
                 available: false,
                 backend: VolumeBackend::Unavailable,
+                direct_gain: None, direct_token: None,
+                shared_token: None,
             },
             is_updating: false,
             playback_error: None,
