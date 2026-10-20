@@ -3793,7 +3793,7 @@ dependencies = [
 
 [[package]]
 name = "sonante"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "alsa",
  "base64 0.22.1",

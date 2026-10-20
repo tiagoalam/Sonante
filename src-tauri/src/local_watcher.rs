@@ -291,22 +291,17 @@ impl PendingChanges {
         check_interval: Duration,
         timeout: Duration,
     ) -> Result<(), usize> {
-        let mut removed = Vec::new();
         let mut timed_out = 0;
         for (path, pending) in &mut self.writing {
             let stamp = match fs::symlink_metadata(path) {
                 Ok(metadata) if metadata.file_type().is_file() => {
                     Some(FileStamp::from_metadata(&metadata))
                 }
-                Ok(_) => {
-                    removed.push(path.clone());
-                    continue;
-                }
-                Err(error) if error.kind() == ErrorKind::NotFound => {
-                    removed.push(path.clone());
-                    continue;
-                }
-                Err(_) => None,
+                // The name may disappear/change after draining inotify but
+                // before this check. Keep its write until CLOSE_WRITE, DELETE
+                // or the paired move events resolve it; metadata is not proof
+                // that a writer closed. Missing events still fail closed below.
+                Ok(_) | Err(_) => None,
             };
             if now.saturating_duration_since(pending.last_check) >= check_interval {
                 if stamp == pending.observed {
@@ -320,14 +315,6 @@ impl PendingChanges {
             if now.saturating_duration_since(pending.first_event) >= timeout {
                 timed_out += 1;
             }
-        }
-        if !removed.is_empty() {
-            for path in removed {
-                self.writing.remove(&path);
-                self.mark_path(path, now);
-            }
-            self.dirty = true;
-            self.touch(now);
         }
         if timed_out > 0 {
             Err(timed_out)

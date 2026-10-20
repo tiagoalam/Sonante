@@ -1,3 +1,4 @@
+import { bindCollectionReset } from "../../tests/helpers/collectionResetFixture.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -170,9 +171,10 @@ test("existing Plex album query publishes error or data once and drops disposed/
     const calls=[],pending=deferred(),status=[],published=[],identity={},generation={current:0},conn={};
     const setters=["setAlbums","setCollections","setHasCollections","setLoading","setActiveAlbum","setActiveCollection","setActiveArtist","setFallbackPlexArtist","setSelectedPlexDecade","setSelectedPlexYear","setSelectedPlexUnknownYear","setSelectedPlexGenre","setSearchQuery","setSearchResults","setPlexViewMode"];
     const values=setters.map(name=>name==="setAlbums"?v=>published.push(v):()=>{});
-    const run=new Function("centralSection","plexArea","selectedLibrary","plexLibrariesIdentity","plexConnectionIdentity","plexBrowserIdentity","plexLibraryRequestGenerationRef","setPlexAlbumLoad","plexService","plexCatalog","plexAlbumLoad","logError",...setters,`return (${effect("plexCatalog.loadLibrary(selectedLibrary")});`)(
+    const resetScope = {}, reset = bindCollectionReset(resetScope);
+    const run=new Function("clearCollection","centralSection","plexArea","selectedLibrary","plexLibrariesIdentity","plexConnectionIdentity","plexBrowserIdentity","plexLibraryRequestGenerationRef","setPlexAlbumLoad","plexService","plexCatalog","plexAlbumLoad","logError",...setters,`return (${effect("plexCatalog.loadLibrary(selectedLibrary")});`)(resetScope.clearCollection,
       "plex","library",{key:"exact-library"},conn,conn,identity,generation,v=>status.push(v),{getCollections:()=>Promise.resolve([])},{loadLibrary:(...a)=>{calls.push(a);return pending.promise;}},null,()=>{},...values);
-    const cleanup=run();assert.deepEqual(calls,[[{key:"exact-library"}]]);assert.equal(status[0].phase,"loading");
+    const cleanup=run();reset.assertReset();assert.deepEqual(calls,[[{key:"exact-library"}]]);assert.equal(status[0].phase,"loading");
     if(scenario==="disposed")cleanup();if(scenario==="generation")generation.current++;
     if(scenario==="error")pending.reject(Error("DO_NOT_EXPOSE"));else pending.resolve([plex("exact")]);await flush();
     assert.equal(calls.length,1);assert.equal(status.at(-1).phase,scenario==="success"?"ready":scenario==="error"?"error":"loading");

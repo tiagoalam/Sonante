@@ -73,6 +73,29 @@ function mixSaveErrorKeys(source) {
   return keys;
 }
 
+// Follow finite return values from the actual mute-label producer. Unknown
+// returns remain a scanner failure rather than accepting arbitrary dynamic keys.
+const muteLabelProducer = readFileSync(new URL("utils/signalPath.ts", src), "utf8");
+function muteLabelKeys(source) {
+  const tree = ts.createSourceFile("signalPath.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const producer = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "muteLabel");
+  assert.ok(producer?.body, "muteLabel producer must remain inspectable");
+  const keys = new Set();
+  function finite(node) {
+    if (ts.isStringLiteral(node)) keys.add(node.text);
+    else if (ts.isConditionalExpression(node)) { finite(node.whenTrue); finite(node.whenFalse); }
+    else if (ts.isParenthesizedExpression(node)) finite(node.expression);
+    else assert.fail(`uncovered muteLabel producer ${node.getText(tree)}`);
+  }
+  function visit(node) {
+    if (ts.isReturnStatement(node)) { assert.ok(node.expression); finite(node.expression); }
+    else ts.forEachChild(node, visit);
+  }
+  visit(producer.body);
+  assert.ok(keys.size > 0);
+  return keys;
+}
+
 function translationCollector(tree, file, keys, mixSaveKeys) {
   const declarations = new Map();
   function declarationsVisit(node) {
@@ -85,6 +108,16 @@ function translationCollector(tree, file, keys, mixSaveKeys) {
     else if (ts.isConditionalExpression(node)) { collect(node.whenTrue); collect(node.whenFalse); }
     else if (ts.isParenthesizedExpression(node)) collect(node.expression);
     else if (ts.isIdentifier(node) && declarations.has(node.text)) collect(declarations.get(node.text));
+    else if (["components/PlayerBar.tsx", "components/NowPlayingPresentation.tsx"].includes(file)
+      && ts.isCallExpression(node) && node.getText(tree) === "muteLabel(status)") {
+      const imported = tree.statements.some(statement => ts.isImportDeclaration(statement)
+        && statement.moduleSpecifier.text === "../utils/signalPath"
+        && statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)
+        && statement.importClause.namedBindings.elements.some(item => item.name.text === "muteLabel"
+          && (item.propertyName?.text ?? item.name.text) === "muteLabel"));
+      assert.ok(imported, `${file}: muteLabel must bind to its inspected producer`);
+      muteLabelKeys(muteLabelProducer).forEach(key => keys.add(key));
+    }
     else if (file === "components/PlexDiscoverView.tsx" && ts.isPropertyAccessExpression(node)
       && node.getText(tree) === "state.mixSave.error") mixSaveKeys.forEach(key => keys.add(key));
     else if (ts.isTemplateExpression(node)) {
@@ -221,4 +254,24 @@ test("Settings and wizard cannot translate unconstrained error strings", () => {
     const collect = translationCollector(tree, file, new Set(), mixSaveErrorKeys(mixSaveProducer));
     assert.throws(() => collect(tree.statements[0].expression.arguments[0]), /uncovered translation expression/);
   }
+});
+
+test("mute labels follow the actual producer and reject unknown keys, returns or consumer bindings", async () => {
+  const keys = muteLabelKeys(muteLabelProducer);
+  assert.deepEqual([...keys].sort(), ["player.mute", "player.unmute"]);
+  await assertTranslationKeys(keys);
+  const invalid = muteLabelProducer.replace('"player.unmute"', '"player.invalidFixtureMuteKey"');
+  assert.notEqual(invalid, muteLabelProducer);
+  await assert.rejects(assertTranslationKeys(muteLabelKeys(invalid)), /en: player\.invalidFixtureMuteKey/);
+  const unknown = muteLabelProducer.replace('"player.unmute"', 'unknownLabel.key');
+  assert.throws(() => muteLabelKeys(unknown), /uncovered muteLabel producer unknownLabel\.key/);
+  for (const expression of ["muteLabel(other)", "muteLabel()", "unknownLabel(status)"]) {
+    const file = "components/PlayerBar.tsx";
+    const tree = ts.createSourceFile(file, `import { muteLabel } from "../utils/signalPath"; t(${expression})`, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const collect = translationCollector(tree, file, new Set(), new Set());
+    assert.throws(() => collect(tree.statements[1].expression.arguments[0]), /uncovered translation expression/);
+  }
+  const file = "components/PlayerBar.tsx";
+  const wrongImport = ts.createSourceFile(file, 'import { muteLabel } from "../other"; t(muteLabel(status))', ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  assert.throws(() => translationCollector(wrongImport, file, new Set(), new Set())(wrongImport.statements[1].expression.arguments[0]), /muteLabel must bind/);
 });

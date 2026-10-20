@@ -1,3 +1,4 @@
+import { bindCollectionReset } from "../../tests/helpers/collectionResetFixture.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -155,7 +156,8 @@ function navigationFixture() {
     fallbackPlexArtist: null, selectedPlexDecade: null, selectedPlexYear: null,
     selectedPlexUnknownYear: false, exploreDetail: null, selectedLibrary: { key: "one" },
   };
-  const scope = () => ({
+  let reset;
+  const scope = () => { const bindings = {
     ...state, activeGenre: state.selectedGenre, activePlexGenre: state.selectedPlexGenre,
     initialAlbumId: undefined, playerTarget: null, playerNavigationRequests: { invalidate() {} },
     plexLibraryRequestGenerationRef: { current: 1 }, plexSearchRequestGenerationRef: { current: 1 },
@@ -165,8 +167,8 @@ function navigationFixture() {
     setAlbums() {}, setCollections() {}, setHasCollections() {}, setLoading() {},
     setSearchQuery() {}, setSearchResults() {}, setPlayerNavigation() {}, setPlayerNavigationError() {}, setLocalSelectedArtist() {},
     ...Object.fromEntries(Object.keys(state).map(key => [`set${key[0].toUpperCase()}${key.slice(1)}`, value => { state[key] = value; }])),
-  });
-  return { state, scope, local: (name, ...args) => execute(localSource, name, scope(), ...args),
+  }; reset = bindCollectionReset(bindings); return bindings; };
+  return { state, scope, assertCollectionReset: () => reset.assertReset(), local: (name, ...args) => execute(localSource, name, scope(), ...args),
     plex: (name, ...args) => execute(plexSource, name, scope(), ...args) };
 }
 
@@ -193,7 +195,10 @@ test("Local genre → album → back retains genre; second back and tab transiti
 
 test("Plex album back retains genre, while genre back, mode changes and library changes invalidate it", () => {
   const f = navigationFixture();
+  f.state.activeCollection = { rating_key: "old" };
   f.plex("handlePlexModeChange", "genres");
+  f.assertCollectionReset();
+  assert.equal(f.state.activeCollection, null);
   f.state.selectedPlexGenre = "rock";
   f.state.activeAlbum = { rating_key: "real-album" };
   const albumBack = plexSource.match(/album=\{activeAlbum\}\s+onBack=\{([^}]+)\}/)[1];

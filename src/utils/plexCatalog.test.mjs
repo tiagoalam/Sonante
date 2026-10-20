@@ -1,3 +1,4 @@
+import { bindCollectionReset } from "../../tests/helpers/collectionResetFixture.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -48,7 +49,9 @@ test("actual catalog effect preserves valid data on failure and drops library/lo
       plexCatalog: { loadLibrary: () => pending.then(catalog => requireCompletePlexCatalog(catalog, "1")) },
       logError: operation => diagnostics.push(operation) };
     for (const setter of ["setCollections", "setHasCollections", "setLoading", "setActiveAlbum", "setActiveCollection", "setActiveArtist", "setFallbackPlexArtist", "setSelectedPlexDecade", "setSelectedPlexYear", "setSelectedPlexUnknownYear", "setSelectedPlexGenre", "setSearchQuery", "setSearchResults", "setPlexViewMode"]) scope[setter] = () => {};
+    const reset = bindCollectionReset(scope);
     const cleanup = new Function(...Object.keys(scope), `${compiled}; return run();`)(...Object.values(scope));
+    reset.assertReset();
     assert.equal(inventory, lastValid);
     if (scenario === "library") generation.current++;
     if (["logout", "account"].includes(scenario)) { cleanup(); inventory = []; }
@@ -75,10 +78,12 @@ test("actual browser effect changes only its displayed library while concurrent 
     setPlexAlbumLoad: value => states.push(value), setAlbums: value => { displayed = value; },
     plexCatalog: coordinator, plexService: { getCollections: async () => [] }, logError() {} };
   for (const setter of ["setCollections", "setHasCollections", "setLoading", "setActiveAlbum", "setActiveCollection", "setActiveArtist", "setFallbackPlexArtist", "setSelectedPlexDecade", "setSelectedPlexYear", "setSelectedPlexUnknownYear", "setSelectedPlexGenre", "setSearchQuery", "setSearchResults", "setPlexViewMode"]) scope[setter] = () => {};
+  const reset = bindCollectionReset(scope);
   const run = () => new Function(...Object.keys(scope), `${compiled}; return run();`)(...Object.values(scope));
-  const closeFirst = run(); for (const library of libraries) void coordinator.loadLibrary(library).catch(() => {}); await flush(); assert.equal(calls.length, 2);
+  const closeFirst = run(); reset.assertReset(); for (const library of libraries) void coordinator.loadLibrary(library).catch(() => {}); await flush(); assert.equal(calls.length, 2);
   closeFirst(); generation.current++; scope.selectedLibrary = libraries[1]; scope.plexBrowserIdentity = {};
-  const closeSecond = run(); await flush(); assert.equal(calls.length, 2);
+  reset.state.active = { rating_key: "stale-second" }; reset.state.albums = [{ rating_key: "old-second" }]; reset.state.loading = true;
+  const closeSecond = run(); reset.assertReset(2); await flush(); assert.equal(calls.length, 2);
   calls[0].resolve([{ rating_key: "a", title: "A", artist: "Artist" }]); await flush();
   assert.deepEqual(displayed, []); assert.equal(confirmedAlbums(coordinator.getSnapshot()).length, 1);
   calls[1].resolve([{ rating_key: "b", title: "B", artist: "Artist" }]); await flush();

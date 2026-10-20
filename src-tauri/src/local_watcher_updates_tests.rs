@@ -332,3 +332,49 @@ fn prepared_aliases_deduplicate_and_second_queued_handoff_is_refused_before_effe
     fs::remove_file(alias).unwrap();
     fs::remove_dir_all(r).unwrap();
 }
+
+#[test]
+fn rename_between_drain_and_metadata_check_keeps_write_until_close_event() {
+    let r = root();
+    let control = WatcherControl::new();
+    let shutdown = AtomicBool::new(false);
+    let source = SourceIdentity::capture(r.clone()).unwrap();
+    let mut reader = InotifyReader::new(&[source], &control, &shutdown).unwrap().unwrap();
+    let mut pending = PendingChanges::default();
+    let drain = |reader: &mut InotifyReader, pending: &mut PendingChanges| {
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match (&reader.fd).read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => process_events(reader, &control, &shutdown, &buffer[..n], pending),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) => panic!("inotify read: {e}"),
+            }
+        }
+    };
+    let temporary = r.join("writing.tmp");
+    let target = r.join("final.flac");
+    let mut file = File::create(&temporary).unwrap();
+    use std::io::Write;
+    file.write_all(b"partial").unwrap();
+    drain(&mut reader, &mut pending);
+    assert!(pending.writing.contains_key(&temporary));
+
+    // Real rename after the worker's EAGAIN, before its metadata check. The
+    // paired inotify events are queued, deliberately not consumed yet.
+    fs::rename(&temporary, &target).unwrap();
+    pending.verify_unclosed_writes(Instant::now(), Duration::ZERO, Duration::from_secs(2)).unwrap();
+    drain(&mut reader, &mut pending);
+    let blocked = pending.writing.contains_key(&target)
+        && !pending.ready(Instant::now() + Duration::from_secs(1), Duration::from_millis(25));
+    // Close/write is the publication boundary, not disappearance of the old name.
+    drop(file);
+    drain(&mut reader, &mut pending);
+    let closed = pending.writing.is_empty()
+        && pending.paths.contains(&target)
+        && pending.ready(Instant::now() + Duration::from_secs(1), Duration::from_millis(25));
+    drop(reader);
+    fs::remove_dir_all(r).unwrap();
+    assert!(blocked, "open renamed file became eligible before CLOSE_WRITE");
+    assert!(closed, "close must release the same target for reconciliation");
+}

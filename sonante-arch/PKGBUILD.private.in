@@ -1,13 +1,13 @@
 # Local private inputs only; generated checksums identify the exact snapshot.
 # No public Git tag/branch download. Generate inputs with prepare-private-arch.py.
 pkgname=sonante-private
-pkgver=0.5.3
+pkgver=0.5.4
 pkgrel=1
 pkgdesc='Sonante private work snapshot with verified application-owned runtimes'
 arch=('x86_64')
 license=('GPL-3.0-only' 'GPL-2.0-or-later' 'MPL-2.0')
 url='https://github.com/tiagoalam/Sonante'
-provides=('sonante=0.5.3')
+provides=('sonante=0.5.4')
 conflicts=('sonante' 'sonante-bin')
 options=('!debug' '!strip') # Runtime identities must not change during packaging.
 depends=(@DEPENDENCIES@)
