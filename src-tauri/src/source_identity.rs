@@ -9,10 +9,12 @@
 //!
 //! Bootstrap reserves only IDs visible in legacy/v1 mappings. Removed IDs from
 //! before this feature cannot be reconstructed safely from playlists/favorites.
-//! Roots are bound by filesystem ID, inode and creation time (device fallback
-//! for an active filesystem without FSID). Reusing a retired ID requires FSID
-//! and creation-time proof. Unsupported proof gives a fresh ID on readdition.
-//! These are filesystem identities, not content hashes or authentication of
+//! Active IDs follow the configured canonical root and inode; mount device
+//! numbers and missing optional metadata do not prove replacement. Available
+//! conflicting FSID/birth observations still refuse automatic continuity.
+//! Retired IDs require the prior FSID and creation-time proof for reactivation.
+//! Unsupported proof gives a fresh ID on readdition. These are filesystem
+//! observations, not content hashes or authentication of
 //! cloned filesystems, restored older histories, or live MPD file descriptors.
 //! No media files, source xattrs, references or configuration are rewritten.
 use serde::{Deserialize, Serialize};
@@ -80,7 +82,15 @@ impl Origin {
             birth,
         })
     }
+    // Callers already require an active ID mapped to this canonical root.
+    // Device is an auxiliary mount observation, not the configured source ID.
     fn matches_active(&self, other: &Self) -> bool {
+        self.inode == other.inode
+            && !matches!((self.filesystem, other.filesystem), (Some(a), Some(b)) if a != b)
+            && !matches!((self.birth, other.birth), (Some(a), Some(b)) if a != b)
+    }
+    // Preserve the prior comparison for retired IDs and historical recovery.
+    fn matches_reserved_origin(&self, other: &Self) -> bool {
         let same_fs = match (self.filesystem, other.filesystem) {
             (Some(a), Some(b)) => a == b,
             (None, None) => self.device == other.device,
@@ -89,7 +99,7 @@ impl Origin {
         same_fs && self.inode == other.inode && self.birth == other.birth
     }
     fn proves_reactivation(&self, other: &Self) -> bool {
-        self.filesystem.is_some() && self.birth.is_some() && self.matches_active(other)
+        self.filesystem.is_some() && self.birth.is_some() && self.matches_reserved_origin(other)
     }
 }
 
@@ -274,7 +284,7 @@ pub(crate) fn validate_recovery_extension(old:&[u8],anchor:&[u8],current:&[u8],c
 }
 pub(crate) fn verify_recovery_origins(bytes:&[u8],sources:&BTreeMap<String,PathBuf>)->Result<(),String>{
     let registry:Registry=serde_json::from_slice(bytes).map_err(|_|"LIBRARY_RECOVERY_LEDGER_DIVERGENT")?;
-    registry.validate()?;verify_registered_origins(&registry,sources)
+    registry.validate()?;verify_registered_origins_using(&registry,sources,Origin::matches_reserved_origin)
 }
 
 pub(crate) fn validate_recovery_snapshot(
@@ -426,7 +436,7 @@ fn reserve_with(
                 .is_some_and(|o| o.matches_active(&observed))
             {
                 return Err(error(
-                    "a origem ativa foi substituída; não será reatribuída automaticamente",
+                    "a origem ativa diverge dos sinais registrados; não será reatribuída automaticamente",
                 ));
             }
             (*id).clone()
@@ -547,15 +557,22 @@ fn verify_registered_origins(
     registry: &Registry,
     sources: &BTreeMap<String, PathBuf>,
 ) -> Result<(), String> {
+    verify_registered_origins_using(registry, sources, Origin::matches_active)
+}
+fn verify_registered_origins_using(
+    registry: &Registry,
+    sources: &BTreeMap<String, PathBuf>,
+    same_origin: fn(&Origin, &Origin) -> bool,
+) -> Result<(), String> {
     for (id, root) in sources {
         let observed = Origin::capture(root)?;
         if !registry.ids.get(id).is_some_and(|r| {
             r.root.as_ref() == Some(root)
                 && r.origin
                     .as_ref()
-                    .is_some_and(|o| o.matches_active(&observed))
+                    .is_some_and(|o| same_origin(o, &observed))
         }) {
-            return Err(error("origem substituída desde a reserva de identidade"));
+            return Err(error("origem da fonte diverge dos sinais registrados"));
         }
     }
     Ok(())
@@ -568,6 +585,109 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn proposed_active_policy_observation_table_and_retired_separation() {
+        let weak=Origin {filesystem:None,device:11,inode:22,birth:None};
+        let renumbered=Origin {device:12,..weak.clone()};
+        assert!(weak.matches_active(&renumbered), "Active source: device alone is not replacement");
+        assert!(!weak.proves_reactivation(&renumbered));
+        let observed_strong=Origin {filesystem:Some([31,32]),device:12,inode:22,birth:Some((41,42))};
+        assert!(weak.matches_active(&observed_strong), "Missing optional hints do not contradict");
+        assert!(observed_strong.matches_active(&weak));
+        assert!(!weak.proves_reactivation(&observed_strong));
+        assert!(!observed_strong.proves_reactivation(&weak));
+        assert!(observed_strong.proves_reactivation(&Origin{device:99,..observed_strong.clone()}));
+        assert!(!observed_strong.matches_active(&Origin{filesystem:Some([51,52]),..observed_strong.clone()}));
+        assert!(!observed_strong.matches_active(&Origin{birth:Some((61,62)),..observed_strong.clone()}));
+        assert!(!weak.matches_active(&Origin{inode:23,..renumbered}));
+        assert!(!observed_strong.proves_reactivation(&Origin{birth:Some((61,62)),..observed_strong.clone()}));
+    }
+
+    #[test]
+    fn proposed_active_policy_six_active_ids_survive_without_ledger_rewrite() {
+        let f=Fixture::new();
+        let retired=(0..3).map(|i|f.root(&format!("Retired{i}"))).collect::<Vec<_>>();
+        f.reserve(&retired,&BTreeMap::new());
+        let roots=(0..6).map(|i|f.root(&format!("Source{i}"))).collect::<Vec<_>>();
+        f.seed(&roots);
+        let manifest=mirror::read_manifest(&f.library()).unwrap();
+        let mut registry:Registry=serde_json::from_slice(&fs::read(f.0.join(NAME)).unwrap()).unwrap();
+        for id in manifest.sources.keys() {
+            let o=registry.ids.get_mut(id).unwrap().origin.as_mut().unwrap();
+            o.filesystem=None;o.birth=None;o.device=o.device.wrapping_add(1);
+        }
+        registry.checksum=registry.checksum().unwrap();
+        fs::write(f.0.join(NAME),serde_json::to_vec_pretty(&registry).unwrap()).unwrap();
+        let ledger=fs::read(f.0.join(NAME)).unwrap();
+        let anchor=fs::read(f.0.join(LOCK)).unwrap();
+        let marker=fs::read(f.library().join(mirror::MANIFEST_NAME)).unwrap();
+        assert_eq!(registry.ids.len(),9);
+        verify_if_initialized(&f.library(),&manifest.sources).unwrap();
+        verify_origins(&f.library(),&manifest.sources).unwrap();
+        // Historical recovery keeps the former strict comparison.
+        assert!(verify_recovery_origins(&ledger,&manifest.sources).is_err());
+        let folders=roots.iter().map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert!(crate::local_media::resolve_local_sources(&f.library(),&folders).is_ok());
+        let (mapping,namespace)=reserve(&f.library(),&roots,&current(&manifest.sources),manifest.registry_id.as_deref()).unwrap();
+        assert_eq!(mapping,manifest.sources);
+        assert_eq!(Some(namespace),manifest.registry_id);
+        for name in ["favorites.json","playlists.json","queue_cache.json"] {
+            fs::write(f.0.join(name),br#"{"reference":"Source0/Album/track.wav"}"#).unwrap();
+        }
+        let offline=f.0.join("temporarily-offline");
+        fs::rename(&roots[0],&offline).unwrap();
+        assert!(crate::local_media::resolve_local_sources(&f.library(),&folders).is_err());
+        assert_eq!(fs::read(f.0.join(NAME)).unwrap(),ledger);
+        fs::rename(&offline,&roots[0]).unwrap();
+        assert!(crate::local_media::resolve_local_sources(&f.library(),&folders).is_ok());
+        assert_eq!(fs::read(f.0.join(NAME)).unwrap(),ledger);
+        assert_eq!(fs::read(f.0.join(LOCK)).unwrap(),anchor);
+        assert_eq!(fs::read(f.library().join(mirror::MANIFEST_NAME)).unwrap(),marker);
+        for name in ["favorites.json","playlists.json","queue_cache.json"] {
+            assert_eq!(fs::read(f.0.join(name)).unwrap(),br#"{"reference":"Source0/Album/track.wav"}"#);
+        }
+    }
+
+    #[test]
+    fn proposed_active_policy_canonical_root_change_and_symlink_retarget_are_not_device_drift() {
+        let f=Fixture::new();
+        let a=f.root("A");let b=f.root("B");let alias=f.0.join("alias");
+        std::os::unix::fs::symlink(&a,&alias).unwrap();
+        f.seed(&[alias.clone()]);
+        let folders=vec![alias.to_string_lossy().into_owned()];
+        assert!(crate::local_media::resolve_local_sources(&f.library(),&folders).is_ok());
+        let ledger=fs::read(f.0.join(NAME)).unwrap();
+        let manifest=mirror::read_manifest(&f.library()).unwrap();
+        fs::remove_file(&alias).unwrap();std::os::unix::fs::symlink(&b,&alias).unwrap();
+        assert!(crate::local_media::resolve_local_sources(&f.library(),&folders).is_err());
+        let changed=manifest.sources.keys().map(|id|(id.clone(),b.clone())).collect::<BTreeMap<_,_>>();
+        assert!(verify_if_initialized(&f.library(),&changed).is_err());
+        assert_eq!(fs::read(f.0.join(NAME)).unwrap(),ledger);
+    }
+
+    #[test]
+    fn proposed_active_policy_deliberate_removal_does_not_reactivate_weak_retired_id() {
+        let f=Fixture::new();let root=f.root("Music");f.seed(&[root.clone()]);
+        let manifest=mirror::read_manifest(&f.library()).unwrap();
+        let old_id=manifest.sources.keys().next().unwrap().clone();
+        let mut registry:Registry=serde_json::from_slice(&fs::read(f.0.join(NAME)).unwrap()).unwrap();
+        let o=registry.ids.get_mut(&old_id).unwrap().origin.as_mut().unwrap();
+        o.filesystem=None;o.birth=None;o.device=o.device.wrapping_add(1);
+        registry.checksum=registry.checksum().unwrap();
+        fs::write(f.0.join(NAME),serde_json::to_vec_pretty(&registry).unwrap()).unwrap();
+        let retired_reservation=registry.ids[&old_id].clone();
+        let removed=f.prepare(&[],"explicit-remove");
+        mirror::publish_prepared_managed_generation(&f.library(),&removed).unwrap().cleanup_previous().unwrap();
+        assert!(mirror::read_manifest(&f.library()).unwrap().sources.is_empty());
+        let (again,namespace)=f.reserve(&[root],&BTreeMap::new());
+        assert_ne!(again.keys().next().unwrap(),&old_id);
+        assert_eq!(Some(namespace),manifest.registry_id);
+        let after:Registry=serde_json::from_slice(&fs::read(f.0.join(NAME)).unwrap()).unwrap();
+        assert_eq!(after.ids[&old_id],retired_reservation);
+        assert_eq!(after.ids.len(),2);
+    }
+
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
@@ -788,7 +908,7 @@ mod tests {
         assert!(
             reserve(&f.library(), &[root.clone()], &current(&first), None)
                 .unwrap_err()
-                .contains("substituída")
+                .contains("diverge")
         );
         assert_eq!(fs::read(f.0.join(NAME)).unwrap(), before);
         f.reserve(&[], &current(&first));

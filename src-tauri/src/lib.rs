@@ -37,6 +37,7 @@ mod local_own_writes;
 mod managed_preparation;
 mod managed_save_intent;
 mod mpris;
+mod mpris_shutdown;
 mod online_artwork;
 mod system_tray;
 mod online_metadata;

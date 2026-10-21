@@ -19,7 +19,10 @@ pub(crate) struct Lease {
 impl Lease {
     pub fn acquire(path: &Path) -> Result<Self, String> {
         if !path.try_exists().map_err(|_| UNSAFE)? {
+            // A new XDG_CONFIG_HOME may not exist before AppConfig is loaded.
+            // Existing directories are still checked by Dir::open below.
             fs::DirBuilder::new()
+                .recursive(true)
                 .mode(0o700)
                 .create(path)
                 .map_err(|_| UNSAFE)?;
@@ -249,6 +252,118 @@ mod tests {
         fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
         p
     }
+
+    #[test]
+    fn first_run_lease_absent_xdg_parent_is_admitted_before_other_profile_io() {
+        let base = fixture("first-run-absent-xdg");
+        let profile = base.join("new-xdg/nested/sonante");
+        let state = State::new(&profile);
+        let result = crate::managed_save_intent::guard_startup(&profile, || {
+            state.lease()?.validate()?;
+            crate::config::AppConfig::load_from_path(&profile.join("config.json"))
+        });
+        if result.is_err() {
+            // Characterize why an empty directory seen after failure is not proof
+            // that the lease was acquired when run() originally constructed State.
+            crate::persistence::prepare_private_file_for_load(
+                &profile.join("queue_cache.json"), "queue_cache.json"
+            ).unwrap();
+            eprintln!("first_run_counterproof: later_directory_created={}, cached_lease_invalid={}",
+                profile.is_dir(), state.lease().is_err());
+        }
+        let config = result.expect("A genuinely new private XDG tree must reach first_run");
+        assert!(config.first_run);
+        let config_state = crate::ConfigState(std::sync::Mutex::new(config.clone()));
+        let transactions = crate::ConfigTransactionState::new();
+        let reloaded = crate::read_config_after_startup_reconciliation(
+            &config_state, &transactions, &profile
+        ).unwrap();
+        assert_eq!(reloaded, config);
+        assert!(!crate::should_start_mpd_on_startup(true, &config));
+        assert!(!profile.join("config.json").exists());
+        assert_eq!(fs::metadata(base.join("new-xdg")).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(base.join("new-xdg/nested")).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&profile).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(profile.join(NAME)).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_dir(&profile).unwrap().count(), 1);
+        drop(state);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn first_run_lease_existing_parent_and_empty_profile_keep_first_run() {
+        for present in [false, true] {
+            let base = fixture(if present {"first-run-empty-profile"} else {"first-run-parent"});
+            let profile = base.join("sonante");
+            if present {
+                fs::DirBuilder::new().mode(0o700).create(&profile).unwrap();
+            }
+            let state = State::new(&profile);
+            let config = crate::managed_save_intent::guard_startup(&profile, || {
+                state.lease()?.validate()?;
+                crate::config::AppConfig::load_from_path(&profile.join("config.json"))
+            }).unwrap();
+            assert!(config.first_run);
+            assert!(!crate::should_start_mpd_on_startup(true, &config));
+            assert!(!profile.join("config.json").exists());
+            assert_eq!(fs::read_dir(&profile).unwrap().count(), 1);
+            drop(state);
+            fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    #[test]
+    fn first_run_lease_existing_valid_configuration_is_not_reset() {
+        let profile = fixture("first-run-existing-config");
+        let mut expected = crate::config::AppConfig::default();
+        expected.first_run = false;
+        let bytes = serde_json::to_vec(&expected).unwrap();
+        fs::write(profile.join("config.json"), &bytes).unwrap();
+        fs::set_permissions(profile.join("config.json"), fs::Permissions::from_mode(0o600)).unwrap();
+        let state = State::new(&profile);
+        let loaded = crate::managed_save_intent::guard_startup(&profile, || {
+            state.lease()?.validate()?;
+            crate::config::AppConfig::load_from_path(&profile.join("config.json"))
+        }).unwrap();
+        assert_eq!(loaded, expected);
+        assert_eq!(fs::read(profile.join("config.json")).unwrap(), bytes);
+        drop(state);
+        fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
+    fn first_run_lease_unsafe_profile_never_becomes_first_run() {
+        for case in ["file", "symlink", "writable"] {
+            let base = fixture(&format!("first-run-refuse-{case}"));
+            let profile = base.join("sonante");
+            let target = base.join("target");
+            fs::DirBuilder::new().mode(0o700).create(&target).unwrap();
+            match case {
+                "file" => fs::write(&profile, b"preserve").unwrap(),
+                "symlink" => std::os::unix::fs::symlink(&target, &profile).unwrap(),
+                _ => {
+                    fs::DirBuilder::new().mode(0o700).create(&profile).unwrap();
+                    fs::set_permissions(&profile, fs::Permissions::from_mode(0o777)).unwrap();
+                }
+            }
+            let state = State::new(&profile);
+            assert!(state.lease().is_err());
+            let entered = std::cell::Cell::new(false);
+            let result = crate::managed_save_intent::guard_startup(&profile, || {
+                state.lease()?.validate()?;
+                entered.set(true);
+                crate::config::AppConfig::load_from_path(&profile.join("config.json"))
+            });
+            assert!(result.is_err());
+            assert!(!entered.get());
+            assert!(!target.join(NAME).exists());
+            if case=="file" {assert_eq!(fs::read(&profile).unwrap(), b"preserve");}
+            if case=="writable" {assert_eq!(fs::metadata(&profile).unwrap().mode() & 0o777, 0o777);}
+            drop(state);
+            fs::remove_dir_all(base).unwrap();
+        }
+    }
+
     #[test]
     fn cooperative_child_competitor() {
         if let Some(path) = std::env::var_os("SONANTE_LEASE_TEST_PROFILE") {

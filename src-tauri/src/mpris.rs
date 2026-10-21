@@ -1185,12 +1185,7 @@ pub fn start(app: AppHandle) {
             .try_state::<MprisState>()
             .and_then(|state| state.0.lock().ok()?.finish_start(server));
         if let Some(server) = unused_server {
-            if let Err(error) = server.release_bus_name().await {
-                eprintln!(
-                    "[MPRIS] Failed to release D-Bus name: {}",
-                    crate::diagnostics::error_summary(&error)
-                );
-            }
+            release_server_name(&server).await;
             return;
         }
 
@@ -1262,14 +1257,23 @@ pub fn shutdown(app: &AppHandle) {
     }
 
     if let Some(server) = server {
-        if let Err(error) = tauri::async_runtime::block_on(server.release_bus_name()) {
-            eprintln!(
-                "[MPRIS] Failed to stop service: {}",
-                crate::diagnostics::error_summary(&error)
-            );
-        }
+        tauri::async_runtime::block_on(release_server_name(&server));
     }
 }
+
+async fn release_server_name(server: &Server<SonanteMpris>) {
+    match crate::mpris_shutdown::bounded_release(server.release_bus_name()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => eprintln!(
+            "[MPRIS] Failed to release D-Bus name: {}",
+            crate::diagnostics::error_summary(&error)
+        ),
+        Err(_) => eprintln!(
+            "[MPRIS] D-Bus name release timed out after 1s; continuing controlled cleanup."
+        ),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

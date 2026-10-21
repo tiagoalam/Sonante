@@ -351,16 +351,16 @@ impl MpdSupervisor {
             Ok(_) => {
                 let resolved = crate::local_media::resolve_local_sources(lib_dir, folders)
                     .map_err(|error| error.to_string())?;
-                let manifest = crate::local_media::mirror::read_manifest(lib_dir)?;
+                let manifest = crate::diagnostics::startup_stage("managed.manifest", crate::local_media::mirror::read_manifest(lib_dir))?;
                 if &manifest.sources != resolved.sources() {
                     return Err(
                         "A geração managed diverge das pastas locais configuradas."
                             .to_string(),
                     );
                 }
-                let (current, namespace) = crate::local_media::mirror::identity_sources(lib_dir)?;
+                let (current, namespace) = crate::diagnostics::startup_stage("managed.identity_sources", crate::local_media::mirror::identity_sources(lib_dir))?;
                 let roots = manifest.sources.values().cloned().collect::<Vec<_>>();
-                crate::source_identity::reserve(lib_dir, &roots, &current, namespace.as_deref())?;
+                crate::diagnostics::startup_stage("managed.identity_reserve", crate::source_identity::reserve(lib_dir, &roots, &current, namespace.as_deref()))?;
                 return Ok(LibrarySyncResult {
                     library_dir: lib_dir.to_path_buf(),
                     changed: false,
@@ -375,19 +375,13 @@ impl MpdSupervisor {
                 ))
             }
         }
-        let mut unique_folders = Vec::new();
-        let mut desired_targets = HashSet::new();
-        for f in folders {
-            let p = Path::new(f);
-            if p.exists() && p.is_dir() {
-                let canonical = fs::canonicalize(p).map_err(|e| {
-                    format!("Falha ao resolver pasta local ({}): {}", p.display(), e)
-                })?;
-                if desired_targets.insert(canonical.clone()) {
-                    unique_folders.push(canonical);
-                }
-            }
-        }
+        // A configured source going offline is not an authorized removal.
+        // Validate all roots before reserving identities or deleting any link,
+        // using the same availability policy as the managed path. An explicit
+        // new list (including empty) still removes sources deliberately.
+        let configured = folders.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let unique_folders = crate::local_media::mirror::canonical_configured_roots(&configured)?;
+        let desired_targets = unique_folders.iter().cloned().collect::<HashSet<_>>();
 
         let mut entries = fs::read_dir(lib_dir)
             .map_err(|e| {
@@ -472,13 +466,13 @@ impl MpdSupervisor {
         shared_volume_backend: Option<SharedVolumeBackend>,
         engine: &crate::mpd_engine::MpdEngine,
     ) -> Result<(PathBuf, VolumeBackend, LibrarySyncResult), String> {
-        let dir = crate::persistence::ensure_sonante_config_dir()?;
+        let dir = crate::diagnostics::startup_stage("config.profile", crate::persistence::ensure_sonante_config_dir())?;
 
         let library_sync = if self.output_only_restart {
             // The caller validated the existing generation before stopping.
             // EQ changes output only; it must not publish mirrors or rescan.
             LibrarySyncResult { library_dir: Self::library_dir(), changed: false }
-        } else { Self::sync_library_symlinks(&cfg.local_folders)? };
+        } else { crate::diagnostics::startup_stage("library.reconcile", Self::sync_library_symlinks(&cfg.local_folders))? };
 
         let conf_path = dir.join("mpd.conf");
         let db_path = Self::database_path();
@@ -731,7 +725,7 @@ decoder {{
     fn start_inner(&mut self, cfg: &AppConfig) -> Result<LibrarySyncResult, String> {
         // Resolve/validate an explicit development engine before stopping
         // the current owned MPD. No override keeps the established path.
-        let engine = if self.shared_eq_pipe.is_some() { crate::mpd_engine::MpdEngine::resolve_eq()? } else { crate::mpd_engine::MpdEngine::resolve()? };
+        let engine = crate::diagnostics::startup_stage("engine.resolve", if self.shared_eq_pipe.is_some() { crate::mpd_engine::MpdEngine::resolve_eq() } else { crate::mpd_engine::MpdEngine::resolve() })?;
         if self.shared_eq_pipe.is_some() && !crate::is_shared_output(cfg) { return Err("EQ_SHARED_ONLY".into()); }
 
         let is_shared = cfg.audio_output_type == "pipewire"
@@ -752,11 +746,11 @@ decoder {{
             // copying Direct's unity gain or assuming a previous listening level.
             self.shared_software_volume = Some(0);
         }
-        self.stop()
+        crate::diagnostics::startup_stage("previous.stop", self.stop())
             .map_err(|e| format!("Falha ao encerrar a instância anterior do MPD: {}", e))?;
         self.health = MpdHealth::Starting;
 
-        crate::persistence::ensure_sonante_config_dir()?;
+        crate::diagnostics::startup_stage("profile.ensure", crate::persistence::ensure_sonante_config_dir())?;
 
         let dir = Self::sonante_config_dir();
         // Remove arquivos de estado residuais para assegurar inicialização silenciosa
@@ -772,8 +766,8 @@ decoder {{
         }
 
         let (conf_path, volume_backend, library_sync) =
-            self.ensure_config_file(cfg, shared_volume_backend, &engine)?;
-        self.prepare_runtime_files()?;
+            crate::diagnostics::startup_stage("config.ensure", self.ensure_config_file(cfg, shared_volume_backend, &engine))?;
+        crate::diagnostics::startup_stage("runtime.prepare", self.prepare_runtime_files())?;
 
         println!(
             "[Supervisor] Starting MPD: route={}, buffer={} KB",
@@ -1400,6 +1394,120 @@ mod tests {
         .unwrap();
         fs::remove_dir(library).unwrap();
         fs::rename(staging, library).unwrap();
+    }
+
+    #[test]
+    fn legacy_offline_root_keeps_alias_ledger_and_references_until_restored_or_explicitly_removed()
+    {
+        let (root, library) = library_test_paths("legacy-offline-preservation");
+        let music = root.join("Music");
+        fs::create_dir_all(music.join("Album")).unwrap();
+        fs::write(music.join("Album/track.flac"), b"synthetic-path-fixture").unwrap();
+        let folders = vec![configured_folder(&music)];
+        MpdSupervisor::reconcile_library_symlinks(&library, &folders).unwrap();
+        let before = tree_snapshot(&library);
+        let ledger = fs::read(root.join("local-source-identities.json")).unwrap();
+        for file in ["favorites.json", "playlists.json", "queue_cache.json"] {
+            fs::write(root.join(file), br#"{"uri":"Music/Album/track.flac"}"#).unwrap();
+        }
+        let offline = root.join("Music.offline");
+        fs::rename(&music, &offline).unwrap();
+        let result = MpdSupervisor::reconcile_library_symlinks(&library, &folders);
+        eprintln!(
+            "legacy offline: result={:?}, alias_retained={}",
+            result.as_ref().map(|v| v.changed),
+            library.join("Music").is_symlink()
+        );
+        assert!(
+            result.is_err(),
+            "Unavailable configured source is not an authorized removal"
+        );
+        assert_eq!(tree_snapshot(&library), before);
+        assert_eq!(
+            fs::read(root.join("local-source-identities.json")).unwrap(),
+            ledger
+        );
+        assert!(crate::local_media::resolve_local_sources(&library, &folders).is_err());
+        for file in ["favorites.json", "playlists.json", "queue_cache.json"] {
+            assert_eq!(
+                fs::read(root.join(file)).unwrap(),
+                br#"{"uri":"Music/Album/track.flac"}"#
+            );
+        }
+        fs::rename(&offline, &music).unwrap();
+        assert!(
+            !MpdSupervisor::reconcile_library_symlinks(&library, &folders)
+                .unwrap()
+                .changed
+        );
+        assert_eq!(tree_snapshot(&library), before);
+        assert_eq!(
+            fs::read(root.join("local-source-identities.json")).unwrap(),
+            ledger
+        );
+        assert!(crate::local_media::resolve_local_path(
+            &library,
+            "Music/Album/track.flac",
+            &folders
+        )
+        .is_ok());
+        // Explicit Preferences removal is represented by a new desired list.
+        assert!(
+            MpdSupervisor::reconcile_library_symlinks(&library, &[])
+                .unwrap()
+                .changed
+        );
+        assert!(!library.join("Music").is_symlink());
+        assert!(music.join("Album/track.flac").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_offline_one_root_blocks_partial_reconciliation_but_explicit_removal_still_works() {
+        let (root, library) = library_test_paths("legacy-offline-two-sources");
+        let a = root.join("A");
+        let b = root.join("B");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        let folders = vec![configured_folder(&a), configured_folder(&b)];
+        MpdSupervisor::reconcile_library_symlinks(&library, &folders).unwrap();
+        let before = tree_snapshot(&library);
+        let ledger = fs::read(root.join("local-source-identities.json")).unwrap();
+        fs::rename(&b, root.join("B.offline")).unwrap();
+        assert!(MpdSupervisor::reconcile_library_symlinks(&library, &folders).is_err());
+        assert_eq!(tree_snapshot(&library), before);
+        assert_eq!(
+            fs::read(root.join("local-source-identities.json")).unwrap(),
+            ledger
+        );
+        assert!(
+            MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&a)])
+                .unwrap()
+                .changed
+        );
+        assert!(library.join("A").is_symlink());
+        assert!(!library.join("B").is_symlink());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_offline_replaced_by_regular_file_is_not_a_removal() {
+        let (root, library) = library_test_paths("legacy-offline-not-directory");
+        let music = root.join("Music");
+        fs::create_dir(&music).unwrap();
+        let folders = vec![configured_folder(&music)];
+        MpdSupervisor::reconcile_library_symlinks(&library, &folders).unwrap();
+        let before = tree_snapshot(&library);
+        let ledger = fs::read(root.join("local-source-identities.json")).unwrap();
+        fs::rename(&music, root.join("Music.offline")).unwrap();
+        fs::write(&music, b"not a directory").unwrap();
+        assert!(MpdSupervisor::reconcile_library_symlinks(&library, &folders).is_err());
+        assert_eq!(tree_snapshot(&library), before);
+        assert_eq!(
+            fs::read(root.join("local-source-identities.json")).unwrap(),
+            ledger
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -152,7 +152,7 @@ pub(crate) fn resolve_local_sources(
         .iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    let canonical_roots = mirror::canonical_configured_roots(&configured_paths)
+    let canonical_roots = crate::diagnostics::startup_stage("roots.validate", mirror::canonical_configured_roots(&configured_paths))
         .map_err(LocalPathResolveError::Unavailable)?;
     let library_metadata = fs::symlink_metadata(library_dir).map_err(|error| {
         LocalPathResolveError::Unavailable(format!(
@@ -170,7 +170,7 @@ pub(crate) fn resolve_local_sources(
     let (topology, sources) = match fs::symlink_metadata(&marker) {
         Ok(_) => (
             LocalLibraryTopology::Managed,
-            mirror::import_managed_source_mapping(library_dir, &canonical_roots)
+            crate::diagnostics::startup_stage("managed.mapping", mirror::import_managed_source_mapping(library_dir, &canonical_roots))
                 .map_err(LocalPathResolveError::Unavailable)?,
         ),
         Err(error) if error.kind() == ErrorKind::NotFound => (
@@ -191,12 +191,12 @@ pub(crate) fn resolve_local_sources(
             .iter()
             .any(|root| !mapped_roots.contains(root))
     {
-        return Err(LocalPathResolveError::Unavailable(
+        return crate::diagnostics::startup_stage("mapping.root_set", Err(LocalPathResolveError::Unavailable(
             "A topologia da biblioteca diverge das pastas locais configuradas.".to_string(),
-        ));
+        )));
     }
 
-    crate::source_identity::verify_if_initialized(library_dir, &sources)
+    crate::diagnostics::startup_stage("identity.verify", crate::source_identity::verify_if_initialized(library_dir, &sources))
         .map_err(LocalPathResolveError::Unavailable)?;
     Ok(ResolvedLocalSources { topology, sources })
 }
@@ -707,8 +707,8 @@ pub(crate) mod mirror {
         library_path: &Path,
         canonical_roots: &[PathBuf],
     ) -> Result<BTreeMap<String, PathBuf>, String> {
-        let manifest = read_manifest(library_path)?;
-        validate_cleanup_tree(library_path, &manifest)
+        let manifest = crate::diagnostics::startup_stage("managed.read_manifest", read_manifest(library_path))?;
+        crate::diagnostics::startup_stage("managed.topology", validate_cleanup_tree(library_path, &manifest))
             .map_err(|error| format!("Geração gerenciada incompatível: {error}"))?;
         let configured = canonical_roots.iter().cloned().collect::<HashSet<_>>();
         let mut by_target = HashMap::new();
