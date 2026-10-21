@@ -82,7 +82,7 @@ jobs:
         run: node scripts/verify-packaging.mjs
 
       - name: Test packaging contracts
-        run: python3 -m unittest discover -s tests -p 'packaging_test.py'
+        run: python3 -m unittest discover -s tests -p '*packaging_test.py'
 
       - name: Build native executable
         run: npm run tauri -- build --no-bundle -- --locked
