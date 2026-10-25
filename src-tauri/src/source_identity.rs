@@ -1256,3 +1256,366 @@ mod tests {
         assert_eq!(fs::metadata(f.0.join(NAME)).unwrap().len(), MAX_BYTES + 1);
     }
 }
+
+// FF04-I1a additive and disconnected. No existing D03/verifier/writer changed.
+// The caller must obtain these bounded bytes from its anchored readonly snapshot.
+pub(crate) fn recovery_validate_unique(bytes:&[u8], limit:u64)->Result<(),()> {
+    if bytes.len() as u64>limit {return Err(());}
+    struct Checked;
+    impl<'de> Deserialize<'de> for Checked {
+        fn deserialize<D:serde::Deserializer<'de>>(d:D)->Result<Self,D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value=Checked;
+                fn expecting(&self,f:&mut std::fmt::Formatter)->std::fmt::Result {f.write_str("unambiguous JSON")}
+                fn visit_bool<E:serde::de::Error>(self,_:bool)->Result<Checked,E>{Ok(Checked)}
+                fn visit_i64<E:serde::de::Error>(self,_:i64)->Result<Checked,E>{Ok(Checked)}
+                fn visit_u64<E:serde::de::Error>(self,_:u64)->Result<Checked,E>{Ok(Checked)}
+                fn visit_f64<E:serde::de::Error>(self,_:f64)->Result<Checked,E>{Ok(Checked)}
+                fn visit_str<E:serde::de::Error>(self,_:&str)->Result<Checked,E>{Ok(Checked)}
+                fn visit_unit<E:serde::de::Error>(self)->Result<Checked,E>{Ok(Checked)}
+                fn visit_seq<A:serde::de::SeqAccess<'de>>(self,mut a:A)->Result<Checked,A::Error>{
+                    while a.next_element::<Checked>()?.is_some(){} Ok(Checked)
+                }
+                fn visit_map<A:serde::de::MapAccess<'de>>(self,mut a:A)->Result<Checked,A::Error>{
+                    let mut exact=std::collections::BTreeSet::new();
+                    let mut paths=std::collections::BTreeSet::new();
+                    while let Some(key)=a.next_key::<String>()? {
+                        // Also reject keys that collapse when deserialized as PathBuf.
+                        // Exact decoded strings already catch escaped duplicate IDs.
+                        if !exact.insert(key.clone()) || !paths.insert(PathBuf::from(&key)) {
+                            return Err(serde::de::Error::custom("ambiguous key"));
+                        }
+                        a.next_value::<Checked>()?;
+                    }
+                    Ok(Checked)
+                }
+            }
+            d.deserialize_any(Visitor)
+        }
+    }
+    let mut deserializer=serde_json::Deserializer::from_slice(bytes);
+    Checked::deserialize(&mut deserializer).map_err(|_|())?;
+    deserializer.end().map_err(|_|())
+}
+pub(crate) fn recovery_decode_unique<T:serde::de::DeserializeOwned>(bytes:&[u8],limit:u64)->Result<T,()> {
+    recovery_validate_unique(bytes,limit)?;
+    serde_json::from_slice(bytes).map_err(|_|())
+}
+
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(crate) enum PreliminaryHistoricalReason {
+    MatchesAtInspection, UnsupportedLedger, LedgerInvalid, LedgerExtensionUnconfirmed,
+    ManifestBindingUnconfirmed, RootNotFound, RootPermissionDenied, RootUnsafe,
+    RootAccessUnconfirmed, HistoricalMismatch, HistoricalIncomparable,
+    ObservationChanged, Cancelled, Unconfirmed,
+}
+/// Private registry state; deliberately no Serialize/Debug or authorization token.
+pub(crate) struct PreliminaryHistoricalContext { registry:Registry, bytes:Vec<u8> }
+impl PreliminaryHistoricalContext {
+    pub(crate) fn from_readonly_bytes(old:&[u8],old_anchor:&[u8],current:&[u8],anchor:&[u8])
+        ->Result<Self,PreliminaryHistoricalReason> {
+        use PreliminaryHistoricalReason::*;
+        if old_anchor.len()!=32 || anchor.len()!=32 {return Err(LedgerInvalid);}
+        let a:Registry=recovery_decode_unique(old,MAX_BYTES).map_err(|_|LedgerInvalid)?;
+        let b:Registry=recovery_decode_unique(current,MAX_BYTES).map_err(|_|LedgerInvalid)?;
+        if a.schema_version!=VERSION || b.schema_version!=VERSION {return Err(UnsupportedLedger);}
+        a.validate().map_err(|_|LedgerInvalid)?; b.validate().map_err(|_|LedgerInvalid)?;
+        if old_anchor!=a.namespace.as_bytes() || anchor!=b.namespace.as_bytes() {return Err(LedgerInvalid);}
+        if a.namespace!=b.namespace || a.ids.iter().any(|(id,r)|b.ids.get(id)!=Some(r)) {
+            return Err(LedgerExtensionUnconfirmed);
+        }
+        // Retain the original extension validator as a second authority. Failure
+        // not established by the checks above is unknown, never parsed from text.
+        validate_recovery_extension(old,old_anchor,current,anchor).map_err(|_|Unconfirmed)?;
+        Ok(Self{registry:b,bytes:current.to_vec()})
+    }
+    fn mismatch(expected:&Origin,observed:&Origin)->PreliminaryHistoricalReason {
+        use PreliminaryHistoricalReason::*;
+        if expected.inode!=observed.inode
+            || matches!((expected.filesystem,observed.filesystem),(Some(a),Some(b)) if a!=b)
+            || matches!((expected.birth,observed.birth),(Some(a),Some(b)) if a!=b) {
+            HistoricalMismatch
+        } else if expected.filesystem.is_some()!=observed.filesystem.is_some()
+            || expected.birth.is_some()!=observed.birth.is_some() {HistoricalIncomparable}
+        else {HistoricalMismatch}
+    }
+    /// Preliminary physical observation only; no Lease/operation/legacy fence.
+    /// No paths or Origin fields escape through the finite outcome enum.
+    pub(crate) fn assess_manifest(&self,manifest:&crate::local_media::mirror::MirrorManifest,
+        cancel:&dyn Fn()->bool)->PreliminaryHistoricalReason {
+        use PreliminaryHistoricalReason::*;
+        if cancel(){return Cancelled;}
+        if crate::local_media::mirror::validate_manifest(manifest).is_err()
+            || manifest.registry_id.as_deref()!=Some(self.registry.namespace.as_str())
+            || manifest.sources.iter().any(|(id,root)|self.registry.ids.get(id)
+                .is_none_or(|r|r.root.as_ref()!=Some(root)||r.origin.is_none())) {
+            return ManifestBindingUnconfirmed;
+        }
+        for (id,root) in &manifest.sources {
+            if cancel(){return Cancelled;}
+            let r=&self.registry.ids[id];let expected=r.origin.as_ref().expect("binding checked");
+            fn io_reason(e:std::io::Error)->PreliminaryHistoricalReason {
+                match e.kind(){std::io::ErrorKind::NotFound=>RootNotFound,
+                    std::io::ErrorKind::PermissionDenied=>RootPermissionDenied,_=>RootAccessUnconfirmed}
+            }
+            let named=match fs::symlink_metadata(root){Ok(m)=>m,Err(e)=>return io_reason(e)};
+            if !named.is_dir(){return RootUnsafe;}
+            let held=match OpenOptions::new().read(true)
+                .custom_flags(libc::O_NOFOLLOW|libc::O_DIRECTORY|libc::O_CLOEXEC).open(root) {
+                Ok(f)=>f,Err(e)=>return io_reason(e),
+            };
+            let opened=match held.metadata(){Ok(m)=>m,Err(_)=>return RootAccessUnconfirmed};
+            if !opened.is_dir() || (opened.dev(),opened.ino())!=(named.dev(),named.ino()) {return ObservationChanged;}
+            let observed=match Origin::capture(root){Ok(o)=>o,Err(_)=>return RootAccessUnconfirmed};
+            if !expected.matches_reserved_origin(&observed){return Self::mismatch(expected,&observed);}
+            if cancel(){return Cancelled;}
+            let after=match fs::symlink_metadata(root){Ok(m)=>m,Err(_)=>return ObservationChanged};
+            if !after.is_dir() || (after.dev(),after.ino())!=(opened.dev(),opened.ino()){return ObservationChanged;}
+            let fresh=match Origin::capture(root){Ok(o)=>o,Err(_)=>return RootAccessUnconfirmed};
+            if !expected.matches_reserved_origin(&fresh){return Self::mismatch(expected,&fresh);}
+        }
+        if cancel(){return Cancelled;}
+        // Use the unchanged final verifier too. A discrepancy is not a typed
+        // mismatch inferred from its String error and is never accepted.
+        if verify_recovery_origins(&self.bytes,&manifest.sources).is_err(){return Unconfirmed;}
+        if cancel(){Cancelled}else{MatchesAtInspection}
+    }
+}
+
+#[cfg(test)]
+mod ff04_historical_table {
+    use super::*;
+    #[test] fn strict_active_reactivation_table_uses_original_predicates() {
+        let weak=Origin{filesystem:None,device:11,inode:22,birth:None};
+        let same=weak.clone();let moved=Origin{device:12,..weak.clone()};
+        let strong=Origin{filesystem:Some([31,32]),device:11,inode:22,birth:Some((41,42))};
+        let renumbered=Origin{device:99,..strong.clone()};
+        assert!(weak.matches_reserved_origin(&same));
+        assert!(weak.matches_active(&moved));assert!(!weak.matches_reserved_origin(&moved));
+        assert!(weak.matches_active(&strong));assert!(!weak.matches_reserved_origin(&strong));
+        assert!(strong.matches_active(&weak));assert!(!strong.matches_reserved_origin(&weak));
+        assert!(strong.matches_reserved_origin(&renumbered));assert!(strong.proves_reactivation(&renumbered));
+        assert!(!weak.proves_reactivation(&same));
+        assert_eq!(PreliminaryHistoricalContext::mismatch(&weak,&strong),PreliminaryHistoricalReason::HistoricalIncomparable);
+        // Pure decision table only, not a forged physical-history positive.
+    }
+    #[test] fn readonly_json_rejects_duplicates_path_aliases_trailing_and_limits() {
+        for bad in [br#"{"ids":{"x":1,"x":2}}"#.as_slice(),br#"{"entries":{"a/b":1,"a/./b":2}}"#,br#"{} {}"#] {
+            assert!(recovery_decode_unique::<serde_json::Value>(bad,4096).is_err());
+        }
+        assert!(recovery_decode_unique::<serde_json::Value>(b"{}",1).is_err());
+        assert!(recovery_decode_unique::<serde_json::Value>(br#"{"a":[1,null,true]}"#,4096).is_ok());
+    }
+}
+
+// FF06-I1a: isolated readonly inspection, never product admission.
+// Existing reservation/recovery functions and D03 predicates above are unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReadonlyStamp {
+    dev: u64, ino: u64, mode: u32, uid: u32, links: u64, len: u64,
+    mtime: (i64, i64), ctime: (i64, i64),
+}
+impl ReadonlyStamp {
+    pub(crate) fn of(m: &fs::Metadata) -> Self {
+        Self { dev: m.dev(), ino: m.ino(), mode: m.mode(), uid: m.uid(),
+            links: m.nlink(), len: m.len(), mtime: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()) }
+    }
+}
+
+/// Anchored readonly descriptor. Its path is internal and never a DTO.
+pub(crate) struct ReadonlyDirectory { file: File, path: PathBuf, stamp: ReadonlyStamp }
+impl ReadonlyDirectory {
+    pub(crate) fn open(path: &Path) -> Result<Self, ()> {
+        if !path.is_absolute() { return Err(()); }
+        let before = fs::symlink_metadata(path).map_err(|_| ())?;
+        if !before.is_dir() { return Err(()); }
+        let file = OpenOptions::new().read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(path).map_err(|_| ())?;
+        let stamp = ReadonlyStamp::of(&file.metadata().map_err(|_| ())?);
+        if stamp != ReadonlyStamp::of(&before) { return Err(()); }
+        let result = Self { file, path: path.into(), stamp };
+        result.revalidate()?;
+        Ok(result)
+    }
+    pub(crate) fn revalidate(&self) -> Result<(), ()> {
+        let a = self.file.metadata().map_err(|_| ())?;
+        let b = fs::symlink_metadata(&self.path).map_err(|_| ())?;
+        if !a.is_dir() || !b.is_dir() || a.uid() != unsafe { libc::geteuid() }
+            || a.mode() & 0o022 != 0 || ReadonlyStamp::of(&a) != self.stamp
+            || ReadonlyStamp::of(&b) != self.stamp { return Err(()); }
+        Ok(())
+    }
+    pub(crate) fn entry(&self, name: &std::ffi::OsStr) -> Result<PathBuf, ()> {
+        if Path::new(name).components().count() != 1
+            || !matches!(Path::new(name).components().next(), Some(std::path::Component::Normal(_))) {
+            return Err(());
+        }
+        Ok(PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd())).join(name))
+    }
+    // Only previously captured relative mirror entries use this helper.
+    pub(crate) fn descendant(&self, relative: &Path) -> Result<PathBuf, ()> {
+        if relative.as_os_str().is_empty() || relative.components().any(|part|
+            !matches!(part, std::path::Component::Normal(_))) { return Err(()); }
+        Ok(PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd())).join(relative))
+    }
+    pub(crate) fn change_watch_path(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}",self.file.as_raw_fd()))
+    }
+    pub(crate) fn supports_local_change_events(&self) -> bool {
+        let mut info=std::mem::MaybeUninit::<libc::statfs>::uninit();
+        if unsafe {libc::fstatfs(self.file.as_raw_fd(),info.as_mut_ptr())}!=0 {return false;}
+        // An optimization precondition, never source/read admission. Remote,
+        // FUSE and unknown filesystems retain the complete scan validation.
+        matches!(unsafe {info.assume_init()}.f_type as u64,
+            0xef53 | 0x9123683e | 0x58465342 | 0x01021994)
+    }
+    pub(crate) fn names(&self, limit: usize) -> Result<Vec<std::ffi::OsString>, ()> {
+        self.revalidate()?;
+        let mut names = Vec::new();
+        for e in fs::read_dir(format!("/proc/self/fd/{}", self.file.as_raw_fd())).map_err(|_| ())? {
+            if names.len() >= limit { return Err(()); }
+            names.push(e.map_err(|_| ())?.file_name());
+        }
+        names.sort(); self.revalidate()?; Ok(names)
+    }
+}
+
+pub(crate) struct ReadonlyBoundedFile {
+    file: File, name: std::ffi::OsString, stamp: ReadonlyStamp,
+    bytes: Vec<u8>, max: u64, private: bool,
+}
+impl ReadonlyBoundedFile {
+    pub(crate) fn open(dir: &ReadonlyDirectory, name: &str, max: u64, private: bool) -> Result<Self, ()> {
+        dir.revalidate()?;
+        // NONBLOCK prevents a substituted FIFO from hanging before the type check.
+        let path = dir.entry(std::ffi::OsStr::new(name))?;
+        let file = OpenOptions::new().read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&path).map_err(|_| ())?;
+        let stamp = ReadonlyStamp::of(&file.metadata().map_err(|_| ())?);
+        let mut result = Self { file, name: name.into(), stamp, bytes: Vec::new(), max, private };
+        result.validate_metadata(dir)?;
+        result.bytes = result.read_bounded()?;
+        result.validate_metadata(dir)?;
+        dir.revalidate()?;
+        Ok(result)
+    }
+    fn validate_metadata(&self, dir: &ReadonlyDirectory) -> Result<(), ()> {
+        dir.revalidate()?;
+        let a = self.file.metadata().map_err(|_| ())?;
+        let b = fs::symlink_metadata(dir.entry(&self.name)?).map_err(|_| ())?;
+        if !a.is_file() || !b.is_file() || a.uid() != unsafe { libc::geteuid() }
+            || a.nlink() != 1 || a.mode() & if self.private { 0o077 } else { 0o022 } != 0
+            || a.len() > self.max || ReadonlyStamp::of(&a) != self.stamp
+            || ReadonlyStamp::of(&b) != self.stamp { return Err(()); }
+        Ok(())
+    }
+    fn read_bounded(&self) -> Result<Vec<u8>, ()> {
+        use std::os::unix::fs::FileExt;
+        let mut bytes = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let remaining = (self.max + 1).saturating_sub(bytes.len() as u64) as usize;
+            if remaining == 0 { return Err(()); }
+            let len = buf.len().min(remaining);
+            let n = self.file.read_at(&mut buf[..len], bytes.len() as u64).map_err(|_| ())?;
+            if n == 0 { break; }
+            bytes.extend_from_slice(&buf[..n]);
+            if bytes.len() as u64 > self.max { return Err(()); }
+        }
+        Ok(bytes)
+    }
+    pub(crate) fn bytes(&self) -> &[u8] { &self.bytes }
+    pub(crate) fn revalidate(&self, dir: &ReadonlyDirectory) -> Result<(), ()> {
+        self.validate_metadata(dir)?;
+        if self.read_bounded()? != self.bytes { return Err(()); }
+        self.validate_metadata(dir)
+    }
+}
+
+/// serde maps normally accept duplicate keys (including duplicate IDs). Reject
+/// duplicates recursively before typed deserialization; reject trailing JSON too.
+pub(crate) fn readonly_unique_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ()> {
+    struct Unique(serde_json::Value);
+    impl<'de> Deserialize<'de> for Unique {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> serde::de::Visitor<'de> for V {
+                type Value = Unique;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("JSON without duplicate keys") }
+                fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Unique,E> { Ok(Unique(v.into())) }
+                fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Unique,E> { Ok(Unique(v.into())) }
+                fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Unique,E> { Ok(Unique(v.into())) }
+                fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Unique,E> {
+                    serde_json::Number::from_f64(v).map(|n| Unique(n.into())).ok_or_else(|| E::custom("nonfinite"))
+                }
+                fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Unique,E> { Ok(Unique(v.into())) }
+                fn visit_unit<E: serde::de::Error>(self) -> Result<Unique,E> { Ok(Unique(serde_json::Value::Null)) }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a:A) -> Result<Unique,A::Error> {
+                    let mut v=Vec::new(); while let Some(Unique(x))=a.next_element()? { v.push(x); }
+                    Ok(Unique(v.into()))
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(self, mut a:A) -> Result<Unique,A::Error> {
+                    let mut v=serde_json::Map::new();
+                    while let Some(k)=a.next_key::<String>()? {
+                        if v.contains_key(&k) { return Err(serde::de::Error::custom("duplicate key")); }
+                        let Unique(x)=a.next_value()?; v.insert(k,x);
+                    }
+                    Ok(Unique(v.into()))
+                }
+            }
+            d.deserialize_any(V)
+        }
+    }
+    let Unique(v)=serde_json::from_slice(bytes).map_err(|_| ())?;
+    serde_json::from_value(v).map_err(|_| ())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadonlyOriginObservation { Available, NotFound, PermissionDenied, IoError, Conflict }
+
+pub(crate) struct ReadonlyIdentitySnapshot {
+    parent: ReadonlyDirectory, ledger: ReadonlyBoundedFile, anchor: ReadonlyBoundedFile,
+    registry: Registry,
+}
+impl ReadonlyIdentitySnapshot {
+    pub(crate) fn open(library: &Path) -> Result<Self, ()> {
+        let parent=ReadonlyDirectory::open(library.parent().ok_or(())?)?;
+        let ledger=ReadonlyBoundedFile::open(&parent, NAME, MAX_BYTES, true)?;
+        let anchor=ReadonlyBoundedFile::open(&parent, LOCK, 32, true)?;
+        let registry:Registry=readonly_unique_json(ledger.bytes())?;
+        registry.validate().map_err(|_| ())?;
+        if anchor.bytes()!=registry.namespace.as_bytes() { return Err(()); }
+        let s=Self {parent, ledger, anchor, registry}; s.revalidate()?; Ok(s)
+    }
+    pub(crate) fn revalidate(&self) -> Result<(), ()> {
+        self.ledger.revalidate(&self.parent)?; self.anchor.revalidate(&self.parent)
+    }
+    pub(crate) fn matches_manifest(&self, namespace:&str, sources:&BTreeMap<String,PathBuf>) -> bool {
+        namespace==self.registry.namespace && sources.iter().all(|(id,root)|
+            self.registry.ids.get(id).is_some_and(|r| r.root.as_ref()==Some(root) && r.origin.is_some()))
+    }
+    /// No other root is touched, and no error string or raw Origin escapes.
+    pub(crate) fn observe(&self, id:&str) -> Result<ReadonlyOriginObservation, ()> {
+        use ReadonlyOriginObservation::*;
+        self.revalidate()?;
+        let r=self.registry.ids.get(id).ok_or(())?;
+        let root=r.root.as_ref().ok_or(())?; let expected=r.origin.as_ref().ok_or(())?;
+        fn classify(e:std::io::Error)->ReadonlyOriginObservation {
+            match e.kind() { std::io::ErrorKind::NotFound=>NotFound,
+                std::io::ErrorKind::PermissionDenied=>PermissionDenied, _=>IoError }
+        }
+        let m=match fs::symlink_metadata(root) { Ok(m)=>m, Err(e)=>return Ok(classify(e)) };
+        if !m.is_dir() { return Ok(Conflict); }
+        if let Err(e)=fs::read_dir(root) { return Ok(classify(e)); }
+        let current=Origin::capture(root).map_err(|_| ())?;
+        if !expected.matches_active(&current) { return Ok(Conflict); }
+        // Repeat actual D03 capture after access check; do not trust first observation.
+        let after=Origin::capture(root).map_err(|_| ())?;
+        if !expected.matches_active(&after) || !current.matches_active(&after) { return Ok(Conflict); }
+        self.revalidate()?; Ok(Available)
+    }
+}

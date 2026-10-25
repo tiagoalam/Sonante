@@ -27,6 +27,7 @@ mod profile_lease;
 mod local_media;
 mod library_refresh;
 mod source_identity;
+mod source_availability;
 mod local_import_preview;
 mod local_import_artwork;
 mod local_watcher;
@@ -84,6 +85,7 @@ pub struct ConfigState(pub Mutex<AppConfig>);
 pub struct ConfigTransactionState {
     operations: Arc<config_save_operation::Coordinator>,
     startup_config_read_gate: Mutex<bool>,
+    source_mirror_cache: source_availability::MirrorReadCache,
     restart_gate: Mutex<()>,
     preparation: managed_preparation::ManagedPreparationCoordinator,
     lifecycle: AtomicU8,
@@ -2365,6 +2367,7 @@ impl ConfigTransactionState {
         Self {
             operations: Arc::new(config_save_operation::Coordinator::new()),
             startup_config_read_gate: Mutex::new(false),
+            source_mirror_cache: source_availability::MirrorReadCache::default(),
             restart_gate: Mutex::new(()),
             preparation: managed_preparation::ManagedPreparationCoordinator::new(),
             lifecycle: AtomicU8::new(0),
@@ -4109,18 +4112,69 @@ async fn get_local_cover(path: String, app: AppHandle, diagnostic_id: Option<u64
     diagnostic.phase("executor.queued");
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
-        let result = (|| {
-            diagnostic.phase("wait.config");
-            let local_folders = app.state::<ConfigState>().0.lock()
-                .map_err(|_| "Configuração indisponível.".to_string())?.local_folders.clone();
-            let lib_dir = MpdSupervisor::library_dir();
+        diagnostic.phase("wait.config");
+        let result = with_local_source_context(&app, |before, recheck, context| {
+            if before.observed_conflict { return Err("LOCAL_COVER_IDENTITY_CONFLICT".into()); }
             let socket_path = MpdSupervisor::socket_path().to_string_lossy().into_owned();
+            let verify = || -> Result<(), String> {
+                // Retain the real config/Lease/transaction checks at each I/O
+                // boundary. SourceCoverTarget separately revalidates source B
+                // and held physical FDs. Full original inventories are checked
+                // once more below, before any artwork result is published.
+                (context.validate_config)()?;
+                if MpdSupervisor::socket_path().to_string_lossy().as_ref() != socket_path.as_str() {
+                    return Err("LOCAL_COVER_CONTEXT_CHANGED".into());
+                }
+                Ok(())
+            };
+            verify()?;
             diagnostic.phase("filesystem");
-            AudioEngine::get_local_cover_at(&socket_path, &lib_dir, &path, &local_folders)
-        })();
+            let cover = local_media::with_source_cover_target(
+                context.owner, context.transaction, context.coordinator, context.library, context.configured, &path,
+                |target| AudioEngine::get_local_cover_from_source(&socket_path, &path, target, &verify),
+            )?;
+            verify()?;
+            let after = recheck()?;
+            if after.observed_conflict { return Err("LOCAL_COVER_IDENTITY_CONFLICT".into()); }
+            if before.sources != after.sources { return Err("LOCAL_COVER_CONTEXT_CHANGED".into()); }
+            verify()?;
+            Ok(cover)
+        }).map(|(cover, _)| cover);
         diagnostic.result(&result);
         result
     }).await.map_err(|_| "Consulta de capa local indisponível.".to_string())?
+}
+
+#[tauri::command]
+async fn get_local_covers(paths: Vec<String>, app: AppHandle) -> Result<Vec<Result<Option<String>,String>>,String> {
+    if paths.is_empty() || paths.len()>2 || paths.iter().any(|path|path.len()>4096) {
+        return Err("LOCAL_COVER_BATCH_BOUND".into());
+    }
+    let permit=bounded_artwork_io::COVER_READS.acquire()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit=permit;
+        with_local_source_context(&app, |before,recheck,context| {
+            if before.observed_conflict {return Err("LOCAL_COVER_IDENTITY_CONFLICT".into());}
+            let socket=MpdSupervisor::socket_path().to_string_lossy().into_owned();
+            let verify=||->Result<(),String> {
+                (context.validate_config)()?;
+                if MpdSupervisor::socket_path().to_string_lossy().as_ref()!=socket.as_str() {
+                    return Err("LOCAL_COVER_CONTEXT_CHANGED".into());
+                }
+                Ok(())
+            };
+            verify()?;
+            let covers=context.inventory.read_cover_pair_in_context(context.owner,context.transaction,context.coordinator,
+                context.library,context.configured,&paths,|path,target|
+                    AudioEngine::get_local_cover_from_source(&socket,path,target,&verify))?;
+            verify()?;
+            let after=recheck()?;
+            if after.observed_conflict {return Err("LOCAL_COVER_IDENTITY_CONFLICT".into());}
+            if before.sources!=after.sources {return Err("LOCAL_COVER_CONTEXT_CHANGED".into());}
+            verify()?;
+            Ok(covers)
+        }).map(|(covers,_)|covers)
+    }).await.map_err(|_|"Consulta de capas locais indisponível.".to_string())?
 }
 
 #[tauri::command]
@@ -4213,6 +4267,160 @@ async fn get_config(app: AppHandle) -> Result<AppConfig, String> {
     .map_err(|error| format!("Falha na tarefa de leitura da configuração: {error}"))?
 }
 
+// Guards stay on this worker's stack through the callback and final validation.
+// This context binds a consistent profile/config/ledger/mirror. It never grants
+// physical-file or playback access; each caller has its own finite read scope.
+// Constructed only by the real guard-owning helper; never serialized.
+struct LocalSourceReadContext<'a> {
+    owner: &'a profile_lease::Lease,
+    transaction: &'a config_save_operation::Transaction<'a>,
+    coordinator: &'a config_save_operation::Coordinator,
+    library: &'a Path,
+    configured: &'a [String],
+    validate_config: &'a dyn Fn() -> Result<(), String>,
+    inventory: &'a source_availability::PreliminaryInventory,
+}
+// Read-only variant for the guard-owning local-source context only.
+// Existing startup/Save callers retain the original hardening loader.
+fn read_local_source_config_with_startup_guard(
+    state: &ConfigState,
+    transactions: &ConfigTransactionState,
+    config_dir: &Path,
+    startup_owned: &std::sync::MutexGuard<'_, bool>,
+) -> Result<AppConfig, String> {
+    if transactions
+        .operations
+        .snapshot()?
+        .is_some_and(|op| op.phase == config_save_operation::Phase::Uncertain)
+    {
+        return Err(
+            "CONFIG_PERSISTENCE_UNCERTAIN: conclusão do Save não confirmada.".to_string(),
+        );
+    }
+    if !transactions.operations.active() {
+        if **startup_owned {
+            managed_save_intent::check_active_startup_reconciliation(config_dir)?;
+        } else {
+            managed_save_intent::check_startup(config_dir)?;
+        }
+        // The caller pins, parses and compares persisted bytes immediately
+        // below. Do not use the hardening loader here: chmod changes the
+        // profile ctime and invalidates the retained D03 snapshot.
+    }
+    Ok(state
+        .0
+        .lock()
+        .map_err(|_| "Falha ao acessar a configuração atual.".to_string())?
+        .clone())
+}
+
+fn with_local_source_context<T>(
+    app: &AppHandle,
+    read: impl FnOnce(
+        &source_availability::PreliminaryObservation,
+        &dyn Fn() -> Result<source_availability::PreliminaryObservation, String>,
+        &LocalSourceReadContext<'_>,
+    ) -> Result<T, String>,
+) -> Result<(T, source_availability::PreliminaryObservation), String> {
+    const BUSY: &str = "SOURCE_AVAILABILITY_BUSY";
+    const BLOCKED: &str = "SOURCE_AVAILABILITY_BLOCKED";
+    const CHANGED: &str = "SOURCE_AVAILABILITY_CHANGED";
+    const UNCONFIRMED: &str = "SOURCE_AVAILABILITY_UNCONFIRMED";
+    let owner = app.state::<profile_lease::State>().lease().map_err(|_| BLOCKED)?;
+    owner.validate().map_err(|_| BLOCKED)?;
+    let transactions = app.state::<ConfigTransactionState>();
+    // Match startup's order. Neither admission waits behind another worker.
+    let startup_owned = transactions.startup_config_read_gate.try_lock().map_err(|error| {
+        match error {
+            std::sync::TryLockError::WouldBlock => BUSY,
+            std::sync::TryLockError::Poisoned(_) => BLOCKED,
+        }
+    })?;
+    let _transaction = transactions.operations.try_begin_background().map_err(|error| {
+        match error {
+            config_save_operation::BackgroundAdmission::Busy => BUSY,
+            config_save_operation::BackgroundAdmission::Blocked => BLOCKED,
+        }
+    })?;
+    let shutdown = || transactions.shutdown_requested() || transactions.shutdown_started()
+        || transactions.operations.shutdown_requested();
+    if shutdown() { return Err(BLOCKED.into()); }
+    let config_dir = MpdSupervisor::sonante_config_dir();
+    let library_dir = MpdSupervisor::library_dir();
+    let profile = recovery_fs::Dir::open(&config_dir).map_err(|_| BLOCKED)?;
+    let library = recovery_fs::Dir::open(&library_dir).map_err(|_| UNCONFIRMED)?;
+    let validate_context = || -> Result<(), String> {
+        if shutdown() { return Err(BLOCKED.into()); }
+        owner.validate().map_err(|_| CHANGED)?;
+        profile.validate().map_err(|_| CHANGED)?;
+        library.validate().map_err(|_| CHANGED)?;
+        if profile.id() != owner.root().id()
+            || MpdSupervisor::sonante_config_dir() != config_dir
+            || MpdSupervisor::library_dir() != library_dir
+            || library_dir != config_dir.join("library") {
+            return Err(CHANGED.into());
+        }
+        Ok(())
+    };
+    validate_context()?;
+    let state = app.state::<ConfigState>();
+    let config = read_local_source_config_with_startup_guard(&state, &transactions, &config_dir, &startup_owned)
+        .map_err(|_| BLOCKED)?;
+    // Pin bounded persisted bytes and identity as well as the live config.
+    // No raw config, paths, errors, or credentials enter the response.
+    let config_id = profile.file_identity("config.json").map_err(|_| CHANGED)?;
+    let config_bytes = profile.read("config.json", 16 * 1024 * 1024, &shutdown)
+        .map_err(|_| UNCONFIRMED)?.ok_or(UNCONFIRMED)?;
+    let mut persisted: AppConfig = serde_json::from_slice(&config_bytes).map_err(|_| UNCONFIRMED)?;
+    persisted.apply_legacy_migrations();
+    if persisted != config || profile.file_identity("config.json").map_err(|_| CHANGED)? != config_id {
+        return Err(CHANGED.into());
+    }
+    validate_context()?;
+    // The callback borrows only finite observations and a readonly recheck.
+    // It cannot retain our guards or turn a path into a product capability.
+    let validate_config = || -> Result<(), String> {
+        let current = read_local_source_config_with_startup_guard(&state, &transactions, &config_dir, &startup_owned)
+            .map_err(|_| BLOCKED)?;
+        if current != config
+            || profile.file_identity("config.json").map_err(|_| CHANGED)? != config_id
+            || profile.read("config.json", 16 * 1024 * 1024, &shutdown).map_err(|_| CHANGED)?.as_deref()
+                != Some(config_bytes.as_slice()) {
+            return Err(CHANGED.into());
+        }
+        validate_context()
+    };
+    let value=source_availability::with_cached_read_inventory(&transactions.source_mirror_cache,&library_dir,&config.local_folders,|before,read_origins,inventory| {
+        let recheck=||->Result<source_availability::PreliminaryObservation,String> {
+            validate_config()?;
+            let current=read_origins()?;
+            validate_config()?;
+            Ok(current)
+        };
+        let context=LocalSourceReadContext {owner:&owner,transaction:&_transaction,
+            coordinator:transactions.operations.as_ref(),library:&library_dir,configured:&config.local_folders,
+            validate_config:&validate_config,inventory};
+        let value=read(before,&recheck,&context)?;
+        validate_config()?;
+        Ok(value)
+    })?;
+    // This runs AFTER the read scope's final full original topology check.
+    // Both real guards remain owned through this final config/Lease validation.
+    validate_config()?;
+    Ok(value)
+}
+
+// Informational only: the response may report conflicts, never product admission.
+// Abandoning IPC does not cancel the worker or release its retained guards.
+#[tauri::command]
+async fn get_local_source_availability(
+    app: AppHandle,
+) -> Result<source_availability::PreliminaryObservation, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        with_local_source_context(&app, |_, _, _| Ok(())).map(|(_, observation)| observation)
+    }).await.map_err(|_| "SOURCE_AVAILABILITY_UNCONFIRMED".to_string())?
+}
+
 // These commands are available before config/bootstrap. Analysis is read-only,
 // and the State rejects calls after a normal admitted startup.
 #[tauri::command]
@@ -4220,7 +4428,7 @@ async fn analyze_library_recovery(app: AppHandle, request_id: String) -> Result<
     tauri::async_runtime::spawn_blocking(move || {
         app.state::<library_recovery::State>().analyze(
             &MpdSupervisor::sonante_config_dir(), &request_id,
-            app.state::<profile_lease::State>().lease().and_then(|o|o.validate()).is_ok(),
+            app.state::<profile_lease::State>().lease().ok(),
             || app.state::<ConfigTransactionState>().shutdown_requested(),
         )
     }).await.map_err(|_| library_recovery::UNAVAILABLE.to_string())?
@@ -4244,6 +4452,18 @@ async fn export_library_recovery_report(app: AppHandle, analysis_id: u64) -> Res
         library_recovery::save_report(&path, report.as_bytes())?;
         Ok(true)
     }).await.map_err(|_| library_recovery::UNAVAILABLE.to_string())?
+}
+
+#[tauri::command]
+fn get_library_recovery_attempt_diagnostic(app:AppHandle,analysis_key:String)->library_recovery::AttemptDiagnosticDto {
+    // ConfigTransactionState::shutdown_requested is an atomic lifecycle read.
+    // No Coordinator guard is held across State request->last acquisition.
+    let Some(transactions)=app.try_state::<ConfigTransactionState>() else {
+        return library_recovery::attempt_diagnostic_response(None,analysis_key,false);
+    };
+    let shutdown=transactions.shutdown_requested();drop(transactions);
+    let state=app.try_state::<library_recovery::State>();
+    library_recovery::attempt_diagnostic_response(state.as_deref(),analysis_key,shutdown)
 }
 
 #[tauri::command]
@@ -4274,6 +4494,17 @@ fn read_config_after_startup_reconciliation(
         .startup_config_read_gate
         .lock()
         .map_err(|_| "Controle de leitura da configuração indisponível.".to_string())?;
+    read_config_with_startup_guard(state, transactions, config_dir, &startup_owned)
+}
+
+// The caller retains the actual startup gate; do not relock it here.
+// Old readers keep their original locking wrapper and validation semantics.
+fn read_config_with_startup_guard(
+    state: &ConfigState,
+    transactions: &ConfigTransactionState,
+    config_dir: &Path,
+    startup_owned: &std::sync::MutexGuard<'_, bool>,
+) -> Result<AppConfig, String> {
     if transactions
         .operations
         .snapshot()?
@@ -4284,7 +4515,7 @@ fn read_config_after_startup_reconciliation(
         );
     }
     if !transactions.operations.active() {
-        if *startup_owned {
+        if **startup_owned {
             managed_save_intent::check_active_startup_reconciliation(config_dir)?;
         } else {
             managed_save_intent::check_startup(config_dir)?;
@@ -4447,6 +4678,10 @@ async fn save_config(
     audio_state: State<'_, AudioState>,
     analyzer_state: State<'_, AnalyzerState>,
 ) -> Result<config_save_operation::SaveResponse, String> {
+    // Refuse unowned/changed profiles before intent invalidation or any Save effects.
+    // Keep the actual lease alive across awaits and the synchronous Save branches.
+    let profile_owner = app.state::<profile_lease::State>().lease()?;
+    profile_owner.validate()?;
     audio_state.0.lock().map_err(|_|"Playback unavailable")?.note_eq_intervention();
     transaction_state.operations.reject_active()?;
     audio_state.0.lock().map_err(|_| "Playback unavailable".to_string())?.invalidate_playback_intents();
@@ -4608,8 +4843,8 @@ async fn save_config(
         let preparation = {
             let mut audio=audio_state.0.lock().map_err(|e|format!("Falha ao preparar troca de saída: {e}"))?;
             let queue=switch_queue.as_ref().ok_or("Fila da troca de saída indisponível.")?;
-            if route_save_resume {audio.prepare_reserved_route_save(queue)}
-            else {audio.prepare_reserved_device_switch(queue)}
+            // All output Saves retain an existing logical cursor without starting MPD.
+            audio.prepare_reserved_route_save(queue)
         };
         playback_snapshot = match preparation {
             Ok(snapshot) => snapshot,
@@ -4681,8 +4916,8 @@ async fn save_config(
         let restore_result = match audio_state.0.lock() {
             Ok(mut audio) => {
                 let queue=switch_queue.as_ref().ok_or("Fila da troca de saída indisponível.")?;
-                if route_save_resume {audio.restore_for_route_save(playback_snapshot,queue)}
-                else {audio.restore_after_reserved_device_switch(playback_snapshot,queue)}
+                // No Play/Seek before commit, including buffer/ReplayGain/DoP-only Saves.
+                audio.restore_for_route_save(playback_snapshot,queue)
             },
             Err(e) => Err(format!("não foi possível acessar a fila após trocar a saída: {e}")),
         };
@@ -4954,8 +5189,10 @@ fn rollback_audio_switch_with(
         audio.lock().map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
             .validate_device_switch_queue(switch_queue)?;
         restart_previous()?;
+        // Error recovery restores a stopped queue and logical paused cursor only.
+        // Playback needs a later explicit user action, never a rollback Play/Seek.
         let outcome = audio.lock().map_err(|e| format!("Falha ao acessar a fila durante rollback: {}", e))?
-            .restore_after_reserved_device_switch(playback_snapshot, switch_queue)?;
+            .restore_for_route_save(playback_snapshot, switch_queue)?;
         match outcome {
             audio::DeviceSwitchRestoreOutcome::Complete => Ok(()),
             audio::DeviceSwitchRestoreOutcome::PositionNotRestored => Err("Fila restaurada e pausada, mas a posição anterior não foi restaurada.".into()),
@@ -5072,24 +5309,55 @@ async fn get_local_albums(app: AppHandle, diagnostic_id: Option<u64>) -> Result<
     tauri::async_runtime::spawn_blocking(move || {
         let mut diagnostic = diagnostic;
         let result = (|| {
-            diagnostic.phase("wait.audio");
-            let socket_path = app.state::<AudioState>().0.lock()
-                .map_err(|_| "Conexão da biblioteca local indisponível.".to_string())?.local_album_socket_path();
             diagnostic.phase("wait.config");
-            let local_folders = app.state::<ConfigState>().0.lock()
-                .map_err(|_| "Pastas da biblioteca local indisponíveis.".to_string())?.local_folders.clone();
             diagnostic.phase("filesystem.roots");
-            let sources = {
-                let _roots = diagnostics::DevSpan::new("catalog.roots");
-                MpdSupervisor::local_library_sources(&local_folders)?
-            };
-            let source_ids = sources.iter().map(|source| source.id.clone()).collect();
-            diagnostic.phase("mpd.catalog");
-            let mut albums = {
-                let _mpd = diagnostics::DevSpan::new("catalog.mpd");
-                AudioEngine::get_local_albums_at(&socket_path, &source_ids)?
-            };
-            label_local_album_sources(&mut albums, &sources);
+            let roots = diagnostics::DevSpan::new("catalog.roots");
+            let (albums, _) = with_local_source_context(&app, |before, recheck, _context| {
+                if before.observed_conflict {
+                    return Err("LOCAL_CATALOG_IDENTITY_CONFLICT".into());
+                }
+                // All bound IDs label indexed metadata, including offline roots.
+                // get_local_albums_at uses these IDs for labels, not filtering.
+                // Available is not an admission test or a playback capability.
+                let sources = before.sources.iter().map(|row| supervisor::LocalLibrarySource {
+                    id: row.source_id.clone(), label: row.label.clone(),
+                }).collect::<Vec<_>>();
+                let source_ids = sources.iter().map(|source| source.id.clone()).collect();
+                drop(roots);
+                diagnostic.phase("wait.audio");
+                // No blocking acquisition of AudioState while owning startup
+                // and transaction admission; never hold it during MPD I/O.
+                let read_socket = || -> Result<String, String> {
+                    let state = app.state::<AudioState>();
+                    let audio = state.0.try_lock()
+                        .map_err(|_| "Conexão da biblioteca local indisponível.".to_string())?;
+                    Ok(audio.local_album_socket_path())
+                };
+                let socket_path = read_socket()?;
+                let expected_socket = MpdSupervisor::socket_path();
+                if Path::new(&socket_path) != expected_socket.as_path() {
+                    return Err("LOCAL_CATALOG_CONTEXT_CHANGED".into());
+                }
+                diagnostic.phase("mpd.catalog");
+                let mut albums = {
+                    let _mpd = diagnostics::DevSpan::new("catalog.mpd");
+                    AudioEngine::get_local_albums_at(&socket_path, &source_ids)?
+                };
+                // Reuse the SAME inventory, which revalidates its original
+                // ledger/anchor/mirror snapshots. Never replace it after a fault.
+                let after = recheck()?;
+                if after.observed_conflict {
+                    return Err("LOCAL_CATALOG_IDENTITY_CONFLICT".into());
+                }
+                if before.sources != after.sources || read_socket()? != socket_path
+                    || MpdSupervisor::socket_path() != expected_socket {
+                    return Err("LOCAL_CATALOG_CONTEXT_CHANGED".into());
+                }
+                label_local_album_sources(&mut albums, &sources);
+                Ok(albums)
+                // Shared context still validates live/persisted config, owner,
+                // profile/library and shutdown BEFORE releasing either guard.
+            })?;
             Ok(albums)
         })();
         diagnostic.result(&result);
@@ -5439,6 +5707,128 @@ fn start_coordinated_shutdown(app_handle: &AppHandle, exit_code: i32) {
     });
 }
 
+
+// Initial startup only: ownership comes from the actual Lease, retained startup
+// mutex and Coordinator transaction, never from a preliminary Available row.
+// This bridge cannot enroll/retire IDs, reconcile a mirror, or request a rescan.
+struct InitialManagedGeneration<'a> {
+    owner: &'a profile_lease::Lease,
+    transactions: &'a ConfigTransactionState,
+    transaction: &'a config_save_operation::Transaction<'a>,
+    _startup_owned: &'a std::sync::MutexGuard<'a,bool>,
+    config: &'a AppConfig,
+    profile: recovery_fs::Dir,
+    library: recovery_fs::Dir,
+    mirror: local_media::mirror::ReadonlyMirrorSnapshot,
+    pins: Vec<(&'static str,recovery_fs::Identity,Vec<u8>)>,
+    database: recovery_fs::Identity,
+    config_dir: PathBuf,
+    library_dir: PathBuf,
+    origins: Vec<(String,source_identity::ReadonlyOriginObservation)>,
+}
+impl InitialManagedGeneration<'_> {
+    const ERROR: &'static str="SOURCE_STARTUP_UNCONFIRMED";
+    fn observe_origins(&self)->Result<Vec<(String,source_identity::ReadonlyOriginObservation)>,String> {
+        use source_identity::{ReadonlyIdentitySnapshot,ReadonlyOriginObservation as O};
+        let identity=ReadonlyIdentitySnapshot::open(&self.library_dir).map_err(|_|Self::ERROR)?;
+        if !identity.matches_manifest(self.mirror.manifest.registry_id.as_deref().ok_or(Self::ERROR)?,&self.mirror.manifest.sources) {
+            return Err(Self::ERROR.into());
+        }
+        let mut rows=Vec::new();
+        for (id,root) in &self.mirror.manifest.sources {
+            if self.transactions.shutdown_requested() || self.transactions.operations.shutdown_requested(){return Err(Self::ERROR.into());}
+            let observation=identity.observe(id).map_err(|_|Self::ERROR)?;
+            match observation {
+                O::Available if std::fs::canonicalize(root).map_err(|_|Self::ERROR)?.as_os_str()==root.as_os_str()=>{},
+                O::NotFound=>{}, // Known bound identity stays reserved, not removed.
+                _=>return Err(Self::ERROR.into()), // Conflict/permission/IO unknowns do not admit startup.
+            }
+            rows.push((id.clone(),observation));
+        }
+        identity.revalidate().map_err(|_|Self::ERROR)?;
+        Ok(rows)
+    }
+    fn validate(&self,config:&AppConfig)->Result<(),String> {
+        let error=Self::ERROR;
+        if config!=self.config || !self.transaction.belongs_to(self.transactions.operations.as_ref())
+            || self.transactions.shutdown_requested() || self.transactions.shutdown_started()
+            || self.transactions.operations.shutdown_requested() {return Err(error.into());}
+        self.owner.validate().map_err(|_|error)?;self.profile.validate().map_err(|_|error)?;self.library.validate().map_err(|_|error)?;
+        if self.profile.id()!=self.owner.root().id() || MpdSupervisor::sonante_config_dir()!=self.config_dir
+            || MpdSupervisor::library_dir()!=self.library_dir || self.library_dir!=self.config_dir.join("library") {return Err(error.into());}
+        managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir()).map_err(|_|error)?;
+        let cancelled=||self.transactions.shutdown_requested() || self.transactions.operations.shutdown_requested();
+        for (name,id,bytes) in &self.pins {
+            let limit=if *name=="local-source-identities.lock" {32} else {16*1024*1024};
+            if self.profile.file_identity(name).map_err(|_|error)?.as_ref()!=Some(id)
+                || self.profile.read(name,limit,&cancelled).map_err(|_|error)?.as_deref()!=Some(bytes.as_slice())
+                || self.profile.file_identity(name).map_err(|_|error)?.as_ref()!=Some(id) {return Err(error.into());}
+        }
+        if self.profile.file_identity("mpd-v2.db").map_err(|_|error)?.as_ref()!=Some(&self.database) {return Err(error.into());}
+        // Keep the ORIGINAL mirror snapshot through startup: library topology,
+        // marker, inode and timestamps may not change. Profile directory ctime
+        // may legitimately change when Supervisor creates mpd.conf; ledger and
+        // config identities/bytes remain pinned, and D03 is rechecked afresh.
+        self.mirror.revalidate().map_err(|_|error)?;
+        if self.observe_origins()?!=self.origins {return Err(error.into());}
+        self.mirror.revalidate().map_err(|_|error)?;
+        self.owner.validate().map_err(|_|error)?;
+        Ok(())
+    }
+}
+fn start_initial_mpd(
+    supervisor:&mut MpdSupervisor,config:&AppConfig,owner_state:&profile_lease::State,
+    transactions:&ConfigTransactionState,
+)->Result<supervisor::LibrarySyncResult,String> {
+    let owner=owner_state.lease()?;owner.validate()?;
+    // Same order as startup refresh/readers. No AppHandle or fabricated bool is needed.
+    let startup_owned=transactions.startup_config_read_gate.try_lock().map_err(|_|InitialManagedGeneration::ERROR)?;
+    let transaction=transactions.begin()?;
+    let config_dir=MpdSupervisor::sonante_config_dir();let library_dir=MpdSupervisor::library_dir();
+    managed_save_intent::check_startup(&config_dir)?;
+    let profile=recovery_fs::Dir::open(&config_dir)?;
+    if profile.id()!=owner.root().id(){return Err(InitialManagedGeneration::ERROR.into());}
+    let database=profile.file_identity("mpd-v2.db")?;
+    let marker=library_dir.join(local_media::mirror::MANIFEST_NAME);
+    let marker_present=match std::fs::symlink_metadata(&marker) {
+        Ok(_)=>true,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>false,
+        Err(_)=>return Err(InitialManagedGeneration::ERROR.into()),
+    };
+    // First-run/legacy/no-DB behavior stays strict; no partial inventory is
+    // converted into a new generation or silently rescanned here.
+    if !marker_present || database.is_none(){return supervisor.start(config);}
+    let library=recovery_fs::Dir::open(&library_dir)?;
+    let marker_bytes=library.read(local_media::mirror::MANIFEST_NAME,16*1024*1024,&||transactions.shutdown_requested())?
+        .ok_or(InitialManagedGeneration::ERROR)?;
+    let header:local_media::mirror::MirrorManifest=source_identity::readonly_unique_json(&marker_bytes)
+        .map_err(|_|InitialManagedGeneration::ERROR)?;
+    // Legacy managed formats still use their original strict path; they do not
+    // acquire this new D03 existing-generation startup admission.
+    if header.schema_version!=2 || header.registry_id.is_none(){return supervisor.start(config);}
+    let mut pins=Vec::new();
+    for name in ["config.json","local-source-identities.json","local-source-identities.lock"] {
+        let id=profile.file_identity(name)?.ok_or(InitialManagedGeneration::ERROR)?;
+        let limit=if name=="local-source-identities.lock" {32} else {16*1024*1024};
+        let bytes=profile.read(name,limit,&||transactions.shutdown_requested() || transactions.operations.shutdown_requested())?.ok_or(InitialManagedGeneration::ERROR)?;
+        if profile.file_identity(name)?.as_ref()!=Some(&id){return Err(InitialManagedGeneration::ERROR.into());}
+        pins.push((name,id,bytes));
+    }
+    let mut persisted:AppConfig=serde_json::from_slice(&pins[0].2).map_err(|_|InitialManagedGeneration::ERROR)?;
+    persisted.apply_legacy_migrations();
+    if persisted!=*config{return Err(InitialManagedGeneration::ERROR.into());}
+    let mirror=local_media::mirror::ReadonlyMirrorSnapshot::open(&library_dir).map_err(|_|InitialManagedGeneration::ERROR)?;
+    let configured=config.local_folders.iter().collect::<std::collections::BTreeSet<_>>();
+    let bound=mirror.manifest.sources.values().map(|p|p.to_str().ok_or(InitialManagedGeneration::ERROR)).collect::<Result<std::collections::BTreeSet<_>,_>>()?;
+    if configured.len()!=config.local_folders.len() || configured.iter().map(|s|s.as_str()).collect::<std::collections::BTreeSet<_>>()!=bound {
+        return Err(InitialManagedGeneration::ERROR.into());
+    }
+    let mut admission=InitialManagedGeneration{owner:&owner,transactions,transaction:&transaction,_startup_owned:&startup_owned,
+        config,profile,library,mirror,pins,database:database.unwrap(),config_dir,library_dir,origins:Vec::new()};
+    admission.origins=admission.observe_origins()?;
+    admission.validate(config)?;
+    supervisor.start_initial_existing(config,&admission)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let socket_path = MpdSupervisor::socket_path().to_string_lossy().to_string();
@@ -5488,7 +5878,7 @@ pub fn run() {
     let mut supervisor = MpdSupervisor::new(&socket_path);
     supervisor.attach_playback_gate(playback_gate.clone());
     let mpd_started = if should_start_mpd {
-        match supervisor.start(&initial_config) {
+        match start_initial_mpd(&mut supervisor,&initial_config,&profile_owner,&transactions) {
             Ok(_) => true,
             Err(error) => {
                 eprintln!(
@@ -5547,6 +5937,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             analyze_library_recovery,
             cancel_library_recovery_analysis,
+            get_library_recovery_attempt_diagnostic,
             export_library_recovery_report,
             execute_library_recovery,
             reopen_library_after_recovery,
@@ -5589,6 +5980,7 @@ pub fn run() {
             apply_local_album_tag_batch,
             update_local_track_tags,
             get_local_cover,
+            get_local_covers,
             get_online_album_cover,
             get_online_cover_cache_status,
             get_artwork_enrichment_progress,
@@ -5613,6 +6005,7 @@ pub fn run() {
             get_local_watch_needs_check,
             get_local_index_coverage,
             get_config,
+            get_local_source_availability,
             equalizer_commands::get_equalizer,
             equalizer_commands::pick_equalizer_preset,
             equalizer_commands::export_equalizer_preset,

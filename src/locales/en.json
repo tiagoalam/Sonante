@@ -448,6 +448,31 @@
     "tracks": "tracks"
   },
   "localBrowser": {
+    "catalogReadUnavailable": "The local catalog could not be validated. Check the library status before trying again.",
+    "catalogUnsupportedFormat": "The saved local library format is not supported by this version of Sonante. Library access is blocked; waiting for a library update will not resolve this incompatibility. Preserve the existing files for review.",
+    "sourceAvailability": {
+      "title": "Collections — observed availability",
+      "refresh": "Check availability",
+      "scope": "This observation describes collections at the time of the check. It does not confirm album access or authorize reading or playback.",
+      "blocked": "Wait for the library update or block to clear before checking.",
+      "loading": "Checking collection availability…",
+      "failed": "The availability observation could not be obtained. Check again manually when appropriate.",
+      "observed": "Result of the last check in this window. Availability may change afterward.",
+      "idle": "Run a manual check to see the observed availability of collections.",
+      "conflict": "An identity conflict was observed. This observation does not enable collection access.",
+      "noRows": "This check did not report any collections.",
+      "status": {
+        "available": "Observed as available",
+        "unavailable": "Unavailable during the check",
+        "identity_conflict": "Identity conflict"
+      },
+      "reason": {
+        "not_found": "Source not found",
+        "permission_denied": "Read permission denied",
+        "io_error": "The source could not be checked because of a read failure",
+        "origin_mismatch": "The observed identity does not match the recorded identity"
+      }
+    },
     "playRequestError": "The playback request could not be completed.",
     "importPreviewTitle": "Albums being indexed",
     "importPreviewDescription": "Provisional discoveries. Playback will be available after the library update is confirmed.",
@@ -1531,10 +1556,10 @@
     "cancel": "Cancel analysis",
     "export": "Save report",
     "exporting": "Choose where to save the report…",
-    "failed": "Analysis could not be completed. Try again; the library remains blocked.",
-    "cancelFailed": "Analysis was dismissed in this window, but backend cancellation was not confirmed. No recovery was requested.",
-    "exportFailed": "The report could not be saved. Choose a new file and try again.",
-    "exported": "Report saved. It contains only the diagnosis, without personal paths or credentials.",
+    "failed": "This analysis could not be completed. Earlier information remains for reference only. You may run another manual analysis.",
+    "cancelFailed": "Analysis was dismissed in this window and late results will be ignored. The cancellation request was not confirmed.",
+    "exportFailed": "The analysis report could not be saved. An analysis that is no longer current is refused; run a new manual analysis before trying to export it.",
+    "exported": "Analysis report saved. It contains the analysis observation, without the new attempt diagnosis, personal paths or credentials.",
     "unavailable": "Automatic recovery is unavailable for this diagnosis.",
     "guidance": "Preserve the library files. Save this report to guide review and the choice of a complete backup. Do not delete records or folders to bypass the startup block.",
     "details": "Analysis details",
@@ -1559,7 +1584,7 @@
       "mirror_invalid": "A generation or its manifest could not be safely validated.",
       "generation_divergent": "An observed generation differs from the identities recorded in the transaction.",
       "database_missing": "The local catalog database is missing.",
-      "database_unproven": "The database is present, but catalog coverage is unproven. No database was loaded or reindexed during analysis.",
+      "database_unproven": "The database is present, but catalog coverage is unproven. Analysis may read database bytes to check the recovery set; this does not validate its catalog or reindex it.",
       "ledger_missing": "The identity history file pair is missing or incomplete. IDs will not be recreated automatically.",
       "ledger_divergent": "Identity history or its anchor could not be validated against the observed manifests.",
       "unsafe_entry": "A file or directory is unavailable, replaced, or fails safety checks.",
@@ -1568,7 +1593,7 @@
       "no_pending_marker": "No transaction record or staged generation was found. This does not enable audio or confirm a valid configuration.",
       "recovery_set_unproven": "The recovery set is missing, incomplete, changed, or does not meet safe execution requirements."
     },
-    "executionFailed": "Recovery did not complete. Records and backups were preserved. Analyze again; audio remains blocked.",
+    "executionFailed": "Completion of this recovery session could not be confirmed. Effects may have occurred. Preserve files and records; run another manual analysis when appropriate.",
     "reopenFailed": "The app could not reopen. Close Sonante normally and open it with the current launcher; startup guards will run again.",
     "executing": "Creating a backup, executing and validating the plan…",
     "reopening": "Closing this session to reopen normally…",
@@ -1579,11 +1604,118 @@
       "restore_previous": "Restore the proven previous state",
       "finish_confirmed": "Finalize the already confirmed state"
     },
-    "impact": "The plan rechecks files and source identities before any effect. It preserves current favorites, playlists and reserved IDs. Restoration returns configuration and catalog to the proven state; an earlier queue is restored only with specific evidence. References to new sources may become unavailable.",
+    "impact": "The plan rechecks files and source identities before applying changes to the active state. Protection records and backups may be created before a later failure. The plan preserves current favorites, playlists and reserved IDs. Completed restoration returns configuration and catalog to the proven state; an earlier queue is restored only with specific evidence. References to new sources may become unavailable.",
     "proof": "The previous catalog contains {{tracks}} tracks. The control backup requires at least {{bytes}} bytes, plus the virtual structure. Missing space or current evidence keeps audio blocked.",
     "noMusicBackup": "This backup does not copy music or NAS data. It cannot restore physical music that was changed or removed.",
     "resumePlan": "This plan resumes an interrupted operation using only stages and files that can still be proven.",
     "execute": "Create backup and execute this plan",
-    "reopen": "Reopen normally"
+    "reopen": "Reopen normally",
+    "analysisCancelled": "Analysis was dismissed in this window. Late results will not be used to offer recovery.",
+    "executionCancelled": "Recovery cancellation was requested. Work termination and the final result are not confirmed. Preserve files and records.",
+    "executionCancelFailed": "This window stopped waiting for recovery, but the cancellation request was not confirmed. Work may still be running or effects may already have occurred. Preserve files and records.",
+    "cancelExecution": "Request recovery cancellation",
+    "sessionUnconfirmed": "Completion of this session is unconfirmed. Attempt information, even a recorded successful return, does not enable reopening.",
+    "priorAnalysis": "Earlier analysis, for reference only. It offers neither execution nor report export.",
+    "proofUnavailable": "The quantities in this summary are unconfirmed.",
+    "reportV1": "The report is always an analysis snapshot and does not include the new attempt diagnosis. Export checks again that the analysis is still current.",
+    "reportPriorRefused": "Export of an earlier analysis is always refused. Run a new current manual analysis before requesting another report.",
+    "diagnostic": {
+      "failureClass": {
+        "legacy_unknown": "The detailed cause of this attempt could not be determined.",
+        "cancellation_observed": "A check observed cancellation. Work termination and the final result are unconfirmed.",
+        "preflight_unconfirmed": "The requirements for this plan could not be confirmed.",
+        "plan_context_changed": "The plan context changed and this attempt was not confirmed.",
+        "offered_context_unconfirmed": "The context observed in the offer could not be confirmed for this attempt.",
+        "local_journal_context_unconfirmed": "The context of the local journal used in this attempt could not be confirmed.",
+        "catalog_mismatch_observed": "The checked catalog did not match what was expected during the check."
+      },
+      "boundary": {
+        "protocol_check": "Check category: protocol checks. This does not indicate a linear phase.",
+        "readonly_preflight": "Check category: plan inspection. This does not indicate a linear phase.",
+        "protection_records": "Check category: protection records. This does not indicate a linear phase.",
+        "local_journal_binding": "Check category: local journal binding. This does not indicate a linear phase.",
+        "catalog_check": "Check category: catalog check. This does not indicate a linear phase.",
+        "generation_namespace": "Check category: generation names. This does not indicate a linear phase.",
+        "control_writes": "Check category: profile controls. This does not indicate a linear phase.",
+        "final_validation": "Check category: final validation. This does not indicate a linear phase.",
+        "commit_retention": "Check category: commit or retention. This does not indicate a linear phase.",
+        "unknown": "Check category: unconfirmed category. This does not indicate a linear phase."
+      },
+      "effect": {
+        "protection": "May have been issued in this attempt: protection records. The effect and its completion are not confirmed.",
+        "live_generation_namespace": "May have been issued in this attempt: live generation names. The effect and its completion are not confirmed.",
+        "control_temporary": "May have been issued in this attempt: temporary controls. The effect and its completion are not confirmed.",
+        "canonical_control": "May have been issued in this attempt: canonical controls. The effect and its completion are not confirmed.",
+        "retention": "May have been issued in this attempt: file and record retention. The effect and its completion are not confirmed.",
+        "backup_namespace": "May have been issued in this attempt: backup names. The effect and its completion are not confirmed.",
+        "validator_or_child_unknown": "May have been issued in this attempt: unconfirmed auxiliary or external process effects. The effect and its completion are not confirmed.",
+        "opaque_callback": "Auxiliary actions with undetailed results may have been requested."
+      },
+      "knowledge": {
+        "executor_captured": "Summary captured when the executor returned; not a post-error measurement of the whole state.",
+        "unknown_boundary": "No reliable detailed diagnosis is available for this boundary. Preserve current files and records."
+      },
+      "inherited": {
+        "journal_and_blocked_read": "Local and blocked-state records were read. This does not prove the absence of other effects.",
+        "committed_name_not_completed": "A commit record name was observed; this does not prove session completion."
+      },
+      "outcome": {
+        "not_attempted": "No attempt is captured in this diagnosis. This does not authorize execution.",
+        "unconfirmed": "An attempt was reserved, but its completion is not confirmed.",
+        "failed": "An error return was recorded. Detailed cause information may still be unknown.",
+        "state_returned_ok": "A successful attempt return was recorded. This snapshot does not confirm completion of this session or enable reopening."
+      },
+      "freshness": {
+        "current": "Current at the instant of the query; it may change afterward.",
+        "stale": "Diagnosis from an earlier attempt, for information only."
+      },
+      "unavailableReason": {
+        "invalid_lookup": "The query association could not be confirmed.",
+        "shutdown": "The query is unavailable during shutdown.",
+        "not_captured_or_unavailable": "No reliable diagnosis is available for this query."
+      },
+      "title": "Attempt information",
+      "prior": "Information from an earlier attempt, retained during reanalysis. It does not describe a new attempt.",
+      "informationOnly": "This snapshot shows only what was recorded. It does not enable execution, reopening or session completion.",
+      "unknown": "No reliable finite information is available for this query. This does not confirm the absence of effects.",
+      "queryUnavailable": "A query for this same attempt provided no additional reliable information. The earlier error record was retained.",
+      "unknownEffects": "Reliable effect details are unavailable for this attempt. Broad uncertainty confirms neither that every effect occurred nor that files stayed unchanged.",
+      "mayOnly": "The possibilities below confirm neither effects nor termination. An absent item also does not prove that nothing changed.",
+      "guidance": "Preserve current files and records. When appropriate, check access to the same original sources and run a new manual analysis or seek support. Do not delete or reset data to bypass startup checks."
+    },
+    "assessment": {
+      "status": {
+        "eligible_at_observation": "Inspection observed offer requirements at that instant. Execution requires its own checks again.",
+        "ineligible": "Inspection did not find an eligible offer for this set.",
+        "unconfirmed": "Inspection did not confirm an offer for this set."
+      },
+      "reason": {
+        "ownership_unconfirmed": "The exclusivity needed for inspection could not be confirmed.",
+        "planning_unconfirmed": "The offer requirements could not be confirmed during this inspection.",
+        "plan_changed": "The observed plan changed. A new analysis is required before another offer.",
+        "historical_mismatch": "Historical identities are incompatible with the observed set. Preserve records; do not recreate IDs to bypass this refusal.",
+        "historical_proof_incomparable": "The observed history could not be compared with the required evidence. Preserve data and seek guidance for a proven restoration.",
+        "original_root_unavailable": "An original source required by inspection was unavailable. Check access to that same original source and run a new manual analysis.",
+        "original_root_permission_denied": "Reading an original source was denied by permissions. Check access to that same source without changing history.",
+        "origin_unconfirmed": "The original source identity could not be confirmed. This does not prove music loss.",
+        "ledger_invalid": "The history record could not be validated. Preserve its files; do not delete or reset it.",
+        "ledger_extension_unconfirmed": "History continuity was not proven. New IDs do not repair this missing evidence.",
+        "manifest_unconfirmed": "The manifest binding to the observed set was not confirmed.",
+        "unsupported_format": "A record format is not supported by this check. Recovery will not run with this diagnosis. Preserve files and records; do not delete or reset data. Seek support for that format and save the analysis report to guide review.",
+        "unsafe_or_ambiguous": "Inspection found an unsafe or ambiguous situation and did not confirm an offer.",
+        "snapshot_changed": "Observed data changed during inspection. Another manual analysis can reassess the situation.",
+        "incomplete_set": "The set required by inspection was incomplete. Preserve available files and seek a proven complete backup.",
+        "cancelled": "Inspection observed cancellation. This does not confirm termination of other work.",
+        "unknown": "No reliable detailed explanation is available for this offer. Preserve files and records."
+      },
+      "role": {
+        "previous": "Observed reference: previous state.",
+        "completion": "Observed reference: recorded completion.",
+        "confirmed": "Observed reference: state confirmed during inspection.",
+        "journal_resume": "Observed reference: local-record resume.",
+        "journal_committed": "Observed reference: local-record commit."
+      },
+      "scope": "This explanation is limited to offer inspection. It neither validates the entire observation nor enables execution or reopening."
+    }
   }
 }

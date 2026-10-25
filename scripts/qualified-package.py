@@ -24,9 +24,16 @@ def require(ok, message):
         raise ValueError(message)
 
 
+def stream_digest(stream):
+    checksum = hashlib.sha256()
+    for block in iter(lambda: stream.read(1024 * 1024), b''):
+        checksum.update(block)
+    return checksum.hexdigest()
+
+
 def digest(path):
     with Path(path).open('rb') as f:
-        return hashlib.file_digest(f, 'sha256').hexdigest()
+        return stream_digest(f)
 
 
 def safe_name(raw):
@@ -244,7 +251,7 @@ def inspect_inputs(archive, p, output=None):
                         shutil.copyfileobj(f, target)
                     require(digest(output / name) == expected[name], 'Selected build input changed')
                 else:
-                    require(hashlib.file_digest(f, 'sha256').hexdigest() == expected[name], 'Selected build input changed')
+                    require(stream_digest(f) == expected[name], 'Selected build input changed')
                 seen.add(name)
     require(seen == set(expected), 'Missing selected build input')
 

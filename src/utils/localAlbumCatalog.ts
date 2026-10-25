@@ -9,6 +9,13 @@ export interface LocalAlbumCatalogState {
   saveBlocked: boolean;
 }
 
+// Informational message selection only; native error admission is unchanged.
+export function localCatalogErrorKey(error: string): "localBrowser.catalogUnsupportedFormat" | "localBrowser.catalogReadUnavailable" | null {
+  if (error === "SOURCE_AVAILABILITY_UNSUPPORTED_FORMAT") return "localBrowser.catalogUnsupportedFormat";
+  return /^(?:LOCAL_)?SOURCE_AVAILABILITY_(?:BUSY|BLOCKED|CHANGED|UNCONFIRMED)$/.test(error)
+    ? "localBrowser.catalogReadUnavailable" : null;
+}
+
 const MPD_CATALOG_BUSY = "Biblioteca local em atualização no MPD; tente novamente após a atualização.";
 
 export function localCatalogActivity(
@@ -90,7 +97,7 @@ export class LocalAlbumCatalog {
   }
 
   onMpdStatus(updating: boolean): void {
-    if (this.waitingForMpd) this.setUpdating(updating);
+    this.setUpdating(updating);
   }
 
   setSaveBlocked(blocked: boolean): void {
@@ -137,7 +144,7 @@ export class LocalAlbumCatalog {
       .catch((error: unknown) => {
         if (generation !== this.generation || this.updating) return;
         const message = error instanceof Error ? error.message : String(error);
-        if (message === MPD_CATALOG_BUSY) {
+        if (message === MPD_CATALOG_BUSY || message === "SOURCE_AVAILABILITY_BUSY") {
           this.waitingForMpd = true;
           this.publish({ error: null, mpdBusy: true });
         } else {

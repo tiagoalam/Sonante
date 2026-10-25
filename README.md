@@ -21,57 +21,34 @@ Sonante is a desktop music player built for people who want to **listen to, navi
 
 Sonante is designed for substantial, imperfect real-world libraries: multiple storage locations, multi-disc albums, CUE-based albums, varying metadata, and sources that may temporarily become unavailable.
 
-## Installation
+## Installation — 0.5.5
 
-Download Sonante v0.4.13 from [GitHub Releases](https://github.com/tiagoalam/Sonante/releases/tag/v0.4.13). Prebuilt packages are available for **Debian/Ubuntu (DEB), Fedora (RPM), and Arch Linux/Manjaro (`.pkg.tar.zst`)**, for x86_64. Choose the package for your distribution.
+Use the complete package and SHA256SUMS delivered together for your distribution:
 
-### Debian / Ubuntu — DEB
+- Ubuntu 22.04: `sonante_0.5.5-1_amd64.deb` (`apt install ./sonante_0.5.5-1_amd64.deb`).
+- Fedora 44: `sonante-0.5.5-1.x86_64.rpm` (`dnf install ./sonante-0.5.5-1.x86_64.rpm`).
+- Arch Linux / Manjaro: `sonante-0.5.5-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.5.5-1-x86_64.pkg.tar.zst`).
 
-Download the `.deb` package and `SHA256SUMS-ubuntu.txt` from the release page, then run from their directory:
+Run package installation with the normal administrator workflow on the test system. Verify the supplied checksum first. Packages manage their own pinned audio runtimes and do not enable a system MPD service. Corresponding runtime source sidecars accompany the packages; they are not installed into `/usr`.
 
-```bash
-sha256sum --ignore-missing -c SHA256SUMS-ubuntu.txt
-sudo apt install ./Sonante_0.4.13_amd64.deb
-```
-
-### Fedora — RPM
-
-Download the `.rpm` package and `SHA256SUMS-ubuntu.txt` from the release page:
-
-```bash
-sha256sum --ignore-missing -c SHA256SUMS-ubuntu.txt
-sudo dnf install ./Sonante-0.4.13-1.x86_64.rpm
-```
-
-The required MPD and native libraries must be available from your configured repositories. Sonante does not add third-party repositories.
-
-### Arch Linux / Manjaro — pacman
-
-Download the `.pkg.tar.zst` package and `SHA256SUMS-arch.txt` from the release page:
-
-```bash
-sha256sum -c SHA256SUMS-arch.txt
-sudo pacman -U ./sonante-0.4.13-1-x86_64.pkg.tar.zst
-```
-
-Package installation does **not** enable a system-wide MPD service. Sonante manages a private MPD process for its own session.
+Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the final qualified 0.5.5 payload.
 
 ### System requirements
 
 - A Linux desktop with **GTK 3 and WebKitGTK 4.1 API, library version 2.40 or newer** support.
-- **MPD** for playback, decoding, and local-library indexing; available formats depend on the installed MPD build.
+- The package includes the pinned private **MPD** engines for playback, decoding, and indexing; format support depends on those builds.
 - **ALSA** and `aplay` (usually from `alsa-utils`) for audio devices.
 - **OpenSSL 3**, `xdg-open`, and an **XDG Desktop Portal** backend for integration with the desktop and folder selection.
 - **WirePlumber / `wpctl` is optional**, used when available for Shared-mode volume control through PipeWire.
-- **`webp-pixbuf-loader` is optional for artwork**: it is recommended by the DEB/RPM packages and listed as an optional dependency in Arch. Without it, some WebP artwork previews may be unavailable.
+- Artwork decoding depends on the supported image loaders. Invalid images use the existing placeholder; decoder-specific validation is recorded separately.
 
 Exact native dependencies vary by distribution and are checked as part of packaging. The Ubuntu 22.04 build is additionally checked against a maximum required **GLIBC 2.35** symbol version; this does not guarantee compatibility with every distribution or device.
 
 The current DEB/RPM packaging requires WebKitGTK **2.40 or newer**: Tauri/Wry uses [`webkit_uri_scheme_request_get_http_body`, introduced in 2.40](https://webkitgtk.org/reference/webkit2gtk/2.42.1/method.URISchemeRequest.get_http_body.html). The **4.1** API/SONAME does not imply that library version. A Fedora 37 installation with WebKitGTK 2.38.2 accepted the older v0.4.9 RPM but failed at startup with this missing symbol. Versioned package requirements prevent that unsupported dependency combination; they do not establish full Fedora compatibility or replace installation/startup validation with suitable dependencies.
 
-RPM uses the rich dependency `(webkit2gtk4.1 >= 2.40)`: the pinned [Tauri CLI 2.12.0 bundler](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.0/crates/tauri-bundler/src/bundle/linux/rpm.rs) stores dependency strings as names, and RPM interprets a leading `(` using its [rich dependency parser](https://github.com/rpm-software-management/rpm/blob/master/lib/rpmds.cc). The unparenthesized string becomes an unsatisfiable literal name. Inspection checks REQUIRENAME/REQUIREFLAGS/REQUIREVERSION; CI also runs `python3 tests/rpm_solver_check.py <candidate.rpm>` with real RPM tools and a disposable database (`--test --noscripts --notriggers`), accepting 2.40/2.52.1 and rejecting 2.38.2, no provider, and the old literal encoding. Other dependencies in that test have synthetic providers; this does not prove a complete Fedora installation or runtime.
+The prepared Fedora recipe keeps the rich dependency `(webkit2gtk4.1 >= 2.40)` and the full Fedora compatibility dependency set. Final packages are assembled from the verified payload; ordinary Tauri bundler output is not a release artifact.
 
-Fedora 44 lists [libayatana-appindicator-gtk3](https://packages.fedoraproject.org/pkgs/libayatana-appindicator/libayatana-appindicator-gtk3/fedora-44.html) as the provider of `libayatana-appindicator3.so.1()(64bit)` required by the Ubuntu-built RPM. [libappindicator-gtk3](https://packages.fedoraproject.org/pkgs/libappindicator/libappindicator-gtk3/fedora-44.html) provides the different `libappindicator3.so.1()(64bit)` and cannot replace that ABI requirement. The separate [mpd package](https://packages.fedoraproject.org/pkgs/mpd/mpd/fedora-44-updates.html) provides `mpd` and `/usr/bin/mpd`. Repository metadata establishes available providers, not their installation or operation on a particular machine.
+Fedora uses the separate compat3 runtime descriptor: private bzip2/sndio ABIs, system Nettle >=3.10, and no private obsolete Nettle library. Dependency names and actual ELF requirements are checked again for the final RPM.
 
 ## Getting started
 
@@ -125,7 +102,7 @@ The interface offers **ReplayGain** controls and can request **DoP** when config
 
 **Sonante does not claim verified bit-perfect output.** The displayed sample rate, bit depth, and channel information are **reported by MPD**, not measured at the DAC. Software volume, ReplayGain, resampling, and external mixing can change the actual signal. The Signal Path view is an explanation of the selected route and known status, **not an end-to-end audio measurement**.
 
-For actual decoder support on your system, inspect `mpd --version`.
+For decoder support of the packaged Direct engine, inspect `/usr/lib/sonante/runtimes/v1/mpd-direct --version`. A system `mpd` may be a different build.
 
 ## Privacy and application data
 
@@ -146,12 +123,12 @@ Configuration directories and sensitive files are created with restrictive Linux
 
 Development requires **Node.js 22**, npm, a stable Rust toolchain, and the native development dependencies for Tauri 2, GTK 3, WebKitGTK 4.1, ALSA, and OpenSSL. See the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/) and the [CI workflow](https://github.com/tiagoalam/Sonante/blob/main/.github/workflows/ci.yml) for the Ubuntu build environment.
 
-To build **v0.4.13** from its release tag without installing a system package:
+For a development compilation of the verified 0.5.5 source archive without installation, extract the supplied source archive and run the normal build commands. This compilation alone does not create the complete release packages.
 
 ```bash
-git clone https://github.com/tiagoalam/Sonante.git
-cd Sonante
-git checkout v0.4.13
+# Extract the supplied, SHA-verified source archive first.
+cd sonante
+# The supplied sources already identify version 0.5.5; no unpublished tag is required.
 npm ci
 npm run tauri -- build --no-bundle -- --locked
 ```
@@ -174,13 +151,13 @@ cargo check --manifest-path src-tauri/Cargo.toml --locked
 python3 -m unittest discover -s tests -p 'packaging_test.py'
 ```
 
-The CI also checks packaging versions, native ELF requirements, and package contents. The Arch package is built using an Arch environment; **AppImage is not a validated distribution target for v0.4.13**.
+The manual CI workflow is retained for compilation checks. Publishing 0.5.5 uses the exact complete DEB/RPM/Arch payloads after their distribution checks, with corresponding sources and checksums; no automatic rebuild substitutes other assets. AppImage is outside this release scope.
 
 ## Project status and scope
 
 Sonante prioritizes **reliable playback, conservative MPD lifecycle management, safe library changes, and clear audio reporting** over claiming support for every possible codec or audio feature. Platform and hardware behavior must be tested rather than inferred from a successful build.
 
-Local tag editing is limited to supported physical FLAC files and reports independent per-file results; availability of codecs, network sources, and DAC capabilities depends on your system. Sonante v0.4.13 provides DEB, RPM, and Arch packages for x86_64. Compatibility depends on the distribution, its available dependencies, and the selected audio hardware.
+Local tag editing is limited to supported physical FLAC files and reports independent per-file results. Availability of codecs, network sources, and DAC capabilities depends on the configured system. The 0.5.5 release targets DEB, RPM, and Arch packages for x86_64; each requires its own final installation and startup evidence.
 
 Bug reports and reproducible feedback can be submitted through [GitHub Issues](https://github.com/tiagoalam/Sonante/issues).
 

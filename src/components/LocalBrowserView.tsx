@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LocalImportPreviewSection } from "./LocalImportPreviewSection";
+import { LocalSourceAvailabilityPanel } from "./LocalSourceAvailabilityPanel";
 import { filterImportPreview } from "../utils/localImportPreview";
 import type { PreviewAlbum } from "../types/localImportPreview";
 import { LocalItem, LocalAlbum } from "../types/local";
@@ -33,7 +34,7 @@ import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
 import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDiscs";
 import { localAlbumCatalog } from "../utils/localAlbumCatalogSession";
-import { emptyLocalAlbumCatalogState, localCatalogActivity } from "../utils/localAlbumCatalog";
+import { emptyLocalAlbumCatalogState, localCatalogActivity, localCatalogErrorKey } from "../utils/localAlbumCatalog";
 import { albumLocationSources } from "../utils/localAlbumLocations";
 import { localArtworkEnrichment, localArtworkResolver } from "../utils/localArtworkSession";
 import {
@@ -109,6 +110,7 @@ const LocalAlbumCard: React.FC<{
 }> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable, onlineArtworkEnabled, isLibraryUpdating, readEnabled }) => {
   const { t } = useTranslation();
   const [cover, setCover] = useState<string | null>(() => localArtworkResolver.get(album.id));
+  const [failedCover, setFailedCover] = useState<string | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const readEnabledRef = useRef(readEnabled);
@@ -156,12 +158,13 @@ const LocalAlbumCard: React.FC<{
   return (
     <div ref={cardRef} onClick={onClick} className="group flex flex-col cursor-pointer relative">
       <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md">
-        {cover ? (
+        {cover && cover !== failedCover ? (
           <img
             src={cover}
             alt={album.title}
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
             loading="lazy"
+            onError={() => setFailedCover(cover)}
           />
         ) : (
           <AlbumArtworkPlaceholder />
@@ -256,6 +259,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const [viewMode, setViewMode] = useState<"albums" | "artists" | "years" | "genres" | "folders">(playerTarget?.view === "artist" ? "artists" : "albums");
   const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, isLibraryUpdating);
   const catalogActivity = localCatalogActivity(isLibraryUpdating, catalog);
+  const catalogErrorKey = catalog.error ? localCatalogErrorKey(catalog.error) : null;
   const [albumSearch, setAlbumSearch] = useState("");
   const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
   const [artistSearch, setArtistSearch] = useState("");
@@ -276,6 +280,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     playerTarget, () => localAlbumCatalog.getSnapshot().albums, audioService.getLocalAlbumTracks,
   ), setTrackState, () => localAlbumCatalog.waitForMpd()), []);
   const catalogConfirmed = !detailUnavailable && catalog.loaded && !catalog.loading && !catalog.error && !catalog.mpdBusy && !catalog.saveBlocked && !isLibraryUpdating;
+  const sourceAvailabilityConfig = JSON.stringify(configuredLocalFolders);
+  const sourceAvailabilityContext = useMemo(() => ({ albums, config: sourceAvailabilityConfig, refresh: catalogRefreshRevision }),
+    [albums, sourceAvailabilityConfig, catalogRefreshRevision]);
   const artworkBlocked = metadataMode || artworkReadBlocked(isLibraryUpdating, catalog);
   const tracksReady = catalogConfirmed && trackState.catalogVersion === albums && trackState.phase === "ready" && trackState.albumId === selectedAlbum?.id;
   const { tracks: albumTracks, sections: albumSections } = useMemo(
@@ -953,10 +960,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       )}
       {catalog.error && (
         <div role="alert" className="px-8 py-2 text-xs text-[color:var(--theme-fg-error,var(--color-red-400))] border-b border-[color:var(--theme-border-soft,#222222)]">
-          {catalog.error}
+          {catalogErrorKey ? t(catalogErrorKey) : catalog.error}
         </div>
       )}
       <div ref={setScrollContainer} className="flex-1 overflow-y-auto p-8">
+        {!metadataMode && !selectedAlbum && !selectedArtist && <LocalSourceAvailabilityPanel context={sourceAvailabilityContext}
+          blocked={!catalogConfirmed || Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack || playlistItems)} />}
         {selectedAlbum ? (
           <div className="space-y-8 animate-in fade-in duration-100">
             <div className="flex items-end space-x-6">

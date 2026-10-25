@@ -448,6 +448,31 @@
     "tracks": "faixas"
   },
   "localBrowser": {
+    "catalogReadUnavailable": "Não foi possível validar o catálogo local. Consulte o estado da biblioteca antes de tentar novamente.",
+    "catalogUnsupportedFormat": "O formato salvo da biblioteca local não é suportado por esta versão do Sonante. A consulta está bloqueada; aguardar a atualização da biblioteca não resolve essa incompatibilidade. Preserve os arquivos existentes para análise.",
+    "sourceAvailability": {
+      "title": "Coleções — disponibilidade observada",
+      "refresh": "Consultar disponibilidade",
+      "scope": "Esta observação informa o estado das coleções no momento da consulta. Não confirma acesso aos álbuns nem autoriza leitura ou reprodução.",
+      "blocked": "Aguarde a atualização ou o desbloqueio da biblioteca antes de consultar.",
+      "loading": "Consultando a disponibilidade das coleções…",
+      "failed": "Não foi possível obter a observação de disponibilidade. Consulte novamente, manualmente, quando apropriado.",
+      "observed": "Resultado da última consulta nesta janela. A disponibilidade pode mudar depois.",
+      "idle": "Faça uma consulta manual para ver a disponibilidade observada das coleções.",
+      "conflict": "Foi observado um conflito de identidade. Esta observação não libera acesso à coleção.",
+      "noRows": "Nenhuma coleção foi informada por esta consulta.",
+      "status": {
+        "available": "Observada como disponível",
+        "unavailable": "Indisponível na observação",
+        "identity_conflict": "Conflito de identidade"
+      },
+      "reason": {
+        "not_found": "Origem não encontrada",
+        "permission_denied": "Permissão de leitura negada",
+        "io_error": "Não foi possível verificar a origem por uma falha de leitura",
+        "origin_mismatch": "A identidade observada não corresponde à registrada"
+      }
+    },
     "playRequestError": "Não foi possível concluir a solicitação de reprodução.",
     "importPreviewTitle": "Álbuns em indexação",
     "importPreviewDescription": "Descobertas provisórias. A reprodução ficará disponível após a confirmação da atualização da biblioteca.",
@@ -1531,10 +1556,10 @@
     "cancel": "Cancelar análise",
     "export": "Salvar relatório",
     "exporting": "Escolha onde salvar o relatório…",
-    "failed": "Não foi possível concluir a análise. Tente novamente; a biblioteca continua bloqueada.",
-    "cancelFailed": "A análise foi dispensada nesta janela, mas o cancelamento no backend não foi confirmado. Nenhuma recuperação foi solicitada.",
-    "exportFailed": "Não foi possível salvar o relatório. Escolha um arquivo novo e tente novamente.",
-    "exported": "Relatório salvo. Ele contém somente o diagnóstico, sem caminhos pessoais ou credenciais.",
+    "failed": "Não foi possível concluir esta análise. As informações anteriores continuam apenas como referência. Você pode fazer outra análise manual.",
+    "cancelFailed": "A análise foi dispensada nesta janela e resultados tardios serão ignorados. O pedido de cancelamento não foi confirmado.",
+    "exportFailed": "Não foi possível salvar o relatório da análise. Uma análise que deixou de ser atual é recusada; faça uma nova análise manual antes de tentar exportá-la.",
+    "exported": "Relatório da análise salvo. Ele contém a observação da análise, sem o novo diagnóstico da tentativa, caminhos pessoais ou credenciais.",
     "unavailable": "Recuperação automática indisponível para este diagnóstico.",
     "guidance": "Preserve os arquivos da biblioteca. Salve este relatório para orientar a revisão e a escolha de um backup completo. Não apague registros ou pastas para tentar liberar a abertura.",
     "details": "Detalhes da análise",
@@ -1559,7 +1584,7 @@
       "mirror_invalid": "Uma geração ou seu manifesto não pôde ser validado com segurança.",
       "generation_divergent": "Uma geração encontrada difere das identidades registradas na transação.",
       "database_missing": "O banco local do catálogo está ausente.",
-      "database_unproven": "O banco está presente, mas a cobertura do catálogo não foi comprovada. Nenhum banco foi carregado ou reindexado nesta análise.",
+      "database_unproven": "O banco está presente, mas a cobertura do catálogo não foi comprovada. A análise pode ler bytes do banco para verificar o conjunto de recuperação; isso não equivale a validar seu catálogo nem a reindexá-lo.",
       "ledger_missing": "O par de arquivos do histórico de identidades está ausente ou incompleto. IDs não serão recriados automaticamente.",
       "ledger_divergent": "O histórico de identidades ou sua âncora não pôde ser validado com os manifestos encontrados.",
       "unsafe_entry": "Um arquivo ou diretório está indisponível, substituído ou não atende às verificações de segurança.",
@@ -1568,7 +1593,7 @@
       "no_pending_marker": "Não foi encontrado registro de transação nem geração em preparação. Isso não libera o áudio nem confirma que a configuração esteja válida.",
       "recovery_set_unproven": "O conjunto de recuperação está ausente, incompleto, mudou ou não atende aos requisitos para execução segura."
     },
-    "executionFailed": "A recuperação não foi concluída. Os registros e backups foram preservados. Analise novamente; o áudio continua bloqueado.",
+    "executionFailed": "Não foi possível confirmar a conclusão desta sessão de recuperação. Pode ter havido efeitos. Preserve os arquivos e registros; faça uma nova análise manual quando apropriado.",
     "reopenFailed": "Não foi possível reabrir. Feche o Sonante normalmente e abra pelo launcher atual; os guards serão verificados de novo.",
     "executing": "Criando backup, executando e validando o plano…",
     "reopening": "Encerrando esta sessão para reabrir normalmente…",
@@ -1579,11 +1604,118 @@
       "restore_previous": "Restaurar o estado anterior comprovado",
       "finish_confirmed": "Finalizar o estado já confirmado"
     },
-    "impact": "O plano revalida os arquivos e a identidade das origens antes de qualquer efeito. Preserva favoritos, playlists e reservas de IDs atuais. Na restauração, configuração e catálogo voltam ao estado comprovado; a fila anterior só é reposta quando há prova específica. Referências a fontes novas podem ficar indisponíveis.",
+    "impact": "O plano revalida os arquivos e a identidade das origens antes de aplicar alterações ao estado ativo. Registros de proteção e backup podem ser criados antes de uma falha posterior. O plano preserva favoritos, playlists e reservas de IDs atuais. Na restauração concluída, configuração e catálogo voltam ao estado comprovado; a fila anterior só é reposta quando há prova específica. Referências a fontes novas podem ficar indisponíveis.",
     "proof": "O catálogo anterior contém {{tracks}} faixas. O backup dos controles precisa de pelo menos {{bytes}} bytes, mais a estrutura virtual. Sem espaço ou provas atuais, nada é liberado.",
     "noMusicBackup": "Este backup não copia músicas nem NAS. Ele não restaura música física alterada ou removida.",
     "resumePlan": "Este plano retoma uma operação interrompida a partir das etapas e arquivos que ainda puderem ser comprovados.",
     "execute": "Criar backup e executar este plano",
-    "reopen": "Reabrir normalmente"
+    "reopen": "Reabrir normalmente",
+    "analysisCancelled": "A análise foi dispensada nesta janela. Resultados tardios não serão usados para oferecer recuperação.",
+    "executionCancelled": "O cancelamento da recuperação foi solicitado. O término dos trabalhos e o resultado final não estão confirmados. Preserve os arquivos e registros.",
+    "executionCancelFailed": "A janela deixou de aguardar a recuperação, mas o pedido de cancelamento não foi confirmado. Pode haver trabalho em andamento ou efeitos já ocorridos. Preserve os arquivos e registros.",
+    "cancelExecution": "Solicitar cancelamento da recuperação",
+    "sessionUnconfirmed": "A conclusão desta sessão não está confirmada. Informações da tentativa, mesmo quando registram retorno bem-sucedido, não liberam a reabertura.",
+    "priorAnalysis": "Análise anterior, somente para referência. Ela não oferece execução nem exportação.",
+    "proofUnavailable": "As quantidades deste resumo não foram confirmadas.",
+    "reportV1": "O relatório é sempre um retrato da análise e não inclui o novo diagnóstico da tentativa. A exportação verifica novamente se a análise ainda é atual.",
+    "reportPriorRefused": "A exportação de uma análise anterior é sempre recusada. Faça uma nova análise manual atual para poder solicitar outro relatório.",
+    "diagnostic": {
+      "failureClass": {
+        "legacy_unknown": "Não foi possível determinar a causa detalhada desta tentativa.",
+        "cancellation_observed": "Uma verificação observou cancelamento. O término dos trabalhos e o resultado final não estão confirmados.",
+        "preflight_unconfirmed": "Os requisitos deste plano não puderam ser confirmados.",
+        "plan_context_changed": "O contexto do plano mudou e esta tentativa não foi confirmada.",
+        "offered_context_unconfirmed": "O contexto observado na oferta não pôde ser confirmado para esta tentativa.",
+        "local_journal_context_unconfirmed": "O contexto do registro local usado nesta tentativa não pôde ser confirmado.",
+        "catalog_mismatch_observed": "O catálogo verificado não correspondeu ao esperado durante a verificação."
+      },
+      "boundary": {
+        "protocol_check": "Categoria de verificação: checagens do protocolo. Não indica uma fase linear.",
+        "readonly_preflight": "Categoria de verificação: inspeção do plano. Não indica uma fase linear.",
+        "protection_records": "Categoria de verificação: registros de proteção. Não indica uma fase linear.",
+        "local_journal_binding": "Categoria de verificação: vínculo do registro local. Não indica uma fase linear.",
+        "catalog_check": "Categoria de verificação: verificação de catálogo. Não indica uma fase linear.",
+        "generation_namespace": "Categoria de verificação: nomes da geração. Não indica uma fase linear.",
+        "control_writes": "Categoria de verificação: controles do perfil. Não indica uma fase linear.",
+        "final_validation": "Categoria de verificação: validação final. Não indica uma fase linear.",
+        "commit_retention": "Categoria de verificação: confirmação ou retenção. Não indica uma fase linear.",
+        "unknown": "Categoria de verificação: categoria não confirmada. Não indica uma fase linear."
+      },
+      "effect": {
+        "protection": "Possível emissão nesta tentativa: registros de proteção. O efeito e seu término não estão confirmados.",
+        "live_generation_namespace": "Possível emissão nesta tentativa: nomes da geração ativa. O efeito e seu término não estão confirmados.",
+        "control_temporary": "Possível emissão nesta tentativa: controles temporários. O efeito e seu término não estão confirmados.",
+        "canonical_control": "Possível emissão nesta tentativa: controles canônicos. O efeito e seu término não estão confirmados.",
+        "retention": "Possível emissão nesta tentativa: retenção de arquivos e registros. O efeito e seu término não estão confirmados.",
+        "backup_namespace": "Possível emissão nesta tentativa: nomes de backups. O efeito e seu término não estão confirmados.",
+        "validator_or_child_unknown": "Possível emissão nesta tentativa: efeitos auxiliares ou de processos externos não confirmados. O efeito e seu término não estão confirmados.",
+        "opaque_callback": "Podem ter sido solicitadas ações auxiliares cujo resultado não foi detalhado."
+      },
+      "knowledge": {
+        "executor_captured": "Sumário capturado no retorno do executor; não é uma medição pós-erro do estado completo.",
+        "unknown_boundary": "Não há um diagnóstico detalhado confiável para este limite. Preserve os arquivos e registros atuais."
+      },
+      "inherited": {
+        "journal_and_blocked_read": "Foram lidos registros locais e de bloqueio. Isso não prova ausência de outros efeitos.",
+        "committed_name_not_completed": "Foi observado um nome de registro de commit; isso não comprova conclusão da sessão."
+      },
+      "outcome": {
+        "not_attempted": "Não há tentativa capturada neste diagnóstico. Isso não autoriza executar.",
+        "unconfirmed": "Existe uma tentativa reservada, mas sua conclusão não está confirmada.",
+        "failed": "Foi registrado um retorno de erro. Os detalhes da causa podem continuar desconhecidos.",
+        "state_returned_ok": "Foi registrado um retorno bem-sucedido da tentativa. Este retrato não confirma a conclusão desta sessão nem permite reabrir."
+      },
+      "freshness": {
+        "current": "Informação atual no instante da consulta; ela pode mudar depois.",
+        "stale": "Diagnóstico de uma tentativa anterior, somente informativo."
+      },
+      "unavailableReason": {
+        "invalid_lookup": "A associação da consulta não pôde ser confirmada.",
+        "shutdown": "A consulta não está disponível durante o encerramento.",
+        "not_captured_or_unavailable": "Não há um diagnóstico confiável disponível para esta consulta."
+      },
+      "title": "Informações da tentativa",
+      "prior": "Informação de uma tentativa anterior, mantida durante esta reanálise. Não se refere a uma nova tentativa.",
+      "informationOnly": "Este retrato informa apenas o que foi registrado. Não permite executar, reabrir ou confirmar a conclusão da sessão.",
+      "unknown": "Não há informação finita confiável para esta consulta. Isso não confirma ausência de efeitos.",
+      "queryUnavailable": "Uma consulta desta mesma tentativa não trouxe informação adicional confiável. O registro de erro anterior foi mantido.",
+      "unknownEffects": "Não há detalhe confiável sobre os efeitos desta tentativa. A incerteza abrangente não confirma que cada efeito ocorreu nem que os arquivos ficaram intactos.",
+      "mayOnly": "As possibilidades abaixo não confirmam efeitos ou término. Um item ausente também não prova que nada mudou.",
+      "guidance": "Preserve os arquivos e registros atuais. Quando apropriado, confira o acesso às mesmas origens e faça uma nova análise manual ou procure suporte. Não apague nem redefina dados para liberar a abertura."
+    },
+    "assessment": {
+      "status": {
+        "eligible_at_observation": "A inspeção observou requisitos para uma oferta naquele instante. A execução exige validações próprias novamente.",
+        "ineligible": "A inspeção não encontrou uma oferta elegível para este conjunto.",
+        "unconfirmed": "A inspeção não confirmou uma oferta para este conjunto."
+      },
+      "reason": {
+        "ownership_unconfirmed": "Não foi possível confirmar a exclusividade necessária para a inspeção.",
+        "planning_unconfirmed": "Os requisitos da oferta não puderam ser confirmados nesta inspeção.",
+        "plan_changed": "O plano observado mudou. É necessária uma nova análise antes de outra oferta.",
+        "historical_mismatch": "As identidades históricas são incompatíveis com o conjunto observado. Preserve os registros; não recrie IDs para contornar esta recusa.",
+        "historical_proof_incomparable": "O histórico encontrado não pôde ser comparado com as provas exigidas. Preserve os dados e procure orientação para uma restauração comprovada.",
+        "original_root_unavailable": "Uma origem original exigida pela inspeção estava indisponível. Verifique o acesso à mesma origem original e faça nova análise manual.",
+        "original_root_permission_denied": "A leitura de uma origem original foi recusada por permissão. Verifique o acesso à mesma origem sem alterar o histórico.",
+        "origin_unconfirmed": "A identidade da origem original não pôde ser confirmada. Isso não comprova perda de músicas.",
+        "ledger_invalid": "O registro do histórico não pôde ser validado. Preserve seus arquivos; não o apague nem redefina.",
+        "ledger_extension_unconfirmed": "A continuidade do histórico não foi comprovada. Novos IDs não corrigem essa falta de prova.",
+        "manifest_unconfirmed": "O vínculo do manifesto com o conjunto observado não foi confirmado.",
+        "unsupported_format": "O formato de um registro não é suportado por esta verificação. A recuperação não será executada com este diagnóstico. Preserve os arquivos e registros; não apague nem redefina dados. Procure suporte para esse formato e salve o relatório da análise para orientar a revisão.",
+        "unsafe_or_ambiguous": "A inspeção encontrou uma situação insegura ou ambígua e não confirmou uma oferta.",
+        "snapshot_changed": "Os dados observados mudaram durante a inspeção. Outra análise manual poderá reavaliar a situação.",
+        "incomplete_set": "O conjunto exigido pela inspeção estava incompleto. Preserve os arquivos disponíveis e procure um backup completo comprovado.",
+        "cancelled": "A inspeção observou cancelamento. Isso não confirma o término de outros trabalhos.",
+        "unknown": "Não há explicação detalhada confiável para esta oferta. Preserve os arquivos e registros."
+      },
+      "role": {
+        "previous": "Referência observada: estado anterior.",
+        "completion": "Referência observada: conclusão registrada.",
+        "confirmed": "Referência observada: estado confirmado na inspeção.",
+        "journal_resume": "Referência observada: retomada por registro local.",
+        "journal_committed": "Referência observada: confirmação em registro local."
+      },
+      "scope": "Esta explicação se limita à inspeção da oferta e não valida a observação inteira nem permite executar ou reabrir."
+    }
   }
 }

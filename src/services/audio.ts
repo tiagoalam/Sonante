@@ -1,13 +1,20 @@
 import { ensureDirectOutputChoice } from "./config";
+import { createLocalCoverBatch, type LocalCoverReply } from "../utils/localCoverBatch";
+import { createLocalSourceReadQueue } from "../utils/localSourceReadQueue";
+const runLocalSourceRead = createLocalSourceReadQueue();
 import { beginPlaybackIntent, configurePlaybackIntents, playbackIntentToken, type PlaybackIntent } from "../utils/playbackIntent";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { MpdStatusSnapshot, PlaybackStatus, PlaybackOptions, PlaybackOptionAction, TrackMetadata } from "../types/audio";
 import { LocalItem, LocalAlbum, LocalAlbumDiscTracks } from "../types/local";
+import type { LocalSourceAvailabilityObservation, LocalSourceAvailabilityRow } from "../types/local";
 import type { OnlineCacheStatus } from "../utils/localArtwork";
 
 import { diagnosticInvoke } from "../utils/frontendDiagnostics";
 const invoke = <T>(command: string, args?: Record<string, unknown>): Promise<T> =>
   diagnosticInvoke<T>(nativeInvoke<T>, command, args);
+const readLocalCover = createLocalCoverBatch(paths =>
+  runLocalSourceRead(() => invoke<LocalCoverReply[]>("get_local_covers", { paths })));
+
 
 const onlineArtworkRequest = (album: LocalAlbum) => ({
   album_id: album.id,
@@ -27,6 +34,38 @@ async function ordinaryToggle():Promise<void>{
  if(wantPlay)await ensureDirectOutputChoice(intent);if(!intent.current())throw 'PLAYBACK_SUPERSEDED';
  await invoke('toggle_playback',{intent:token,wantPlay});
 }
+// This decoder accepts observations only. Reject the entire payload on any
+// malformed row; never drop a source or turn missing evidence into Available.
+function decodeLocalSourceAvailability(value: unknown): LocalSourceAvailabilityObservation | null {
+  const record = (item: unknown): item is Record<string, unknown> =>
+    typeof item === "object" && item !== null && !Array.isArray(item);
+  const keys = (item: Record<string, unknown>, expected: readonly string[]) =>
+    Object.keys(item).length === expected.length && expected.every(key => Object.prototype.hasOwnProperty.call(item, key));
+  const safeLabel = (item: unknown): item is string => typeof item === "string"
+    && item.length > 0 && item.length <= 255 && item !== "." && item !== ".."
+    && !/[\/\\\u0000-\u001f\u007f]/.test(item) && !/^[a-z][a-z0-9+.-]*:/i.test(item);
+  if (!record(value) || !keys(value, ["admission", "sources", "observed_conflict"])
+    || value.admission !== "not_product_admission" || typeof value.observed_conflict !== "boolean"
+    || !Array.isArray(value.sources) || value.sources.length > 65_536) return null;
+  const sources: LocalSourceAvailabilityRow[] = [];
+  const ids = new Set<string>();
+  for (const row of value.sources) {
+    if (!record(row) || !keys(row, ["source_id", "label", "status", "reason"])
+      || !safeLabel(row.source_id) || !safeLabel(row.label) || ids.has(row.source_id)) return null;
+    ids.add(row.source_id);
+    const identity = { source_id: row.source_id, label: row.label };
+    if (row.status === "available" && row.reason === null) {
+      sources.push({ ...identity, status: "available", reason: null });
+    } else if (row.status === "unavailable"
+      && (row.reason === "not_found" || row.reason === "permission_denied" || row.reason === "io_error")) {
+      sources.push({ ...identity, status: "unavailable", reason: row.reason });
+    } else if (row.status === "identity_conflict" && row.reason === "origin_mismatch" && value.observed_conflict) {
+      sources.push({ ...identity, status: "identity_conflict", reason: "origin_mismatch" });
+    } else { return null; }
+  }
+  return { admission: "not_product_admission", sources, observed_conflict: value.observed_conflict };
+}
+
 export const audioService = {
   getStatus: (): Promise<PlaybackStatus> => invoke<PlaybackStatus>("get_playback_status"),
   getMpdStatusSnapshot: (): Promise<MpdStatusSnapshot> =>
@@ -53,15 +92,19 @@ export const audioService = {
   setWindowTitle: (title: string): Promise<void> => invoke<void>("set_window_title", { title }),
   listLocalDirectory: (path: string): Promise<LocalItem[]> =>
     invoke<LocalItem[]>("list_local_directory", { path }),
-  getLocalCover: (path: string): Promise<string | null> =>
-    invoke<string | null>("get_local_cover", { path }),
+  getLocalCover: readLocalCover,
   getOnlineAlbumCover: (album: LocalAlbum): Promise<string | null> =>
     invoke<string | null>("get_online_album_cover", { request: onlineArtworkRequest(album) }),
   getCachedOnlineAlbumCover: (album: LocalAlbum): Promise<string | null> =>
     invoke<string | null>("get_online_album_cover", { request: onlineArtworkRequest(album), cacheOnly: true }),
   getOnlineCoverCacheStatus: (album: LocalAlbum): Promise<OnlineCacheStatus> =>
     invoke<OnlineCacheStatus>("get_online_cover_cache_status", { request: onlineArtworkRequest(album) }),
-  getLocalAlbums: (): Promise<LocalAlbum[]> => invoke<LocalAlbum[]>("get_local_albums"),
+  getLocalSourceAvailability: (): Promise<LocalSourceAvailabilityObservation> => runLocalSourceRead(async () => {
+    const observation = decodeLocalSourceAvailability(await invoke<unknown>("get_local_source_availability"));
+    if (!observation) throw new Error("LOCAL_SOURCE_AVAILABILITY_UNCONFIRMED");
+    return observation;
+  }),
+  getLocalAlbums: (): Promise<LocalAlbum[]> => runLocalSourceRead(() => invoke<LocalAlbum[]>("get_local_albums")),
   getLocalAlbumTracks: (albumId: string): Promise<LocalAlbumDiscTracks[]> =>
     invoke<LocalAlbumDiscTracks[]>("get_local_album_tracks", { albumId }),
   resolveLocalLibraryPath: (path: string): Promise<string> =>

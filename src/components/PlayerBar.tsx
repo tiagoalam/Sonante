@@ -48,6 +48,7 @@ export const PlayerBar: React.FC<Props> = ({
   const { t } = useTranslation();
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekValue, setSeekValue] = useState(0.0);
+  const [failedCover, setFailedCover] = useState<string | null>(null);
 
   const isSeekingRef = useRef(false);
   useEffect(() => {
@@ -170,9 +171,10 @@ export const PlayerBar: React.FC<Props> = ({
                 alt=""
                 className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
               />
-            ) : status.thumb && !isNoTrack ? (
+            ) : status.thumb && status.thumb !== failedCover && !isNoTrack ? (
               <img
                 src={status.thumb}
+                onError={() => setFailedCover(status.thumb ?? null)}
                 alt=""
                 className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
               />

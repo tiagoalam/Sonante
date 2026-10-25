@@ -7,6 +7,13 @@ import re
 import stat
 import sys
 
+def digest(path):
+    checksum = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            checksum.update(block)
+    return checksum.hexdigest()
+
 def verify(root):
     if (root/'DISTRIBUTION_BLOCKED').exists():
         raise ValueError('Runtime distribution is blocked; audit fixture cannot be packaged')
@@ -29,9 +36,8 @@ def verify(root):
         mode=path.stat().st_mode
         if not stat.S_ISREG(mode) or mode & 0o6022 or path.stat().st_nlink != 1:
             raise ValueError('Unsafe staging file')
-        with path.open('rb') as stream:
-            if hashlib.file_digest(stream,'sha256').hexdigest()!=expected:
-                raise ValueError('Staging file changed: '+name)
+        if digest(path)!=expected:
+            raise ValueError('Staging file changed: '+name)
     manifest=json.loads((Path(__file__).resolve().parent.parent/'packaging/private-runtimes.json').read_text())
     runtime=root/manifest['install_root'].lstrip('/')
     if (runtime/'manifest.json').read_bytes()!=(Path(__file__).resolve().parent.parent/'packaging/private-runtimes.json').read_bytes():

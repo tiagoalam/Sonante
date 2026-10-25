@@ -465,10 +465,14 @@ impl MpdSupervisor {
         cfg: &AppConfig,
         shared_volume_backend: Option<SharedVolumeBackend>,
         engine: &crate::mpd_engine::MpdEngine,
+        existing: Option<&crate::InitialManagedGeneration<'_>>,
     ) -> Result<(PathBuf, VolumeBackend, LibrarySyncResult), String> {
         let dir = crate::diagnostics::startup_stage("config.profile", crate::persistence::ensure_sonante_config_dir())?;
 
-        let library_sync = if self.output_only_restart {
+        let library_sync = if let Some(admission)=existing {
+            admission.validate(cfg)?;
+            LibrarySyncResult { library_dir: Self::library_dir(), changed: false }
+        } else if self.output_only_restart {
             // The caller validated the existing generation before stopping.
             // EQ changes output only; it must not publish mirrors or rescan.
             LibrarySyncResult { library_dir: Self::library_dir(), changed: false }
@@ -709,7 +713,14 @@ decoder {{
     }
 
     pub fn start(&mut self, cfg: &AppConfig) -> Result<LibrarySyncResult, String> {
-        let result = self.start_inner(cfg);
+        self.start_admitted(cfg,None)
+    }
+    pub(crate) fn start_initial_existing(&mut self,cfg:&AppConfig,admission:&crate::InitialManagedGeneration<'_>)->Result<LibrarySyncResult,String> {
+        if self.process.is_some() || self.output_only_restart {return Err("SOURCE_STARTUP_UNCONFIRMED".into());}
+        self.start_admitted(cfg,Some(admission))
+    }
+    fn start_admitted(&mut self,cfg:&AppConfig,existing:Option<&crate::InitialManagedGeneration<'_>>)->Result<LibrarySyncResult,String> {
+        let result = self.start_inner(cfg,existing);
         match result {
             Ok(library_sync) => {
                 self.health = MpdHealth::Available;
@@ -722,7 +733,8 @@ decoder {{
         }
     }
 
-    fn start_inner(&mut self, cfg: &AppConfig) -> Result<LibrarySyncResult, String> {
+    fn start_inner(&mut self, cfg: &AppConfig, existing:Option<&crate::InitialManagedGeneration<'_>>) -> Result<LibrarySyncResult, String> {
+        if let Some(admission)=existing {admission.validate(cfg)?;}
         // Resolve/validate an explicit development engine before stopping
         // the current owned MPD. No override keeps the established path.
         let engine = crate::diagnostics::startup_stage("engine.resolve", if self.shared_eq_pipe.is_some() { crate::mpd_engine::MpdEngine::resolve_eq() } else { crate::mpd_engine::MpdEngine::resolve() })?;
@@ -766,8 +778,12 @@ decoder {{
         }
 
         let (conf_path, volume_backend, library_sync) =
-            crate::diagnostics::startup_stage("config.ensure", self.ensure_config_file(cfg, shared_volume_backend, &engine))?;
+            crate::diagnostics::startup_stage("config.ensure", self.ensure_config_file(cfg, shared_volume_backend, &engine, existing))?;
         crate::diagnostics::startup_stage("runtime.prepare", self.prepare_runtime_files())?;
+
+        if let Some(admission)=existing {
+            if let Err(error)=admission.validate(cfg){return Err(self.cleanup_after_start_failure(error));}
+        }
 
         println!(
             "[Supervisor] Starting MPD: route={}, buffer={} KB",
@@ -838,6 +854,9 @@ decoder {{
         self.shared_mute_generation = self.shared_mute_generation.wrapping_add(1);
         self.shared_mute = Default::default();
         self.engine_evidence = engine.evidence(is_shared);
+        if let Some(admission)=existing {
+            if let Err(error)=admission.validate(cfg){return Err(self.cleanup_after_start_failure(error));}
+        }
         if let Some(gate)=&self.playback_gate {gate.bind(cfg,pid,self.direct_volume.clone());}
         Ok(library_sync)
     }

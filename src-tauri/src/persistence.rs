@@ -108,6 +108,11 @@ fn harden_existing_private_directory(path: &Path) -> Result<(), String> {
     if !metadata.is_dir() {
         return Err("O diretório de configuração do Sonante não é válido.".to_string());
     }
+    // chmod changes ctime even when its mode is unchanged; normal reads
+    // must not invalidate a retained readonly profile/source snapshot.
+    // Other modes/owners retain the previous chmod and error path.
+    if metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.mode() & 0o7777 == PRIVATE_DIR_MODE { return Ok(()); }
     directory
         .set_permissions(fs::Permissions::from_mode(PRIVATE_DIR_MODE))
         .map_err(|e| {
@@ -156,6 +161,8 @@ fn harden_existing_private_file(path: &Path, file_label: &str) -> Result<(), Str
             file_label
         ));
     }
+    if metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.mode() & 0o7777 == PRIVATE_FILE_MODE { return Ok(()); }
     file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))
         .map_err(|e| format!("Falha ao aplicar permissões 0600 a {}: {}", file_label, e))
 }

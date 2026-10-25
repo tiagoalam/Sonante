@@ -38,3 +38,18 @@ export interface LocalAlbumDiscTracks {
   disc: LocalAlbumDisc;
   tracks: LocalItem[];
 }
+
+// Informational projection only; never a read/playback capability.
+export type LocalSourceAvailabilityRow = {
+  source_id: string;
+  label: string;
+} & (
+  | { status: "available"; reason: null }
+  | { status: "unavailable"; reason: "not_found" | "permission_denied" | "io_error" }
+  | { status: "identity_conflict"; reason: "origin_mismatch" }
+);
+export interface LocalSourceAvailabilityObservation {
+  admission: "not_product_admission";
+  sources: readonly LocalSourceAvailabilityRow[];
+  observed_conflict: boolean;
+}

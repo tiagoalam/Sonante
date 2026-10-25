@@ -3137,6 +3137,44 @@ impl AudioEngine {
         Self::embedded_cover_for_folder(socket_path, path)
     }
 
+    // Source-scoped path: the caller owns real lifecycle/Lease admission and
+    // the target owns checked FDs. Legacy get_local_cover_at stays unchanged.
+    pub(crate) fn get_local_cover_from_source(
+        socket_path:&str,path:&str,target:&local_media::SourceCoverTarget<'_>,
+        verify_context:&dyn Fn()->Result<(),String>,
+    )->Result<Option<String>,String> {
+        target.validate()?;
+        for name in LOCAL_FOLDER_COVER_NAMES {
+            if let Some(file)=target.open_cover(name)? {
+                let bytes=read_limited_local_cover(file.reader(),file.len());
+                file.validate()?;
+                if let Some(bytes)=bytes {
+                    let mime=match Path::new(name).extension().and_then(|v|v.to_str()).unwrap_or("jpeg") {
+                        "png"=>"image/png","webp"=>"image/webp",_=>"image/jpeg",
+                    };
+                    verify_context()?;target.validate()?;
+                    return Ok(Some(format!("data:{mime};base64,{}",BASE64.encode(&bytes))));
+                }
+            }
+        }
+        // MPD still opens its own URI: local FDs do not bind remote readpicture.
+        // Keep the existing commands, size/MIME handling and three-probe limit.
+        verify_context()?;target.validate()?;
+        let command=format!("lsinfo {}",Self::quote_mpd_argument(path)?);
+        let lines=Self::send_command_to_socket(socket_path,&command)?;
+        verify_context()?;target.validate()?;
+        let tracks=lines.iter().filter_map(|line|line.strip_prefix("file: "))
+            .filter(|uri|Path::new(uri).parent()==Some(Path::new(path)))
+            .filter(|uri|local_media::is_catalog_track_uri(uri)).take(MAX_EMBEDDED_COVER_TRACK_PROBES);
+        for uri in tracks {
+            verify_context()?;target.validate_probe_uri(uri)?;
+            let cover=Self::embedded_cover_for_track(socket_path,uri)?;
+            verify_context()?;target.validate()?;
+            if cover.is_some() {return Ok(cover);}
+        }
+        verify_context()?;target.validate()?;Ok(None)
+    }
+
     fn embedded_cover_for_folder(
         socket_path: &str,
         folder: &str,
@@ -11303,15 +11341,8 @@ mod tests {
                     script.push(("stop".into(), Some("OK\n".into())));
                 }
                 if rollback_starts {
-                    let selection = if state == PlaybackState::Stopped {
-                        ""
-                    } else {
-                        "play 0\n"
-                    };
-                    script.push((format!("command_list_begin\nclear\nadd \"valid.flac\"\n{selection}command_list_end"), Some("OK\n".into())));
-                    if state != PlaybackState::Stopped {
-                        script.push(("pause 1".into(), Some("OK\n".into())));
-                    }
+                    // Rollback must rebuild without selecting/starting a song.
+                    script.push(("command_list_begin\nclear\nadd \"valid.flac\"\ncommand_list_end".into(), Some("OK\n".into())));
                 }
                 let (socket, server) = fake_mpd_script(script);
                 engine.socket_path = socket;
@@ -11345,6 +11376,9 @@ mod tests {
                 assert_eq!(engine.queue, before);
                 assert_eq!(engine.get_queue().is_empty(), !rollback_starts);
                 assert_eq!(engine.queue_coherent, rollback_starts);
+                assert_eq!(engine.restored_resume, if rollback_starts && state != PlaybackState::Stopped {
+                    Some(PlaybackResumeSnapshot { queue_index: 0, elapsed: 0.0, state: PlaybackState::Paused })
+                } else { None });
                 assert!(engine.reserve_queue_structure().is_none());
                 drop(resolved);
                 assert_eq!(engine.queue_structure_reserved.load(Ordering::SeqCst), 0);

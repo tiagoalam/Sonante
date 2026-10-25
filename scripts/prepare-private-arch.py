@@ -25,7 +25,7 @@ def archive(target,root,names,prefix):
             info=tar.gettarinfo(str(path),arcname=prefix+'/'+name)
             info.uid=info.gid=0;info.uname=info.gname='root';info.mtime=0
             with path.open('rb') as stream:tar.addfile(info,stream)
-    with target.open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
+    return verifier.digest(target)
 
 def prepare(stage,source_manifest,sidecar,application,app_receipt,output,check_only=False):
     receipt=verifier.verify(stage) # Reject audit/private-path fixtures BEFORE creating any inputs.
@@ -36,17 +36,16 @@ def prepare(stage,source_manifest,sidecar,application,app_receipt,output,check_o
         path=SOURCE/path
         if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o7777 != entry['mode']:
             raise ValueError('Invalid snapshot source or mode')
-        with path.open('rb') as stream:
-            if hashlib.file_digest(stream,'sha256').hexdigest()!=entry['sha256']:raise ValueError('Snapshot changed')
+        if verifier.digest(path)!=entry['sha256']:raise ValueError('Snapshot changed')
     inventory=json.loads((stage/'usr/share/doc/sonante/runtime-inventory.json').read_text())
     identity=inventory['source_sidecar']
-    if sidecar.name!=identity['filename'] or hashlib.file_digest(sidecar.open('rb'),'sha256').hexdigest()!=identity['sha256']:
+    if sidecar.name!=identity['filename'] or verifier.digest(sidecar)!=identity['sha256']:
         raise ValueError('Exact corresponding source sidecar required')
     packages=set(inventory['arch_packages'])-{'glibc','gcc-libs'}
     packages.update(['glibc>=2.35','gcc-libs>=12','alsa-utils','gtk3','openssl','webkit2gtk-4.1>=2.40','xdg-utils','xdg-desktop-portal','pipewire','wireplumber'])
     if any(p.startswith('lib32-') for p in packages):raise ValueError('Wrong dependency architecture')
     app=json.loads(app_receipt.read_text())
-    app_hash=hashlib.file_digest(application.open('rb'),'sha256').hexdigest()
+    app_hash=verifier.digest(application)
     source_hash=hashlib.sha256(source_manifest.read_bytes()).hexdigest()
     if application.is_symlink() or not application.is_file() or app_hash!=app['sha256'] or source_hash!=app['source_manifest_sha256'] or not app['custom_protocol']:
         raise ValueError('Application does not match the validated Ubuntu source/build receipt')

@@ -2,6 +2,13 @@
 # CI only: package the checked-out commit, without fetching a future release tag.
 set -euo pipefail
 stage="$1"
+# HEAD omits unstaged/staged changes and untracked sources even at the same version.
+# Keep status failure fatal and refuse before creating any package inputs.
+checkout_status="$(git --no-optional-locks -c safe.directory="$(pwd -P)" status --porcelain=v1 --untracked-files=normal)"
+if [[ -n "$checkout_status" ]]; then
+  echo 'Working tree differs from HEAD; refusing incomplete Arch package source' >&2
+  exit 1
+fi
 mkdir -m 700 "$stage"
 git -c safe.directory="$(pwd -P)" archive --format=tar --prefix=sonante/ HEAD > "$stage/sonante-source.tar"
 archive_version="$(tar -xOf "$stage/sonante-source.tar" sonante/package.json | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')"

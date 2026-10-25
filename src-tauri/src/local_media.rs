@@ -247,6 +247,292 @@ pub(crate) fn resolve_local_path(
     })
 }
 
+
+// Source-scoped cover consumer only. No serialized capability or public path.
+// Canonicalization locates aliases; actual reads use retained, checked FDs.
+const COVER_CHANGED: &str = "LOCAL_COVER_CONTEXT_CHANGED";
+const COVER_UNAVAILABLE: &str = "LOCAL_COVER_SOURCE_UNAVAILABLE";
+const COVER_ESCAPE: &str = "LOCAL_COVER_OUTSIDE_SOURCE";
+const COVER_PATH_BYTES: usize = 4096;
+const COVER_PATH_DEPTH: usize = 128;
+
+#[derive(Clone, PartialEq, Eq)]
+struct CoverStamp { dev:u64, ino:u64, mode:u32, links:u64, uid:u32, gid:u32,
+    len:u64, mtime:(i64,i64), ctime:(i64,i64) }
+impl CoverStamp {
+    fn file(file:&fs::File)->Result<Self,String> {
+        use std::os::unix::fs::MetadataExt;
+        let m=file.metadata().map_err(|_|COVER_CHANGED)?;
+        Ok(Self {dev:m.dev(),ino:m.ino(),mode:m.mode(),links:m.nlink(),uid:m.uid(),gid:m.gid(),
+            len:m.len(),mtime:(m.mtime(),m.mtime_nsec()),ctime:(m.ctime(),m.ctime_nsec())})
+    }
+    fn named(parent:&fs::File,name:&std::ffi::OsStr)->Result<Self,String> {
+        use std::os::{fd::AsRawFd,unix::ffi::OsStrExt};
+        let name=std::ffi::CString::new(name.as_bytes()).map_err(|_|COVER_CHANGED)?;
+        let mut value=std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {libc::fstatat(parent.as_raw_fd(),name.as_ptr(),value.as_mut_ptr(),libc::AT_SYMLINK_NOFOLLOW)}!=0 {
+            return Err(COVER_CHANGED.into());
+        }
+        let m=unsafe {value.assume_init()};
+        Ok(Self {dev:m.st_dev as u64,ino:m.st_ino as u64,mode:m.st_mode as u32,
+            links:m.st_nlink as u64,uid:m.st_uid,gid:m.st_gid,len:m.st_size as u64,
+            mtime:(m.st_mtime as i64,m.st_mtime_nsec as i64),ctime:(m.st_ctime as i64,m.st_ctime_nsec as i64)})
+    }
+    fn directory(&self)->bool {self.mode & libc::S_IFMT as u32==libc::S_IFDIR as u32}
+    fn regular(&self)->bool {self.mode & libc::S_IFMT as u32==libc::S_IFREG as u32}
+}
+fn cover_path_bound(path:&Path)->Result<(),String> {
+    use std::os::unix::ffi::OsStrExt;
+    if path.as_os_str().as_bytes().len()>COVER_PATH_BYTES || path.components().count()>COVER_PATH_DEPTH {
+        return Err(COVER_UNAVAILABLE.into());
+    }
+    Ok(())
+}
+fn cover_open_at(parent:&fs::File,name:&std::ffi::OsStr,flags:i32)->Result<fs::File,String> {
+    use std::os::{fd::{AsRawFd,FromRawFd},unix::ffi::OsStrExt};
+    let name=std::ffi::CString::new(name.as_bytes()).map_err(|_|COVER_CHANGED)?;
+    let fd=unsafe {libc::openat(parent.as_raw_fd(),name.as_ptr(),flags|libc::O_NOFOLLOW|libc::O_CLOEXEC)};
+    if fd<0 {return Err(COVER_CHANGED.into());}
+    Ok(unsafe {fs::File::from_raw_fd(fd)})
+}
+struct CoverEntry { file:fs::File, name:std::ffi::OsString, stamp:CoverStamp }
+struct OpenedCoverPath {
+    requested:PathBuf, canonical:PathBuf, directories:Vec<CoverEntry>, leaf:Option<CoverEntry>,
+}
+impl OpenedCoverPath {
+    fn open(root:&Path,root_fd:&fs::File,requested:&Path,
+        missing_parent:Option<&fs::File>)->Result<Option<Self>,String> {
+        cover_path_bound(requested)?;
+        // std canonicalize retains the platform's finite symlink traversal limit;
+        // loops/errors are not retried. No custom unbounded symlink walker.
+        let canonical=match fs::canonicalize(requested) {
+            Ok(path)=>path,
+            Err(e) if matches!(e.kind(),ErrorKind::NotFound|ErrorKind::PermissionDenied)=>{
+                use std::os::{fd::AsRawFd,unix::ffi::OsStrExt};
+                // Only open_cover supplies this already retained directory FD
+                // for its single named candidate. Without that witness, refuse.
+                let parent=missing_parent.ok_or(COVER_UNAVAILABLE)?;
+                let name=requested.file_name().ok_or(COVER_UNAVAILABLE)?;
+                let name=std::ffi::CString::new(name.as_bytes()).map_err(|_|COVER_CHANGED)?;
+                let parent_stamp=CoverStamp::file(parent)?;
+                let mut nominal=std::mem::MaybeUninit::<libc::stat>::uninit();
+                let found=unsafe {libc::fstatat(parent.as_raw_fd(),name.as_ptr(),nominal.as_mut_ptr(),libc::AT_SYMLINK_NOFOLLOW)};
+                let missing=found!=0 && std::io::Error::last_os_error().kind()==ErrorKind::NotFound;
+                if CoverStamp::file(parent)?!=parent_stamp {return Err(COVER_CHANGED.into());}
+                // A present symlink (or any present unresolved entry) is NOT
+                // evidence of absence. Do not inspect its external destination.
+                // The caller also revalidates the original target/parent before
+                // accepting None. Regular read-permission handling stays below.
+                if e.kind()==ErrorKind::NotFound && missing {return Ok(None);}
+                return Err(COVER_UNAVAILABLE.into());
+            }
+            Err(_)=>return Err(COVER_UNAVAILABLE.into()),
+        };
+        cover_path_bound(&canonical)?;
+        let relative=canonical.strip_prefix(root).map_err(|_|COVER_ESCAPE)?;
+        let parts=relative.components().map(|part|match part {
+            Component::Normal(name)=>Ok(name.to_os_string()),_=>Err(COVER_ESCAPE.to_string())
+        }).collect::<Result<Vec<_>,_>>()?;
+        let mut result=Self {requested:requested.into(),canonical,directories:Vec::new(),leaf:None};
+        for (index,name) in parts.iter().enumerate() {
+            let parent=result.directories.last().map_or(root_fd,|entry|&entry.file);
+            let before=CoverStamp::named(parent,name)?;
+            // O_PATH retains a target identity without reading a music file or
+            // requiring directory listing permission. Linux application scope.
+            let file=cover_open_at(parent,name,libc::O_PATH)?;
+            let stamp=CoverStamp::file(&file)?;
+            if before!=stamp || CoverStamp::named(parent,name)?!=stamp {return Err(COVER_CHANGED.into());}
+            let directory=stamp.directory();
+            if !directory && index+1!=parts.len() {return Err(COVER_CHANGED.into());}
+            let entry=CoverEntry {file,name:name.clone(),stamp};
+            if directory {result.directories.push(entry);} else {result.leaf=Some(entry);}
+        }
+        result.validate(root_fd)?;
+        Ok(Some(result))
+    }
+    fn parent<'a>(&'a self,root:&'a fs::File)->&'a fs::File {
+        self.directories.last().map_or(root,|entry|&entry.file)
+    }
+    fn validate(&self,root:&fs::File)->Result<(),String> {
+        let mut parent=root;
+        for entry in &self.directories {
+            if CoverStamp::file(&entry.file)?!=entry.stamp || CoverStamp::named(parent,&entry.name)?!=entry.stamp {
+                return Err(COVER_CHANGED.into());
+            }
+            parent=&entry.file;
+        }
+        if let Some(entry)=&self.leaf {
+            if CoverStamp::file(&entry.file)?!=entry.stamp || CoverStamp::named(parent,&entry.name)?!=entry.stamp {
+                return Err(COVER_CHANGED.into());
+            }
+        }
+        // Recheck the alias spelling too. FD validation, not this pathname
+        // check alone, binds the actual object read by the consumer.
+        if fs::canonicalize(&self.requested).map_err(|_|COVER_CHANGED)?!=self.canonical {
+            return Err(COVER_CHANGED.into());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct SourceCoverTarget<'a> {
+    owner:&'a crate::profile_lease::Lease,
+    transaction:&'a crate::config_save_operation::Transaction<'a>,
+    coordinator:&'a crate::config_save_operation::Coordinator,
+    identity:&'a crate::source_identity::ReadonlyIdentitySnapshot,
+    mirror:&'a mirror::ReadonlyMirrorSnapshot,
+    root:PathBuf, root_fd:fs::File, root_stamp:CoverStamp, source_id:String,
+    opened:OpenedCoverPath,
+}
+pub(crate) struct SourceCoverFile<'a,'b> {
+    target:&'a SourceCoverTarget<'b>, opened:OpenedCoverPath, file:fs::File, stamp:CoverStamp,
+}
+impl SourceCoverFile<'_,'_> {
+    pub(crate) fn reader(&self)->&fs::File {&self.file}
+    pub(crate) fn len(&self)->u64 {self.stamp.len}
+    pub(crate) fn validate(&self)->Result<(),String> {
+        self.target.validate()?;
+        self.opened.validate(&self.target.root_fd)?;
+        if CoverStamp::file(&self.file)?!=self.stamp {return Err(COVER_CHANGED.into());}
+        Ok(())
+    }
+}
+impl SourceCoverTarget<'_> {
+    pub(crate) fn validate(&self)->Result<(),String> {
+        use std::os::unix::fs::MetadataExt;
+        if !self.transaction.belongs_to(self.coordinator) || self.coordinator.shutdown_requested() {
+            return Err(COVER_CHANGED.into());
+        }
+        self.owner.validate().map_err(|_|COVER_CHANGED)?;
+        self.identity.revalidate().map_err(|_|COVER_CHANGED)?;
+        // Per-step checks bind the retained marker and root; the complete
+        // original topology is revalidated after the callback, before return.
+        self.mirror.revalidate_binding().map_err(|_|COVER_CHANGED)?;
+        if self.identity.observe(&self.source_id).map_err(|_|COVER_CHANGED)?
+            !=crate::source_identity::ReadonlyOriginObservation::Available {
+            return Err(COVER_UNAVAILABLE.into());
+        }
+        let named=fs::symlink_metadata(&self.root).map_err(|_|COVER_CHANGED)?;
+        if !named.is_dir() || (named.dev(),named.ino())!=(self.root_stamp.dev,self.root_stamp.ino)
+            || fs::canonicalize(&self.root).map_err(|_|COVER_CHANGED)?!=self.root
+            || CoverStamp::file(&self.root_fd)?!=self.root_stamp {
+            return Err(COVER_CHANGED.into());
+        }
+        self.opened.validate(&self.root_fd)
+    }
+    pub(crate) fn open_cover(&self,name:&str)->Result<Option<SourceCoverFile<'_,'_>>,String> {
+        self.validate()?;
+        if !matches!((Path::new(name).components().next(),Path::new(name).components().count()),
+            (Some(Component::Normal(_)),1)) {return Err(COVER_CHANGED.into());}
+        let directory=if self.opened.leaf.is_some() {
+            self.opened.canonical.parent().ok_or(COVER_CHANGED)?
+        }else{self.opened.canonical.as_path()};
+        let Some(opened)=OpenedCoverPath::open(&self.root,&self.root_fd,&directory.join(name),
+            Some(self.opened.parent(&self.root_fd)))? else {
+            self.validate()?;return Ok(None);
+        };
+        let Some(leaf)=opened.leaf.as_ref() else {self.validate()?;return Ok(None)};
+        if !leaf.stamp.regular() {self.validate()?;return Ok(None);}
+        // Open read access relative to the verified parent FD, never the earlier
+        // absolute pathname. Existing hardlinked regular files remain allowed.
+        let file=match cover_open_at(opened.parent(&self.root_fd),&leaf.name,libc::O_RDONLY|libc::O_NONBLOCK) {
+            Ok(file)=>file,
+            Err(error)=>{
+                // Ordinary unreadability remains a missing candidate, provided
+                // the witnessed object and all retained bindings still match.
+                opened.validate(&self.root_fd)?;self.validate()?;
+                return if error==COVER_CHANGED {Ok(None)}else{Err(error)};
+            }
+        };
+        let stamp=CoverStamp::file(&file)?;
+        if stamp!=leaf.stamp || !stamp.regular() {return Err(COVER_CHANGED.into());}
+        let result=SourceCoverFile {target:self,opened,file,stamp};result.validate()?;Ok(Some(result))
+    }
+    pub(crate) fn validate_probe_uri(&self,uri:&str)->Result<(),String> {
+        let path=validate_local_uri(uri).map_err(|_|COVER_ESCAPE)?;cover_path_bound(&path)?;
+        if path.components().next()!=Some(Component::Normal(std::ffi::OsStr::new(&self.source_id))) {
+            return Err(COVER_ESCAPE.into());
+        }
+        self.validate()
+    }
+}
+
+// Called only inside the retained real source context. No source path escapes
+// this callback; the result is data/None, not a physical playback capability.
+pub(crate) fn with_source_cover_target<T>(
+    owner:&crate::profile_lease::Lease,
+    transaction:&crate::config_save_operation::Transaction<'_>,
+    coordinator:&crate::config_save_operation::Coordinator,
+    library:&Path,configured:&[String],uri:&str,
+    read:impl FnOnce(&SourceCoverTarget<'_>)->Result<T,String>,
+)->Result<T,String> {
+    if !transaction.belongs_to(coordinator) || coordinator.shutdown_requested() {return Err(COVER_CHANGED.into());}
+    owner.validate().map_err(|_|COVER_CHANGED)?;
+    if library.parent()!=Some(owner.root().path.as_path()) {return Err(COVER_CHANGED.into());}
+    let identity=crate::source_identity::ReadonlyIdentitySnapshot::open(library).map_err(|_|COVER_UNAVAILABLE)?;
+    let mirror=mirror::ReadonlyMirrorSnapshot::open(library).map_err(|_|COVER_UNAVAILABLE)?;
+    with_source_cover_target_in_snapshot(owner,transaction,coordinator,library,configured,uri,&identity,&mirror,|target| {
+        let value=read(target)?;
+        mirror.revalidate().map_err(|_|COVER_CHANGED)?;
+        Ok(value)
+    })
+}
+
+// The caller must retain and finally revalidate these same original snapshots
+// before publishing any result. Real Lease/transaction/D03/FD checks still run
+// for every target; sharing an inventory alone never admits a read.
+pub(crate) fn with_source_cover_target_in_snapshot<T>(
+    owner:&crate::profile_lease::Lease,
+    transaction:&crate::config_save_operation::Transaction<'_>,
+    coordinator:&crate::config_save_operation::Coordinator,
+    library:&Path,configured:&[String],uri:&str,
+    identity:&crate::source_identity::ReadonlyIdentitySnapshot,
+    mirror:&mirror::ReadonlyMirrorSnapshot,
+    read:impl FnOnce(&SourceCoverTarget<'_>)->Result<T,String>,
+)->Result<T,String> {
+    use std::os::unix::{ffi::OsStrExt,fs::OpenOptionsExt};
+    if !transaction.belongs_to(coordinator) || coordinator.shutdown_requested() {return Err(COVER_CHANGED.into());}
+    owner.validate().map_err(|_|COVER_CHANGED)?;
+    if library.parent()!=Some(owner.root().path.as_path()) {return Err(COVER_CHANGED.into());}
+    if !identity.matches_manifest(mirror.manifest.registry_id.as_deref().ok_or(COVER_CHANGED)?,&mirror.manifest.sources) {
+        return Err(COVER_CHANGED.into());
+    }
+    if configured.len()>65_536 {return Err(COVER_CHANGED.into());}
+    let mut config=std::collections::BTreeSet::new();
+    for value in configured {
+        if !Path::new(value).is_absolute() || value.len()>COVER_PATH_BYTES || !config.insert(value.as_bytes()) {
+            return Err(COVER_CHANGED.into());
+        }
+    }
+    let registered=mirror.manifest.sources.values().map(|p|p.as_os_str().as_bytes()).collect::<std::collections::BTreeSet<_>>();
+    if config!=registered {return Err(COVER_CHANGED.into());}
+    let relative=validate_local_uri(uri).map_err(|_|COVER_ESCAPE)?;cover_path_bound(&relative)?;
+    let mut parts=relative.components();
+    let Some(Component::Normal(id))=parts.next() else {return Err(COVER_ESCAPE.into())};
+    let source_id=id.to_str().ok_or(COVER_ESCAPE)?.to_string();
+    let root=mirror.manifest.sources.get(&source_id).ok_or(COVER_UNAVAILABLE)?.clone();
+    if identity.observe(&source_id).map_err(|_|COVER_UNAVAILABLE)?
+        !=crate::source_identity::ReadonlyOriginObservation::Available {return Err(COVER_UNAVAILABLE.into());}
+    cover_path_bound(&root)?;
+    if fs::canonicalize(&root).map_err(|_|COVER_UNAVAILABLE)?!=root {return Err(COVER_CHANGED.into());}
+    let root_fd=fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_PATH|libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC)
+        .open(&root).map_err(|_|COVER_UNAVAILABLE)?;
+    let root_stamp=CoverStamp::file(&root_fd)?;
+    if !root_stamp.directory() {return Err(COVER_CHANGED.into());}
+    let requested=root.join(parts.collect::<PathBuf>());
+    let opened=OpenedCoverPath::open(&root,&root_fd,&requested,None)?.ok_or(COVER_UNAVAILABLE)?;
+    if opened.leaf.as_ref().is_some_and(|leaf|!leaf.stamp.regular()) {return Err(COVER_UNAVAILABLE.into());}
+    let target=SourceCoverTarget {owner,transaction,coordinator,identity:&identity,mirror:&mirror,
+        root,root_fd,root_stamp,source_id,opened};
+    target.validate()?;
+    let value=read(&target)?;
+    target.validate()?;
+    // Full original inventory validation belongs to the enclosing read scope.
+    // No worker publishes a partial pair before that scope succeeds.
+    Ok(value)
+}
+
 fn validate_local_uri(uri: &str) -> Result<PathBuf, LocalPathResolveError> {
     if uri.is_empty()
         || uri.bytes().any(|byte| matches!(byte, 0 | b'\r' | b'\n'))
@@ -527,6 +813,216 @@ pub(crate) mod mirror {
     struct ScannedFile {
         physical: PathBuf,
         relative: PathBuf,
+    }
+
+    // FF06-I1a additive readonly snapshot; no read_manifest/check_manifest call,
+    // no physical source traversal, no reservation or cleanup side effects.
+    type ReadonlyTopology = BTreeMap<PathBuf, (crate::source_identity::ReadonlyStamp, Option<PathBuf>)>;
+    // One process-owned, nonblocking notification descriptor. No thread or
+    // polling task: each actual read checks the kernel queue before publishing.
+    struct MirrorChanges {
+        fd: OwnedFd,
+        dirty: std::sync::Mutex<bool>,
+        #[cfg(test)]
+        watches: Vec<i32>,
+    }
+    impl MirrorChanges {
+        fn open(snapshot:&ReadonlyMirrorSnapshot)->Result<Self,()> {
+            use std::os::unix::ffi::OsStrExt;
+            use crate::source_identity::ReadonlyDirectory;
+            let raw=unsafe {libc::inotify_init1(libc::IN_NONBLOCK|libc::IN_CLOEXEC)};
+            if raw<0 {return Err(());}
+            let fd=unsafe {OwnedFd::from_raw_fd(raw)};
+            let mut watches=Vec::new();
+            let mut add=|path:&Path,directory:bool|->Result<(),()> {
+                let name=CString::new(path.as_os_str().as_bytes()).map_err(|_|())?;
+                let mask=libc::IN_ATTRIB|libc::IN_MODIFY|libc::IN_CREATE|libc::IN_DELETE
+                    |libc::IN_MOVED_FROM|libc::IN_MOVED_TO|libc::IN_DELETE_SELF
+                    |libc::IN_MOVE_SELF|libc::IN_CLOSE_WRITE|libc::IN_MASK_ADD
+                    |if directory {libc::IN_ONLYDIR} else {libc::IN_DONT_FOLLOW};
+                let watch=unsafe {libc::inotify_add_watch(fd.as_raw_fd(),name.as_ptr(),mask)};
+                if watch<0 {return Err(());}
+                watches.push(watch);Ok(())
+            };
+            if !snapshot.directory.supports_local_change_events() {return Err(());}
+            add(&snapshot.directory.change_watch_path(),true)?;
+            for (relative,(_,target)) in &snapshot.topology {
+                let path=snapshot.directory.descendant(relative)?;
+                if target.is_none() {
+                    let directory=ReadonlyDirectory::open(&path)?;
+                    // Remote/FUSE/unknown filesystems retain full validation;
+                    // kernel notifications alone do not prove their changes.
+                    if !directory.supports_local_change_events() {return Err(());}
+                    add(&directory.change_watch_path(),true)?;
+                    directory.revalidate()?;
+                } else {
+                    // Watch the link inode too: an external hard link can
+                    // change its attributes without notifying this parent.
+                    add(&path,false)?;
+                }
+            }
+            Ok(Self {fd,dirty:std::sync::Mutex::new(false),#[cfg(test)] watches})
+        }
+        fn check(&self)->Result<(),()> {
+            let mut dirty=self.dirty.lock().map_err(|_|())?;
+            if *dirty {return Err(());}
+            let mut events=[0u8;4096];
+            let n=unsafe {libc::read(self.fd.as_raw_fd(),events.as_mut_ptr().cast(),events.len())};
+            if n<0 && std::io::Error::last_os_error().kind()==ErrorKind::WouldBlock {return Ok(());}
+            // Any subscribed event, overflow, unmount, removed watch or IO
+            // uncertainty permanently invalidates THIS proof, even after drain.
+            *dirty=true;Err(())
+        }
+        fn invalidate(&self) {if let Ok(mut dirty)=self.dirty.lock() {*dirty=true;}}
+    }
+    pub(crate) struct ReadonlyMirrorSnapshot {
+        directory: crate::source_identity::ReadonlyDirectory,
+        marker: crate::source_identity::ReadonlyBoundedFile,
+        pub(crate) manifest: MirrorManifest,
+        topology: ReadonlyTopology,
+        changes: Option<MirrorChanges>,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum ReadonlyMirrorOpenError { Unconfirmed, UnsupportedSchema }
+    impl From<()> for ReadonlyMirrorOpenError {
+        fn from(_: ()) -> Self { Self::Unconfirmed }
+    }
+    impl ReadonlyMirrorSnapshot {
+        pub(crate) fn open(library: &Path) -> Result<Self, ReadonlyMirrorOpenError> {
+            use crate::source_identity::{ReadonlyBoundedFile, ReadonlyDirectory, readonly_unique_json};
+            let directory=ReadonlyDirectory::open(library)?;
+            let marker=ReadonlyBoundedFile::open(&directory, MANIFEST_NAME, 16*1024*1024, false)?;
+            let manifest:MirrorManifest=readonly_unique_json(marker.bytes())?;
+            // Explain only a parsed, unique unknown version bound to unchanged
+            // original bytes. This remains a refusal, never a readable snapshot.
+            if !matches!(manifest.schema_version, 1 | 2) {
+                marker.revalidate(&directory)?;
+                directory.revalidate()?;
+                return Err(ReadonlyMirrorOpenError::UnsupportedSchema);
+            }
+            validate_manifest(&manifest).map_err(|_| ())?;
+            if manifest.schema_version!=2 || manifest.sources.len()>65_536 {
+                return Err(ReadonlyMirrorOpenError::Unconfirmed);
+            }
+            let topology=Self::topology(&directory, &manifest)?;
+            let result=Self {directory,marker,manifest,topology,changes:None}; result.revalidate()?; Ok(result)
+        }
+        pub(crate) fn open_cached(library:&Path)->Result<Self,ReadonlyMirrorOpenError> {
+            let mut result=Self::open(library)?;
+            let changes=MirrorChanges::open(&result);
+            // Registration is not authority. Revalidate the complete ORIGINAL
+            // snapshot after registration, covering every installation race.
+            result.revalidate_full()?;
+            if let Ok(changes)=changes {changes.check()?;result.changes=Some(changes);}
+            // Unsupported watches keep the original full-scan algorithm.
+            Ok(result)
+        }
+        #[cfg(test)]
+        pub(crate) fn has_change_watch(&self)->bool {self.changes.is_some()}
+        #[cfg(test)]
+        pub(crate) fn remove_change_watch(&self) {
+            let changes=self.changes.as_ref().unwrap();
+            assert_eq!(unsafe {libc::inotify_rm_watch(changes.fd.as_raw_fd(),changes.watches[0])},0);
+        }
+        pub(crate) fn revalidate_binding(&self) -> Result<(), ()> {
+            self.marker.revalidate(&self.directory)
+        }
+        pub(crate) fn revalidate(&self) -> Result<(), ()> {
+            let Some(changes)=&self.changes else {return self.revalidate_full();};
+            let result=(|| {
+                changes.check()?;
+                self.marker.revalidate(&self.directory)?;
+                // Mount-over is not reported by inotify. Keep original stamps
+                // for EVERY directory, including dev/inode, between checks.
+                for (relative,(stamp,target)) in &self.topology {
+                    if target.is_none() && crate::source_identity::ReadonlyStamp::of(
+                        &fs::symlink_metadata(self.directory.descendant(relative)?).map_err(|_|())?)!=*stamp {
+                        return Err(());
+                    }
+                }
+                self.marker.revalidate(&self.directory)?;
+                changes.check()
+            })();
+            if result.is_err() {changes.invalidate();}
+            result
+        }
+        fn revalidate_full(&self) -> Result<(), ()> {
+            self.marker.revalidate(&self.directory)?;
+            // The retained snapshot already contains every published entry.
+            // Recheck all of their stamps and link targets without rebuilding,
+            // sorting and reopening the same tree for each cover. Additions and
+            // removals change the containing directory's retained ctime/mtime.
+            for (relative,(stamp,target)) in &self.topology {
+                let path=self.directory.descendant(relative)?;
+                if crate::source_identity::ReadonlyStamp::of(&fs::symlink_metadata(&path).map_err(|_| ())?)!=*stamp {
+                    return Err(());
+                }
+                if let Some(expected)=target {
+                    if fs::read_link(&path).map_err(|_| ())?.as_os_str()!=expected.as_os_str() {return Err(());}
+                }
+            }
+            // A directory changed during the entry reads must still refuse the
+            // result, even when the changed entry sorted before our last read.
+            for (relative,(stamp,target)) in &self.topology {
+                if target.is_none() && crate::source_identity::ReadonlyStamp::of(
+                    &fs::symlink_metadata(self.directory.descendant(relative)?).map_err(|_| ())?)!=*stamp {
+                    return Err(());
+                }
+            }
+            self.marker.revalidate(&self.directory)
+        }
+        #[cfg(test)]
+        pub(crate) fn revalidate_by_rebuilding_for_comparison(&self) -> Result<(), ()> {
+            self.marker.revalidate(&self.directory)?;
+            if Self::topology(&self.directory,&self.manifest)?!=self.topology {return Err(());}
+            self.marker.revalidate(&self.directory)
+        }
+        fn topology(root:&crate::source_identity::ReadonlyDirectory, manifest:&MirrorManifest) -> Result<ReadonlyTopology, ()> {
+            use crate::source_identity::{ReadonlyDirectory,ReadonlyStamp};
+            const LIMIT:usize=131_072;
+            fn walk(dir:&ReadonlyDirectory, relative:&Path, physical:&Path, depth:usize,
+                result:&mut ReadonlyTopology) -> Result<(), ()> {
+                if depth>128 { return Err(()); }
+                for name in dir.names(LIMIT)? {
+                    if result.len()>=LIMIT { return Err(()); }
+                    let path=dir.entry(&name)?;
+                    let m=fs::symlink_metadata(&path).map_err(|_| ())?;
+                    let rel=relative.join(&name);
+                    let target=if m.file_type().is_symlink() {
+                        let target=fs::read_link(&path).map_err(|_| ())?;
+                        // The existing publisher emits absolute root/relative links.
+                        // Exact target comparison is structural, NOT origin proof.
+                        if target.as_os_str()!=physical.join(&name).as_os_str() { return Err(()); }
+                        Some(target)
+                    } else if m.is_dir() { None } else { return Err(()); };
+                    let stamp=ReadonlyStamp::of(&m);
+                    result.insert(rel.clone(),(stamp.clone(),target));
+                    if m.is_dir() {
+                        let child=ReadonlyDirectory::open(&path)?;
+                        walk(&child,&rel,&physical.join(&name),depth+1,result)?;
+                        child.revalidate()?;
+                    }
+                    if ReadonlyStamp::of(&fs::symlink_metadata(&path).map_err(|_| ())?)!=stamp { return Err(()); }
+                }
+                dir.revalidate()
+            }
+            let mut result=BTreeMap::new();
+            for name in root.names(LIMIT)? {
+                if name==OsStr::new(MANIFEST_NAME) { continue; }
+                let id=name.to_str().ok_or(())?;
+                let physical=manifest.sources.get(id).ok_or(())?;
+                let path=root.entry(&name)?; let m=fs::symlink_metadata(&path).map_err(|_| ())?;
+                if !m.is_dir() { return Err(()); }
+                if result.len()>=LIMIT { return Err(()); }
+                result.insert(PathBuf::from(&name),(ReadonlyStamp::of(&m),None));
+                let child=ReadonlyDirectory::open(&path)?;
+                walk(&child,Path::new(&name),physical,1,&mut result)?;
+                child.revalidate()?;
+            }
+            // Empty published sources can legitimately have no mirror directory.
+            // Their IDs still remain in manifest.sources, never derived from entries.
+            root.revalidate()?; Ok(result)
+        }
     }
 
     pub(crate) fn build_filtered_staging(
