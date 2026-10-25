@@ -37,6 +37,7 @@ mod local_own_writes;
 #[allow(dead_code)]
 mod managed_preparation;
 mod managed_save_intent;
+mod first_run_managed;
 mod mpris;
 mod mpris_shutdown;
 mod online_artwork;
@@ -1812,6 +1813,117 @@ fn plan_saved_folders_refresh(
 fn after_confirmed_local_folders_save<T>(result: Result<T, String>, uncertain: bool, install: impl FnOnce()) -> Result<T, String> {
     if result.is_ok() && !uncertain { install(); }
     result
+}
+
+fn run_initial_managed_save(
+    app: &AppHandle, observed: &AppConfig, next: &AppConfig,
+    operation: &config_save_operation::Operation,
+) -> (Result<(), String>, bool) {
+    // Set explicitly even if the final marker unlink succeeds but fsync fails.
+    let uncertain = Cell::new(false);
+    let result = (|| -> Result<(), String> {
+        let transactions = app.state::<ConfigTransactionState>();
+        let owner = app.state::<profile_lease::State>().lease()?;
+        owner.validate()?;
+        // The real Operation already owns the Coordinator slot. Never reacquire
+        // begin(). Keep startup readers excluded through publication and commit.
+        let _startup = transactions.startup_config_read_gate.try_lock()
+            .map_err(|_| "SOURCE_AVAILABILITY_BUSY")?;
+        let cancelled = || operation.shutdown_requested() || transactions.shutdown_requested();
+        recovery_fs::check(&cancelled)?;
+        managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())?;
+        let current = app.state::<ConfigState>().0.lock().map_err(|_| "Config unavailable")?.clone();
+        validate_config_change_preflight(observed, &current, next, alsa_preflight::probe)?;
+        if !is_finishing_first_run(&current, next) { return Err("FIRST_RUN_CONFIG_CHANGED".into()); }
+        let roots = next.local_folders.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let watch = app.state::<LocalWatcherState>().prepare(roots)?;
+        let coverage_token = app.state::<index_coverage::State>().begin()?;
+        let generation = format!("first-run-{}-{}", std::process::id(),
+            MIRROR_GENERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let mut initial = first_run_managed::InitialPublication::prepare(
+            &owner, &current, next, &generation, &cancelled,
+        )?;
+        let check = index_coverage::Check::from_catalog(initial.coverage(),
+            index_coverage::Catalog::from_records(std::collections::HashSet::new())?,
+            std::collections::BTreeSet::new())?;
+        // A publication/durability failure leaves its stop marker and both
+        // generations. Do not start MPD or guess whether an exchange occurred.
+        initial.publish(&cancelled)?;
+        let supervisor = app.state::<SupervisorState>();
+        let audio = app.state::<AudioState>();
+        let report = std::cell::RefCell::new(None);
+        let start_and_index = (|| -> Result<(), String> {
+            recovery_fs::check(&cancelled)?;
+            initial.validate_published()?;
+            supervisor.0.lock().map_err(|_| "MPD unavailable")?.start(next)?;
+            initial.validate_published()?;
+            let socket = {
+                let mut audio = audio.0.lock().map_err(|_| "Playback unavailable")?;
+                audio.set_music_dir(&MpdSupervisor::library_dir().to_string_lossy());
+                audio.local_album_socket_path()
+            };
+            request_refresh_and_inspect(&socket, &local_media::mirror::ManagedRefreshPlan::Full,
+                None, Some(operation), || {
+                    let (observed, _) = check.finish_at(&socket, &MpdSupervisor::library_dir())?;
+                    *report.borrow_mut() = Some(observed);
+                    initial.validate_published()
+                })
+        })();
+        let rollback = |error: String| -> Result<(), String> {
+            // Never rename the mirror/DB until this owned MPD's stop is confirmed.
+            let recovery = initial.rollback(|| stop_supervisor(&supervisor.0));
+            if recovery.is_err() { uncertain.set(true); }
+            Err(error_with_rollback(error, recovery))
+        };
+        if let Err(error) = start_and_index { return rollback(error); }
+        if let Err(error) = recovery_fs::check(&cancelled) { return rollback(error); }
+        // Lock both in-memory destinations before the commit point. Failures
+        // here are still reversible; a confirmed config rename never is.
+        let config_state = app.state::<ConfigState>();
+        let plex_state = app.state::<PlexState>();
+        let mut config = match config_state.0.lock() {
+            Ok(guard) => guard, Err(_) => return rollback("Config unavailable".into()),
+        };
+        if *config != current { return rollback("FIRST_RUN_CONFIG_CHANGED".into()); }
+        let mut plex = match plex_state.0.lock() {
+            Ok(guard) => guard, Err(_) => return rollback("Plex config unavailable".into()),
+        };
+        if let Err(error) = initial.validate_before_commit().and_then(|_| recovery_fs::check(&cancelled)) {
+            drop(plex); drop(config);
+            return rollback(error);
+        }
+        if let Err(error) = next.save() {
+            drop(plex); drop(config);
+            return match error {
+                ConfigSaveError::BeforeRename(error) => rollback(error),
+                error @ ConfigSaveError::AfterRenameUnconfirmed(_) => {
+                    uncertain.set(true);
+                    app.state::<Arc<direct_playback::Gate>>().forget_choice();
+                    let stopped = stop_supervisor(&supervisor.0);
+                    Err(error_with_rollback(uncertain_config_save_message(&error), stopped))
+                }
+            };
+        }
+        // From here on config is committed: retain it and the new generation on
+        // any durability/cleanup failure. Stop MPD; do not restore old config.
+        if let Err(error) = initial.finish_committed() {
+            uncertain.set(true);
+            app.state::<Arc<direct_playback::Gate>>().forget_choice();
+            return Err(error_with_rollback(error, stop_supervisor(&supervisor.0)));
+        }
+        app.state::<Arc<direct_playback::Gate>>().commit_choice(next);
+        plex.update_config(next);
+        *config = next.clone();
+        drop(plex); drop(config);
+        if let Some(report) = report.into_inner() {
+            publish_index_coverage(app, coverage_token, &next.local_folders, report);
+        }
+        install_committed_local_watcher(app, Some(watch));
+        Ok(())
+    })();
+    let pending = result.is_err()
+        && managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir()).is_err();
+    (result, uncertain.get() || pending)
 }
 
 fn run_experimental_local_folders_save_inner(
@@ -4707,6 +4819,23 @@ async fn save_config(
         })
         .await
         .map_err(|_| "Local folder admission unavailable".to_string())??;
+    }
+
+    if is_finishing_first_run(&observed_cfg, &new_config) {
+        if queue_clear_authorization.is_some() {
+            return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE".into());
+        }
+        let worker_app = app.clone();
+        let (_, operation) = transaction_state.operations.reserve()?;
+        // Keep the wizard's completed-response contract. It already waits for
+        // saveConfig; heavy filesystem work runs off the async command thread.
+        return tauri::async_runtime::spawn_blocking(move || {
+            let (result, uncertain) = run_initial_managed_save(
+                &worker_app, &observed_cfg, &new_config, &operation,
+            );
+            operation.finish(result.clone(), uncertain);
+            result.map(|_| config_save_operation::SaveResponse::completed(audio::DeviceSwitchRestoreOutcome::Complete))
+        }).await.map_err(|_| "FIRST_RUN_MANAGED_SAVE_INTERRUPTED".to_string())?;
     }
 
     if !observed_cfg.first_run
