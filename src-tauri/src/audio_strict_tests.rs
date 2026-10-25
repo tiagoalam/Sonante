@@ -24,7 +24,10 @@ fn strict_regression_failed_recovery_fences_queue_after_owner_release() {
             let selection = if state == PlaybackState::Stopped { "" } else { "play 1\n" };
             let batch = format!("command_list_begin\nclear\nadd \"a.flac\"\nadd \"b.flac\"\n{selection}command_list_end");
             let mut script = vec![(batch.clone(), Some("ACK [50@2] {add} unavailable\n".into()))];
-            if restart_ok { script.push((batch, Some("ACK [50@2] {add} unavailable\n".into()))); }
+            if restart_ok {
+                let stopped_batch = "command_list_begin\nclear\nadd \"a.flac\"\nadd \"b.flac\"\ncommand_list_end";
+                script.push((stopped_batch.into(), Some("ACK [50@2] {add} unavailable\n".into())));
+            }
             let (socket, server) = super::tests::fake_mpd_script(script);
             engine.socket_path = socket;
             assert!(engine.restore_after_reserved_device_switch(snapshot, &resolved).is_err());
@@ -134,22 +137,29 @@ fn partial_restore_caller_publishes_warning_without_rollback_or_extra_play() {
 }
 
 #[test]
-fn recovery_proved_by_same_owner_keeps_queue_available_and_failed_pause_fences_it() {
-    for failure in ["none", "pause", "seek"] {
+fn recovery_proved_by_same_owner_stages_paused_cursor_and_failed_queue_fences_it() {
+    for failure in [false, true] {
         let mut engine = fixture();
         let resolved = engine.capture_device_switch_queue().unwrap()
             .bind_resolved_uris(vec!["a.flac".into(), "b.flac".into()]).unwrap();
         let snapshot = Some(DeviceSwitchSnapshot { queue_index: 1, elapsed: 30.0, state: PlaybackState::Paused });
-        let batch = "command_list_begin\nclear\nadd \"a.flac\"\nadd \"b.flac\"\nplay 1\ncommand_list_end";
-        let mut script = vec![(batch.into(),Some("OK\n".into())),
-            ("seekcur 30.0".into(),Some(if failure=="seek" {"ACK [50@0] {seekcur} unavailable\n"}else{"OK\n"}.into()))];
-        if failure!="seek" { script.push(("pause 1".into(),Some(if failure=="pause" {"ACK [50@0] {pause} unavailable\n"}else{"OK\n"}.into()))); }
+        // Rollback stages the queue without opening an output. The fake server
+        // accepts exactly one batch, so Play/Seek/Pause cannot satisfy this test.
+        let batch = "command_list_begin\nclear\nadd \"a.flac\"\nadd \"b.flac\"\ncommand_list_end";
+        let script = vec![(batch.into(), Some(if failure {
+            "ACK [50@2] {add} unavailable\n"
+        } else { "OK\n" }.into()))];
         let (socket,server)=super::tests::fake_mpd_script(script);engine.socket_path=socket;
         let audio=Mutex::new(engine);
         let result=crate::rollback_audio_switch_with(snapshot,&resolved,&audio,||Ok(()));
-        assert_eq!(result.is_ok(),failure=="none");drop(resolved);
-        let engine=audio.lock().unwrap();assert_eq!(engine.queue_coherent,failure=="none");
-        assert_eq!(engine.get_queue().is_empty(),failure!="none");
+        assert_eq!(result.is_ok(),!failure);drop(resolved);
+        let engine=audio.lock().unwrap();assert_eq!(engine.queue_coherent,!failure);
+        assert_eq!(engine.get_queue().is_empty(),failure);
+        if !failure {
+            assert_eq!(engine.restored_resume, Some(PlaybackResumeSnapshot {
+                queue_index: 1, elapsed: 30.0, state: PlaybackState::Paused,
+            }));
+        }
         assert_eq!(engine.queue_structure_reserved.load(Ordering::SeqCst),0);server.join().unwrap();
     }
 }

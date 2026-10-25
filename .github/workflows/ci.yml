@@ -71,7 +71,16 @@ jobs:
         run: npm run test:frontend
 
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+        run: |
+          # Each suite requires an exclusive private parent for synthetic scenes.
+          # Keep scenes on failure; never point these variables at user data.
+          umask 077
+          fixture_root="$(mktemp -d "$RUNNER_TEMP/sonante-rust-fixtures.XXXXXXXX")"
+          export FF04_I1A_OWN_FIXTURES="$fixture_root/recovery"
+          export FF04_OFFER_OWN_FIXTURES="$fixture_root/offers"
+          export FF06_I1A_OWN_FIXTURES="$fixture_root/availability"
+          mkdir -m 700 "$FF04_I1A_OWN_FIXTURES" "$FF04_OFFER_OWN_FIXTURES" "$FF06_I1A_OWN_FIXTURES"
+          cargo test --manifest-path src-tauri/Cargo.toml --locked
 
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked

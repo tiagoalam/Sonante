@@ -1433,7 +1433,7 @@ mod tests {
         fs::rename(&music, &offline).unwrap();
         let result = MpdSupervisor::reconcile_library_symlinks(&library, &folders);
         eprintln!(
-            "legacy offline: result={:?}, alias_retained={}",
+            "[SupervisorTest] legacy offline: result={:?}, alias_retained={}",
             result.as_ref().map(|v| v.changed),
             library.join("Music").is_symlink()
         );

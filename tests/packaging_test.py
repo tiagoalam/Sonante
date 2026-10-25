@@ -387,11 +387,11 @@ else: raise SystemExit(2)
 
     def test_release_manual_dispatch_has_no_upload(self):
         release = Path('.github/workflows/release.yml').read_text()
-        self.assertIn("if: github.event_name == 'release'", release)
-        self.assertIn('needs: packages', release)
-        self.assertIn('GH_REPO:', release)
-        self.assertNotIn('gh release create', release)
-        self.assertNotIn('--clobber', release)
+        self.assertIn('workflow_dispatch:', release)
+        self.assertIn('uses: ./.github/workflows/ci.yml', release)
+        self.assertIn('contents: read', release)
+        for publishing_capability in ['release:', 'contents: write', 'gh release', 'GH_TOKEN:', 'GH_REPO:', '--clobber']:
+            self.assertNotIn(publishing_capability, release)
         ci = Path('.github/workflows/ci.yml').read_text()
         for check in ['npm run test:frontend', 'cargo test', 'cargo check', '--locked', 'inspect-elf.sh', 'inspect-packages.sh', 'makepkg', 'sha256sum -c']:
             self.assertIn(check, ci)
