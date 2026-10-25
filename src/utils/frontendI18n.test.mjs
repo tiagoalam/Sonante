@@ -96,6 +96,28 @@ function muteLabelKeys(source) {
   return keys;
 }
 
+const catalogErrorProducer = readFileSync(new URL("utils/localAlbumCatalog.ts", src), "utf8");
+function catalogErrorKeys(source) {
+  const tree = ts.createSourceFile("localAlbumCatalog.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const producer = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "localCatalogErrorKey");
+  assert.ok(producer?.body, "catalog error producer must remain inspectable");
+  const keys = new Set();
+  function finite(node) {
+    if (ts.isStringLiteral(node)) keys.add(node.text);
+    else if (node.kind === ts.SyntaxKind.NullKeyword) return;
+    else if (ts.isConditionalExpression(node)) { finite(node.whenTrue); finite(node.whenFalse); }
+    else if (ts.isParenthesizedExpression(node)) finite(node.expression);
+    else assert.fail(`uncovered catalog error producer ${node.getText(tree)}`);
+  }
+  function visit(node) {
+    if (ts.isReturnStatement(node)) { assert.ok(node.expression); finite(node.expression); }
+    else ts.forEachChild(node, visit);
+  }
+  visit(producer.body);
+  assert.ok(keys.size > 0);
+  return keys;
+}
+
 function translationCollector(tree, file, keys, mixSaveKeys) {
   const declarations = new Map();
   function declarationsVisit(node) {
@@ -103,11 +125,30 @@ function translationCollector(tree, file, keys, mixSaveKeys) {
     ts.forEachChild(node, declarationsVisit);
   }
   declarationsVisit(tree);
-  function collect(node) {
+  const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  function concatenationPatterns(node) {
+    if (ts.isStringLiteral(node)) return [escape(node.text)];
+    if (ts.isIdentifier(node) && declarations.has(node.text)) return concatenationPatterns(declarations.get(node.text));
+    if (ts.isParenthesizedExpression(node)) return concatenationPatterns(node.expression);
+    if (ts.isConditionalExpression(node)) return [...concatenationPatterns(node.whenTrue), ...concatenationPatterns(node.whenFalse)];
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      return concatenationPatterns(node.left).flatMap(left => concatenationPatterns(node.right).map(right => left + right));
+    }
+    if (file === "components/LocalSourceAvailabilityPanel.tsx" && ts.isPropertyAccessExpression(node)
+      && ["row.status", "row.reason"].includes(node.getText(tree))) return [".+"];
+    assert.fail(`${file}: uncovered translation concatenation ${node.getText(tree)}`);
+  }
+  function collect(node, guardedNullable = false) {
     if (ts.isStringLiteral(node)) keys.add(node.text);
-    else if (ts.isConditionalExpression(node)) { collect(node.whenTrue); collect(node.whenFalse); }
-    else if (ts.isParenthesizedExpression(node)) collect(node.expression);
-    else if (ts.isIdentifier(node) && declarations.has(node.text)) collect(declarations.get(node.text));
+    else if (node.kind === ts.SyntaxKind.NullKeyword && guardedNullable) return;
+    else if (ts.isConditionalExpression(node)) { collect(node.whenTrue, guardedNullable); collect(node.whenFalse, guardedNullable); }
+    else if (ts.isParenthesizedExpression(node)) collect(node.expression, guardedNullable);
+    else if (ts.isIdentifier(node) && declarations.has(node.text)) {
+      const call = node.parent, branch = call?.parent;
+      const guarded = ts.isCallExpression(call) && ts.isConditionalExpression(branch)
+        && branch.whenTrue === call && ts.isIdentifier(branch.condition) && branch.condition.text === node.text;
+      collect(declarations.get(node.text), guardedNullable || guarded);
+    }
     else if (["components/PlayerBar.tsx", "components/NowPlayingPresentation.tsx"].includes(file)
       && ts.isCallExpression(node) && node.getText(tree) === "muteLabel(status)") {
       const imported = tree.statements.some(statement => ts.isImportDeclaration(statement)
@@ -118,18 +159,73 @@ function translationCollector(tree, file, keys, mixSaveKeys) {
       assert.ok(imported, `${file}: muteLabel must bind to its inspected producer`);
       muteLabelKeys(muteLabelProducer).forEach(key => keys.add(key));
     }
+    else if (file === "components/LocalBrowserView.tsx" && ts.isCallExpression(node)
+      && node.getText(tree) === "localCatalogErrorKey(catalog.error)") {
+      const imported = tree.statements.some(statement => ts.isImportDeclaration(statement)
+        && statement.moduleSpecifier.text === "../utils/localAlbumCatalog"
+        && statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)
+        && statement.importClause.namedBindings.elements.some(item => item.name.text === "localCatalogErrorKey"
+          && (item.propertyName?.text ?? item.name.text) === "localCatalogErrorKey"));
+      assert.ok(imported, "catalog error key must bind to its inspected producer");
+      assert.ok(guardedNullable, "nullable catalog error key must be guarded before translation");
+      catalogErrorKeys(catalogErrorProducer).forEach(key => keys.add(key));
+    }
     else if (file === "components/PlexDiscoverView.tsx" && ts.isPropertyAccessExpression(node)
       && node.getText(tree) === "state.mixSave.error") mixSaveKeys.forEach(key => keys.add(key));
+    else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      for (const expression of concatenationPatterns(node)) {
+        const pattern = new RegExp(`^${expression}$`);
+        const group = Object.keys(catalogs.en).filter(key => pattern.test(key));
+        assert.ok(group.length > 0, `${file}: ${node.getText(tree)}`);
+        group.forEach(key => keys.add(key));
+      }
+    }
     else if (ts.isTemplateExpression(node)) {
-      assert.equal(node.templateSpans.length, 1, file);
-      assert.equal(node.templateSpans[0].literal.text, "", file);
-      const group = Object.keys(catalogs.en).filter(key => key.startsWith(node.head.text));
+      const literals = [node.head.text, ...node.templateSpans.map(span => span.literal.text)];
+      const pattern = new RegExp(`^${literals.map(escape).join(".+")}$`);
+      const group = Object.keys(catalogs.en).filter(key => pattern.test(key));
       assert.ok(group.length > 0, `${file}: ${node.head.text}`);
       group.forEach(key => keys.add(key));
     } else assert.fail(`${file}: uncovered translation expression ${node.getText(tree)}`);
   }
   return collect;
 }
+
+test("catalog error producer keys remain finite, guarded and bound to the real import", async () => {
+  const keys = catalogErrorKeys(catalogErrorProducer);
+  assert.deepEqual([...keys].sort(), ["localBrowser.catalogReadUnavailable", "localBrowser.catalogUnsupportedFormat"]);
+  await assertTranslationKeys(keys);
+  const invalid = catalogErrorProducer.replace('"localBrowser.catalogUnsupportedFormat";', '"localBrowser.invalidFixtureKey";');
+  await assert.rejects(assertTranslationKeys(catalogErrorKeys(invalid)), /en: localBrowser.invalidFixtureKey/);
+  const unknown = catalogErrorProducer.replace('return "localBrowser.catalogUnsupportedFormat";', 'return unsafe.key;');
+  assert.throws(() => catalogErrorKeys(unknown), /uncovered catalog error producer/);
+  const file = "components/LocalBrowserView.tsx";
+  const source = 'import {localCatalogErrorKey} from "../utils/localAlbumCatalog"; const key = catalog.error ? localCatalogErrorKey(catalog.error) : null; key ? t(key) : catalog.error;';
+  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const collected = new Set();
+  translationCollector(tree, file, collected, new Set())(tree.statements[2].expression.whenTrue.arguments[0]);
+  assert.deepEqual([...collected].sort(), [...keys].sort());
+  const unguarded = ts.createSourceFile(file, source.replace('key ? t(key) : catalog.error;', 't(key);'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  assert.throws(() => translationCollector(unguarded, file, new Set(), new Set())(unguarded.statements[2].expression.arguments[0]), /nullable catalog error key must be guarded/);
+  const wrong = ts.createSourceFile(file, source.replace('../utils/localAlbumCatalog', '../other'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  assert.throws(() => translationCollector(wrong, file, new Set(), new Set())(wrong.statements[2].expression.whenTrue.arguments[0]), /must bind to its inspected producer/);
+});
+
+test("translation scanner covers nested diagnostic templates and finite availability concatenations", () => {
+  const file = "components/LibraryRecoveryPanel.tsx";
+  const tree = ts.createSourceFile(file, 't(`libraryRecovery.${group}.${value}`);', ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const keys = new Set();
+  translationCollector(tree, file, keys, new Set())(tree.statements[0].expression.arguments[0]);
+  assert.ok(keys.has("libraryRecovery.diagnostic.outcome.failed"));
+  const availabilityFile = "components/LocalSourceAvailabilityPanel.tsx";
+  const source = 'const key = "localBrowser.sourceAvailability."; t(key + "status." + row.status);';
+  const availability = ts.createSourceFile(availabilityFile, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const statuses = new Set();
+  translationCollector(availability, availabilityFile, statuses, new Set())(availability.statements[1].expression.arguments[0]);
+  assert.deepEqual([...statuses].sort(), ["localBrowser.sourceAvailability.status.available", "localBrowser.sourceAvailability.status.identity_conflict", "localBrowser.sourceAvailability.status.unavailable"]);
+  const unsafe = ts.createSourceFile(availabilityFile, source.replace('row.status', 'row.unsafe'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  assert.throws(() => translationCollector(unsafe, availabilityFile, new Set(), new Set())(unsafe.statements[1].expression.arguments[0]), /uncovered translation concatenation/);
+});
 
 async function assertTranslationKeys(keys) {
   for (const lng of ["en", "pt-BR"]) {

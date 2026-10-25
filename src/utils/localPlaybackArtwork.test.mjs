@@ -1,3 +1,5 @@
+import { createLocalCoverBatch } from "./localCoverBatch.ts";
+import { createLocalSourceReadQueue } from "./localSourceReadQueue.ts";
 import * as playbackIntents from "./playbackIntent.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -7,10 +9,11 @@ import { LocalArtworkResolver, artworkReadBlocked } from "./localArtwork.ts";
 import { LocalAlbumCatalog } from "./localAlbumCatalog.ts";
 import { currentMediaKey, localAlbumForMedia } from "./playerNavigation.ts";
 import { logError } from "./frontendDiagnostics.ts";
+const coverPaths = calls => calls.filter(c=>c[0]==="get_local_covers").flatMap(c=>c[1].paths);
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
 const compile = (file, deps) => {
   const js = ts.transpileModule(read(file), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
-  const exports = {}; new Function("require", "exports", js)(id => { if(id === "../utils/playbackIntent") return playbackIntents; if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; assert.ok(id in deps, id); return deps[id]; }, exports); return exports;
+  const exports = {}; new Function("require", "exports", js)(id => { if(id === "../utils/playbackIntent") return playbackIntents; if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; if(id==="../utils/localCoverBatch")return {createLocalCoverBatch}; if(id==="../utils/localSourceReadQueue")return {createLocalSourceReadQueue}; assert.ok(id in deps, id); return deps[id]; }, exports); return exports;
 };
 const appSource = read("App.tsx"), ast = ts.createSourceFile("App.tsx", appSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let projection, snapshotEffect;
@@ -34,7 +37,7 @@ function mount({ cover = async () => "local-cover", cached = async () => null, i
     "@tauri-apps/api/core": { invoke: async (cmd,args) => {
       calls.push([cmd,args]);
       if(cmd==="get_local_albums")return inventory;
-      if(cmd==="get_local_cover")return cover(args.path);
+      if(cmd==="get_local_covers")return Promise.all(args.paths.map(async path=>{try{return {Ok:await cover(path)}}catch(error){return {Err:String(error)}}}));
       if(cmd==="get_online_album_cover"){assert.equal(args.cacheOnly,true,"recovery must never permit HTTP lookup");return cached(args.request);}
       assert.fail(`Unexpected audio/playback command ${cmd}`);
     } }, "../utils/frontendDiagnostics": { diagnosticInvoke: (invoke,cmd,args)=>invoke(cmd,args) },
@@ -63,7 +66,7 @@ test("actual App projection restores Local artwork before Play through catalog/r
   const f=mount();const original=structuredClone(f.status);const display=await ready(f);
   assert.equal(display.thumb,"local-cover");assert.deepEqual(f.status,original);
   assert.deepEqual({...display,thumb:null},original);assert.equal(display.elapsed,19.5);assert.equal(display.state,"pause");
-  assert.equal(f.calls.filter(c=>c[0]==="get_local_albums").length,1);assert.equal(f.calls.filter(c=>c[0]==="get_local_cover").length,1);
+  assert.equal(f.calls.filter(c=>c[0]==="get_local_albums").length,1);assert.equal(coverPaths(f.calls).length,1);
   for(let i=0;i<20;i++){f.status={...f.status,elapsed:19.5+i};f.render();await flush();}
   assert.equal(f.calls.length,2,"health/status rerenders perform no artwork or playback I/O");
   const sourceInfo={media:f.display.current_media,info:{provenance:"local",codec:"FLAC",compression:"lossless",sample_type:"integer",sample_rate:96000,bit_depth:24,dsd_level:null,revision:"fixture"}};
@@ -83,7 +86,7 @@ test("actual App projection restores Local artwork before Play through catalog/r
 test("CUE/disc references use the existing Local album artwork contract and persisted enrichment is cache-only",async()=>{
   const cueAlbum={...albums[0],discs:[{folder_path:"Source/Album/image.cue",number:1}]};
   const f=mount({inventory:[cueAlbum],cover:async path=>path.endsWith("image.cue")?"embedded-cover":null});f.status.current_media.uri="Source/Album/image.cue/track0001";
-  assert.equal((await ready(f)).thumb,"embedded-cover");assert.deepEqual(f.calls.filter(c=>c[0]==="get_local_cover").map(c=>c[1].path),["Source/Album","Source/Album/image.cue"]);f.dispose();
+  assert.equal((await ready(f)).thumb,"embedded-cover");assert.deepEqual(coverPaths(f.calls),["Source/Album","Source/Album/image.cue"]);f.dispose();
   const cached=mount({cover:async()=>null,cached:async request=>{assert.equal(request.album_id,"first");return "previous-enrichment";}});
   assert.equal((await ready(cached)).thumb,"previous-enrichment");assert.equal(cached.calls.filter(c=>c[0]==="get_online_album_cover").length,1);cached.dispose();
 });

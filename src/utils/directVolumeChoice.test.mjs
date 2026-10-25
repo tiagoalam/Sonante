@@ -1,3 +1,5 @@
+import { createLocalCoverBatch } from "./localCoverBatch.ts";
+import { createLocalSourceReadQueue } from "./localSourceReadQueue.ts";
 import test,{afterEach}from'node:test';import assert from'node:assert/strict';import{readFileSync}from'node:fs';import ts from'typescript';import i18n from'i18next';
 import{directVolumeContext,hasDirectVolumeChoice,confirmDirectVolumeConfig}from'./directVolumeChoice.ts';import{ensureDirectOutputChoice}from'../services/config.ts';import * as intents from'./playbackIntent.ts';
 const base=()=>({first_run:false,audio_output_type:'alsa',alsa_device:'hw:CARD=Fixture,DEV=0',dop_enabled:false,local_folders:[],direct_volume_choice:null,direct_muted:false});
@@ -13,7 +15,7 @@ function fixture({accept=true,playing=false}={}){
  };
  globalThis.window={confirm:message=>{prompts++;assert.equal(message,i18n.t('player.directVolumeChoiceConfirm'));return accept;},__TAURI_INTERNALS__:{invoke:native}};
  const js=ts.transpileModule(readFileSync(new URL('../services/audio.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};
- const deps={'./config':{ensureDirectOutputChoice},'../utils/playbackIntent':intents,'@tauri-apps/api/core':{invoke:native},'../utils/frontendDiagnostics':{diagnosticInvoke:(fn,c,a)=>fn(c,a)}};
+ const deps={'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue},'./config':{ensureDirectOutputChoice},'../utils/playbackIntent':intents,'@tauri-apps/api/core':{invoke:native},'../utils/frontendDiagnostics':{diagnosticInvoke:(fn,c,a)=>fn(c,a)}};
  new Function('require','exports',js)(id=>{assert.ok(id in deps,id);return deps[id]},exports);
  return{service:exports.audioService,calls,get cfg(){return cfg},set cfg(v){cfg=v},get prompts(){return prompts},native};
 }

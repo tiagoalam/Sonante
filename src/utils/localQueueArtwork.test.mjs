@@ -1,3 +1,5 @@
+import { createLocalCoverBatch } from "./localCoverBatch.ts";
+import { createLocalSourceReadQueue } from "./localSourceReadQueue.ts";
 import * as signalPathHelpers from "./signalPath.ts";
 import * as playbackIntents from "./playbackIntent.ts";
 import test from "node:test";
@@ -14,8 +16,9 @@ import { LocalAlbumCatalog } from "./localAlbumCatalog.ts";
 import { VisibleQueueArtwork } from "./visibleQueueArtwork.ts";
 import { localAlbumForMedia } from "./playerNavigation.ts";
 import { logError } from "./frontendDiagnostics.ts";
+const coverPaths = calls => calls.filter(c=>c[0]==="get_local_covers").flatMap(c=>c[1].paths);
 const read = file => readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
-function compile(file,deps){const js=ts.transpileModule(read(file),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};new Function("require","exports",js)(id=>{if(id === "../utils/playbackIntent") return playbackIntents; if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; if(id==="../utils/signalPath")return signalPathHelpers; assert.ok(id in deps,id);return deps[id];},exports);return exports;}
+function compile(file,deps){const js=ts.transpileModule(read(file),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};new Function("require","exports",js)(id=>{if(id === "../utils/playbackIntent") return playbackIntents; if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; if(id==="../utils/signalPath")return signalPathHelpers; if(id==="../utils/localCoverBatch")return {createLocalCoverBatch}; if(id==="../utils/localSourceReadQueue")return {createLocalSourceReadQueue}; assert.ok(id in deps,id);return deps[id];},exports);return exports;}
 const flush=async()=>{for(let i=0;i<60;i++)await Promise.resolve();};
 const defer=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};};
 const album=(id,folder)=>({id,title:"Same title",artist:"Same artist",folder_path:folder,discs:[],source_id:folder.split("/")[0],track_count:2});
@@ -43,7 +46,7 @@ function mount({items=[track("Source/Album/1.flac"),track("Source/Album/2.flac")
   thumbs(){return nodes(f.tree,n=>n.type===TrackArtwork).map(n=>n.props.track.thumb??null);},
   dispose(){slots.forEach(s=>s?.cleanup?.());disposed=true;},late:()=>late,
  };
- const {audioService}=compile("services/audio.ts",{"@tauri-apps/api/core":{invoke:async(cmd,args)=>{calls.push([cmd,args]);if(cmd==="get_queue")return f.items.map(t=>({...t}));if(cmd==="get_local_albums")return f.inventory;if(cmd==="get_local_cover")return cover(args.path);if(cmd==="get_online_album_cover"){assert.equal(args.cacheOnly,true);return cache(args.request);}assert.fail(`unexpected transport/HTTP ${cmd}`);}},"../utils/frontendDiagnostics":{diagnosticInvoke:(invoke,cmd,args)=>invoke(cmd,args)}});
+ const {audioService}=compile("services/audio.ts",{"@tauri-apps/api/core":{invoke:async(cmd,args)=>{calls.push([cmd,args]);if(cmd==="get_queue")return f.items.map(t=>({...t}));if(cmd==="get_local_albums")return f.inventory;if(cmd==="get_local_covers")return Promise.all(args.paths.map(async path=>{try{return {Ok:await cover(path)}}catch(error){return {Err:String(error)}}}));if(cmd==="get_online_album_cover"){assert.equal(args.cacheOnly,true);return cache(args.request);}assert.fail(`unexpected transport/HTTP ${cmd}`);}},"../utils/frontendDiagnostics":{diagnosticInvoke:(invoke,cmd,args)=>invoke(cmd,args)}});
  const catalog=new LocalAlbumCatalog(audioService.getLocalAlbums),resolver=new LocalArtworkResolver(audioService.getLocalCover,async()=>assert.fail("no HTTP"));
  const hook=compile("utils/useLocalQueueArtwork.ts",{react,"./localAlbumCatalogSession":{localAlbumCatalog:catalog},"./localArtworkSession":{localArtworkResolver:resolver},"./localArtwork":{artworkReadBlocked},"./playerNavigation":{localAlbumForMedia},"./nowPlayingPresentation":presentation,"./visibleQueueArtwork":{VisibleQueueArtwork},"../services/audio":{audioService},"./frontendDiagnostics":{logError}}).useLocalQueueArtwork;
  class Reader extends presentation.QueuePreviewReader{constructor(load,publish){super(load,publish,100000);reader=this;}}
@@ -54,7 +57,7 @@ function mount({items=[track("Source/Album/1.flac"),track("Source/Album/2.flac")
 test("actual virtual queue restores noncurrent rows, shares one album read and preserves logical items/current artwork",async()=>{
  const f=mount(),before=structuredClone(f.items);await f.ready();assert.deepEqual(f.thumbs(),["current-cover","cover:Source/Album","cover:Other/Album"]);assert.deepEqual(f.items,before);
  const imageReads=f.calls.filter(c=>c[0]!=="get_queue").length;await f.replace(f.items.map(item=>({...item})));assert.equal(f.calls.filter(c=>c[0]!=="get_queue").length,imageReads,"identical queue polling does not retry images");
- assert.deepEqual(f.calls.filter(c=>c[0]==="get_local_cover").map(c=>c[1].path),["Source/Album","Other/Album"]);
+ assert.deepEqual(coverPaths(f.calls),["Source/Album","Other/Album"]);
  const artwork=nodes(f.tree,n=>n.type===TrackArtwork)[1];assert.match(renderToStaticMarkup(React.createElement(TrackArtwork,artwork.props)),/src="cover:Source\/Album"/);
  const count=f.calls.length;for(let i=0;i<20;i++){f.props.status={...f.props.status,elapsed:i};await f.ready();}assert.equal(f.calls.length,count);f.dispose();
 });
@@ -62,19 +65,19 @@ test("actual virtual queue restores noncurrent rows, shares one album read and p
 test("visible plus overscan only, bounded concurrency through local/cache fallback, scrolling and polling reuse",async()=>{
  const inventory=Array.from({length:50},(_,i)=>album(`a${i}`,`S/Album${i}`));const pending=[];let running=0,max=0;
  const f=mount({items:inventory.map(x=>track(`${x.folder_path}/1.flac`)),inventory,cover:async()=>{running++;max=Math.max(max,running);const d=defer();pending.push(d);await d.promise;running--;return null;},cache:async request=>`cached:${request.album_id}`});
- await f.ready();assert.equal(pending.length,2);assert.equal(f.calls.filter(c=>c[0]==="get_local_cover").length,2);
+ await f.ready();assert.equal(pending.length,2);assert.equal(coverPaths(f.calls).length,2);
  for(let i=0;i<8;i++){pending.splice(0).forEach(d=>d.resolve());await f.ready();}
- assert.equal(max,2);assert.equal(f.calls.filter(c=>c[0]==="get_local_cover").length,15,"16 visible/overscan rows: current cover reused, 15 lookups, not 50");
+ assert.equal(max,2);assert.equal(coverPaths(f.calls).length,15,"16 visible/overscan rows: current cover reused, 15 lookups, not 50");
  f.scroll(32*64);await f.ready();assert.equal(pending.length,2);pending.splice(0).forEach(d=>d.resolve());await f.ready();
- assert.ok(f.calls.filter(c=>c[0]==="get_local_cover").some(c=>c[1].path==="S/Album28"));assert.ok(!f.calls.some(c=>c[1]?.path==="S/Album49"));
+ assert.ok(coverPaths(f.calls).includes("S/Album28"));assert.ok(!coverPaths(f.calls).includes("S/Album49"));
  f.dispose();pending.splice(0).forEach(d=>d.resolve());await flush();assert.equal(f.late(),0);
 });
 
 test("exact source/disc CUE matching excludes Plex, unknown URI and ambiguity despite identical titles",async()=>{
  const cue={...a,discs:[{folder_path:"Source/Album/image.cue",number:1}]};const plex={...track("Source/Album/image.cue/track0001"),media_locator:{kind:"plex",server_id:"s",part_key:"p"},plex_image:{server_id:"s",path:"thumb"}};
  const f=mount({inventory:[cue,b],items:[track("Source/Album/image.cue/track0001"),track("Source/Album/image.cue/track0002"),track("Other/Album/x.flac"),plex,track("Source/Album-extra/x.flac"),track("http://server/x")],cover:async path=>path.endsWith("image.cue")?"embedded":path.startsWith("Other/")?"other-source":null});
- await f.ready();assert.deepEqual(f.thumbs(),["current-cover","embedded","other-source",null,null,null]);assert.equal(f.calls.filter(c=>c[0]==="get_local_cover").length,3);assert.deepEqual(nodes(f.tree,n=>n.type===TrackArtwork)[3].props.track.plex_image,plex.plex_image);f.dispose();
- const ambiguous=mount({inventory:[a,{...a,id:"ambiguous"}],items:[track("Source/Album/1.flac"),track("Source/Album/2.flac")]});await ambiguous.ready();assert.deepEqual(ambiguous.thumbs(),["current-cover",null]);assert.equal(ambiguous.calls.filter(c=>c[0]==="get_local_cover").length,0);ambiguous.dispose();
+ await f.ready();assert.deepEqual(f.thumbs(),["current-cover","embedded","other-source",null,null,null]);assert.equal(coverPaths(f.calls).length,3);assert.deepEqual(nodes(f.tree,n=>n.type===TrackArtwork)[3].props.track.plex_image,plex.plex_image);f.dispose();
+ const ambiguous=mount({inventory:[a,{...a,id:"ambiguous"}],items:[track("Source/Album/1.flac"),track("Source/Album/2.flac")]});await ambiguous.ready();assert.deepEqual(ambiguous.thumbs(),["current-cover",null]);assert.equal(coverPaths(ambiguous.calls).length,0);ambiguous.dispose();
 });
 
 test("queue replace/clear/close, catalog/source changes and unmount reject late results, including cache-only reads",async()=>{
@@ -117,8 +120,8 @@ test("actual drawer/embedded/detached hosts forward artwork gates and detached i
 test("cache-only fallback occupies the same two slots; cancellation prevents queued offscreen work", async()=>{
  const pending=[];const inventory=Array.from({length:20},(_,i)=>album(`a${i}`,`S/${i}`));
  const f=mount({items:inventory.map(x=>track(`${x.folder_path}/x.flac`)),inventory,cover:async()=>null,cache:async()=>{const d=defer();pending.push(d);return d.promise;}});
- await f.ready();assert.equal(pending.length,2);assert.equal(f.calls.filter(c=>c[0]==="get_local_cover").length,2);
- f.props.open=false;await f.ready();pending.forEach(d=>d.resolve("old-cache"));await flush();await f.ready();assert.equal(f.calls.filter(c=>c[0]==="get_local_cover").length,2);assert.ok(!f.thumbs().includes("old-cache"));f.dispose();
+ await f.ready();assert.equal(pending.length,2);assert.equal(coverPaths(f.calls).length,2);
+ f.props.open=false;await f.ready();pending.forEach(d=>d.resolve("old-cache"));await flush();await f.ready();assert.equal(coverPaths(f.calls).length,2);assert.ok(!f.thumbs().includes("old-cache"));f.dispose();
 });
 
 test("reused index and a fresh catalog object reject old responses while allowing new artwork",async()=>{
