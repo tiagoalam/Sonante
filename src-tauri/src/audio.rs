@@ -2137,9 +2137,12 @@ impl AudioEngine {
                 return Err(());
             }
             match status {
-                Ok(Some(active))
-                    if expected_job_id.is_none() || expected_job_id == Some(active) => {}
-                Ok(_) => return Ok(MpdRefreshCompletion::Completed),
+                // A different active job may PRECEDE our queued request (MPD
+                // automatically scans a missing first database). Its id is not
+                // proof that our job completed. Wait until the update queue is
+                // idle; this also avoids assuming job ids never wrap.
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(MpdRefreshCompletion::Completed),
                 Err(MpdStatusQueryError::Unavailable(message)) => {
                     return Ok(MpdRefreshCompletion::Unavailable(message))
                 }
@@ -11948,6 +11951,23 @@ mod tests {
         assert_eq!(json["tag_presence"], serde_json::json!({"evaluated_track_count":1,"missing":{"album":1,"artist":1,"album_artist":1,"date":1,"genre":1}}));
         let roundtrip: LocalAlbum = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip.tag_presence, albums[0].tag_presence);
+    }
+
+    #[test]
+    fn managed_wait_does_not_complete_behind_an_earlier_active_job() {
+        for jobs in [vec![Some(1), Some(1), Some(2), None],
+            vec![Some(32768), Some(1), None], vec![Some(3), None]] {
+            let expected_reads = jobs.len();
+            let mut jobs = jobs.into_iter();
+            let mut sleeps = 0;
+            let result = AudioEngine::wait_for_managed_mpd_update_with(
+                Some(2), Duration::from_millis(10), || false,
+                || Ok(jobs.next().expect("stop reading after idle")),
+                |_| sleeps += 1,
+            );
+            assert_eq!(result, Ok(MpdRefreshCompletion::Completed));
+            assert_eq!(sleeps, expected_reads - 1);
+        }
     }
 
     #[test]

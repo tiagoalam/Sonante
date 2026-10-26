@@ -174,10 +174,12 @@ pub(crate) fn no_local_folders_publishes_an_empty_managed_generation() {
     next.local_folders.clear();
     let owner = Lease::acquire(&f.profile).unwrap();
     let mut tx = InitialPublication::prepare(&owner, &previous, &next, "first-run-plex-only", &|| false).unwrap();
-    tx.publish(&|| false).unwrap(); tx.validate_before_commit().unwrap();
+    tx.publish(&|| false).unwrap();
+    assert_eq!(tx.validate_before_commit().unwrap_err(), "FIRST_RUN_DATABASE_UNCONFIRMED");
+    f.db(); tx.validate_before_commit().unwrap();
     let reader = mirror::ReadonlyMirrorSnapshot::open(&f.profile.join("library")).unwrap();
     assert_eq!(reader.manifest.schema_version, 2); assert!(reader.manifest.sources.is_empty());
-    f.db(); f.persist(&next); tx.finish_committed().unwrap(); assert!(!f.marker().exists());
+    f.persist(&next); tx.finish_committed().unwrap(); assert!(!f.marker().exists());
 }
 
 #[cfg_attr(test, test)]
@@ -193,3 +195,118 @@ pub(crate) fn config_replaced_during_indexing_refuses_commit_and_rollback() {
     assert_eq!(AppConfig::load_from_path(&f.profile.join("config.json")).unwrap(), unexpected);
     assert!(f.marker().exists()); f.assert_managed();
 }
+
+/// Opt-in real engine regression; never opens an audio device or sends play.
+/// Supply a private fixture parent, a short private socket directory and the
+/// exact runtime under test. Retain profiles/logs for inspection after failures.
+fn real_mpd_database_case(deny_database_write: bool) {
+    use std::{io::{BufRead, BufReader, Write}, os::unix::net::UnixStream,
+        process::{Child, Command, Stdio}, time::{Duration, Instant}};
+    struct OwnedMpd(Child);
+    impl Drop for OwnedMpd {
+        fn drop(&mut self) {
+            if self.0.try_wait().unwrap().is_none() {
+                self.0.kill().unwrap(); self.0.wait().unwrap();
+            }
+        }
+    }
+    struct RestoreMode(PathBuf);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) { fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700)).unwrap(); }
+    }
+    fn command(socket: &std::path::Path, command: &str) -> Vec<String> {
+        assert!(matches!(command, "rescan" | "status" | "stats" | "kill"));
+        let mut connection = UnixStream::connect(socket).unwrap();
+        connection.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        connection.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut reader = BufReader::new(connection.try_clone().unwrap());
+        let mut line = String::new(); reader.read_line(&mut line).unwrap();
+        assert!(line.starts_with("OK MPD "));
+        writeln!(connection, "{command}").unwrap();
+        let mut lines = Vec::new();
+        loop {
+            line.clear(); let n = reader.read_line(&mut line).unwrap();
+            if n == 0 { assert_eq!(command, "kill"); break; }
+            assert!(!line.starts_with("ACK"), "{line}");
+            if line == "OK\n" { break; }
+            lines.push(line.trim_end().into());
+        }
+        lines
+    }
+    let runtime = PathBuf::from(std::env::var_os("SONANTE_FIRST_RUN_MPD_TEST_RUNTIME").expect("explicit runtime required"));
+    let sockets = PathBuf::from(std::env::var_os("SONANTE_FIRST_RUN_MPD_SOCKET_ROOT").expect("explicit socket root required"));
+    assert!(runtime.is_absolute() && runtime.is_file());
+    let socket_metadata = fs::symlink_metadata(&sockets).unwrap();
+    assert!(socket_metadata.is_dir() && socket_metadata.uid() == unsafe { libc::getuid() }
+        && socket_metadata.mode() & 0o777 == 0o700);
+    assert!(std::env::var_os("SONANTE_FIRST_RUN_TEST_ROOT").is_some());
+    {
+        let f = Fixture::new(); let (previous, mut next) = f.configs(false);
+        if deny_database_write {
+            next.local_folders = vec![std::env::var("SONANTE_FIRST_RUN_MPD_OVERLAP_MEDIA").expect("explicit larger synthetic fixture required")];
+        }
+        let mut wav = b"RIFF".to_vec(); wav.extend(1636u32.to_le_bytes());
+        wav.extend(b"WAVEfmt "); wav.extend(16u32.to_le_bytes()); wav.extend(1u16.to_le_bytes());
+        wav.extend(1u16.to_le_bytes()); wav.extend(8000u32.to_le_bytes()); wav.extend(16000u32.to_le_bytes());
+        wav.extend(2u16.to_le_bytes()); wav.extend(16u16.to_le_bytes()); wav.extend(b"data");
+        wav.extend(1600u32.to_le_bytes()); wav.resize(1644, 0);
+        fs::write(f.media.join("track.wav"), wav).unwrap();
+        let owner = Lease::acquire(&f.profile).unwrap();
+        let mut tx = InitialPublication::prepare(&owner, &previous, &next,
+            "first-run-real-regression", &|| false).unwrap();
+        tx.publish(&|| false).unwrap();
+        let socket = sockets.join(format!("regression-{}-{}.socket", std::process::id(), u8::from(deny_database_write)));
+        assert!(!socket.exists() && socket.as_os_str().len() < 104);
+        let escaped = |path: &std::path::Path| path.to_str().unwrap().replace('\\', "\\\\").replace('"', "\\\"");
+        let config = format!("music_directory \"{}\"\ndatabase {{\n plugin \"simple\"\n path \"{}\"\n hide_playlist_targets \"no\"\n}}\nbind_to_address \"{}\"\nauto_update \"no\"\nfollow_inside_symlinks \"yes\"\nfollow_outside_symlinks \"yes\"\nzeroconf_enabled \"no\"\naudio_output {{\n type \"null\"\n name \"metadata only\"\n mixer_type \"none\"\n}}\n", escaped(&f.profile.join("library")), escaped(&f.profile.join("mpd-v2.db")), escaped(&socket));
+        let conf = f.root.join("mpd.conf"); fs::write(&conf, config).unwrap();
+        let log_path = f.root.join("mpd.stderr"); let log = fs::File::create(&log_path).unwrap();
+        let restore = RestoreMode(f.profile.clone());
+        let mut mpd = OwnedMpd(Command::new(&runtime).args(["--no-daemon", "--stderr"]).arg(&conf)
+            .env_clear().env("PATH", "/usr/bin:/bin").env("HOME", &f.root).env("LANG", "C.UTF-8")
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log)).spawn().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while UnixStream::connect(&socket).is_err() {
+            assert!(mpd.0.try_wait().unwrap().is_none(), "MPD startup failed");
+            assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10));
+        }
+        if deny_database_write {
+            assert!(!f.profile.join("mpd-v2.db").exists(), "startup must still be indexing the larger fixture");
+            fs::set_permissions(&f.profile, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        assert!(command(&socket, "rescan").iter().any(|s| s.starts_with("updating_db:")));
+        while command(&socket, "status").iter().any(|s| s.starts_with("updating_db:")) {
+            assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10));
+        }
+        let songs = if deny_database_write { 512 } else { 1 };
+        assert!(command(&socket, "stats").iter().any(|s| s == &format!("songs: {songs}")));
+        drop(restore);
+        if deny_database_write {
+            // Real MPD accepts/completes the scan and exposes its in-memory
+            // catalogue, despite its real filesystem save failing.
+            assert!(!f.profile.join("mpd-v2.db").exists());
+            assert!(fs::read_to_string(&log_path).unwrap().contains("Failed to save database"));
+            assert_eq!(tx.validate_before_commit().unwrap_err(), "FIRST_RUN_DATABASE_UNCONFIRMED");
+            assert!(!f.profile.join("config.json").exists());
+            tx.rollback(|| { command(&socket, "kill"); assert!(mpd.0.wait().unwrap().success()); Ok(()) }).unwrap();
+            assert!(!f.marker().exists() && !f.profile.join("library").exists());
+        } else {
+            tx.validate_before_commit().unwrap(); f.persist(&next); tx.finish_committed().unwrap();
+            command(&socket, "kill"); assert!(mpd.0.wait().unwrap().success());
+            assert!(f.profile.join("mpd-v2.db").is_file() && !f.marker().exists());
+        }
+        fs::write(f.root.join("REAL-MPD-RESULT.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "database_write_deliberately_denied": deny_database_write,
+            "real_catalogue_songs": songs, "no_playback_or_GUI": true, "own_MPD_exit": 0,
+            "config_committed": !deny_database_write, "marker_present": f.marker().exists(),
+        })).unwrap()).unwrap();
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, ignore = "requires explicitly admitted real MPD and isolated fixture/socket roots")]
+pub(crate) fn real_mpd_saved_database_can_commit_initial_config() { real_mpd_database_case(false); }
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, ignore = "requires explicitly admitted real MPD and isolated fixture/socket roots")]
+pub(crate) fn real_mpd_failed_database_save_prevents_initial_config_commit() { real_mpd_database_case(true); }

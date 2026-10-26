@@ -57,6 +57,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   const pickingFolderRef = useRef(false);
   const finishingRef = useRef(false);
   const [completionError, setCompletionError] = useState<WizardSaveErrorKey | "wizard.plexNotReady" | "wizard.folderError" | null>(null);
+  const preparationBlockedRef = useRef(false);
   const [availability, setAvailability] = useState<AvailabilityQueryState>({ checking: false, results: [], failed: false });
   const availabilityQueryRef = useRef<ReturnType<typeof createDeviceAvailabilityQuery> | null>(null);
   const [showAvailabilityHelp, setShowAvailabilityHelp] = useState(false);
@@ -220,6 +221,8 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
     switch (error) {
       case "settings.localFolderOverlap": return t("settings.localFolderOverlap");
       case "wizard.configPersistenceUncertain": return t("wizard.configPersistenceUncertain");
+      case "wizard.libraryPreparationError": return t("wizard.libraryPreparationError");
+      case "wizard.preparationIncomplete": return t("wizard.preparationIncomplete");
       case "wizard.deviceBusy": return t("wizard.deviceBusy");
       case "wizard.deviceUnavailable": return t("wizard.deviceUnavailable");
       case "wizard.saveError": return t("wizard.saveError");
@@ -233,7 +236,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   };
 
   const handleComplete = async () => {
-    if (finishingRef.current || availability.checking) return;
+    if (finishingRef.current || preparationBlockedRef.current || availability.checking) return;
     if (plexRequired && !plexReady) {
       setCompletionError("wizard.plexNotReady");
       return;
@@ -252,7 +255,9 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
       if (response.status !== "completed") throw new Error(t("settings.librarySaveUncertain"));
       onFinish(finalConfig);
     } catch (err) {
-      setCompletionError(wizardSaveErrorKey(err));
+      const error = wizardSaveErrorKey(err);
+      if (error === "wizard.preparationIncomplete") preparationBlockedRef.current = true;
+      setCompletionError(error);
     } finally {
       finishingRef.current = false;
       setIsFinishing(false);
@@ -714,7 +719,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
             <button
               type="button"
               onClick={prevStep}
-              disabled={isFinishing}
+              disabled={isFinishing || completionError === "wizard.preparationIncomplete"}
               className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-[var(--theme-surface-raised,#222222)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] text-xs font-bold text-[color:var(--theme-fg-secondary,#CCCCCC)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer"
             >
               <ArrowLeft size={15} />
@@ -738,7 +743,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
             <button
               type="button"
               onClick={handleComplete}
-              disabled={isFinishing || availability.checking || (plexRequired && !plexReady)}
+              disabled={isFinishing || completionError === "wizard.preparationIncomplete" || availability.checking || (plexRequired && !plexReady)}
               className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-md transition-transform active:scale-95 cursor-pointer disabled:opacity-50"
             >
               <Check size={16} />

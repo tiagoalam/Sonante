@@ -14,6 +14,7 @@ use std::{
 
 const LIMIT: u64 = 16 * 1024 * 1024;
 const ERROR: &str = "FIRST_RUN_MANAGED_SAVE_UNCONFIRMED";
+const DATABASE_ERROR: &str = "FIRST_RUN_DATABASE_UNCONFIRMED";
 
 /// A live-only owner. Drop intentionally does not undo anything: a panic/crash
 /// leaves the durable stop marker for manual review, like a managed Save.
@@ -228,7 +229,33 @@ impl<'a> InitialPublication<'a> {
 
     pub(crate) fn validate_before_commit(&self) -> Result<(), String> {
         self.validate_previous_config()?;
-        self.validate_published()
+        self.validate_published()?;
+        // MPD can finish an update even when saving its database failed. Do not
+        // commit first_run=false on the strength of the in-memory catalogue.
+        self.sync_database().map(|_| ())
+    }
+
+    fn sync_database(&self) -> Result<Identity, String> {
+        let database = self.profile.file_identity("mpd-v2.db")?.ok_or(DATABASE_ERROR)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(self.profile.entry("mpd-v2.db")?)
+            .map_err(|_| DATABASE_ERROR)?;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata().map_err(|_| DATABASE_ERROR)?;
+        if metadata.mode() & 0o022 != 0
+            || metadata.dev() != database.dev
+            || metadata.ino() != database.ino
+        {
+            return Err(DATABASE_ERROR.into());
+        }
+        file.sync_all().map_err(|_| DATABASE_ERROR)?;
+        self.profile.sync()?;
+        if self.profile.file_identity("mpd-v2.db")?.as_ref() != Some(&database) {
+            return Err(DATABASE_ERROR.into());
+        }
+        Ok(database)
     }
 
     /// Stop must be confirmed before any rename/cleanup. No old DB was admitted:
@@ -290,21 +317,7 @@ impl<'a> InitialPublication<'a> {
         if AppConfig::load_from_path(&self.profile.path.join("config.json"))? != self.next {
             return Err(ERROR.into());
         }
-        let database = self.profile.file_identity("mpd-v2.db")?.ok_or(ERROR)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.profile.entry("mpd-v2.db")?)
-            .map_err(|_| ERROR)?;
-        use std::os::unix::fs::MetadataExt;
-        let metadata = file.metadata().map_err(|_| ERROR)?;
-        if metadata.mode() & 0o022 != 0
-            || metadata.dev() != database.dev
-            || metadata.ino() != database.ino
-        {
-            return Err(ERROR.into());
-        }
-        file.sync_all().map_err(|_| ERROR)?;
+        let database = self.sync_database()?;
         self.publication
             .as_ref()
             .ok_or(ERROR)?

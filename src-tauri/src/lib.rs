@@ -1909,7 +1909,11 @@ fn run_initial_managed_save(
         if let Err(error) = initial.finish_committed() {
             uncertain.set(true);
             app.state::<Arc<direct_playback::Gate>>().forget_choice();
-            return Err(error_with_rollback(error, stop_supervisor(&supervisor.0)));
+            let stopped = stop_supervisor(&supervisor.0);
+            return Err(match stopped {
+                Ok(()) => format!("FIRST_RUN_PREPARATION_INCOMPLETE: {error}"),
+                Err(stop) => format!("FIRST_RUN_PREPARATION_INCOMPLETE: {error}; MPD_STOP_UNCONFIRMED: {stop}"),
+            });
         }
         app.state::<Arc<direct_playback::Gate>>().commit_choice(next);
         plex.update_config(next);

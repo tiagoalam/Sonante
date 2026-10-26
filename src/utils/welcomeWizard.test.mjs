@@ -257,7 +257,7 @@ test("late server discovery after disconnect cannot reconnect or replace a new a
 });
 
 test("failed/busy/uncertain/accepted Save never finishes early or discards the review draft; retries remain possible", async () => {
-  for (const error of ["ALSA_PREFLIGHT_OUTPUT_BUSY", "ALSA_PREFLIGHT_OUTPUT_UNAVAILABLE", "CONFIG_PERSISTENCE_UNCERTAIN: private", "RAW SECRET", "LOCAL_SOURCE_NEW_OVERLAP"]) {
+  for (const error of ["ALSA_PREFLIGHT_OUTPUT_BUSY", "ALSA_PREFLIGHT_OUTPUT_UNAVAILABLE", "CONFIG_PERSISTENCE_UNCERTAIN: private", "RAW SECRET", "LOCAL_SOURCE_NEW_OVERLAP", "FIRST_RUN_DATABASE_UNCONFIRMED"]) {
     let attempts = 0;
     const f = audioWizard({ save: async () => { if (++attempts === 1) throw error; return { status: "completed" }; } });
     selectSources(f, true, false); await button(f, "settings.addFolder").props.onClick(); f.render(); next(f);
@@ -269,6 +269,20 @@ test("failed/busy/uncertain/accepted Save never finishes early or discards the r
   }
   const f = audioWizard({ save: async () => ({ status: "accepted", operation: { id: "op", phase: "preparing" } }) });
   selectSources(f, true, false); next(f); await button(f, "wizard.start").props.onClick(); f.render(); assert.equal(f.calls.finished.length, 0);
+});
+
+test("postcommit preparation failure preserves the draft and blocks another completion", async () => {
+  const f = audioWizard({ save: async () => { throw "FIRST_RUN_PREPARATION_INCOMPLETE: private"; } });
+  selectSources(f, true, false); await button(f, "settings.addFolder").props.onClick(); f.render(); next(f);
+  const complete = button(f, "wizard.start").props.onClick;
+  await complete(); f.render();
+  assert.equal(f.calls.finished.length, 0); assert.equal(f.calls.saves.length, 1);
+  assert.match(text(f.tree), /wizard.preparationIncomplete/); assert.doesNotMatch(text(f.tree), /private/);
+  assert.equal(button(f, "wizard.start").props.disabled, true);
+  assert.equal(button(f, "wizard.back").props.disabled, true);
+  await complete(); await button(f, "wizard.start").props.onClick();
+  assert.equal(f.calls.saves.length, 1); assert.equal(f.calls.finished.length, 0);
+  assert.deepEqual(f.calls.saves[0].local_folders, ["/fixture/local"]); f.dispose();
 });
 
 test("pending Save and PIN reads are deduplicated; audio queries cannot run during conclusion", async () => {
@@ -290,9 +304,11 @@ test("connection readiness and completion diagnostics are conservative, translat
   }
   assert.equal(wizardSaveErrorKey(new Error("ALSA_PREFLIGHT_OUTPUT_BUSY")), "wizard.deviceBusy");
   assert.equal(wizardSaveErrorKey(new Error("CONFIG_PERSISTENCE_UNCERTAIN: SECRET")), "wizard.configPersistenceUncertain");
+  assert.equal(wizardSaveErrorKey("FIRST_RUN_DATABASE_UNCONFIRMED. Estado anterior restaurado."), "wizard.libraryPreparationError");
+  assert.equal(wizardSaveErrorKey("FIRST_RUN_PREPARATION_INCOMPLETE: SECRET"), "wizard.preparationIncomplete");
   for (const language of ["en", "pt-BR"]) {
     const locale = JSON.parse(readFileSync(new URL(`../locales/${language}.json`, import.meta.url), "utf8"));
-    for (const key of ["deviceBusy", "deviceUnavailable", "folderError", "noPlexServers", "plexDiscoveryError", "plexNotReady", "unnamedServer"]) assert.ok(locale.wizard[key]);
+    for (const key of ["libraryPreparationError", "preparationIncomplete", "deviceBusy", "deviceUnavailable", "folderError", "noPlexServers", "plexDiscoveryError", "plexNotReady", "unnamedServer"]) assert.ok(locale.wizard[key]);
     assert.match(locale.wizard.step, /{{step}}.*{{total}}/);
   }
 });
