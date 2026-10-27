@@ -415,3 +415,14 @@ test("returning to appearance preserves audio/folder drafts and active Plex PIN 
  back(f);back(f);back(f);back(f);appearanceSelect(f).props.onChange({target:{value:"light"}});f.render();assert.equal(f.calls.pins,1);assert.equal(f.timers.size,1);
  next(f);assert.equal(selector(f,"-device").props.value,devices[0].id);next(f);next(f);assert.match(text(f.tree),/fixture\/local/);next(f);assert.match(text(f.tree),/PIN7/);assert.equal(f.calls.saves.length,0);assert.equal(f.calls.finished.length,0);button(f,"settings.cancel").props.onClick();f.render();assert.equal(f.timers.size,0);
 });
+
+test("confirmed first preferences enter the app while catalogue indexing remains pending", async () => {
+  const indexing = deferred(); let indexed = false;
+  void indexing.promise.then(() => { indexed = true; });
+  const f = audioWizard({save: async () => ({status: "completed"})});
+  selectSources(f, true, false); next(f);
+  await button(f, "wizard.start").props.onClick();
+  assert.equal(indexed, false); assert.equal(f.calls.finished.length, 1);
+  assert.equal(f.calls.finished[0].first_run, false);
+  indexing.resolve(); await flush(); f.dispose();
+});

@@ -23,8 +23,8 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LocalImportPreviewSection } from "./LocalImportPreviewSection";
-import { LocalSourceAvailabilityPanel } from "./LocalSourceAvailabilityPanel";
-import { filterImportPreview } from "../utils/localImportPreview";
+import { filterImportPreview, importPreviewForCatalog } from "../utils/localImportPreview";
+import type { ImportArtworkCache } from "../utils/importArtworkCache";
 import type { PreviewAlbum } from "../types/localImportPreview";
 import { LocalItem, LocalAlbum } from "../types/local";
 import { FavoriteAlbum } from "../types/favorite";
@@ -218,6 +218,8 @@ export interface LocalBrowserViewProps {
   playerTarget?: Extract<PlayerNavigationTarget, { kind: "local" }>;
   onPlayerNavigationBack?: () => void;
   importPreview?: readonly PreviewAlbum[];
+  importPreviewRevision?: number | null;
+  importArtworkCache?: ImportArtworkCache;
   initialArtist?: string | null;
   onClearInitialArtist?: () => void;
   catalogRefreshRevision: number;
@@ -236,6 +238,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   playerTarget,
   onPlayerNavigationBack,
   importPreview = [],
+  importPreviewRevision = null,
+  importArtworkCache,
   initialArtist,
   onClearInitialArtist,
   catalogRefreshRevision,
@@ -280,9 +284,6 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     playerTarget, () => localAlbumCatalog.getSnapshot().albums, audioService.getLocalAlbumTracks,
   ), setTrackState, () => localAlbumCatalog.waitForMpd()), []);
   const catalogConfirmed = !detailUnavailable && catalog.loaded && !catalog.loading && !catalog.error && !catalog.mpdBusy && !catalog.saveBlocked && !isLibraryUpdating;
-  const sourceAvailabilityConfig = JSON.stringify(configuredLocalFolders);
-  const sourceAvailabilityContext = useMemo(() => ({ albums, config: sourceAvailabilityConfig, refresh: catalogRefreshRevision }),
-    [albums, sourceAvailabilityConfig, catalogRefreshRevision]);
   const artworkBlocked = metadataMode || artworkReadBlocked(isLibraryUpdating, catalog);
   const tracksReady = catalogConfirmed && trackState.catalogVersion === albums && trackState.phase === "ready" && trackState.albumId === selectedAlbum?.id;
   const { tracks: albumTracks, sections: albumSections } = useMemo(
@@ -587,9 +588,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     { value: "artist-desc", label: t("localBrowser.sortArtistDesc") },
   ], [t]);
   const activeSourceId = validLocalLibrarySourceSelection(selectedSourceId, sourceOptions);
+  // A successful catalog publication advances data and revision together. This
+  // switches the render in one snapshot, before async partial/cache cleanup.
+  const confirmedPreviewRevision = localAlbumCatalog.getConfirmedRevision();
   const visibleImportPreview = useMemo(
-    () => filterImportPreview(importPreview, activeSourceId, albumSearch),
-    [importPreview, activeSourceId, albumSearch],
+    () => filterImportPreview(importPreviewForCatalog(importPreview, importPreviewRevision, confirmedPreviewRevision), activeSourceId, albumSearch),
+    [importPreview, activeSourceId, albumSearch, importPreviewRevision, confirmedPreviewRevision],
   );
   const scopedAlbums = useMemo(
     () => filterLocalAlbumsByScope(albums, activeSourceId, ""),
@@ -964,8 +968,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         </div>
       )}
       <div ref={setScrollContainer} className="flex-1 overflow-y-auto p-8">
-        {!metadataMode && !selectedAlbum && !selectedArtist && <LocalSourceAvailabilityPanel context={sourceAvailabilityContext}
-          blocked={!catalogConfirmed || Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack || playlistItems)} />}
+
         {selectedAlbum ? (
           <div className="space-y-8 animate-in fade-in duration-100">
             <div className="flex items-end space-x-6">
@@ -1231,7 +1234,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 )}
               />
             )}
-            <LocalImportPreviewSection albums={visibleImportPreview} scrollContainer={scrollContainer} t={t} />
+            <LocalImportPreviewSection albums={visibleImportPreview} scrollContainer={scrollContainer} t={t} artworkCache={importArtworkCache} />
           </>
         ) : viewMode === "artists" ? (
           emptyCatalogState === "indexing" ? (

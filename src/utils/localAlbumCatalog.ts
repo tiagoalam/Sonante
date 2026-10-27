@@ -59,6 +59,7 @@ export class LocalAlbumCatalog {
   private listeners = new Set<() => void>();
   private updating: boolean | null = null;
   private generation = 0;
+  private confirmedRevision = 0;
   private inFlight = false;
   private pending = false;
   private waitingForMpd = false;
@@ -69,6 +70,7 @@ export class LocalAlbumCatalog {
   }
 
   getSnapshot = (): LocalAlbumCatalogState => this.state;
+  getConfirmedRevision = (): number => this.confirmedRevision;
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -139,6 +141,7 @@ export class LocalAlbumCatalog {
       .then(() => generation === this.generation && !this.updating && !this.state.saveBlocked ? this.load() : null)
       .then((albums) => {
         if (albums === null || generation !== this.generation || this.updating) return;
+        this.confirmedRevision += 1;
         this.publish({ albums, loaded: true, error: null });
       })
       .catch((error: unknown) => {

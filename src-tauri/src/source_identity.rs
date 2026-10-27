@@ -1411,7 +1411,7 @@ mod ff04_historical_table {
 
 // FF06-I1a: isolated readonly inspection, never product admission.
 // Existing reservation/recovery functions and D03 predicates above are unchanged.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct ReadonlyStamp {
     dev: u64, ino: u64, mode: u32, uid: u32, links: u64, len: u64,
     mtime: (i64, i64), ctime: (i64, i64),

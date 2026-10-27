@@ -110,6 +110,7 @@ impl Inventory {
     pub fn source_ids(&self) -> BTreeSet<String> {
         self.roots.keys().cloned().collect()
     }
+    pub(crate) fn policy_exclusions(&self) -> &BTreeMap<String, usize> { &self.excluded }
     pub fn exclude(&mut self, id: &str, count: usize) {
         *self.excluded.entry(id.into()).or_default() += count;
     }

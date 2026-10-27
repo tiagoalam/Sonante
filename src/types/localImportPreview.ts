@@ -7,10 +7,12 @@ export interface AlbumDiscovery {
   discs: string[];
   observed_tracks: number;
   image?: string | null;
+  artwork_ref?: string | null;
 }
 
 export interface LocalImportPreview {
   operation_id: string;
+  initial?: boolean;
   provisional: true;
   playable: false;
   complete: false;
@@ -19,4 +21,4 @@ export interface LocalImportPreview {
   albums: AlbumDiscovery[];
 }
 
-export type PreviewAlbum = Pick<AlbumDiscovery, "provisional_group_key" | "source_id" | "album" | "artist" | "image">;
+export type PreviewAlbum = Pick<AlbumDiscovery, "provisional_group_key" | "source_id" | "album" | "artist" | "image" | "artwork_ref">;

@@ -310,3 +310,89 @@ pub(crate) fn real_mpd_saved_database_can_commit_initial_config() { real_mpd_dat
 #[cfg_attr(test, test)]
 #[cfg_attr(test, ignore = "requires explicitly admitted real MPD and isolated fixture/socket roots")]
 pub(crate) fn real_mpd_failed_database_save_prevents_initial_config_commit() { real_mpd_database_case(true); }
+
+#[cfg_attr(test, test)]
+pub(crate) fn preferences_enter_before_database_and_resume_the_same_generation() {
+    let f = Fixture::new(); let (previous, next) = f.configs(true);
+    let owner = Lease::acquire(&f.profile).unwrap();
+    let mut tx = InitialPublication::prepare(&owner, &previous, &next, "initial-background-resume", &|| false).unwrap();
+    tx.publish(&|| false).unwrap(); f.persist(&next);
+    tx.prepare_background().unwrap();
+    let library = Dir::open(&f.profile.join("library")).unwrap().id();
+    assert!(!f.profile.join("mpd-v2.db").exists());
+    assert_eq!(crate::first_run_managed::PendingPreparation::config(&f.profile).unwrap(), Some(next.clone()));
+    drop(tx); drop(owner); // Simulate shutdown/reopen; no old live owner survives.
+    let owner = Lease::acquire(&f.profile).unwrap();
+    let pending = crate::first_run_managed::PendingPreparation::open(&owner).unwrap();
+    let inventory = pending.snapshot().unwrap().coverage_inventory().unwrap(); inventory.verify().unwrap();
+    assert!(pending.finish(&owner).is_err()); // MPD idle without a durable DB is insufficient.
+    assert_eq!(AppConfig::load_from_path(&f.profile.join("config.json")).unwrap(), next);
+    assert!(f.marker().exists()); assert!(f.profile.join(crate::first_run_managed::PENDING).exists());
+    f.db(); pending.finish(&owner).unwrap();
+    assert_eq!(Dir::open(&f.profile.join("library")).unwrap().id(), library);
+    assert!(!f.marker().exists()); assert!(!f.profile.join(crate::first_run_managed::PENDING).exists());
+    assert!(!f.profile.join("library.next").exists()); f.assert_managed();
+}
+
+#[cfg_attr(test, test)]
+pub(crate) fn interrupted_preferences_and_changed_config_do_not_admit_resume() {
+    let f = Fixture::new(); let (previous, next) = f.configs(true);
+    let owner = Lease::acquire(&f.profile).unwrap();
+    let mut tx = InitialPublication::prepare(&owner, &previous, &next, "initial-uncommitted", &|| false).unwrap();
+    tx.publish(&|| false).unwrap();
+    assert!(tx.prepare_background().is_err());
+    assert!(!f.profile.join(crate::first_run_managed::PENDING).exists());
+    assert!(crate::first_run_managed::PendingPreparation::open(&owner).is_err());
+    f.persist(&next); tx.prepare_background().unwrap();
+    crate::first_run_managed::PendingPreparation::open(&owner).unwrap();
+    let mut changed = next.clone(); changed.online_artwork_enabled = !changed.online_artwork_enabled;
+    f.persist(&changed);
+    assert!(crate::first_run_managed::PendingPreparation::open(&owner).is_err());
+    assert!(f.marker().exists()); f.assert_managed();
+}
+
+#[cfg_attr(test, test)]
+pub(crate) fn resumed_cleanup_never_removes_foreign_contents() {
+    let f = Fixture::new(); let (previous, next) = f.configs(true);
+    fs::create_dir(f.profile.join("library")).unwrap();
+    let owner = Lease::acquire(&f.profile).unwrap();
+    let mut tx = InitialPublication::prepare(&owner, &previous, &next, "initial-cleanup", &|| false).unwrap();
+    tx.publish(&|| false).unwrap(); f.persist(&next); tx.prepare_background().unwrap(); f.db();
+    let pending = crate::first_run_managed::PendingPreparation::open(&owner).unwrap();
+    fs::write(f.profile.join("library.next/foreign"), b"preserve").unwrap();
+    assert!(pending.finish(&owner).is_err());
+    assert_eq!(fs::read(f.profile.join("library.next/foreign")).unwrap(), b"preserve");
+    assert!(f.marker().exists());
+}
+
+#[cfg_attr(test, test)]
+pub(crate) fn resumed_cleanup_can_finish_after_original_marker_was_unlinked() {
+    let f = Fixture::new(); let (previous, next) = f.configs(false);
+    let owner = Lease::acquire(&f.profile).unwrap();
+    let mut tx = InitialPublication::prepare(&owner, &previous, &next, "initial-cleanup-resume", &|| false).unwrap();
+    tx.publish(&|| false).unwrap(); f.persist(&next); tx.prepare_background().unwrap(); f.db();
+    fs::remove_file(f.marker()).unwrap(); Dir::open(&f.profile).unwrap().sync().unwrap();
+    drop(tx); drop(owner);
+    let owner = Lease::acquire(&f.profile).unwrap();
+    crate::first_run_managed::PendingPreparation::open(&owner).unwrap().finish(&owner).unwrap();
+    f.assert_managed(); assert!(!f.profile.join(crate::first_run_managed::PENDING).exists());
+}
+
+#[cfg_attr(test, test)]
+pub(crate) fn pending_generation_tampering_and_database_write_failure_keep_preferences() {
+    let f = Fixture::new(); let (previous, next) = f.configs(false);
+    let owner = Lease::acquire(&f.profile).unwrap();
+    let mut tx = InitialPublication::prepare(&owner, &previous, &next, "initial-db-failure", &||false).unwrap();
+    tx.publish(&||false).unwrap(); f.persist(&next); tx.prepare_background().unwrap();
+    let pending = crate::first_run_managed::PendingPreparation::open(&owner).unwrap();
+    fs::create_dir(f.profile.join("mpd-v2.db")).unwrap();
+    assert!(fs::write(f.profile.join("mpd-v2.db"), b"controlled DB write failure").is_err());
+    assert!(pending.finish(&owner).is_err());
+    assert_eq!(AppConfig::load_from_path(&f.profile.join("config.json")).unwrap(), next);
+    let snapshot = pending.snapshot().unwrap();
+    let id = snapshot.manifest.sources.keys().next().unwrap();
+    let link = f.profile.join("library").join(id).join("extra.wav");
+    std::os::unix::fs::symlink(f.media.join("track.wav"), &link).unwrap();
+    assert!(crate::first_run_managed::PendingPreparation::open(&owner).is_err());
+    assert!(link.exists()); assert!(f.marker().exists());
+}

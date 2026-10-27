@@ -888,6 +888,52 @@ pub(crate) mod mirror {
         fn from(_: ()) -> Self { Self::Unconfirmed }
     }
     impl ReadonlyMirrorSnapshot {
+        pub(crate) fn topology_hash(&self) -> Result<String, String> {
+            use sha2::{Digest, Sha256};
+            use std::os::unix::ffi::OsStrExt;
+            self.revalidate().map_err(|_| crate::index_coverage::CHANGED)?;
+            let mut digest = Sha256::new();
+            for (path, (stamp, target)) in &self.topology {
+                let path = path.as_os_str().as_bytes();
+                digest.update((path.len() as u64).to_le_bytes());
+                digest.update(path);
+                let bytes = serde_json::to_vec(stamp).map_err(|_| crate::index_coverage::CHANGED)?;
+                digest.update((bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+                digest.update([u8::from(target.is_some())]);
+                if let Some(target) = target {
+                    let target = target.as_os_str().as_bytes();
+                    digest.update((target.len() as u64).to_le_bytes());
+                    digest.update(target);
+                }
+            }
+            self.revalidate().map_err(|_| crate::index_coverage::CHANGED)?;
+            Ok(format!("{:x}", digest.finalize()))
+        }
+        /// Re-observe only the selected links of this SAME published generation
+        /// after restart; never rebuild or import a physical source tree here.
+        pub(crate) fn coverage_inventory(&self) -> Result<crate::index_coverage::Inventory, String> {
+            self.revalidate().map_err(|_| crate::index_coverage::CHANGED)?;
+            let mut inventory = crate::index_coverage::Inventory::new(&self.manifest.generation_id, &self.manifest.sources, true)?;
+            for (relative, (_, target)) in &self.topology {
+                let Some(target) = target else { continue; };
+                let kind = match super::classify_path(relative) {
+                    super::LocalMediaClass::PlayableAudio => crate::index_coverage::Kind::Audio,
+                    super::LocalMediaClass::ControlSidecar => crate::index_coverage::Kind::Cue,
+                    _ => continue,
+                };
+                let mut parts = relative.components();
+                let id = parts.next().and_then(|v| v.as_os_str().to_str()).ok_or(crate::index_coverage::CHANGED)?;
+                let path = parts.as_path();
+                let root = self.manifest.sources.get(id).ok_or(crate::index_coverage::CHANGED)?;
+                if root.join(path) != *target { return Err(crate::index_coverage::CHANGED.into()); }
+                let metadata = fs::symlink_metadata(target).map_err(|_| crate::index_coverage::CHANGED)?;
+                inventory.observe(id, path, target, kind, &metadata)?;
+            }
+            self.revalidate().map_err(|_| crate::index_coverage::CHANGED)?;
+            inventory.verify()?;
+            Ok(inventory)
+        }
         pub(crate) fn open(library: &Path) -> Result<Self, ReadonlyMirrorOpenError> {
             use crate::source_identity::{ReadonlyBoundedFile, ReadonlyDirectory, readonly_unique_json};
             let directory=ReadonlyDirectory::open(library)?;

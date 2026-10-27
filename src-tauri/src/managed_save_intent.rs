@@ -576,6 +576,12 @@ fn check_startup_state(config_dir: &Path, startup_owns_staging: bool) -> Result<
         Ok(_) => {}
     }
     let parent = Parent::inspect(config_dir)?;
+    // Only first_run_managed's typed resume path may interpret this record.
+    match fs::symlink_metadata(parent.entry(crate::first_run_managed::PENDING)) {
+        Ok(_) => return Err(blocked("A biblioteca inicial está em preparação.")),
+        Err(e) if e.kind() == ErrorKind::NotFound => {},
+        Err(_) => return Err(blocked("Preparação inicial indisponível.")),
+    }
     match fs::symlink_metadata(parent.entry(crate::recovery_set::SEAL)) {
         Ok(_) => return Err(blocked("Selo de recuperação sem finalização durável.")),
         Err(e) if e.kind()==ErrorKind::NotFound => {},

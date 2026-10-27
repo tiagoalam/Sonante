@@ -62,8 +62,11 @@ struct Inner {
     operation: Option<Snapshot>,
     preview: Option<Scope>,
     preview_offsets: Vec<usize>,
+    preview_source_start: usize,
     preview_busy: bool,
+    preview_artwork_busy: bool,
     preview_not_before: Option<Instant>,
+    preview_artwork_not_before: Option<Instant>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -97,6 +100,7 @@ pub(crate) struct PreviewLease {
     coordinator: Arc<Coordinator>,
     id: String,
     pub(crate) scope: Scope,
+    artwork: bool,
 }
 
 pub(crate) struct PreviewJob {
@@ -126,6 +130,11 @@ impl Drop for PreviewJob {
 }
 
 impl PreviewLease {
+    pub(crate) fn source_start(&self) -> Result<usize, PreviewError> {
+        let inner = self.coordinator.inner.lock().map_err(|_| PreviewError::Unavailable)?;
+        if !self.valid(&inner) { return Err(PreviewError::Unavailable); }
+        Ok(inner.preview_source_start)
+    }
     fn valid(&self, inner: &Inner) -> bool {
         !inner.shutdown
             && inner
@@ -178,17 +187,17 @@ impl PreviewLease {
             return Err(PreviewError::Unavailable);
         }
         inner.preview_offsets = next;
+        if self.scope.initial {
+            inner.preview_source_start = (inner.preview_source_start + 8) % self.scope.sources.len();
+        }
         Ok(())
     }
 }
 
 impl Drop for PreviewLease {
     fn drop(&mut self) {
-        self.coordinator
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .preview_busy = false;
+        let mut inner = self.coordinator.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.artwork { inner.preview_artwork_busy = false; } else { inner.preview_busy = false; }
     }
 }
 
@@ -366,6 +375,41 @@ impl Coordinator {
             coordinator: Arc::clone(self),
             id: id.to_string(),
             scope,
+            artwork: false,
+        })
+    }
+    pub(crate) fn reserve_preview_artwork(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> Result<PreviewLease, PreviewError> {
+        let mut inner = self.inner.lock().map_err(|_| PreviewError::Unavailable)?;
+        if inner.shutdown
+            || !inner
+                .operation
+                .as_ref()
+                .is_some_and(|op| op.id == id && op.phase == Phase::Indexing)
+        {
+            return Err(PreviewError::Unavailable);
+        }
+        let scope = inner
+            .preview
+            .clone()
+            .filter(|scope| scope.job.is_some())
+            .ok_or(PreviewError::Unavailable)?;
+        if inner.preview_artwork_busy
+            || inner
+                .preview_artwork_not_before
+                .is_some_and(|at| Instant::now() < at)
+        {
+            return Err(PreviewError::Busy);
+        }
+        inner.preview_artwork_busy = true;
+        inner.preview_artwork_not_before = Some(Instant::now() + Duration::from_millis(500));
+        Ok(PreviewLease {
+            coordinator: Arc::clone(self),
+            id: id.to_string(),
+            scope,
+            artwork: true,
         })
     }
 
@@ -444,6 +488,19 @@ impl Drop for Transaction<'_> {
 }
 
 impl Operation {
+    /// Only the owned initial-generation worker can enable this scope. Each
+    /// read still has at most eight source windows and 128 tracks total.
+    pub(crate) fn enable_initial_preview(&self, socket: &str, sources: &[String]) -> Result<(), PreviewError> {
+        let scope = Scope::initial(socket, sources)?;
+        let mut inner = self.coordinator.inner.lock().map_err(|_| PreviewError::Unavailable)?;
+        if inner.shutdown || !inner.operation.as_ref().is_some_and(|op| op.id == self.id && !op.phase.terminal()) {
+            return Err(PreviewError::Unavailable);
+        }
+        inner.preview = Some(scope);
+        inner.preview_offsets.clear();
+        inner.preview_source_start = 0;
+        Ok(())
+    }
     /// Called only after a proven targeted addition has been published.
     pub(crate) fn enable_addition_preview(
         &self,
@@ -466,6 +523,7 @@ impl Operation {
         }
         inner.preview = Some(scope);
         inner.preview_offsets.clear();
+        inner.preview_source_start = 0;
         Ok(())
     }
 

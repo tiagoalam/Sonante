@@ -15,6 +15,193 @@ use std::{
 const LIMIT: u64 = 16 * 1024 * 1024;
 const ERROR: &str = "FIRST_RUN_MANAGED_SAVE_UNCONFIRMED";
 const DATABASE_ERROR: &str = "FIRST_RUN_DATABASE_UNCONFIRMED";
+pub(crate) const PENDING: &str = ".sonante-initial-library.json";
+
+/// A separate, private admission for resuming only the published first library.
+/// Old stop markers alone never acquire this authority. No credentials or media
+/// bytes are stored here. Preferences and catalogue completion are separate.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingRecord {
+    version: u8,
+    profile: Identity,
+    library: Identity,
+    previous_library: Option<Identity>,
+    config_hash: String,
+    manifest_hash: String,
+    topology_hash: String,
+    ledger_hash: String,
+    ledger_lock_hash: String,
+    intent_hash: String,
+    #[serde(default)]
+    policy_excluded: std::collections::BTreeMap<String, usize>,
+}
+
+pub(crate) struct PendingPreparation {
+    profile: Dir,
+    record: PendingRecord,
+    bytes: Vec<u8>,
+    id: Identity,
+}
+
+impl PendingPreparation {
+    pub(crate) fn restore_policy_counts(&self, inventory: &mut crate::index_coverage::Inventory) -> Result<(), String> {
+        let ids = inventory.source_ids();
+        for (id, count) in &self.record.policy_excluded {
+            if !ids.contains(id) { return Err(ERROR.into()); }
+            inventory.exclude(id, *count);
+        }
+        Ok(())
+    }
+
+    fn digest(profile: &Dir, name: &str) -> Result<String, String> {
+        Ok(recovery_fs::hash(
+            &profile.read(name, LIMIT, &|| false)?.ok_or(ERROR)?,
+        ))
+    }
+
+    /// Read-only configuration admission. It does not admit catalogue readers,
+    /// playback, mutation, an old journal, or an unverified physical source.
+    pub(crate) fn config(path: &std::path::Path) -> Result<Option<AppConfig>, String> {
+        if !path.try_exists().map_err(|_| ERROR)? {
+            return Ok(None);
+        }
+        let profile = Dir::open(path)?;
+        let Some(bytes) = profile.read(PENDING, LIMIT, &|| false)? else {
+            return Ok(None);
+        };
+        let record: PendingRecord =
+            crate::source_identity::readonly_unique_json(&bytes).map_err(|_| ERROR)?;
+        let pending = Self {
+            id: profile.file_identity(PENDING)?.ok_or(ERROR)?,
+            profile,
+            record,
+            bytes,
+        };
+        pending.validate_config().map(Some)
+    }
+
+    pub(crate) fn open(owner: &Lease) -> Result<Self, String> {
+        owner.validate()?;
+        let profile = Dir::open(&owner.root().path)?;
+        let bytes = profile.read(PENDING, LIMIT, &|| false)?.ok_or(ERROR)?;
+        let record = crate::source_identity::readonly_unique_json(&bytes).map_err(|_| ERROR)?;
+        let pending = Self {
+            id: profile.file_identity(PENDING)?.ok_or(ERROR)?,
+            profile,
+            record,
+            bytes,
+        };
+        if pending.profile.id() != owner.root().id() {
+            return Err(ERROR.into());
+        }
+        pending.validate_config()?;
+        pending.snapshot()?;
+        owner.validate()?;
+        Ok(pending)
+    }
+
+    fn validate_config(&self) -> Result<AppConfig, String> {
+        self.profile.validate()?;
+        if self.record.version != 1
+            || self.profile.id() != self.record.profile
+            || self.profile.file_identity(PENDING)?.as_ref() != Some(&self.id)
+            || self.profile.read(PENDING, LIMIT, &|| false)?.as_ref() != Some(&self.bytes)
+        {
+            return Err(ERROR.into());
+        }
+        for name in [crate::recovery_set::PENDING, crate::recovery_set::SEAL] {
+            absent(&self.profile, name)?;
+        }
+        let config = AppConfig::load_from_path(&self.profile.path.join("config.json"))?;
+        if config.first_run
+            || recovery_fs::hash(&serde_json::to_vec(&config).map_err(|_| ERROR)?)
+                != self.record.config_hash
+            || self.profile.child("library")?.id() != self.record.library
+            || Self::digest(&self.profile.child("library")?, mirror::MANIFEST_NAME)?
+                != self.record.manifest_hash
+            || Self::digest(&self.profile, "local-source-identities.json")?
+                != self.record.ledger_hash
+            || Self::digest(&self.profile, "local-source-identities.lock")?
+                != self.record.ledger_lock_hash
+        {
+            return Err(ERROR.into());
+        }
+        if self.profile.exists(crate::managed_save_intent::NAME)?
+            && Self::digest(&self.profile, crate::managed_save_intent::NAME)?
+                != self.record.intent_hash
+        {
+            return Err(ERROR.into());
+        }
+        if self.profile.exists("library.next")? {
+            let previous = self.profile.child("library.next")?;
+            if self.record.previous_library.as_ref() != Some(&previous.id())
+                || fs::read_dir(&previous.path)
+                    .map_err(|_| ERROR)?
+                    .next()
+                    .is_some()
+            {
+                return Err(ERROR.into());
+            }
+        }
+        self.profile.validate()?;
+        Ok(config)
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<mirror::ReadonlyMirrorSnapshot, String> {
+        let config = self.validate_config()?;
+        let snapshot = mirror::ReadonlyMirrorSnapshot::open(&self.profile.path.join("library"))
+            .map_err(|_| ERROR)?;
+        let configured = config
+            .local_folders
+            .iter()
+            .map(PathBuf::from)
+            .collect::<std::collections::BTreeSet<_>>();
+        let bound = snapshot
+            .manifest
+            .sources
+            .values()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if snapshot.manifest.schema_version != 2
+            || snapshot.manifest.registry_id.is_none()
+            || configured.len() != config.local_folders.len()
+            || configured != bound
+            || snapshot.topology_hash()? != self.record.topology_hash
+        {
+            return Err(ERROR.into());
+        }
+        crate::source_identity::verify_origins(
+            &self.profile.path.join("library"),
+            &snapshot.manifest.sources,
+        )?;
+        snapshot.revalidate().map_err(|_| ERROR)?;
+        Ok(snapshot)
+    }
+
+    /// Idempotent across crashes during cleanup. Only an originally admitted
+    /// empty predecessor can be removed; all other contents are retained.
+    pub(crate) fn finish(&self, owner: &Lease) -> Result<(), String> {
+        owner.validate()?;
+        self.snapshot()?;
+        sync_database(&self.profile)?;
+        if self.profile.exists("library.next")? {
+            self.validate_config()?;
+            fs::remove_dir(self.profile.entry("library.next")?).map_err(|_| ERROR)?;
+            self.profile.sync()?;
+        }
+        self.validate_config()?;
+        if self.profile.exists(crate::managed_save_intent::NAME)? {
+            fs::remove_file(self.profile.entry(crate::managed_save_intent::NAME)?)
+                .map_err(|_| ERROR)?;
+            self.profile.sync()?;
+        }
+        self.validate_config()?;
+        owner.validate()?;
+        fs::remove_file(self.profile.entry(PENDING)?).map_err(|_| ERROR)?;
+        self.profile.sync()
+    }
+}
 
 /// A live-only owner. Drop intentionally does not undo anything: a panic/crash
 /// leaves the durable stop marker for manual review, like a managed Save.
@@ -58,6 +245,44 @@ fn empty_library(profile: &Dir) -> Result<Option<Identity>, String> {
 }
 
 impl<'a> InitialPublication<'a> {
+    pub(crate) fn validate_preferences_before_save(&self) -> Result<(), String> {
+        self.validate_previous_config()?;
+        self.validate_published()
+    }
+
+    /// Called only AFTER durable preference persistence. Until this record is
+    /// durable, IPC cannot report success. A crash or an uncertain config rename
+    /// before then leaves the old stop marker blocked for explicit review.
+    pub(crate) fn prepare_background(&self) -> Result<(), String> {
+        self.validate_published()?;
+        if AppConfig::load_from_path(&self.profile.path.join("config.json"))? != self.next {
+            return Err(ERROR.into());
+        }
+        absent(&self.profile, PENDING)?;
+        let record = PendingRecord {
+            version: 1,
+            profile: self.profile.id(),
+            library: self.profile.child("library")?.id(),
+            previous_library: self.before_library.clone(),
+            config_hash: recovery_fs::hash(&serde_json::to_vec(&self.next).map_err(|_| ERROR)?),
+            manifest_hash: PendingPreparation::digest(
+                &self.profile.child("library")?,
+                mirror::MANIFEST_NAME,
+            )?,
+            topology_hash: mirror::ReadonlyMirrorSnapshot::open(&self.profile.path.join("library"))
+                .map_err(|_| ERROR)?
+                .topology_hash()?,
+            ledger_hash: PendingPreparation::digest(&self.profile, "local-source-identities.json")?,
+            ledger_lock_hash: PendingPreparation::digest(
+                &self.profile,
+                "local-source-identities.lock",
+            )?,
+            intent_hash: recovery_fs::hash(&self.marker),
+            policy_excluded: self.prepared.coverage.policy_exclusions().clone(),
+        };
+        self.profile
+            .write_new(PENDING, &serde_json::to_vec(&record).map_err(|_| ERROR)?)
+    }
     pub(crate) fn prepare(
         owner: &'a Lease,
         previous: &AppConfig,
@@ -87,6 +312,7 @@ impl<'a> InitialPublication<'a> {
             "library.next",
             "mpd-v2.db",
             "mpd-v2.db.writing",
+            PENDING,
         ] {
             absent(&profile, name)?;
         }
@@ -236,26 +462,7 @@ impl<'a> InitialPublication<'a> {
     }
 
     fn sync_database(&self) -> Result<Identity, String> {
-        let database = self.profile.file_identity("mpd-v2.db")?.ok_or(DATABASE_ERROR)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.profile.entry("mpd-v2.db")?)
-            .map_err(|_| DATABASE_ERROR)?;
-        use std::os::unix::fs::MetadataExt;
-        let metadata = file.metadata().map_err(|_| DATABASE_ERROR)?;
-        if metadata.mode() & 0o022 != 0
-            || metadata.dev() != database.dev
-            || metadata.ino() != database.ino
-        {
-            return Err(DATABASE_ERROR.into());
-        }
-        file.sync_all().map_err(|_| DATABASE_ERROR)?;
-        self.profile.sync()?;
-        if self.profile.file_identity("mpd-v2.db")?.as_ref() != Some(&database) {
-            return Err(DATABASE_ERROR.into());
-        }
-        Ok(database)
+        sync_database(&self.profile)
     }
 
     /// Stop must be confirmed before any rename/cleanup. No old DB was admitted:
@@ -343,3 +550,26 @@ impl<'a> InitialPublication<'a> {
 #[cfg(test)]
 #[path = "first_run_managed_tests.rs"]
 mod tests;
+
+fn sync_database(profile: &Dir) -> Result<Identity, String> {
+    let database = profile.file_identity("mpd-v2.db")?.ok_or(DATABASE_ERROR)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(profile.entry("mpd-v2.db")?)
+        .map_err(|_| DATABASE_ERROR)?;
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata().map_err(|_| DATABASE_ERROR)?;
+    if metadata.mode() & 0o022 != 0
+        || metadata.dev() != database.dev
+        || metadata.ino() != database.ino
+    {
+        return Err(DATABASE_ERROR.into());
+    }
+    file.sync_all().map_err(|_| DATABASE_ERROR)?;
+    profile.sync()?;
+    if profile.file_identity("mpd-v2.db")?.as_ref() != Some(&database) {
+        return Err(DATABASE_ERROR.into());
+    }
+    Ok(database)
+}

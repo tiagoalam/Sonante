@@ -104,7 +104,7 @@ test("bounded retention evicts oldest groups so later discoveries remain visible
 });
 
 test("completion, failure, rollback, uncertain and replacement discard pending replies", async () => {
-  for (const next of [operation("validating"), operation("completed"), operation("failed"), operation("uncertain"), operation("indexing", "2")]) {
+  for (const next of [operation("completed"), operation("failed"), operation("uncertain"), operation("indexing", "2")]) {
     const f = fixture();
     f.preview.observe(operation());
     f.requests[0].resolve(sample([row(1)])); await flush();
@@ -212,7 +212,7 @@ test("preview shares the existing grid/scroll and keeps placeholders without int
   assert.ok(markup.includes("--theme-surface-subtle,rgb(0_0_0_/_0.4)"));
   assert.ok(markup.includes("animate-spin"));
   assert.doesNotMatch(markup, /<(button|a|img|input|audio)\b|tabindex=|href=|role="button"/i);
-  assert.doesNotMatch(componentSource, /onClick|onKey|tabIndex|services\/|Artwork|LocalAlbumCard|\.uri|max-h-|overflow-y|grid-cols-|gap-4/);
+  assert.doesNotMatch(componentSource, /onClick|onKey|tabIndex|services\/|LocalAlbumCard|\.uri|max-h-|overflow-y|grid-cols-|gap-4/);
   assert.equal(renderToStaticMarkup(React.createElement(LocalImportPreviewSection, { albums: [], scrollContainer: container, t })), "");
 });
 
@@ -225,6 +225,7 @@ const expression = browser.slice(start + branchStart.length, browser.indexOf(bra
 const layoutJs = ts.transpileModule(`function Layout(props) {
   const {filteredAlbums, visibleImportPreview, emptyCatalogState, scrollContainer} = props;
   const sortedAlbums = filteredAlbums, catalogActivity = "indexing", activeSourceId = null, albumSearch = "", albumSortMode = "album-asc";
+  const importArtworkCache = undefined;
   const albumGridRef = null, favoriteIds = new Set(), catalogConfirmed = false, isPlaybackAvailable = true, onlineArtworkEnabled = false, artworkBlocked = true, metadataMode = false;
   const handleToggleFavoriteLocal = () => {}, handleSelectAlbum = () => {}, handlePlayEntireAlbum = () => {};
   const localAlbumNavigationResetKey = () => "existing-navigation";
@@ -267,9 +268,29 @@ test("multiple preview rows and filter changes use the same responsive grid with
     const markup = renderLayout([], filterImportPreview(rows, source, search));
     assert.equal((markup.match(/data-item=/g) ?? []).length, count);
   }
-  assert.ok(browser.includes("filterImportPreview(importPreview, activeSourceId, albumSearch)"));
+  assert.ok(browser.includes("filterImportPreview(importPreviewForCatalog(importPreview, importPreviewRevision, confirmedPreviewRevision), activeSourceId, albumSearch)"));
   const grid = readFileSync(new URL("../components/VirtualAlbumGrid.tsx", import.meta.url), "utf8");
   assert.ok(grid.includes("const MINIMUM_CARD_WIDTH = 170"));
   assert.ok(grid.includes("const GRID_GAP = 24"));
   assert.ok(grid.includes("const CARD_TEXT_HEIGHT = 64"));
+});
+
+test("initial indexing displays successive batches before idle, keeps cards through validation and discards late reads", async () => {
+  const f = fixture();
+  f.preview.observe(operation()); f.requests[0].resolve(sample([row(10)])); await flush();
+  assert.match(renderLayout([], f.current()), /data-item=/);
+  f.preview.observe(operation()); f.requests[1].resolve(sample([row(11)])); await flush();
+  assert.deepEqual(f.current().map(a => a.provisional_group_key), [row(10).provisional_group_key, row(11).provisional_group_key]);
+  f.preview.observe(operation()); f.preview.observe(operation("validating"));
+  f.requests[2].resolve(sample([row(12)])); await flush();
+  assert.equal(f.current().length, 2);
+  f.preview.observe(operation("completed")); assert.deepEqual(f.current(), []);
+  f.preview.dispose();
+});
+
+test("normal library has no protocol availability panel and preserves real error alerts", () => {
+  assert.doesNotMatch(browser, /LocalSourceAvailabilityPanel|sourceAvailabilityContext|sourceAvailabilityConfig/);
+  assert.match(browser, /catalog\.error && \(/);
+  assert.match(browser, /playbackFailure && \(/);
+  assert.match(browser, /role="alert"/);
 });

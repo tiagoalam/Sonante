@@ -773,6 +773,7 @@
     "updatingLibrary": "Updating library...",
     "preparingLibrary": "Preparing local folders...",
     "validatingLibrary": "Validating the library...",
+    "initialLibraryFailed": "Your settings were saved, but the library could not be completed. Close and reopen Sonante to try again.",
     "librarySaveUncertain": "Library save could not be confirmed.",
     "librarySaveStatusUnavailable": "Unable to check import status. The operation may still be running; waiting for confirmation.",
     "libraryUpdateSucceeded": "Library updated.",

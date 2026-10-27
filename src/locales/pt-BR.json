@@ -773,6 +773,7 @@
     "updatingLibrary": "Atualizando biblioteca...",
     "preparingLibrary": "Preparando pastas locais...",
     "validatingLibrary": "Validando a biblioteca...",
+    "initialLibraryFailed": "Sua configuração foi salva, mas não foi possível concluir a biblioteca. Feche e abra o Sonante para tentar novamente.",
     "librarySaveUncertain": "Não foi possível confirmar a atualização da biblioteca.",
     "librarySaveStatusUnavailable": "Não foi possível consultar o estado da importação. A operação pode continuar em andamento; aguardando confirmação.",
     "libraryUpdateSucceeded": "Biblioteca atualizada.",

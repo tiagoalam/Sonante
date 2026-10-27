@@ -76,6 +76,7 @@ import { SidebarNavItem } from "./components/SidebarNavItem";
 import { plexService } from "./services/plex";
 import { audioService, LOCAL_LIBRARY_RECONCILED_EVENT } from "./services/audio";
 import { configService } from "./services/config";
+import { createImportArtworkCache } from "./utils/importArtworkCache";
 import { createLocalImportPreview } from "./utils/localImportPreview";
 import type { PreviewAlbum } from "./types/localImportPreview";
 import { configSavePending, monitorConfigSave } from "./utils/configSaveMonitor";
@@ -439,11 +440,14 @@ export function App() {
   const configSaveGenerationRef = useRef(0);
   const [configSavePhase, setConfigSavePhase] = useState<"local" | "other" | null>(null);
   const [localSavePhase, setLocalSavePhase] = useState<ConfigSavePhase | null>(null);
-  const [importPreview, setImportPreview] = useState<PreviewAlbum[]>([]);
+  const [importPreviewState, setImportPreviewState] = useState<{ albums: PreviewAlbum[]; revision: number | null }>({ albums: [], revision: null });
+  const importPreview = importPreviewState.albums;
+  const importArtworkCache = useMemo(() => createImportArtworkCache(configService.getLocalImportArtwork), []);
   const importPreviewRef = useRef<ReturnType<typeof createLocalImportPreview> | null>(null);
   const configSaveMonitorRef = useRef<ReturnType<typeof monitorConfigSave> | null>(null);
   const [configSaveNotice, setConfigSaveNotice] = useState<{
     kind: "success" | "error" | "warning";
+    initialPreparationFailed?: boolean;
     detail?: string;
     positionNotRestored?: boolean;
     reloadFailed?: boolean;
@@ -751,7 +755,8 @@ export function App() {
     if (!isCurrent()) return;
     setConfigSaveNotice({
       kind: "error",
-      detail: refusal ? undefined : reason.startsWith("LOCAL_INDEX_") ? t("indexCoverage.failed") : detail,
+      initialPreparationFailed: reason.startsWith("FIRST_RUN_CATALOG_PENDING"),
+      detail: reason.startsWith("FIRST_RUN_CATALOG_PENDING") || refusal ? undefined : reason.startsWith("LOCAL_INDEX_") ? t("indexCoverage.failed") : detail,
       reloadFailed,
       refusal,
       stagingCleanupFailed: Boolean(refusal) && cleanup === "LOCAL_SOURCE_STAGING_CLEANUP_FAILED",
@@ -761,7 +766,12 @@ export function App() {
 
   useEffect(() => {
     let disposed = false;
-    const preview = createLocalImportPreview(configService.getLocalImportPreview, setImportPreview);
+    const preview = createLocalImportPreview(configService.getLocalImportPreview,
+      (albums, revision) => setImportPreviewState({ albums, revision: revision ?? null }),
+      { artwork: importArtworkCache, catalogRevision: localAlbumCatalog.getConfirmedRevision });
+    const stopCatalogHandoff = localAlbumCatalog.subscribe(() => {
+      preview.confirmCatalog(localAlbumCatalog.getConfirmedRevision());
+    });
     importPreviewRef.current = preview;
     const monitor = monitorConfigSave(configService.getSaveOperation, (operation) => {
       preview.observe(operation);
@@ -812,6 +822,7 @@ export function App() {
     return () => {
       disposed = true;
       monitor.dispose();
+      stopCatalogHandoff();
       preview.dispose();
       importPreviewRef.current = null;
       configSaveMonitorRef.current = null;
@@ -1712,6 +1723,8 @@ export function App() {
             initialArtist={localSelectedArtist}
             onClearInitialArtist={() => setLocalSelectedArtist(null)}
             importPreview={importPreview}
+            importPreviewRevision={importPreviewState.revision}
+            importArtworkCache={importArtworkCache}
             catalogRefreshRevision={localCatalogRevision}
             isPlaybackAvailable={isPlaybackAvailable}
             isLibraryUpdating={playbackStatus.is_updating}
@@ -2451,6 +2464,7 @@ export function App() {
                   : configSavePhase === "other" ? t("settings.savingSettings")
                   : configSaveNotice?.positionNotRestored ? t("settings.outputPositionNotRestored")
                   : configSaveNotice?.kind === "success" ? t("settings.libraryUpdateSucceeded")
+                  : configSaveNotice?.initialPreparationFailed ? t("settings.initialLibraryFailed")
                   : configSaveNotice?.uncertain ? t("settings.librarySaveUncertain")
                   : configSaveNotice?.refusal === "fullRescan" ? t("settings.fullIndexRequired")
                   : configSaveNotice?.refusal === "overlap" ? t("settings.localFolderOverlap")

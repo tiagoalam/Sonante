@@ -27,6 +27,8 @@ export const configService = {
     }),
   getLocalImportPreview: (operationId: string): Promise<LocalImportPreview> =>
     invoke<LocalImportPreview>("get_local_import_preview", { operationId }),
+  getLocalImportArtwork: (operationId: string, reference: string): Promise<string | null> =>
+    invoke<string | null>("get_local_import_artwork", { operationId, reference }),
   getSaveOperation: (): Promise<ConfigSaveOperation | null> =>
     invoke<ConfigSaveOperation | null>("get_config_save_operation"),
 };
