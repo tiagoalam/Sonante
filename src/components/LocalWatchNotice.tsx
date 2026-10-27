@@ -4,7 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { CircleAlert, X } from "lucide-react";
 import { useIndexCoverage } from "../services/indexCoverage";
-import { IndexCoverageDetails } from "./LocalIndexCoverage";
 
 export function LocalWatchNotice({ onOpenSettings }: { onOpenSettings: () => void }) {
   const { t } = useTranslation();
@@ -35,8 +34,8 @@ export function LocalWatchNotice({ onOpenSettings }: { onOpenSettings: () => voi
       <CircleAlert size={16} className="shrink-0 text-[color:var(--theme-fg-accent,var(--color-amber-300))]" />
       <div>
         {needsCheck && <p>{t("settings.localWatchNeedsCheck")}</p>}
-        {partial && coverage.report && <><p>{t("indexCoverage.partial")}</p><IndexCoverageDetails report={coverage.report}/></>}
-        <button type="button" onClick={onOpenSettings} className="mt-2 text-[color:var(--theme-fg-accent,#E5A00D)] underline">{t("settings.pages.local")}</button>
+        {partial && <p>{t("indexCoverage.partial")}</p>}
+        <button type="button" onClick={onOpenSettings} className="mt-2 text-[color:var(--theme-fg-accent,#E5A00D)] underline">{t(partial ? "indexCoverage.openDetails" : "settings.pages.local")}</button>
       </div>
       <button type="button" onClick={() => { setNeedsCheck(false); setDismissedCoverage(coverage.revision); }} aria-label={t("settings.dismissStatus")}><X size={14} /></button>
     </div>

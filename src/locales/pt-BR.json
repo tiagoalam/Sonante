@@ -269,7 +269,8 @@
     "requestError": {
       "uncertain": "Não foi possível confirmar a reprodução. Selecione uma faixa novamente para restabelecer a fila.",
       "persistence": "A reprodução mudou, mas não foi possível confirmar o salvamento da fila.",
-      "failed": "Não foi possível concluir a reprodução. Tente novamente."
+      "failed": "Não foi possível concluir a reprodução. Tente novamente.",
+      "initialIndexing": "Preparando a biblioteca local. Aguarde a conclusão para iniciar a reprodução."
     },
     "playbackError": {
       "output_busy": "Saída de áudio ocupada. Não foi possível iniciar a reprodução.",
@@ -1539,15 +1540,18 @@
     "limit": "Os metadados da origem não autenticam o master nem confirmam reprodução bit-perfect ou o formato no DAC."
   },
   "indexCoverage": {
-    "partial": "Último relatório: indexação concluída com omissões. Veja quantos arquivos foram incluídos, inclusive se o total for zero. As referências existentes foram mantidas.",
+    "unclassified": "Itens não confirmados sem categoria neste relatório: {{count}}.",
+    "categories": "Áudio não confirmado: {{audio}}. Grupos CUE sem faixa observada: {{cues}}. Entradas sem endereço utilizável: {{paths}}.",
+    "openDetails": "Ver detalhes nas Preferências",
+    "partial": "A indexação terminou, mas alguns itens não foram confirmados.",
     "confirmed": "Último relatório de indexação: arquivos selecionados conciliados no escopo observado.",
     "unknown": "Sem relatório de indexação nesta sessão. A cobertura e as omissões são desconhecidas.",
     "details": "Detalhes da indexação",
     "source": "Fonte {{name}}",
-    "counts": "Arquivos de áudio selecionados: {{audio}}; grupos CUE selecionados: {{cues}}; arquivos de áudio indexados: {{cataloged}}; faixas virtuais indexadas: {{virtual}}; arquivos/grupos omitidos: {{omitted}}; outros arquivos excluídos pela política: {{excluded}}.",
+    "counts": "Áudio incluído: {{cataloged}} de {{audio}} arquivos. CUE: {{cues}} grupos; {{virtual}} faixas observadas. Itens não confirmados: {{omitted}}. Outros itens fora da seleção: {{excluded}}.",
     "full": "Escopo observado: a geração percorrida pelo scan.",
     "paths": "Escopo observado: apenas caminhos alterados; a biblioteca inteira não foi verificada.",
-    "limits": "Omissão não comprova corrupção ou formato incompatível. A presença de um grupo CUE não certifica todos os segmentos. Indexação não verifica decodificação integral ou reprodução. As fontes usam seu identificador gerenciado, sem caminhos absolutos.",
+    "limits": "Itens não confirmados não indicam necessariamente arquivos danificados. Um grupo CUE observado não confirma todos os seus segmentos. Este relatório não testa a reprodução.",
     "failed": "A indexação não pôde ser confirmada: uma fonte ou arquivo selecionado mudou, o catálogo era inválido ou itens antes catalogados estão ausentes sem remoção confirmada. As referências foram mantidas. Confira as fontes e tente novamente após o fim das alterações."
   },
   "libraryRecovery": {

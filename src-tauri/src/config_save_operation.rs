@@ -6,6 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub(crate) const BUSY: &str = "CONFIG_SAVE_BUSY";
+pub(crate) const INITIAL_CATALOG_INDEXING: &str = "FIRST_RUN_CATALOG_INDEXING";
 pub(crate) const INTERRUPTED: &str = "LOCAL_FOLDERS_SAVE_INTERRUPTED_FOR_SHUTDOWN";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -54,12 +55,20 @@ impl SaveResponse {
     }
 }
 
+#[derive(Default, Clone, Copy)]
+enum Purpose {
+    #[default]
+    Save,
+    InitialCatalog,
+}
+
 #[derive(Default)]
 struct Inner {
     busy: bool,
     shutdown: bool,
     next_id: u64,
     operation: Option<Snapshot>,
+    purpose: Purpose,
     preview: Option<Scope>,
     preview_offsets: Vec<usize>,
     preview_source_start: usize,
@@ -287,6 +296,7 @@ impl Coordinator {
             coverage: None,
         };
         inner.operation = Some(snapshot.clone());
+        inner.purpose = Purpose::Save;
         inner.preview = None;
         inner.preview_offsets.clear();
         inner.busy = true;
@@ -423,6 +433,23 @@ impl Coordinator {
     }
 
     pub(crate) fn reject_active(&self) -> Result<(), String> {
+        self.reject_active_with_feedback(false)
+    }
+
+    /// Same refusal, with actionable playback feedback only after saved
+    /// first-run preferences have handed ownership to the catalog worker.
+    pub(crate) fn initial_catalog_id(&self) -> Result<Option<String>, String> {
+        let inner = self.inner.lock().map_err(|_| "Playback unavailable")?;
+        if let Some(error) = Self::admission_error(&inner) { return Err(error); }
+        Ok(inner.operation.as_ref().filter(|op| !op.phase.terminal()
+            && matches!(inner.purpose, Purpose::InitialCatalog)).map(|op| op.id.clone()))
+    }
+
+    pub(crate) fn reject_playback(&self) -> Result<(), String> {
+        self.reject_active_with_feedback(true)
+    }
+
+    fn reject_active_with_feedback(&self, playback: bool) -> Result<(), String> {
         let inner = self
             .inner
             .lock()
@@ -435,7 +462,9 @@ impl Coordinator {
             .as_ref()
             .is_some_and(|op| !op.phase.terminal())
         {
-            Err(BUSY.into())
+            Err(if playback && matches!(inner.purpose, Purpose::InitialCatalog) {
+                INITIAL_CATALOG_INDEXING
+            } else { BUSY }.into())
         } else {
             Ok(())
         }
@@ -488,6 +517,14 @@ impl Drop for Transaction<'_> {
 }
 
 impl Operation {
+    pub(crate) fn initial_catalog_background(&self) {
+        let mut inner = self.coordinator.inner.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.operation.as_ref().is_some_and(|op| op.id == self.id && !op.phase.terminal()) {
+            inner.purpose = Purpose::InitialCatalog;
+        }
+    }
+
     /// Only the owned initial-generation worker can enable this scope. Each
     /// read still has at most eight source windows and 128 tracks total.
     pub(crate) fn enable_initial_preview(&self, socket: &str, sources: &[String]) -> Result<(), PreviewError> {
@@ -646,6 +683,28 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn initial_catalog_feedback_preserves_all_admission_barriers() {
+        let state = Arc::new(Coordinator::new());
+        let (_, operation) = state.reserve().unwrap();
+        assert_eq!(state.reject_playback().unwrap_err(), BUSY);
+        operation.initial_catalog_background();
+        for phase in [Phase::Preparing, Phase::Indexing, Phase::Validating] {
+            operation.phase(phase);
+            assert_eq!(state.reject_playback().unwrap_err(), INITIAL_CATALOG_INDEXING);
+            assert_eq!(state.reject_active().unwrap_err(), BUSY);
+            assert!(state.try_begin_background().is_err());
+            assert!(state.reserve().is_err());
+        }
+        operation.finish(Ok(()), false);
+        assert!(state.reject_playback().is_ok());
+        let (_, operation) = state.reserve().unwrap();
+        assert_eq!(state.reject_playback().unwrap_err(), BUSY);
+        operation.initial_catalog_background();
+        operation.finish(Err("fixture".into()), true);
+        assert_eq!(state.reject_playback().unwrap_err(), crate::managed_save_intent::BLOCKED);
+    }
 
     #[test]
     fn preview_offsets_are_discarded_at_terminal_validation_and_shutdown_boundaries() {

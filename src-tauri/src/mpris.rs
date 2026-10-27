@@ -459,10 +459,8 @@ impl SonanteMpris {
             let state = app
                 .try_state::<AudioState>()
                 .ok_or_else(|| "Estado de áudio indisponível para o controle MPRIS.".to_string())?;
-            let mut audio = state.0.lock().map_err(|error| {
-                format!("Falha ao acessar o estado de áudio via MPRIS: {error}")
-            })?;
-            apply_basic_action(&mut *audio, action, is_shared)
+            let transactions = app.state::<crate::ConfigTransactionState>();
+            crate::with_playback_control(&state.0, &transactions, |audio| apply_basic_action(audio, action, is_shared))
         })
         .await
         .map_err(|error| fdo::Error::Failed(format!("Falha na tarefa MPRIS: {error}")))?

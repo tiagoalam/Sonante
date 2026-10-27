@@ -109,6 +109,7 @@ pub(crate) fn normalize_volume(value: u32) -> u32 {
 }
 
 fn run_wpctl(args: &[&str]) -> Result<Vec<u8>, WpctlError> {
+    crate::initial_plex_playback::check_effect().map_err(|_| WpctlError::Failed)?;
     if args.first()==Some(&"inspect") {run_command_limit("wpctl",args,WPCTL_TIMEOUT,64*1024)}
     else {run_command("wpctl",args,WPCTL_TIMEOUT)}
 }

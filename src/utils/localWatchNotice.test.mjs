@@ -8,13 +8,13 @@ import * as icons from 'lucide-react';
 import {renderToStaticMarkup} from 'react-dom/server';
 const source=readFileSync(new URL('../components/LocalWatchNotice.tsx',import.meta.url),'utf8');
 const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
-function mount(lang='pt-BR',query=async()=>false){
+function mount(lang='pt-BR',query=async()=>false,report=null){
  const strings=JSON.parse(readFileSync(new URL(`../locales/${lang}.json`,import.meta.url),'utf8'));
  const t=key=>key.split('.').reduce((v,k)=>v[k],strings);
- const listeners=new Map(),cleaned=[];let value=false,effect,cleanup,invocations=0,opened=0;
- const deps={'../services/indexCoverage':{useIndexCoverage:()=>({revision:0,report:null})},'./LocalIndexCoverage':{IndexCoverageDetails:()=>null},react:{useState:()=>[value,v=>{value=v;}],useEffect:fn=>{effect??=fn;}},'@tauri-apps/api/core':{invoke:async cmd=>{assert.equal(cmd,'get_local_watch_needs_check');invocations++;return query();}},'@tauri-apps/api/event':{listen:async(event,fn)=>{listeners.set(event,fn);return()=>{listeners.delete(event);cleaned.push(event);};}},'react-i18next':{useTranslation:()=>({t})},'lucide-react':icons,'react/jsx-runtime':jsx};
+ const listeners=new Map(),cleaned=[];let cursor=0,effect,cleanup,invocations=0,opened=0;const states=[];
+ const deps={'../services/indexCoverage':{useIndexCoverage:()=>({revision:1,report})},'./LocalIndexCoverage':{IndexCoverageDetails:()=>{throw new Error('technical details must stay out of the toast')}},react:{useState:initial=>{const i=cursor++;if(!(i in states))states[i]=initial;return[states[i],v=>{states[i]=v}];},useEffect:fn=>{effect??=fn;}},'@tauri-apps/api/core':{invoke:async cmd=>{assert.equal(cmd,'get_local_watch_needs_check');invocations++;return query();}},'@tauri-apps/api/event':{listen:async(event,fn)=>{listeners.set(event,fn);return()=>{listeners.delete(event);cleaned.push(event);};}},'react-i18next':{useTranslation:()=>({t})},'lucide-react':icons,'react/jsx-runtime':jsx};
  const exports={};new Function('require','exports',ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText)(name=>{assert.ok(name in deps,name);return deps[name];},exports);
- const draw=()=>exports.LocalWatchNotice({onOpenSettings:()=>opened++});
+ const draw=()=>{cursor=0;return exports.LocalWatchNotice({onOpenSettings:()=>opened++});};
  draw();cleanup=effect();
  return {listeners,cleaned,draw,html:()=>renderToStaticMarkup(draw()),close:()=>cleanup(),get calls(){return invocations;},get opened(){return opened;}};
 }
@@ -33,4 +33,15 @@ test('App mounts the real notice and routes its action to Local settings without
  const app=readFileSync(new URL('../App.tsx',import.meta.url),'utf8');const ast=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let action;
  const visit=n=>{if(ts.isJsxSelfClosingElement(n)&&n.tagName.getText(ast)==='LocalWatchNotice')action=n.attributes.properties.find(a=>a.name?.getText(ast)==='onOpenSettings').initializer.expression.getText(ast);ts.forEachChild(n,visit);};visit(ast);assert.ok(action);
  const calls=[];new Function('setSettingsInitialPage','setShowSettings',`return (${action})`)(v=>calls.push(['page',v]),v=>calls.push(['show',v]))();assert.deepEqual(calls,[['page','local'],['show',true]]);
+});
+
+test('partial notice stays short with details only by explicit Preferences action; dismissal never repairs',async()=>{
+ for(const lang of ['pt-BR','en']){
+  const report={outcome:'partial',scope:'full',generation:'fixture',sources:[{source:'Fixture',audio_files:1033,cataloged_audio:1033,cue_groups:16,virtual_tracks:122,omitted:1,policy_excluded:322,audio_unconfirmed:0,cue_groups_unobserved:1,unaddressable:0}]};
+  const f=mount(lang,async()=>false,report);await flush();const html=f.html();
+  assert.match(html,/role="alert"/);assert.doesNotMatch(html,/<details|1033|322|CUE|scan|corrupt|rescan/i);
+  assert.ok(html.includes(lang==='pt-BR'?'Ver detalhes nas Preferências':'View details in Preferences'));
+  find(f.draw(),n=>n.type==='button'&&!n.props['aria-label']).props.onClick();assert.equal(f.opened,1);assert.equal(f.calls,1);
+  find(f.draw(),n=>n.type==='button'&&n.props['aria-label']).props.onClick();assert.equal(f.html(),'');assert.equal(f.calls,1);f.close();
+ }
 });

@@ -2258,6 +2258,27 @@ mod tests {
     }
 
     #[test]
+    fn initial_stream_permission_requires_selected_server_and_typed_plex_references() {
+        let config = manager_config("http://127.0.0.1:9", Some("server-1"));
+        let mut client = media_client_for_test(&config);
+        let make = |locator| crate::audio::TrackMetadata {
+            title: "Fixture".into(), artist: "Fixture".into(), album: "Fixture".into(),
+            thumb: None, plex_image: None, uri: "http://untrusted-front-end-uri".into(),
+            media_locator: locator, duration: None,
+        };
+        let valid = make(Some(plex_locator("server-1", "/library/parts/1/file.flac", None, None)));
+        assert!(client.initial_stream_references(&[valid.clone()]));
+        assert!(!client.initial_stream_references(&[]));
+        assert!(!client.initial_stream_references(&[make(None)]));
+        assert!(!client.initial_stream_references(&[make(Some(MediaLocator::Local { uri: "local/a.flac".into() }))]));
+        assert!(!client.initial_stream_references(&[make(Some(plex_locator("other-server", "/library/parts/1/file.flac", None, None)))]));
+        assert!(!client.initial_stream_references(&[make(Some(plex_locator("server-1", "https://untrusted", None, None)))]));
+        assert!(!client.initial_stream_references(&[valid.clone(), make(None)]));
+        client.playback_mode = "local".into();
+        assert!(!client.initial_stream_references(&[valid]));
+    }
+
+    #[test]
     fn same_media_reference_uses_current_route_and_current_token() {
         let mut config = manager_config("http://lan-route", Some("server-1"));
         config.plex_token = "TOKEN_A".to_string();
@@ -3927,6 +3948,15 @@ impl PlexClient {
                 cfg.local_mount_path.clone(),
             );
         }
+    }
+
+    pub(crate) fn initial_stream_references(&self, tracks: &[crate::audio::TrackMetadata]) -> bool {
+        if self.playback_mode == "local" || tracks.is_empty() { return false; }
+        let Ok(snapshot) = self.connection_manager.snapshot() else { return false; };
+        let Some(identity) = snapshot.identity.as_ref() else { return false; };
+        tracks.iter().all(|track| matches!(&track.media_locator,
+            Some(MediaLocator::Plex { server_id, part_key, .. })
+            if server_id == &identity.machine_identifier && is_valid_plex_path(part_key)))
     }
 
     pub async fn resolve_media_locator(

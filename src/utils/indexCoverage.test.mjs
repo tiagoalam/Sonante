@@ -14,3 +14,11 @@ test('cleanup rejects late listeners/read results and restarting has one live su
 test('invalid payloads never become a success or expose raw paths',()=>{
  for(const bad of [{revision:-1,report:null},{revision:1,report:{}},{...snapshot(),report:{...report(),outcome:'success'}},{...snapshot(),report:{...report(),sources:[{...report().sources[0],source:'/private/path'}]}},{...snapshot(),report:{...report(),sources:[{...report().sources[0],omitted:-1}]}}])assert.equal(coverageSnapshot(bad),null);
 });
+
+test('categorized reports preserve aggregates and reject incomplete or contradictory categories',()=>{
+ const counts={...report().sources[0],audio_files:1033,cataloged_audio:1033,cue_groups:16,virtual_tracks:122,policy_excluded:322,audio_unconfirmed:0,cue_groups_unobserved:1,unaddressable:0};
+ const wrap=c=>({revision:2,report:{...report(),sources:[c]}});
+ assert.deepEqual(coverageSnapshot(wrap(counts)).report.sources[0],counts);
+ for(const bad of [{...counts,audio_unconfirmed:1},{...counts,cue_groups_unobserved:0},{...counts,unaddressable:-1},{...counts,unaddressable:undefined},{...counts,cue_groups_unobserved:17,omitted:17}])assert.equal(coverageSnapshot(wrap(bad)),null);
+ assert.ok(coverageSnapshot(snapshot()),'legacy aggregate remains readable without guessed categories');
+});

@@ -42,8 +42,9 @@ export async function playbackIntentToken(intent: PlaybackIntent): Promise<strin
   if (!intent.current()) throw "PLAYBACK_SUPERSEDED";
   return token;
 }
-export type PlaybackFailure = "uncertain" | "persistence" | "failed";
+export type PlaybackFailure = "uncertain" | "persistence" | "failed" | "initialIndexing";
 export function playbackFailure(error: unknown): PlaybackFailure {
   return error === "PLAYBACK_QUEUE_UNCERTAIN" ? "uncertain"
-    : error === "PLAYBACK_PERSISTENCE_FAILED" ? "persistence" : "failed";
+    : error === "PLAYBACK_PERSISTENCE_FAILED" ? "persistence"
+    : error === "FIRST_RUN_CATALOG_INDEXING" ? "initialIndexing" : "failed";
 }

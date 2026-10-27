@@ -32,6 +32,7 @@ mod local_import_preview;
 mod local_import_artwork;
 mod local_watcher;
 mod index_coverage;
+mod initial_plex_playback;
 mod local_changes;
 mod local_own_writes;
 #[allow(dead_code)]
@@ -87,6 +88,7 @@ pub struct SupervisorState(pub Mutex<MpdSupervisor>);
 pub struct ConfigState(pub Mutex<AppConfig>);
 pub struct ConfigTransactionState {
     operations: Arc<config_save_operation::Coordinator>,
+    initial_plex: initial_plex_playback::Gate,
     startup_config_read_gate: Mutex<bool>,
     source_mirror_cache: source_availability::MirrorReadCache,
     restart_gate: Mutex<()>,
@@ -1903,6 +1905,16 @@ fn run_initial_catalog(app: &AppHandle, operation: &config_save_operation::Opera
         owner.validate()?;
         pending.snapshot()?;
         let socket = app.state::<AudioState>().0.lock().map_err(|_| "Playback unavailable")?.local_album_socket_path();
+        if is_shared_output(&config) {
+            let pid = supervisor.0.lock().map_err(|_| "MPD unavailable")?.observed_process_pid().ok_or("MPD unavailable")?;
+            AudioEngine::send_owned_command_to_socket(&socket, pid, "status")?;
+            let id = transactions.operations.initial_catalog_id()?.ok_or(initial_plex_playback::WAIT)?;
+            if transactions.initial_plex.publish(id, socket.clone(), pid).is_err() {
+                // Optional playback concurrency cannot invalidate saved preferences
+                // or the catalog. Unsupported pidfd keeps the actionable wait guard.
+                eprintln!("[Audio] Initial Plex playback permission unavailable; waiting for catalog completion.");
+            }
+        }
         if !snapshot.manifest.sources.is_empty() {
             let sources = snapshot.manifest.sources.keys().cloned().collect::<Vec<_>>();
             operation.enable_initial_preview(&socket, &sources).map_err(|_| "FIRST_RUN_PREVIEW_UNAVAILABLE")?;
@@ -1924,12 +1936,20 @@ fn run_initial_catalog(app: &AppHandle, operation: &config_save_operation::Opera
 }
 
 fn spawn_initial_catalog(app: AppHandle, operation: config_save_operation::Operation, start_mpd: bool, watch: Option<local_watcher::PreparedWatch>) {
+    operation.initial_catalog_background();
     tauri::async_runtime::spawn_blocking(move || {
         let result = run_initial_catalog(&app, &operation, start_mpd, watch).map_err(|error| {
             // Includes failures before index admission. Preferences stay saved;
             // stop only the owned child and preserve the generation for reopen.
-            let supervisor = app.state::<SupervisorState>();
-            format!("FIRST_RUN_CATALOG_PENDING: {}", error_with_rollback(error, stop_supervisor(&supervisor.0)))
+            let transactions = app.state::<ConfigTransactionState>();
+            let cleanup = transactions.initial_plex.revoke_and_stop(|| {
+                let audio_state = app.state::<AudioState>();
+                let mut audio = audio_state.0.lock().map_err(|_| "Playback unavailable".to_string())?;
+                audio.invalidate_playback_intents();
+                audio.mark_queue_uncertain();
+                Ok(())
+            }, || stop_supervisor(&app.state::<SupervisorState>().0));
+            format!("FIRST_RUN_CATALOG_PENDING: {}", error_with_rollback(error, cleanup))
         });
         let failed = result.is_err();
         operation.finish(result, failed);
@@ -2489,6 +2509,7 @@ impl ConfigTransactionState {
     fn new() -> Self {
         Self {
             operations: Arc::new(config_save_operation::Coordinator::new()),
+            initial_plex: initial_plex_playback::Gate::default(),
             startup_config_read_gate: Mutex::new(false),
             source_mirror_cache: source_availability::MirrorReadCache::default(),
             restart_gate: Mutex::new(()),
@@ -2531,6 +2552,7 @@ impl ConfigTransactionState {
         self.preparation.begin_shutdown_with(|| {
             self.operations.request_shutdown(|| {
                 self.lifecycle.fetch_or(SHUTDOWN_REQUESTED, Ordering::SeqCst);
+                self.initial_plex.invalidate();
             });
         });
     }
@@ -2851,14 +2873,11 @@ fn collect_mpd_status_snapshot_with_diagnostic(
 #[tauri::command]
 fn change_playback_option(
     audio_state: State<AudioState>,
+    transactions: State<ConfigTransactionState>,
     action: playback_options::PlaybackOptionAction,
     expected: playback_options::PlaybackOptions,
 ) -> Result<playback_options::PlaybackOptions, String> {
-    audio_state
-        .0
-        .lock()
-        .map_err(|e| format!("Falha ao acessar opções de reprodução: {e}"))?
-        .change_playback_option(action, expected)
+    with_playback_control(&audio_state.0, &transactions, |audio| audio.change_playback_option(action, expected))
 }
 
 #[tauri::command]
@@ -2915,6 +2934,7 @@ fn previous_track(
 #[tauri::command]
 fn seek_playback(
     seconds: f64,
+    transactions: State<ConfigTransactionState>,
     window: Window,
     config_state: State<ConfigState>,
     audio_state: State<AudioState>,
@@ -2927,36 +2947,100 @@ fn seek_playback(
             .map_err(|e| format!("Falha ao acessar configuração durante seek: {}", e))?;
         is_shared_output(&config)
     };
-    let mut audio = audio_state
-        .0
-        .lock()
-        .map_err(|e| format!("Falha ao acessar reprodução durante seek: {}", e))?;
     let observation = diagnostics::now_playing_seek_begin(window.label(), seconds, is_shared);
-    let result = audio.seek(seconds, is_shared);
+    let result = with_playback_control(&audio_state.0, &transactions, |audio| audio.seek(seconds, is_shared));
     diagnostics::now_playing_seek_finish(observation, &result);
     result
+}
+
+// Audio -> short Coordinator snapshot -> session lease. Never a Plex await.
+fn initial_playback_context(transactions: &ConfigTransactionState, token: Option<&str>) -> Result<Option<Arc<initial_plex_playback::Session>>, String> {
+    if transactions.shutdown_requested() || transactions.shutdown_started() { return Err("PLAYBACK_SUPERSEDED".into()); }
+    let bound = match token { Some(token) => transactions.initial_plex.bound(token)?, None => None };
+    match transactions.operations.reject_playback() {
+        Ok(()) => Ok(bound),
+        Err(error) if error == initial_plex_playback::WAIT => {
+            let session = match bound { Some(session) => Some(session), None if token.is_none() => transactions.initial_plex.current()?, None => None };
+            let id = transactions.operations.initial_catalog_id()?;
+            session.filter(|session| id.as_deref() == Some(session.operation.as_str())).map(Some).ok_or(error)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn admit_or_validate_playback(
     audio: &Mutex<AudioEngine>, transactions: &ConfigTransactionState, token: Option<String>,
 ) -> Result<String, String> {
-    if token.is_none(){audio.lock().map_err(|_|"Playback unavailable")?.note_eq_intervention();}
-    if transactions.shutdown_requested() || transactions.shutdown_started() { return Err("PLAYBACK_SUPERSEDED".into()); }
-    transactions.operations.reject_active()?;
-    let mut audio = audio.lock().map_err(|_| "Playback unavailable".to_string())?;
+    let mut audio = audio.lock().map_err(|_| "Playback unavailable")?;
+    if token.is_none() { audio.note_eq_intervention(); }
+    let context = initial_playback_context(transactions, token.as_deref())?;
     if let Some(token) = token { audio.validate_playback_intent(&token)?; Ok(token) }
-    else { audio.admit_playback_intent() }
+    else {
+        let token = audio.admit_playback_intent()?;
+        if let Some(context) = context { transactions.initial_plex.bind(&token, context)?; }
+        else { transactions.initial_plex.clear_intent(); }
+        Ok(token)
+    }
 }
 
+enum InitialPlaybackEffect { Queue, Clear, VerifiedPlex(Vec<String>) }
+fn initial_queue_uris(audio: &AudioEngine, allow_empty: bool) -> Result<Vec<String>, String> {
+    audio.ensure_queue_coherent()?;
+    let queue = audio.get_queue();
+    if (!allow_empty && queue.is_empty()) || audio.startup_queue_pending()
+        || queue.iter().any(|track| !matches!(&track.media_locator, Some(MediaLocator::Plex { server_id, part_key, .. }) if !server_id.is_empty() && !part_key.is_empty())) {
+        return Err(initial_plex_playback::WAIT.into());
+    }
+    let actual = AudioEngine::capture_mpd_queue_structure(&audio.local_album_socket_path()).map_err(|_| "PLAYBACK_QUEUE_UNCERTAIN")?;
+    if actual.entries.len() != queue.len() { return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+    Ok(actual.entries.into_iter().map(|entry| entry.uri).collect())
+}
+fn finish_playback_effect<T>(
+    audio: &Mutex<AudioEngine>, transactions: &ConfigTransactionState, token: &str,
+    effect: InitialPlaybackEffect, apply: impl FnOnce(&mut AudioEngine) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut audio = audio.lock().map_err(|_| "Playback unavailable")?;
+    let context = initial_playback_context(transactions, Some(token))?;
+    audio.validate_playback_intent(token)?;
+    if let Some(context) = context {
+        let _lease = context.enter()?;
+        let before = initial_queue_uris(&audio, !matches!(effect, InitialPlaybackEffect::Queue));
+        let verified = before.and_then(|before| context.accepts_queue(&before));
+        if let Err(error) = verified {
+            if error == "PLAYBACK_QUEUE_UNCERTAIN" { audio.mark_queue_uncertain(); }
+            return Err(error);
+        }
+        let result = apply(&mut audio);
+        let accepted = result.is_ok() || matches!(&result, Err(error) if error == "PLAYBACK_PERSISTENCE_FAILED");
+        // A rejected effect may have left the old queue intact or changed it
+        // partially. Verify the appropriate proof without discarding its error.
+        // Revocation skips even these read-only commands before owned stop.
+        let after = initial_plex_playback::check_effect().and_then(|_| initial_queue_uris(&audio, true)).and_then(|after| {
+            if !accepted { return context.accepts_queue(&after); }
+            match &effect {
+                InitialPlaybackEffect::VerifiedPlex(expected) if expected == &after => context.confirm_queue(after),
+                InitialPlaybackEffect::Clear if after.is_empty() => context.confirm_queue(after),
+                InitialPlaybackEffect::Queue => context.accepts_queue(&after),
+                _ => Err("PLAYBACK_QUEUE_UNCERTAIN".into()),
+            }
+        });
+        if after.is_err() {
+            audio.mark_queue_uncertain();
+            return match result { Err(error) => Err(error), Ok(_) => Err("PLAYBACK_QUEUE_UNCERTAIN".into()) };
+        }
+        result
+    } else { apply(&mut audio) }
+}
 fn finish_playback_intent<T>(
     audio: &Mutex<AudioEngine>, transactions: &ConfigTransactionState, token: &str,
     apply: impl FnOnce(&mut AudioEngine) -> Result<T, String>,
 ) -> Result<T, String> {
-    let mut audio = audio.lock().map_err(|_| "Playback unavailable".to_string())?;
-    if transactions.shutdown_requested() || transactions.shutdown_started() { return Err("PLAYBACK_SUPERSEDED".into()); }
-    transactions.operations.reject_active()?;
-    audio.validate_playback_intent(token)?;
-    apply(&mut audio)
+    finish_playback_effect(audio, transactions, token, InitialPlaybackEffect::Queue, apply)
+}
+pub(crate) fn with_playback_control<T>(audio: &Mutex<AudioEngine>, transactions: &ConfigTransactionState,
+    apply: impl FnOnce(&mut AudioEngine) -> Result<T, String>) -> Result<T, String> {
+    let token = admit_or_validate_playback(audio, transactions, None)?;
+    finish_playback_intent(audio, transactions, &token, apply)
 }
 
 async fn resolve_and_apply_playback_intent<P, T>(
@@ -2977,9 +3061,8 @@ fn admit_playback_intent(audio: State<AudioState>, transactions: State<ConfigTra
 
 #[tauri::command]
 fn playback_intent_current(token: String, audio: State<AudioState>, transactions: State<ConfigTransactionState>) -> bool {
-    !transactions.shutdown_requested() && !transactions.shutdown_started()
-        && transactions.operations.reject_active().is_ok()
-        && audio.0.lock().is_ok_and(|audio| audio.validate_playback_intent(&token).is_ok())
+    audio.0.lock().is_ok_and(|audio| initial_playback_context(&transactions, Some(&token)).is_ok()
+        && audio.validate_playback_intent(&token).is_ok())
 }
 
 #[tauri::command]
@@ -2991,6 +3074,7 @@ fn cancel_playback_intent(token: String, audio: State<AudioState>) -> Result<(),
 #[tauri::command]
 fn play_uris(uris: Vec<String>, start_index: usize, intent: Option<String>, state: State<AudioState>, transactions: State<ConfigTransactionState>) -> Result<(), String> {
     let token = admit_or_validate_playback(&state.0, &transactions, intent)?;
+    if initial_playback_context(&transactions, Some(&token))?.is_some() { return Err(initial_plex_playback::WAIT.into()); }
     finish_playback_intent(&state.0, &transactions, &token, |audio| audio.play_uris(uris, start_index))
 }
 
@@ -3250,9 +3334,19 @@ async fn play_tracks(
         .lock()
         .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
         .clone();
-    resolve_and_apply_playback_intent(&audio_state.0, &transactions, &token,
-        async { let uris = resolve_playback_uris(&tracks, &plex_client).await?; Ok((tracks, uris)) },
-        |audio, (tracks, uris)| audio.play_tracks(tracks, uris, start_index)).await
+    let initial = initial_playback_context(&transactions, Some(&token))?.is_some();
+    if initial && !plex_client.initial_stream_references(&tracks) { return Err(initial_plex_playback::WAIT.into()); }
+    let resolved = resolve_playback_uris(&tracks, &plex_client).await;
+    // Supersession/revocation wins even over a resolver error.
+    { let audio = audio_state.0.lock().map_err(|_| "Playback unavailable")?;
+      initial_playback_context(&transactions, Some(&token))?; audio.validate_playback_intent(&token)?; }
+    let uris = resolved?;
+    if initial && !plex_state.0.lock().map_err(|_| "Plex unavailable")?.initial_stream_references(&tracks) {
+        return Err(initial_plex_playback::WAIT.into());
+    }
+    let effect = if initial { InitialPlaybackEffect::VerifiedPlex(uris.clone()) } else { InitialPlaybackEffect::Queue };
+    finish_playback_effect(&audio_state.0, &transactions, &token, effect,
+        |audio| audio.play_tracks(tracks, uris, start_index))
 }
 
 #[tauri::command]
@@ -3263,7 +3357,17 @@ fn set_volume(
     transactions: State<ConfigTransactionState>,
 ) -> Result<(), String> {
     audio_state.note_transport_intervention();
-    let _transaction = begin_volume_transaction(&transactions)?;
+    let admission = begin_volume_transaction(&transactions);
+    if admission.is_err() {
+        let supervisor = sup_state.0.lock().map_err(|_| "Controle de volume indisponível.")?;
+        require_gradual_volume(supervisor.volume_backend())?;
+        let backend = supervisor.shared_volume_backend();
+        drop(supervisor);
+        return with_initial_volume(&audio_state.0, &transactions, |audio| {
+            set_volume_with_backend(backend, volume, shared_volume::set_pipewire_volume, |value| audio.set_volume(value))
+        });
+    }
+    let _transaction = admission?;
     let supervisor = sup_state.0.lock().map_err(|_| "Controle de volume indisponível.")?;
     require_gradual_volume(supervisor.volume_backend())?;
     let backend = supervisor.shared_volume_backend();
@@ -3277,21 +3381,43 @@ fn set_volume(
 #[tauri::command]
 fn set_shared_mute(muted:bool,token:String,sup_state:State<SupervisorState>,audio_state:State<AudioState>,transactions:State<ConfigTransactionState>)->Result<(),String>{
     audio_state.note_transport_intervention();
-    let _transaction=begin_volume_transaction(&transactions)?;
-    let mut supervisor=sup_state.0.lock().map_err(|_|"SHARED_MUTE_CONTEXT_CHANGED")?;
+    let admission = begin_volume_transaction(&transactions);
+    let mut supervisor = sup_state.0.lock().map_err(|_| "SHARED_MUTE_CONTEXT_CHANGED")?;
+    match admission {
+        Ok(_permit) => {
+            let audio = audio_state.0.lock().map_err(|_| "SHARED_MUTE_CONTEXT_CHANGED")?;
+            apply_shared_mute(&mut supervisor, &audio, muted, &token)
+        }
+        Err(_) => with_initial_volume(&audio_state.0, &transactions,
+            |audio| apply_shared_mute(&mut supervisor, audio, muted, &token)),
+    }
+}
+fn apply_shared_mute(supervisor: &mut MpdSupervisor, audio: &AudioEngine, muted: bool, token: &str) -> Result<(), String> {
     let base=supervisor.shared_mute_context().ok_or("SHARED_MUTE_CONTEXT_CHANGED")?;
     if supervisor.volume_backend()==VolumeBackend::PipeWire {
         let target=shared_volume::read_target()?;
         let context=format!("{}:{}",base,target.token());
         let actual=shared_volume::read_target_volume(&target)?;
-        let action=supervisor.shared_mute.plan(&token,&context,actual.value,actual.muted,true,muted)?;
+        let action=supervisor.shared_mute.plan(token,&context,actual.value,actual.muted,true,muted)?;
         shared_volume::apply_mute_action(&target,action)
     } else {
-        let audio=audio_state.0.lock().map_err(|_|"SHARED_MUTE_CONTEXT_CHANGED")?;
         let value=audio.observed_software_volume()?;
-        let action=supervisor.shared_mute.plan(&token,&base,value,value==0,false,muted)?;
+        let action=supervisor.shared_mute.plan(token,&base,value,value==0,false,muted)?;
         match action {shared_mute::Action::None=>Ok(()),shared_mute::Action::Volume(value)=>audio.set_volume(value),_=>Err("SHARED_MUTE_CONTEXT_CHANGED".into())}
     }
+}
+fn with_initial_volume<T>(audio: &Mutex<AudioEngine>, transactions: &ConfigTransactionState,
+    apply: impl FnOnce(&mut AudioEngine) -> Result<T, String>) -> Result<T, String> {
+    let mut audio = audio.lock().map_err(|_| "Playback unavailable")?;
+    let context = initial_playback_context(transactions, None)?.ok_or(config_save_operation::BUSY)?;
+    let _lease = context.enter()?;
+    let verified = initial_queue_uris(&audio, false).and_then(|queue| context.accepts_queue(&queue));
+    if let Err(error) = verified {
+        if error == "PLAYBACK_QUEUE_UNCERTAIN" { audio.mark_queue_uncertain(); }
+        return Err(error);
+    }
+    initial_plex_playback::check_effect()?;
+    apply(&mut audio)
 }
 
 fn require_gradual_volume(backend: VolumeBackend) -> Result<(), String> {
@@ -3428,7 +3554,7 @@ fn play_queue_index(
 #[tauri::command]
 fn clear_queue(intent: Option<String>, state: State<AudioState>, transactions: State<ConfigTransactionState>) -> Result<(), String> {
     let token = admit_or_validate_playback(&state.0, &transactions, intent)?;
-    finish_playback_intent(&state.0, &transactions, &token, |audio| audio.clear_queue())
+    finish_playback_effect(&state.0, &transactions, &token, InitialPlaybackEffect::Clear, |audio| audio.clear_queue())
 }
 
 #[tauri::command]
@@ -4169,6 +4295,12 @@ async fn play_playlist(
         .lock()
         .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
         .clone();
+    let initial = initial_playback_context(&transactions, Some(&token))?.is_some();
+    let reference_tracks = playlist.items.iter().map(|item| TrackMetadata {
+        title: item.metadata.title.clone(), artist: item.metadata.artist.clone(), album: item.metadata.album.clone(),
+        thumb: None, plex_image: None, media_locator: Some(item.media_locator.clone()), uri: String::new(), duration: item.metadata.duration
+    }).collect::<Vec<_>>();
+    if initial && !plex_client.initial_stream_references(&reference_tracks) { return Err(initial_plex_playback::WAIT.into()); }
     let mut resolved_uris = Vec::with_capacity(playlist.items.len());
     for item in &playlist.items {
         let uri = match &item.media_locator {
@@ -4212,13 +4344,19 @@ async fn play_playlist(
         };
         resolved_uris.push(uri);
     }
+    { let audio = audio_state.0.lock().map_err(|_| "Playback unavailable")?;
+      initial_playback_context(&transactions, Some(&token))?; audio.validate_playback_intent(&token)?; }
     let mut prepared = prepare_playlist_playback(&playlist, resolved_uris, start_item_id.as_deref())?;
     if shuffle == Some(true) && prepared.tracks.len() > 1 {
         let mut source = std::fs::File::open("/dev/urandom")
             .map_err(|error| format!("Falha ao obter aleatoriedade para a playlist: {error}"))?;
         shuffle_prepared_playlist_playback(&mut prepared, |upper| random_playlist_index(upper, &mut source))?;
     }
-    finish_playback_intent(&audio_state.0, &transactions, &token,
+    if initial && !plex_state.0.lock().map_err(|_| "Plex unavailable")?.initial_stream_references(&reference_tracks) {
+        return Err(initial_plex_playback::WAIT.into());
+    }
+    let effect = if initial { InitialPlaybackEffect::VerifiedPlex(prepared.playback_uris.clone()) } else { InitialPlaybackEffect::Queue };
+    finish_playback_effect(&audio_state.0, &transactions, &token, effect,
         |audio| audio.play_tracks(prepared.tracks, prepared.playback_uris, prepared.start_index))?;
     Ok(PlaylistPlaybackResult {
         skipped_count: prepared.skipped_count,
@@ -5857,6 +5995,10 @@ fn start_coordinated_shutdown(app_handle: &AppHandle, exit_code: i32) {
             let transaction_state = shutdown_app.state::<ConfigTransactionState>();
             transaction_state.begin_effective_shutdown();
             let _transaction_guard = transaction_state.wait_for_active_transaction();
+            if transaction_state.initial_plex.drain().is_err() {
+                eprintln!("[Audio] Initial playback shutdown drain unconfirmed.");
+                return;
+            }
             shutdown_controlled_resources(&shutdown_app);
             shutdown_app.state::<shared_dsp::State>().join();
             transaction_state.mark_shutdown_complete();

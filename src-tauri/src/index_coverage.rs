@@ -191,6 +191,9 @@ pub(crate) struct Counts {
     pub virtual_tracks: usize,
     pub omitted: usize,
     pub policy_excluded: usize,
+    pub audio_unconfirmed: usize,
+    pub cue_groups_unobserved: usize,
+    pub unaddressable: usize,
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct Report {
@@ -267,6 +270,7 @@ pub(crate) fn compare(
                     source: id.clone(),
                     policy_excluded: *inventory.excluded.get(id).unwrap_or(&0),
                     omitted: *inventory.unaddressable.get(id).unwrap_or(&0),
+                    unaddressable: *inventory.unaddressable.get(id).unwrap_or(&0),
                     ..Default::default()
                 },
             )
@@ -280,11 +284,16 @@ pub(crate) fn compare(
                 c.audio_files += 1;
                 if covered.contains(uri) {
                     c.cataloged_audio += 1
+                } else {
+                    c.audio_unconfirmed += 1
                 }
             }
             Kind::Cue => {
                 c.cue_groups += 1;
-                c.virtual_tracks += virtual_counts.get(uri).copied().unwrap_or(0)
+                c.virtual_tracks += virtual_counts.get(uri).copied().unwrap_or(0);
+                if !covered.contains(uri) {
+                    c.cue_groups_unobserved += 1
+                }
             }
         }
         if !covered.contains(uri) {

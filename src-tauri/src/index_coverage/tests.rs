@@ -53,6 +53,28 @@ fn catalog(files: &[&str]) -> Catalog {
 fn ids() -> BTreeSet<String> {
     BTreeSet::from(["Music".into()])
 }
+
+#[test]
+fn coverage_categories_keep_cue_absence_distinct_from_audio_and_policy() {
+    let f = Fixture::new();
+    f.file("image.wav", b"fixture");
+    f.file("album.cue", b"FILE \"image.wav\" WAVE\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n");
+    f.file("other.txt", b"excluded");
+    let mut inv = f.build("categories");
+    let physical = f.music.join("image.wav");
+    inv.observe("Music", Path::new("unusable\n.wav"), &physical, Kind::Audio,
+        &fs::metadata(&physical).unwrap()).unwrap();
+    let r = compare(&inv, &catalog(&[]), &ids(), &catalog(&["Music/image.wav"])).unwrap();
+    let c = &r.sources[0];
+    assert_eq!((c.audio_files, c.cataloged_audio), (1, 1));
+    assert_eq!((c.audio_unconfirmed, c.cue_groups_unobserved, c.unaddressable), (0, 1, 1));
+    assert_eq!((c.omitted, c.policy_excluded), (2, 1));
+    let absent = compare(&inv, &catalog(&[]), &ids(), &catalog(&[])).unwrap();
+    let c = &absent.sources[0];
+    assert_eq!((c.audio_unconfirmed, c.cue_groups_unobserved, c.unaddressable), (1, 1, 1));
+    assert_eq!(c.omitted, 3);
+    assert_eq!(compare(&inv, &catalog(&["Music/image.wav"]), &ids(), &catalog(&[])).unwrap_err(), LOST);
+}
 #[test]
 fn real_scan_preserves_unknown_new_omissions_and_true_empty() {
     let f = Fixture::new();

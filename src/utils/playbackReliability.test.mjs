@@ -68,6 +68,7 @@ for(const lang of ['pt-BR','en'])for(const name of ['AlbumView','AlbumDetailModa
  const alert=()=>{const tree=render();const item=nodes(tree).find(n=>n.type===notice.PlaybackRequestNotice);return item?.props.failure?renderToStaticMarkup(item):''};
  const click=()=>{const tree=render();const button=nodes(tree).find(n=>n.type==='button'&&nodes(n).some(child=>child.type===icons.Play));assert.ok(button);button.props.onClick()};
  await ready();let tree=render();const beforeInfo=backend;nodes(tree).find(n=>n.props['data-plex-file-info']).props.onClick({stopPropagation(){}});assert.equal(requests.length,0);assert.equal(backend,beforeInfo);
+ click();requests.at(-1).reject('FIRST_RUN_CATALOG_INDEXING');await flush();assert.ok(alert().includes(i18n.t('player.requestError.initialIndexing')));assert.doesNotMatch(alert(),/FIRST_RUN_CATALOG_INDEXING/);
  click();requests.at(-1).reject('PLAYBACK_QUEUE_UNCERTAIN');await flush();assert.ok(alert().includes(i18n.t('player.requestError.uncertain')));assert.doesNotMatch(alert(),/fixture-part|X-Plex-Token|ACK/);
  h.props={...h.props,album:{...album,rating_key:'visit-B'}};await ready();assert.equal(alert(),'');h.props={...h.props,album};await ready();assert.equal(alert(),'','an old visible error must not return on A-B-A navigation');
  click();assert.equal(alert(),'');requests.at(-1).resolve();await flush();assert.equal(alert(),'');
@@ -82,4 +83,17 @@ test('real service admits before MPD IPC, carries the token, and leaves seek sin
  await service.playTracks([{title:'Fixture',uri:'fixture.flac'}],0);
  assert.deepEqual(calls.map(c=>c[0]),['admit_playback_intent','play_tracks']);assert.equal(calls[1][1].intent,'1');
  calls.length=0;await service.seek(12.5);assert.deepEqual(calls,[['seek_playback',{seconds:12.5}]]);reset();
+});
+
+test('initial-index admission refusal performs no MPD playback and retains its actionable category',async()=>{
+ reset();const prior=intents.beginPlaybackIntent();prior.cancel();await flush();
+ const calls=[];
+ const service=compile(source('services/audio.ts'),{'../utils/playbackIntent':intents,'@tauri-apps/api/core':{invoke:async(cmd)=>{calls.push(cmd);if(cmd==='admit_playback_intent')throw 'FIRST_RUN_CATALOG_INDEXING';throw new Error('unexpected MPD IPC')}},'../utils/frontendDiagnostics':{diagnosticInvoke:(invoke,cmd,args)=>invoke(cmd,args)}}).audioService;
+ for(const start of [()=>service.playTracks([track],0),()=>service.togglePlay(),()=>service.next(),()=>service.previous(),()=>service.playQueueIndex(0),()=>service.clearQueue()]){
+  await assert.rejects(start(),e=>e==='FIRST_RUN_CATALOG_INDEXING');
+ }
+ assert.deepEqual(calls,Array(6).fill('admit_playback_intent'));
+ assert.equal(intents.playbackFailure('FIRST_RUN_CATALOG_INDEXING'),'initialIndexing');
+ assert.equal(intents.playbackFailure('CONFIG_SAVE_BUSY'),'failed');
+ assert.equal(intents.playbackFailure('MANAGED_FOLDERS_SAVE_PENDING'),'failed');reset();
 });

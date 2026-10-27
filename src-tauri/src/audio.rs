@@ -3062,12 +3062,21 @@ impl AudioEngine {
         deadline: Option<Instant>,
     ) -> Result<Vec<String>, String> {
         mpd_deadline_timeout(deadline)?;
+        if let Some(pid) = crate::initial_plex_playback::command_peer(socket_path)? {
+            let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_millis(500));
+            let stream = crate::signal_processing::connect(Path::new(socket_path), pid, deadline)
+                .map_err(|_| "PLAYBACK_SUPERSEDED".to_string())?;
+            return Self::send_command_on_stream(stream, command, Some(deadline));
+        }
         let stream = UnixStream::connect(socket_path)
             .map_err(|e| format!("Falha ao conectar no socket MPD: {}", e))?;
         Self::send_command_on_stream(stream, command, deadline)
     }
 
     pub(crate) fn send_owned_command_to_socket(socket_path: &str, pid: u32, command: &str) -> Result<Vec<String>, String> {
+        if crate::initial_plex_playback::command_peer(socket_path)?.is_some_and(|expected| expected != pid) {
+            return Err("PLAYBACK_SUPERSEDED".into());
+        }
         let deadline = Instant::now() + Duration::from_millis(500);
         let stream = crate::signal_processing::connect(Path::new(socket_path), pid, deadline)
             .map_err(|_| crate::direct_volume::STALE.to_string())?;

@@ -269,7 +269,8 @@
     "requestError": {
       "uncertain": "Playback could not be confirmed. Select a track again to restore the queue.",
       "persistence": "Playback changed, but saving the queue could not be confirmed.",
-      "failed": "Could not complete playback. Please try again."
+      "failed": "Could not complete playback. Please try again.",
+      "initialIndexing": "Preparing the local library. Wait for indexing to finish before starting playback."
     },
     "playbackError": {
       "output_busy": "Audio output is busy. Playback could not start.",
@@ -1539,15 +1540,18 @@
     "limit": "Source metadata does not authenticate the master or confirm bit-perfect playback or the DAC format."
   },
   "indexCoverage": {
-    "partial": "Last report: indexing finished with omissions. See how many files were included, including a possible total of zero. Existing references were kept.",
+    "unclassified": "Unconfirmed items without a category in this report: {{count}}.",
+    "categories": "Unconfirmed audio: {{audio}}. CUE groups with no observed track: {{cues}}. Entries without a usable address: {{paths}}.",
+    "openDetails": "View details in Preferences",
+    "partial": "Indexing finished, but some items could not be confirmed.",
     "confirmed": "Last indexing report: selected files were reconciled within the observed scope.",
     "unknown": "No indexing report is available in this session. Coverage and omissions are unknown.",
     "details": "Indexing details",
     "source": "Source {{name}}",
-    "counts": "Selected audio files: {{audio}}; selected CUE groups: {{cues}}; indexed audio files: {{cataloged}}; indexed virtual tracks: {{virtual}}; omitted files/groups: {{omitted}}; other files excluded by policy: {{excluded}}.",
+    "counts": "Audio included: {{cataloged}} of {{audio}} files. CUE: {{cues}} groups; {{virtual}} observed tracks. Unconfirmed items: {{omitted}}. Other items outside the selection: {{excluded}}.",
     "full": "Observed scope: the scanned generation.",
     "paths": "Observed scope: changed paths only; the whole library was not checked.",
-    "limits": "An omission does not prove corruption or an unsupported format. CUE group presence does not certify every segment. Indexing does not verify complete decoding or playback. Sources use their managed identifier, without absolute paths.",
+    "limits": "Unconfirmed items do not necessarily mean damaged files. Observing a CUE group does not confirm all its segments. This report does not test playback.",
     "failed": "Indexing could not be confirmed: a source or selected file changed, the catalog was invalid, or previously indexed items are missing without a confirmed removal. References were kept. Review the sources and try again when changes have finished."
   },
   "libraryRecovery": {
