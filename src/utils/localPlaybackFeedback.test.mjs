@@ -22,11 +22,11 @@ const hooks={
  useEffect(fn,deps){const h=host,index=h.cursor++,old=h.slots[index];if(!old||!equal(old.deps,deps))h.effects.push(()=>{old?.cleanup?.();h.slots[index]={deps,cleanup:fn()};});},
  useSyncExternalStore(_subscribe,get){host.cursor++;return get();},
 };
-let snapshot,requests,logs,coverRead;
+let snapshot,confirmedRevision,requests,logs,coverRead;
 const album={id:'album-a',title:'Fixture album',artist:'Synthetic artist',folder_path:'Synthetic',discs:[{number:1,label:'Disc 1',folder_path:'Synthetic',track_count:1}],track_count:1,source_id:null};
 const track={name:'fixture.m4a',path:'Synthetic/fixture.m4a',title:'Fixture track',artist:'Synthetic artist',album:'Fixture album',item_type:'file',duration:1};
 const groups=[{disc:album.discs[0],tracks:[track]}];
-const catalog={subscribe:()=>()=>{},getSnapshot:()=>snapshot,setUpdating(){},requestRefresh(){},waitForMpd(){}};
+const catalog={subscribe:()=>()=>{},getSnapshot:()=>snapshot,getConfirmedRevision:()=>confirmedRevision,setUpdating(){},requestRefresh(){},waitForMpd(){}};
 const audioService={playTracks:(...args)=>{const d=deferred();requests.push({...d,args});return d.promise;},getLocalAlbumTracks:async()=>groups,resolveLocalLibraryPath:async()=>'/synthetic/folder',listLocalDirectory:async()=>[track,{name:'Subfolder',path:'Synthetic/Subfolder',item_type:'directory'}],getLocalCover:async()=>null};
 const artwork={get:()=>null,subscribe:()=>()=>{},resolveLocalOnly:(...a)=>coverRead(...a),resolve:async()=>null};
 const replacements={
@@ -67,7 +67,7 @@ class Harness{
  folderClick(){const row=nodes(this.tree,n=>n.type==='div'&&n.props?.onClick&&n.props?.className?.includes('justify-between')&&markup(n).includes('Fixture track'))[0];assert.ok(row,'folder file row');return row.props.onClick();}
 }
 function setup(){
- requests=[];logs=[];coverRead=async()=>null;snapshot={albums:[album],loaded:true,loading:false,saveBlocked:false,mpdBusy:false,error:null};
+ requests=[];logs=[];coverRead=async()=>null;confirmedRevision=1;snapshot={albums:[album],loaded:true,loading:false,saveBlocked:false,mpdBusy:false,error:null};
  return new Harness({initialAlbumId:'album-a',isPlaybackAvailable:true,isLibraryUpdating:false,onlineArtworkEnabled:false,configuredLocalFolders:[],catalogRefreshRevision:0});
 }
 const sensitive='ACK [50@2] {play} /private/file.m4a https://private.invalid/?token=SECRET';
@@ -108,7 +108,7 @@ for(const lng of ['pt-BR','en']){
   language=i18n;const h=setup();try{
    await h.settle();h.render({...h.props,isPlaybackAvailable:false});h.click(language.t('localBrowser.playAlbum'));await flush();assert.equal(requests.length,0);assert.equal(h.alerts().length,0);
    await h.settle();h.render({...h.props,isPlaybackAvailable:true});await h.settle();const cover=deferred();coverRead=()=>cover.promise;
-   h.click(language.t('localBrowser.playAlbum'));await flush();snapshot={...snapshot,albums:[...snapshot.albums]};cover.resolve(null);await flush();assert.equal(requests.length,0);assert.equal(h.alerts().length,0);
+   h.click(language.t('localBrowser.playAlbum'));await flush();confirmedRevision++;snapshot={...snapshot,albums:[...snapshot.albums]};cover.resolve(null);await flush();assert.equal(requests.length,0);assert.equal(h.alerts().length,0);
   }finally{h.close();}
  });
 }
