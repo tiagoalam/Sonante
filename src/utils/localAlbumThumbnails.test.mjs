@@ -269,7 +269,8 @@ test("DEV summaries distinguish restored/paint/capture/rejection/write failure w
     if (!["stage", "restore", "rejected"].includes(key)) assert.ok(Number.isSafeInteger(count) && count >= 0);
   }
   const session = readFileSync(new URL("./localArtworkSession.ts", import.meta.url), "utf8");
-  assert.match(session, /import.meta.env\?\.DEV \? value => console.info\("\[Sonante\] local.thumbnails"/);
+  assert.match(session, /import \{ logLocalThumbnailDiagnostic \} from "\.\/frontendDiagnostics"/);
+  assert.match(session, /import.meta.env\?\.DEV \? logLocalThumbnailDiagnostic : undefined/);
 });
 
 test("reduction failures report only the fixed reason, never exceptions or image payload", () => {

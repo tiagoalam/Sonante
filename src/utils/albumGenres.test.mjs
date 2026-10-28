@@ -149,6 +149,7 @@ test("configured source presentation and genre scope support single, multiple an
 });
 
 function navigationFixture() {
+  const catalog = { albums: [], loading: false, loaded: true, error: null, mpdBusy: false, saveBlocked: false };
   const state = {
     viewMode: "albums", plexViewMode: "albums", selectedGenre: null, selectedPlexGenre: null,
     selectedAlbum: null, selectedArtist: null, selectedDecade: null, selectedYear: null,
@@ -158,6 +159,7 @@ function navigationFixture() {
   };
   let reset;
   const scope = () => { const bindings = {
+    localAlbumCatalog: { getSnapshot: () => catalog },
     ...state, activeGenre: state.selectedGenre, activePlexGenre: state.selectedPlexGenre,
     initialAlbumId: undefined, playerTarget: null, playerNavigationRequests: { invalidate() {} },
     plexLibraryRequestGenerationRef: { current: 1 }, plexSearchRequestGenerationRef: { current: 1 },
@@ -168,12 +170,13 @@ function navigationFixture() {
     setSearchQuery() {}, setSearchResults() {}, setPlayerNavigation() {}, setPlayerNavigationError() {}, setLocalSelectedArtist() {},
     ...Object.fromEntries(Object.keys(state).map(key => [`set${key[0].toUpperCase()}${key.slice(1)}`, value => { state[key] = value; }])),
   }; reset = bindCollectionReset(bindings); return bindings; };
-  return { state, scope, assertCollectionReset: () => reset.assertReset(), local: (name, ...args) => execute(localSource, name, scope(), ...args),
+  return { state, catalog, scope, assertCollectionReset: () => reset.assertReset(), local: (name, ...args) => execute(localSource, name, scope(), ...args),
     plex: (name, ...args) => execute(plexSource, name, scope(), ...args) };
 }
 
 test("Local genre → album → back retains genre; second back and tab transitions clear only their context", async () => {
   const f = navigationFixture(), album = { id: "source/cue", title: "Same" };
+  f.catalog.albums = [album];
   f.local("selectViewMode", "genres");
   f.state.selectedGenre = "jazz";
   await f.local("handleSelectAlbum", album);
@@ -191,6 +194,19 @@ test("Local genre → album → back retains genre; second back and tab transiti
     assert.equal(f.state.viewMode, mode);
     assert.equal(f.state.selectedGenre, null);
   }
+});
+
+test("Local genre selection ignores presentation-only albums until the live catalog is loaded", async () => {
+  const f = navigationFixture(), album = { id: "source/cue", title: "Same" };
+  f.state.viewMode = "genres"; f.state.selectedGenre = "jazz";
+  f.catalog.loaded = false; f.catalog.presentationAlbums = [album];
+  await f.local("handleSelectAlbum", album);
+  assert.equal(f.state.selectedAlbum, null);
+  assert.equal(f.state.selectedGenre, "jazz");
+  f.catalog.loaded = true; f.catalog.albums = [album];
+  await f.local("handleSelectAlbum", album);
+  assert.equal(f.state.selectedAlbum, album, "selection reads the current catalog snapshot");
+  assert.equal(f.state.selectedGenre, "jazz");
 });
 
 test("Plex album back retains genre, while genre back, mode changes and library changes invalidate it", () => {
@@ -260,18 +276,30 @@ function renderGenreBranch(source, variable, end, bindings) {
 }
 
 test("Local genre page reuses the virtual grid and real album identities, isolated from other views", () => {
-  const album = { id: "opaque/cue", folder_path: "A/Album", genres: ["Jazz"] }, calls = [];
+  const album = { id: "opaque/cue", folder_path: "A/Album", genres: ["Jazz"] }, calls = [], cards = [];
   const grid = props => { calls.push(props); return React.createElement("div", null, props.items.map(item => React.cloneElement(props.renderItem(item), { key: props.getItemKey(item) }))); };
-  const base = { VirtualAlbumGrid: grid, LocalAlbumCard: props => React.createElement("span", null, props.album.id),
+  const base = { VirtualAlbumGrid: grid, LocalAlbumCard: props => { cards.push(props); return React.createElement("span", null, props.album.id); },
     activeGenre: "jazz", genreAlbums: [album], activeSourceId: "opaque", albumSearch: "", albumSortMode: "album-asc",
     scrollContainer: {}, favoriteIds: new Set(), handleToggleFavoriteLocal() {}, handleSelectAlbum() {}, handlePlayEntireAlbum() {},
-    metadataMode: false, isPlaybackAvailable: true, onlineArtworkEnabled: false, isLibraryUpdating: false, emptyCatalogState: "ready", genreOptions: deriveAlbumGenres([album]), setSelectedGenre() {} };
+    catalog: { albums: [album], loading: false, loaded: true, error: null, mpdBusy: false, saveBlocked: false },
+    artworkBlocked: false, metadataMode: false, isPlaybackAvailable: true, onlineArtworkEnabled: false, isLibraryUpdating: false, emptyCatalogState: "ready", genreOptions: deriveAlbumGenres([album]), setSelectedGenre() {} };
   assert.match(renderToStaticMarkup(renderGenreBranch(localSource, "viewMode", ') : viewMode === "years" ? (', base)), /opaque\/cue/);
   assert.equal(calls[0].items[0], album);
   assert.equal(calls[0].getItemKey(album), album.id);
+  assert.equal(cards[0].readEnabled, true);
+  assert.equal(cards[0].isLibraryUpdating, false);
   const root = renderGenreBranch(localSource, "viewMode", ') : viewMode === "years" ? (', { ...base, activeGenre: null });
   assert.match(renderToStaticMarkup(root), /Jazz/);
   assert.equal(calls.length, 1, "summary cards do not render album cards or request their artwork");
+  assert.equal(cards.length, 1);
+  for (const bindings of [
+    { ...base, catalog: { ...base.catalog, albums: [], presentationAlbums: [album], loaded: false }, artworkBlocked: true },
+    { ...base, metadataMode: true, artworkBlocked: true },
+  ]) {
+    assert.match(renderToStaticMarkup(renderGenreBranch(localSource, "viewMode", ') : viewMode === "years" ? (', bindings)), /opaque\/cue/);
+    assert.equal(cards.at(-1).readEnabled, false);
+    assert.equal(cards.at(-1).isLibraryUpdating, true);
+  }
   assert.match(renderToStaticMarkup(renderGenreBranch(localSource, "viewMode", ') : viewMode === "years" ? (', { ...base, genreAlbums: [] })), /localBrowser.emptyAlbums/);
 });
 

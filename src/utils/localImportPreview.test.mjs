@@ -223,7 +223,7 @@ const start = browser.indexOf(branchStart, browser.indexOf('ref={setScrollContai
 const expression = browser.slice(start + branchStart.length, browser.indexOf(branchEnd, start));
 // Exercise the actual album-branch JSX, including the empty-state conditions.
 const layoutJs = ts.transpileModule(`function Layout(props) {
-  const {filteredAlbums, visibleImportPreview, emptyCatalogState, scrollContainer} = props;
+  const {filteredAlbums, visibleImportPreview, emptyCatalogState, scrollContainer, catalog} = props;
   const sortedAlbums = filteredAlbums, catalogActivity = "indexing", activeSourceId = null, albumSearch = "", albumSortMode = "album-asc";
   const importArtworkCache = undefined;
   const albumGridRef = null, favoriteIds = new Set(), catalogConfirmed = false, isPlaybackAvailable = true, onlineArtworkEnabled = false, artworkBlocked = true, metadataMode = false;
@@ -231,12 +231,14 @@ const layoutJs = ts.transpileModule(`function Layout(props) {
   const localAlbumNavigationResetKey = () => "existing-navigation";
   const t = key => key;
   const Disc3 = () => null;
-  const LocalAlbumCard = ({album}) => React.createElement("div", {"data-confirmed": album.id}, album.title);
+  const LocalAlbumCard = ({album, readEnabled, isLibraryUpdating, isPlaybackAvailable}) => React.createElement("div", {"data-confirmed": album.id, "data-read-enabled": readEnabled, "data-artwork-blocked": isLibraryUpdating, "data-playback-enabled": isPlaybackAvailable}, album.title);
   return (${expression});
 }`, { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2020 } }).outputText;
 const Layout = new Function("React", "VirtualAlbumGrid", "LocalImportPreviewSection", `${layoutJs}; return Layout;`)(React, gridMock.VirtualAlbumGrid, LocalImportPreviewSection);
-const renderLayout = (confirmed, preview, state = "indexing", scrollContainer = {}) => renderToStaticMarkup(React.createElement(Layout, {
-  filteredAlbums: confirmed, visibleImportPreview: preview, emptyCatalogState: state, scrollContainer,
+const renderLayout = (confirmed, preview, state = "indexing", scrollContainer = {}, catalog = {
+  albums: confirmed, loaded: confirmed.length > 0, loading: false, error: null, mpdBusy: true, saveBlocked: true,
+}) => renderToStaticMarkup(React.createElement(Layout, {
+  filteredAlbums: confirmed, visibleImportPreview: preview, emptyCatalogState: state, scrollContainer, catalog,
 }));
 
 test("empty catalog displays provisional cards in the main scroll without an empty loading block", () => {
@@ -259,6 +261,14 @@ test("confirmed catalog retains its grid, navigation, order and shared scroll be
   assert.deepEqual(gridMock.calls.map(call => call.scrollContainer), [container, container]);
   assert.equal(gridMock.calls[0].resetKey, JSON.stringify(["existing-navigation"]));
   assert.deepEqual(confirmed, original);
+  assert.equal((markup.match(/data-read-enabled="true"/g) ?? []).length, 2);
+  assert.equal((markup.match(/data-artwork-blocked="true"/g) ?? []).length, 2);
+  assert.equal((markup.match(/data-playback-enabled="false"/g) ?? []).length, 2);
+  const restored = renderLayout(confirmed, [row(1)], "ready", container, {
+    albums: [], presentationAlbums: confirmed, loaded: false, loading: false, error: null, mpdBusy: true, saveBlocked: true,
+  });
+  assert.equal((restored.match(/data-read-enabled="false"/g) ?? []).length, 2);
+  assert.equal((restored.match(/data-playback-enabled="false"/g) ?? []).length, 2);
   assert.doesNotMatch(markup, /overflow-y|max-h-/);
 });
 

@@ -11,7 +11,7 @@ const source = path => readFileSync(new URL(path, import.meta.url), "utf8");
 const dataModule = code => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const compile = text => ts.transpileModule(text, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
 const hooksUrl = dataModule(`import React from ${JSON.stringify(import.meta.resolve("react"))}; export default React;
- ${["useState", "useRef", "useEffect", "useMemo", "useSyncExternalStore"].map(name => `export const ${name} = (...args) => globalThis.__metadataSpaceHost.${name}(...args);`).join("\n")}`);
+ ${["useState", "useRef", "useEffect", "useLayoutEffect", "useMemo", "useSyncExternalStore"].map(name => `export const ${name} = (...args) => globalThis.__metadataSpaceHost.${name}(...args);`).join("\n")}`);
 const translationUrl = dataModule('export const useTranslation = () => ({ t: (...args) => globalThis.__metadataSpaceTranslation.t(...args) });');
 const translations = {};
 for (const language of ["pt-BR", "en"]) {
@@ -23,7 +23,8 @@ const audioUrl = dataModule('export const audioService = new Proxy({}, { get: (_
 const favoritesUrl = dataModule('export const favoritesService = { getFavorites: () => Promise.resolve([]) };');
 const artworkUrl = dataModule(`const status = {onlineActivity: null}; export const localArtworkEnrichment = {
  subscribe: () => () => {}, getSnapshot: () => status, setCatalog: () => globalThis.__metadataSpaceReads.push("artwork.setCatalog") };
- export const localArtworkResolver = {get: () => null, subscribe: () => () => {}, resolve: async () => { globalThis.__metadataSpaceReads.push("artwork.resolve"); return null; }};`);
+ export const localArtworkResolver = {get: () => null, subscribe: () => () => {}, resolve: async () => { globalThis.__metadataSpaceReads.push("artwork.resolve"); return null; }};
+ export const localAlbumThumbnails = {get: () => null, setOpeningOrder() {}, observeInitialCard() {}, capture() {}, forget() {}};`);
 const virtualUrl = dataModule(`import React from ${JSON.stringify(import.meta.resolve("react"))};
  export const VirtualList = props => React.createElement("div", {"data-virtual-list": true}, props.items.map(item => React.createElement(React.Fragment, {key: props.getItemKey(item)}, props.renderItem(item))));
  export const VirtualAlbumGrid = () => null;`);
@@ -65,6 +66,7 @@ function host(Component, props) {
     useRef(initial) { return slots[cursor++] ??= { current: initial }; },
     useMemo(factory, deps) { const i = cursor++; if (!slots[i] || deps.some((value, j) => value !== slots[i].deps[j])) slots[i] = { value: factory(), deps }; return slots[i].value; },
     useEffect(setup, deps) { const i = cursor++, previous = slots[i]; if (!previous || !deps || deps.some((value, j) => value !== previous.deps[j])) effects.push(() => { previous?.cleanup?.(); slots[i] = { deps, cleanup: setup() }; }); },
+    useLayoutEffect(setup, deps) { h.useEffect(setup, deps); },
     useSyncExternalStore(_, getSnapshot) { return getSnapshot(); },
     render(next = props) { props = next; globalThis.__metadataSpaceHost = h; cursor = 0; return Component(props); },
     effects() { effects.splice(0).forEach(setup => setup()); }, cleanup() { slots.forEach(slot => slot?.cleanup?.()); }, slots,

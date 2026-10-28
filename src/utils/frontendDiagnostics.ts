@@ -1,3 +1,5 @@
+import type { ThumbnailDiagnostic } from "./localAlbumThumbnails";
+
 // DevTools diagnostics only. UI errors remain unchanged.
 const operations = [
   "player.request", "plex.album-play",
@@ -144,6 +146,32 @@ export function logPlexMixDiagnostic(stage: string, category: string, reason: st
     const count = typeof observed === "number" && Number.isFinite(observed) ? Math.max(0, Math.min(101, Math.trunc(observed))) : 0;
     console.info("[Sonante] plex.mix.frontend", JSON.stringify({ stage, category, reason, observed: count }));
   } catch { /* Diagnostics must not affect selection or interaction. */ }
+}
+
+// The thumbnail owner retains the existing five summaries plus one final line.
+// Keep its DEV-only output here and project only fixed enums and numeric counts.
+export function logLocalThumbnailDiagnostic(value: ThumbnailDiagnostic): void {
+  if (!import.meta.env?.DEV) return;
+  try {
+    const stage = ownData(value, "stage"), restore = ownData(value, "restore");
+    if (!["restore", "summary", "final"].includes(stage as string)
+      || !["absent", "restored", "disabled", "oversized", "invalid_record", "context_mismatch", "invalid_entry", "storage_error"].includes(restore as string)) return;
+    const count = (input: unknown): number => typeof input === "number" && Number.isSafeInteger(input) && input >= 0 ? input : 0;
+    const counters = Object.fromEntries([
+      "restored", "captured", "stored", "retained", "writes", "write_failures", "on_load", "already_complete",
+      "initial_cards", "initial_hits", "initial_misses", "evicted_count", "evicted_bytes",
+    ].map(key => [key, count(ownData(value, key))]));
+    const rejected: Record<string, number> = {};
+    const reasons = ownData(value, "rejected");
+    if (reasons && typeof reasons === "object") {
+      for (const reason of ["context", "admission", "key", "image_incomplete", "source_type", "source_size",
+        "canvas_unavailable", "canvas_failed", "jpeg_invalid", "thumbnail_size", "reduction_failed", "changed", "capacity"]) {
+        const observed = ownData(reasons, reason);
+        if (observed !== undefined) rejected[reason] = count(observed);
+      }
+    }
+    console.info("[Sonante] local.thumbnails", JSON.stringify({ stage, restore, ...counters, rejected }));
+  } catch { /* Diagnostics must not affect artwork or cache behavior. */ }
 }
 
 // Opt-in development snapshots. Never evaluate the builder in a production build.

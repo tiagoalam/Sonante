@@ -20,6 +20,7 @@ const hooks={
  useRef(initial){return host.slots[host.cursor++]??={current:initial};},
  useMemo(fn,deps){const h=host,index=h.cursor++,old=h.slots[index];if(!old||!equal(old.deps,deps))h.slots[index]={deps,value:fn()};return h.slots[index].value;},
  useEffect(fn,deps){const h=host,index=h.cursor++,old=h.slots[index];if(!old||!equal(old.deps,deps))h.effects.push(()=>{old?.cleanup?.();h.slots[index]={deps,cleanup:fn()};});},
+ useLayoutEffect(fn,deps){hooks.useEffect(fn,deps);},
  useSyncExternalStore(_subscribe,get){host.cursor++;return get();},
 };
 let snapshot,confirmedRevision,requests,logs,coverRead;
@@ -34,7 +35,7 @@ const replacements={
  '../services/audio':{audioService},'../services/favorites':{favoritesService:{getFavorites:async()=>[]}},
  '../utils/frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})}, './frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})},
  '../utils/localAlbumCatalogSession':{localAlbumCatalog:catalog},
- '../utils/localArtworkSession':{localArtworkResolver:artwork,localArtworkEnrichment:{subscribe:()=>()=>{},getSnapshot:()=>({active:0,queued:0,inFlight:0,blocked:false}),setCatalog(){}}},
+ '../utils/localArtworkSession':{localAlbumThumbnails:{setOpeningOrder(){}},localArtworkResolver:artwork,localArtworkEnrichment:{subscribe:()=>()=>{},getSnapshot:()=>({active:0,queued:0,inFlight:0,blocked:false}),setCatalog(){}}},
 };
 const cache=new Map();
 function load(path){
