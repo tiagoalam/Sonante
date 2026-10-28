@@ -396,3 +396,73 @@ pub(crate) fn pending_generation_tampering_and_database_write_failure_keep_prefe
     assert!(crate::first_run_managed::PendingPreparation::open(&owner).is_err());
     assert!(link.exists()); assert!(f.marker().exists());
 }
+
+
+#[cfg_attr(test, test)]
+pub(crate) fn generated_permissions_admit_first_run_under_desktop_umasks() {
+    const CASE: &str = "SONANTE_TEST_FIRST_RUN_CREATION_MASK";
+    if let Ok(mask) = std::env::var(CASE) {
+        assert!(["0000", "0002", "0022", "0077"].contains(&mask.as_str()));
+        // umask is process-global: only change it in this isolated single-test
+        // child, never in the parent's parallel test process.
+        unsafe { libc::umask(u32::from_str_radix(&mask, 8).unwrap()); }
+        let f = Fixture::new(); let (previous, next) = f.configs(false);
+        let nested = f.media.join("Album/Disc 1");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("nested.wav"), b"synthetic metadata fixture").unwrap();
+        let source_modes = [&f.media, &nested, &nested.join("nested.wav")].map(|p|
+            fs::symlink_metadata(p).unwrap().permissions().mode());
+        let owner = Lease::acquire(&f.profile).unwrap();
+        let mut tx = InitialPublication::prepare(&owner, &previous, &next, "private-creation", &||false).unwrap();
+        fn private_generation(path: &std::path::Path) {
+            assert_eq!(fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777, 0o700);
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap(); let metadata = fs::symlink_metadata(entry.path()).unwrap();
+                if metadata.is_dir() { private_generation(&entry.path()); }
+                else if metadata.is_file() {
+                    assert_eq!(entry.file_name(), mirror::MANIFEST_NAME);
+                    assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
+                } else { assert!(metadata.file_type().is_symlink()); }
+            }
+        }
+        private_generation(&f.profile.join("library.next"));
+        tx.publish(&||false).unwrap();
+        private_generation(&f.profile.join("library"));
+        let ids = mirror::read_manifest(&f.profile.join("library")).unwrap().sources;
+        f.persist(&next); tx.prepare_background().unwrap();
+        let pending = crate::first_run_managed::PendingPreparation::open(&owner).unwrap();
+        assert!(!f.profile.join("mpd-v2.db").exists());
+        assert!(pending.finish(&owner).is_err(), "no admission of an absent durable DB");
+        assert!(f.marker().exists());
+        f.db(); pending.finish(&owner).unwrap();
+        assert_eq!(mirror::read_manifest(&f.profile.join("library")).unwrap().sources, ids);
+        assert_eq!(AppConfig::load_from_path(&f.profile.join("config.json")).unwrap(), next);
+        assert!(!f.marker().exists()); f.assert_managed();
+        assert_eq!([&f.media, &nested, &nested.join("nested.wav")].map(|p|
+            fs::symlink_metadata(p).unwrap().permissions().mode()), source_modes);
+        return;
+    }
+    for mask in ["0000", "0002", "0022", "0077"] {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "first_run_managed::tests::generated_permissions_admit_first_run_under_desktop_umasks", "--test-threads=1"])
+            .env(CASE, mask).output().unwrap();
+        assert!(result.status.success(), "umask {mask}: {}{}",
+            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    }
+}
+
+#[cfg_attr(test, test)]
+pub(crate) fn writable_published_generation_is_refused_without_permission_repair() {
+    for manifest in [false, true] {
+        let f = Fixture::new(); let (previous, next) = f.configs(false);
+        let owner = Lease::acquire(&f.profile).unwrap();
+        let mut tx = InitialPublication::prepare(&owner, &previous, &next, "unsafe-retained", &||false).unwrap();
+        tx.publish(&||false).unwrap();
+        let path = if manifest { f.profile.join("library").join(mirror::MANIFEST_NAME) } else { f.profile.join("library") };
+        let unsafe_mode = if manifest { 0o664 } else { 0o775 };
+        fs::set_permissions(&path, fs::Permissions::from_mode(unsafe_mode)).unwrap();
+        assert!(tx.validate_published().is_err());
+        assert_eq!(fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o7777, unsafe_mode);
+        assert!(!f.profile.join("config.json").exists()); assert!(f.marker().exists());
+    }
+}

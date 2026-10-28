@@ -860,7 +860,7 @@
     "plexNotReady": "Connect to Plex and select a server before continuing.",
     "unnamedServer": "Plex server",
     "libraryPreparationError": "The music library could not be prepared. Initial setup has not completed.",
-    "preparationIncomplete": "Your preferences were saved, but initial setup could not be completed. Close Sonante and preserve your configuration for recovery.",
+    "preparationIncomplete": "Initial setup could not be completed. Close Sonante and preserve the configuration files for recovery.",
     "saveError": "An error occurred while saving the initial preferences.",
     "sourceRequired": "Select at least one music source (Local Storage or Plex Server).",
     "foldersCount_zero": "{{count}} folders",

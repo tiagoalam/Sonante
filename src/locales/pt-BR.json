@@ -860,7 +860,7 @@
     "plexNotReady": "Conecte ao Plex e selecione um servidor antes de continuar.",
     "unnamedServer": "Servidor Plex",
     "libraryPreparationError": "Não foi possível preparar a biblioteca de músicas. A configuração inicial não foi concluída.",
-    "preparationIncomplete": "Suas preferências foram salvas, mas não foi possível concluir a configuração inicial. Feche o Sonante e preserve sua configuração para recuperação.",
+    "preparationIncomplete": "Não foi possível concluir a configuração inicial. Feche o Sonante e preserve os arquivos de configuração para recuperação.",
     "saveError": "Ocorreu um erro ao salvar as preferências iniciais.",
     "sourceRequired": "Selecione pelo menos uma fonte de música (Armazenamento Local ou Servidor Plex).",
     "foldersCount_zero": "{{count}} pastas",

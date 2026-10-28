@@ -562,11 +562,11 @@ pub(crate) mod mirror {
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::ffi::{CStr, CString, OsStr, OsString};
     use std::fs;
-    use std::io::{ErrorKind, Read};
+    use std::io::{ErrorKind, Read, Write};
     use std::mem::MaybeUninit;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    use std::os::unix::fs::{symlink, MetadataExt};
+    use std::os::unix::fs::{symlink, DirBuilderExt, MetadataExt, OpenOptionsExt};
     use std::path::{Component, Path, PathBuf};
     use std::time::{Duration, Instant};
 
@@ -1117,7 +1117,9 @@ pub(crate) mod mirror {
             scanned.push((source_id.clone(), scan_source(root)?));
         }
 
-        fs::create_dir(staging_path).map_err(|error| {
+        // Generated mirror directories must satisfy the readonly admission
+        // regardless of the desktop session's umask (for example 0002).
+        fs::DirBuilder::new().mode(0o700).create(staging_path).map_err(|error| {
             format!(
                 "Falha ao criar staging da biblioteca ({}): {error}",
                 staging_path.display()
@@ -1330,7 +1332,11 @@ pub(crate) mod mirror {
         validate_manifest(manifest)?;
         let bytes = serde_json::to_vec_pretty(manifest)
             .map_err(|error| format!("Falha ao serializar manifesto do mirror: {error}"))?;
-        fs::write(generation_path.join(MANIFEST_NAME), bytes)
+        // mode applies only on creation; never repair permissions of an
+        // existing generation while writing its already-admitted manifest.
+        fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600)
+            .open(generation_path.join(MANIFEST_NAME))
+            .and_then(|mut file| file.write_all(&bytes))
             .map_err(|error| format!("Falha ao gravar manifesto do mirror: {error}"))
     }
 
@@ -2633,7 +2639,7 @@ pub(crate) mod mirror {
         let parent = destination
             .parent()
             .ok_or_else(|| "Destino do mirror sem diretório pai.".to_string())?;
-        fs::create_dir_all(parent)
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)
             .map_err(|error| format!("Falha ao criar diretório virtual: {error}"))?;
         symlink(&file.physical, &destination)
             .map_err(|error| format!("Falha ao publicar symlink filtrado: {error}"))?;
