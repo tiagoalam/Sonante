@@ -25,3 +25,9 @@ export function createIndexCoverageStore(read:()=>Promise<unknown>,listen:(recei
  const start=()=>{const own=++generation;void(async()=>{const stop=await listen(value=>{if(own===generation)receive(value)});if(own!==generation){stop();return}cleanup=stop;const sampled=own;const value=await read();if(sampled===generation)receive(value)})().catch(()=>{/* Unknown remains unknown; never infer absence of omissions. */})};
  return{getSnapshot:()=>snapshot,subscribe(fn:()=>void){subscribers.add(fn);if(subscribers.size===1)start();return()=>{subscribers.delete(fn);if(!subscribers.size){generation++;cleanup?.();cleanup=undefined}}}};
 }
+
+/** CUE observation alone does not establish missing audio. Keep all counts in Preferences. */
+export function coverageNeedsAttention(report: IndexCoverageReport | null): boolean {
+ return report?.outcome === 'partial' && report.sources.some(c =>
+  (c.audio_unconfirmed ?? c.audio_files - c.cataloged_audio) > 0 || (c.unaddressable ?? 0) > 0);
+}

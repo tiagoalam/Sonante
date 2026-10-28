@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import ts from 'typescript';
 import React from 'react';
+import { coverageNeedsAttention } from './indexCoverage.ts';
 import * as jsx from 'react/jsx-runtime';
 import * as icons from 'lucide-react';
 import {renderToStaticMarkup} from 'react-dom/server';
@@ -12,7 +13,7 @@ function mount(lang='pt-BR',query=async()=>false,report=null){
  const strings=JSON.parse(readFileSync(new URL(`../locales/${lang}.json`,import.meta.url),'utf8'));
  const t=key=>key.split('.').reduce((v,k)=>v[k],strings);
  const listeners=new Map(),cleaned=[];let cursor=0,effect,cleanup,invocations=0,opened=0;const states=[];
- const deps={'../services/indexCoverage':{useIndexCoverage:()=>({revision:1,report})},'./LocalIndexCoverage':{IndexCoverageDetails:()=>{throw new Error('technical details must stay out of the toast')}},react:{useState:initial=>{const i=cursor++;if(!(i in states))states[i]=initial;return[states[i],v=>{states[i]=v}];},useEffect:fn=>{effect??=fn;}},'@tauri-apps/api/core':{invoke:async cmd=>{assert.equal(cmd,'get_local_watch_needs_check');invocations++;return query();}},'@tauri-apps/api/event':{listen:async(event,fn)=>{listeners.set(event,fn);return()=>{listeners.delete(event);cleaned.push(event);};}},'react-i18next':{useTranslation:()=>({t})},'lucide-react':icons,'react/jsx-runtime':jsx};
+ const deps={'../utils/indexCoverage':{coverageNeedsAttention},'../services/indexCoverage':{useIndexCoverage:()=>({revision:1,report})},'./LocalIndexCoverage':{IndexCoverageDetails:()=>{throw new Error('technical details must stay out of the toast')}},react:{useState:initial=>{const i=cursor++;if(!(i in states))states[i]=initial;return[states[i],v=>{states[i]=v}];},useEffect:fn=>{effect??=fn;}},'@tauri-apps/api/core':{invoke:async cmd=>{assert.equal(cmd,'get_local_watch_needs_check');invocations++;return query();}},'@tauri-apps/api/event':{listen:async(event,fn)=>{listeners.set(event,fn);return()=>{listeners.delete(event);cleaned.push(event);};}},'react-i18next':{useTranslation:()=>({t})},'lucide-react':icons,'react/jsx-runtime':jsx};
  const exports={};new Function('require','exports',ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText)(name=>{assert.ok(name in deps,name);return deps[name];},exports);
  const draw=()=>{cursor=0;return exports.LocalWatchNotice({onOpenSettings:()=>opened++});};
  draw();cleanup=effect();
@@ -37,11 +38,22 @@ test('App mounts the real notice and routes its action to Local settings without
 
 test('partial notice stays short with details only by explicit Preferences action; dismissal never repairs',async()=>{
  for(const lang of ['pt-BR','en']){
-  const report={outcome:'partial',scope:'full',generation:'fixture',sources:[{source:'Fixture',audio_files:1033,cataloged_audio:1033,cue_groups:16,virtual_tracks:122,omitted:1,policy_excluded:322,audio_unconfirmed:0,cue_groups_unobserved:1,unaddressable:0}]};
+  const report={outcome:'partial',scope:'full',generation:'fixture',sources:[{source:'Fixture',audio_files:1033,cataloged_audio:1032,cue_groups:16,virtual_tracks:122,omitted:2,policy_excluded:322,audio_unconfirmed:1,cue_groups_unobserved:1,unaddressable:0}]};
   const f=mount(lang,async()=>false,report);await flush();const html=f.html();
   assert.match(html,/role="alert"/);assert.doesNotMatch(html,/<details|1033|322|CUE|scan|corrupt|rescan/i);
   assert.ok(html.includes(lang==='pt-BR'?'Ver detalhes nas Preferências':'View details in Preferences'));
   find(f.draw(),n=>n.type==='button'&&!n.props['aria-label']).props.onClick();assert.equal(f.opened,1);assert.equal(f.calls,1);
   find(f.draw(),n=>n.type==='button'&&n.props['aria-label']).props.onClick();assert.equal(f.html(),'');assert.equal(f.calls,1);f.close();
+ }
+});
+
+test('CUE-only and unclassified omissions stay in Preferences without an automatic alert',async()=>{
+ for(const categorized of [true,false]){
+  const counts={source:'Music',audio_files:2,cataloged_audio:2,cue_groups:1,virtual_tracks:0,omitted:1,policy_excluded:0};
+  if(categorized)Object.assign(counts,{audio_unconfirmed:0,cue_groups_unobserved:1,unaddressable:0});
+  const report={outcome:'partial',scope:'full',generation:'fixture',sources:[counts]};
+  const f=mount('pt-BR',async()=>false,report);await flush();assert.equal(f.html(),'');
+  assert.equal(report.sources[0].omitted,1,'the diagnostic report is preserved');
+  f.listeners.get('local-library-watch-needs-check')();assert.match(f.html(),/role="alert"/);f.close();
  }
 });

@@ -46,5 +46,5 @@ export type PlaybackFailure = "uncertain" | "persistence" | "failed" | "initialI
 export function playbackFailure(error: unknown): PlaybackFailure {
   return error === "PLAYBACK_QUEUE_UNCERTAIN" ? "uncertain"
     : error === "PLAYBACK_PERSISTENCE_FAILED" ? "persistence"
-    : error === "FIRST_RUN_CATALOG_INDEXING" ? "initialIndexing" : "failed";
+    : (error === "FIRST_RUN_CATALOG_INDEXING" || error === "LOCAL_ADDITION_INDEXING") ? "initialIndexing" : "failed";
 }

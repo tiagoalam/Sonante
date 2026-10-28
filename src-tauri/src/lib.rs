@@ -89,6 +89,7 @@ pub struct ConfigState(pub Mutex<AppConfig>);
 pub struct ConfigTransactionState {
     operations: Arc<config_save_operation::Coordinator>,
     initial_plex: initial_plex_playback::Gate,
+    addition_playback: initial_plex_playback::Gate,
     startup_config_read_gate: Mutex<bool>,
     source_mirror_cache: source_availability::MirrorReadCache,
     restart_gate: Mutex<()>,
@@ -2249,7 +2250,18 @@ fn run_experimental_local_folders_save_inner(
             }
         }
     }
+    let mut playback_window = AdditionPlaybackWindow::new(&transaction_state.addition_playback, &audio_state.0, operation);
+    if added_sources && removal_plan.is_none()
+        && previous_kind != local_media::mirror::ManagedMirrorPreviousKind::Legacy
+        && matches!(managed_plan, local_media::mirror::ManagedRefreshPlan::Targeted { .. }) {
+        if playback_window.open(&previous_sources, coverage_check.as_ref(), &live_path, &socket_path, &supervisor_state.0).is_err() {
+            // Optional concurrency must not change Save admission or recovery.
+            playback_window.close()?;
+            eprintln!("[Audio] Confirmed playback unavailable during addition; waiting for completion.");
+        }
+    }
     let refresh_result = request_refresh_and_inspect(&socket_path, managed_plan, Some(diagnostics), Some(operation), || {
+        playback_window.close()?;
         let check = coverage_check.as_ref().ok_or(index_coverage::INVALID)?;
         let (report, catalog) = check.finish_at(&socket_path, &live_path)?;
         let expected = removal_guard.as_ref().map(|(_,proof)|proof);
@@ -2264,6 +2276,11 @@ fn run_experimental_local_folders_save_inner(
         *coverage_report.borrow_mut() = Some(report);
         Ok(())
     });
+    // Failure to drain is a hard fence: preserve intent/generations, never stop,
+    // roll back or commit while an admitted effect could still run.
+    if let Err(primary) = &refresh_result {
+        playback_window.abort().map_err(|cleanup| format!("{primary}; {cleanup}"))?;
+    } else { playback_window.close()?; }
     drop(removal_guard);
     let refresh_result = if confirmed_removal.is_some() {
         refresh_result.and_then(|_| intent.check_queue_cache_completion())
@@ -2396,6 +2413,56 @@ fn run_experimental_local_folders_save_inner(
     after_confirmed_local_folders_save(result, unconfirmed, || install_committed_local_watcher(app, Some(prepared_watch)))
 }
 
+/// Owns the addition-only permission; every return/panic revokes it. No
+/// Coordinator/Audio/Supervisor mutex is held while draining admitted effects.
+struct AdditionPlaybackWindow<'a> {
+    gate: &'a initial_plex_playback::Gate,
+    audio: &'a Mutex<AudioEngine>,
+    operation: &'a config_save_operation::Operation,
+    opened: bool,
+}
+impl<'a> AdditionPlaybackWindow<'a> {
+    fn new(gate: &'a initial_plex_playback::Gate, audio: &'a Mutex<AudioEngine>, operation: &'a config_save_operation::Operation) -> Self {
+        Self { gate, audio, operation, opened: false }
+    }
+    fn open(&mut self, previous: &local_media::ResolvedLocalSources, check: Option<&index_coverage::Check>,
+        library: &Path, socket: &str, supervisor: &Mutex<MpdSupervisor>) -> Result<(), String> {
+        let scope = initial_plex_playback::Addition::capture(library, previous.sources(), check.ok_or(index_coverage::INVALID)?.previous_records())?;
+        let pid = supervisor.lock().map_err(|_| "MPD unavailable")?.observed_process_pid().ok_or("MPD unavailable")?;
+        let mut audio = self.audio.lock().map_err(|_| "Playback unavailable")?;
+        audio.ensure_queue_coherent()?;
+        if audio.startup_queue_pending() { return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        let queue = AudioEngine::capture_mpd_queue_structure(socket).map_err(|_| "PLAYBACK_QUEUE_UNCERTAIN")?;
+        let uris = queue.entries.into_iter().map(|entry| entry.uri).collect::<Vec<_>>();
+        scope.verify_queue(&audio.get_queue(), &uris)?;
+        AudioEngine::send_owned_command_to_socket(socket, pid, "status")?;
+        self.gate.publish_addition(self.operation.id().into(), socket.into(), pid, uris, scope)?;
+        self.opened = true;
+        audio.invalidate_playback_intents();
+        drop(audio);
+        self.operation.addition_playback(true)
+    }
+    fn close(&mut self) -> Result<(), String> { self.finish(false) }
+    fn abort(&mut self) -> Result<(), String> { self.finish(true) }
+    fn finish(&mut self, failed: bool) -> Result<(), String> {
+        if !self.opened { return Ok(()); }
+        let admission = if self.operation.shutdown_requested() { Ok(()) } else { self.operation.addition_playback(false) };
+        if failed { self.gate.invalidate(); self.gate.drain()?; } else { self.gate.retire()?; }
+        let mut audio = self.audio.lock().map_err(|_| "Playback unavailable")?;
+        audio.invalidate_playback_intents();
+        // A partial command or failed cache write must never reach commit or
+        // silently restore the pre-intervention cache. Preserve recovery state.
+        audio.ensure_queue_persisted()?;
+        self.opened = false;
+        admission
+    }
+}
+impl Drop for AdditionPlaybackWindow<'_> {
+    fn drop(&mut self) {
+        if self.abort().is_err() { eprintln!("[Audio] Addition playback revocation unconfirmed; Save remains blocked."); }
+    }
+}
+
 fn is_finishing_first_run(current_config: &AppConfig, new_config: &AppConfig) -> bool {
     current_config.first_run && !new_config.first_run
 }
@@ -2510,6 +2577,7 @@ impl ConfigTransactionState {
         Self {
             operations: Arc::new(config_save_operation::Coordinator::new()),
             initial_plex: initial_plex_playback::Gate::default(),
+            addition_playback: initial_plex_playback::Gate::default(),
             startup_config_read_gate: Mutex::new(false),
             source_mirror_cache: source_availability::MirrorReadCache::default(),
             restart_gate: Mutex::new(()),
@@ -2553,6 +2621,7 @@ impl ConfigTransactionState {
             self.operations.request_shutdown(|| {
                 self.lifecycle.fetch_or(SHUTDOWN_REQUESTED, Ordering::SeqCst);
                 self.initial_plex.invalidate();
+                self.addition_playback.invalidate();
             });
         });
     }
@@ -2956,9 +3025,14 @@ fn seek_playback(
 // Audio -> short Coordinator snapshot -> session lease. Never a Plex await.
 fn initial_playback_context(transactions: &ConfigTransactionState, token: Option<&str>) -> Result<Option<Arc<initial_plex_playback::Session>>, String> {
     if transactions.shutdown_requested() || transactions.shutdown_started() { return Err("PLAYBACK_SUPERSEDED".into()); }
-    let bound = match token { Some(token) => transactions.initial_plex.bound(token)?, None => None };
+    let bound = match token { Some(token) => transactions.addition_playback.bound(token)?.or(transactions.initial_plex.bound(token)?), None => None };
     match transactions.operations.reject_playback() {
         Ok(()) => Ok(bound),
+        Err(error) if error == config_save_operation::ADDITION_INDEXING => {
+            let session = match bound { Some(session) => Some(session), None if token.is_none() => transactions.addition_playback.current()?, None => None };
+            let id = transactions.operations.snapshot()?.filter(|op| op.confirmed_playback && op.phase == config_save_operation::Phase::Indexing).map(|op| op.id);
+            session.filter(|session| session.is_addition() && id.as_deref() == Some(session.operation.as_str())).map(Some).ok_or(error)
+        }
         Err(error) if error == initial_plex_playback::WAIT => {
             let session = match bound { Some(session) => Some(session), None if token.is_none() => transactions.initial_plex.current()?, None => None };
             let id = transactions.operations.initial_catalog_id()?;
@@ -2977,22 +3051,32 @@ fn admit_or_validate_playback(
     if let Some(token) = token { audio.validate_playback_intent(&token)?; Ok(token) }
     else {
         let token = audio.admit_playback_intent()?;
-        if let Some(context) = context { transactions.initial_plex.bind(&token, context)?; }
-        else { transactions.initial_plex.clear_intent(); }
+        if let Some(context) = context {
+            if context.is_addition() { transactions.addition_playback.bind(&token, context)?; }
+            else { transactions.initial_plex.bind(&token, context)?; }
+        } else { transactions.initial_plex.clear_intent(); transactions.addition_playback.clear_intent(); }
         Ok(token)
     }
 }
 
-enum InitialPlaybackEffect { Queue, Clear, VerifiedPlex(Vec<String>) }
-fn initial_queue_uris(audio: &AudioEngine, allow_empty: bool) -> Result<Vec<String>, String> {
+enum InitialPlaybackEffect { Queue, Clear, VerifiedMedia(Vec<String>) }
+fn initial_queue_uris(audio: &AudioEngine, context: &initial_plex_playback::Session, allow_empty: bool) -> Result<Vec<String>, String> {
     audio.ensure_queue_coherent()?;
     let queue = audio.get_queue();
     if (!allow_empty && queue.is_empty()) || audio.startup_queue_pending()
-        || queue.iter().any(|track| !matches!(&track.media_locator, Some(MediaLocator::Plex { server_id, part_key, .. }) if !server_id.is_empty() && !part_key.is_empty())) {
+        || queue.iter().any(|track| match &track.media_locator {
+            Some(MediaLocator::Plex { server_id, part_key, .. }) => server_id.is_empty() || part_key.is_empty(),
+            Some(MediaLocator::Local { uri }) => !context.accepts_local(uri),
+            None => !context.accepts_local(&track.uri),
+        }) {
         return Err(initial_plex_playback::WAIT.into());
     }
     let actual = AudioEngine::capture_mpd_queue_structure(&audio.local_album_socket_path()).map_err(|_| "PLAYBACK_QUEUE_UNCERTAIN")?;
-    if actual.entries.len() != queue.len() { return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+    if actual.entries.len() != queue.len() || queue.iter().zip(&actual.entries).any(|(track, entry)| match &track.media_locator {
+        Some(MediaLocator::Local { uri }) => uri != &entry.uri,
+        None if context.is_addition() => track.uri != entry.uri,
+        _ => false,
+    }) { return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
     Ok(actual.entries.into_iter().map(|entry| entry.uri).collect())
 }
 fn finish_playback_effect<T>(
@@ -3004,7 +3088,7 @@ fn finish_playback_effect<T>(
     audio.validate_playback_intent(token)?;
     if let Some(context) = context {
         let _lease = context.enter()?;
-        let before = initial_queue_uris(&audio, !matches!(effect, InitialPlaybackEffect::Queue));
+        let before = initial_queue_uris(&audio, &context, !matches!(effect, InitialPlaybackEffect::Queue));
         let verified = before.and_then(|before| context.accepts_queue(&before));
         if let Err(error) = verified {
             if error == "PLAYBACK_QUEUE_UNCERTAIN" { audio.mark_queue_uncertain(); }
@@ -3015,10 +3099,10 @@ fn finish_playback_effect<T>(
         // A rejected effect may have left the old queue intact or changed it
         // partially. Verify the appropriate proof without discarding its error.
         // Revocation skips even these read-only commands before owned stop.
-        let after = initial_plex_playback::check_effect().and_then(|_| initial_queue_uris(&audio, true)).and_then(|after| {
+        let after = initial_plex_playback::check_effect().and_then(|_| initial_queue_uris(&audio, &context, true)).and_then(|after| {
             if !accepted { return context.accepts_queue(&after); }
             match &effect {
-                InitialPlaybackEffect::VerifiedPlex(expected) if expected == &after => context.confirm_queue(after),
+                InitialPlaybackEffect::VerifiedMedia(expected) if expected == &after => context.confirm_queue(after),
                 InitialPlaybackEffect::Clear if after.is_empty() => context.confirm_queue(after),
                 InitialPlaybackEffect::Queue => context.accepts_queue(&after),
                 _ => Err("PLAYBACK_QUEUE_UNCERTAIN".into()),
@@ -3043,6 +3127,7 @@ pub(crate) fn with_playback_control<T>(audio: &Mutex<AudioEngine>, transactions:
     finish_playback_intent(audio, transactions, &token, apply)
 }
 
+#[cfg(test)]
 async fn resolve_and_apply_playback_intent<P, T>(
     audio: &Mutex<AudioEngine>, transactions: &ConfigTransactionState, token: &str,
     prepare: impl std::future::Future<Output = Result<P, String>>,
@@ -3334,17 +3419,19 @@ async fn play_tracks(
         .lock()
         .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
         .clone();
-    let initial = initial_playback_context(&transactions, Some(&token))?.is_some();
-    if initial && !plex_client.initial_stream_references(&tracks) { return Err(initial_plex_playback::WAIT.into()); }
+    let context = initial_playback_context(&transactions, Some(&token))?;
+    let initial = context.is_some();
+    if context.as_ref().is_some_and(|scope| !scope.accepts_tracks(&tracks, &plex_client)) { return Err(initial_plex_playback::WAIT.into()); }
     let resolved = resolve_playback_uris(&tracks, &plex_client).await;
     // Supersession/revocation wins even over a resolver error.
     { let audio = audio_state.0.lock().map_err(|_| "Playback unavailable")?;
       initial_playback_context(&transactions, Some(&token))?; audio.validate_playback_intent(&token)?; }
     let uris = resolved?;
-    if initial && !plex_state.0.lock().map_err(|_| "Plex unavailable")?.initial_stream_references(&tracks) {
-        return Err(initial_plex_playback::WAIT.into());
+    if let Some(scope) = &context {
+        let plex = plex_state.0.lock().map_err(|_| "Plex unavailable")?;
+        if !scope.accepts_resolved(&tracks, &uris, &plex) { return Err(initial_plex_playback::WAIT.into()); }
     }
-    let effect = if initial { InitialPlaybackEffect::VerifiedPlex(uris.clone()) } else { InitialPlaybackEffect::Queue };
+    let effect = if initial { InitialPlaybackEffect::VerifiedMedia(uris.clone()) } else { InitialPlaybackEffect::Queue };
     finish_playback_effect(&audio_state.0, &transactions, &token, effect,
         |audio| audio.play_tracks(tracks, uris, start_index))
 }
@@ -3411,7 +3498,7 @@ fn with_initial_volume<T>(audio: &Mutex<AudioEngine>, transactions: &ConfigTrans
     let mut audio = audio.lock().map_err(|_| "Playback unavailable")?;
     let context = initial_playback_context(transactions, None)?.ok_or(config_save_operation::BUSY)?;
     let _lease = context.enter()?;
-    let verified = initial_queue_uris(&audio, false).and_then(|queue| context.accepts_queue(&queue));
+    let verified = initial_queue_uris(&audio, &context, false).and_then(|queue| context.accepts_queue(&queue));
     if let Err(error) = verified {
         if error == "PLAYBACK_QUEUE_UNCERTAIN" { audio.mark_queue_uncertain(); }
         return Err(error);
@@ -3601,6 +3688,18 @@ async fn get_local_album_tracks(album_id: String, app: AppHandle, diagnostic_id:
             let socket_path = app.state::<AudioState>().0.lock()
                 .map_err(|_| "Conexão da biblioteca local indisponível.".to_string())?.local_album_socket_path();
             diagnostic.phase("mpd.tracks");
+            let transactions = app.state::<ConfigTransactionState>();
+            if let Some(context) = transactions.addition_playback.current()? {
+                if initial_playback_context(&transactions, None)?.is_some_and(|scope| scope.is_addition()) {
+                    let _lease = context.enter()?;
+                    let groups = AudioEngine::get_confirmed_album_tracks_at(&socket_path, &album_id)?
+                        .ok_or(config_save_operation::BUSY)?;
+                    if groups.iter().flat_map(|group| &group.tracks).any(|track| !context.accepts_local(&track.path)) {
+                        return Err(config_save_operation::BUSY.into());
+                    }
+                    return Ok(groups);
+                }
+            }
             AudioEngine::get_local_album_tracks_at(&socket_path, &album_id)?
                 .ok_or_else(|| "Álbum local não encontrado no catálogo atual.".to_string())
         })();
@@ -4295,12 +4394,13 @@ async fn play_playlist(
         .lock()
         .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
         .clone();
-    let initial = initial_playback_context(&transactions, Some(&token))?.is_some();
+    let context = initial_playback_context(&transactions, Some(&token))?;
+    let initial = context.is_some();
     let reference_tracks = playlist.items.iter().map(|item| TrackMetadata {
         title: item.metadata.title.clone(), artist: item.metadata.artist.clone(), album: item.metadata.album.clone(),
         thumb: None, plex_image: None, media_locator: Some(item.media_locator.clone()), uri: String::new(), duration: item.metadata.duration
     }).collect::<Vec<_>>();
-    if initial && !plex_client.initial_stream_references(&reference_tracks) { return Err(initial_plex_playback::WAIT.into()); }
+    if context.as_ref().is_some_and(|scope| !scope.accepts_tracks(&reference_tracks, &plex_client)) { return Err(initial_plex_playback::WAIT.into()); }
     let mut resolved_uris = Vec::with_capacity(playlist.items.len());
     for item in &playlist.items {
         let uri = match &item.media_locator {
@@ -4352,10 +4452,11 @@ async fn play_playlist(
             .map_err(|error| format!("Falha ao obter aleatoriedade para a playlist: {error}"))?;
         shuffle_prepared_playlist_playback(&mut prepared, |upper| random_playlist_index(upper, &mut source))?;
     }
-    if initial && !plex_state.0.lock().map_err(|_| "Plex unavailable")?.initial_stream_references(&reference_tracks) {
-        return Err(initial_plex_playback::WAIT.into());
+    if let Some(scope) = &context {
+        let plex = plex_state.0.lock().map_err(|_| "Plex unavailable")?;
+        if !scope.accepts_resolved(&prepared.tracks, &prepared.playback_uris, &plex) { return Err(initial_plex_playback::WAIT.into()); }
     }
-    let effect = if initial { InitialPlaybackEffect::VerifiedPlex(prepared.playback_uris.clone()) } else { InitialPlaybackEffect::Queue };
+    let effect = if initial { InitialPlaybackEffect::VerifiedMedia(prepared.playback_uris.clone()) } else { InitialPlaybackEffect::Queue };
     finish_playback_effect(&audio_state.0, &transactions, &token, effect,
         |audio| audio.play_tracks(prepared.tracks, prepared.playback_uris, prepared.start_index))?;
     Ok(PlaylistPlaybackResult {
@@ -5995,7 +6096,7 @@ fn start_coordinated_shutdown(app_handle: &AppHandle, exit_code: i32) {
             let transaction_state = shutdown_app.state::<ConfigTransactionState>();
             transaction_state.begin_effective_shutdown();
             let _transaction_guard = transaction_state.wait_for_active_transaction();
-            if transaction_state.initial_plex.drain().is_err() {
+            if transaction_state.initial_plex.drain().is_err() || transaction_state.addition_playback.drain().is_err() {
                 eprintln!("[Audio] Initial playback shutdown drain unconfirmed.");
                 return;
             }

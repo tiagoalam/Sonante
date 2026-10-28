@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   LocalAlbumCatalog,
+  confirmedCatalogPlaybackAllowed,
   emptyLocalAlbumCatalogState,
   localCatalogActivity,
   localCatalogErrorKey,
@@ -339,4 +340,25 @@ test("catalog UI never guesses unsupported format from other native refusal code
   for (const code of ["SOURCE_AVAILABILITY_UNSUPPORTED_FORMAT extra", "LOCAL_SOURCE_AVAILABILITY_UNSUPPORTED_FORMAT", "schema99", "SOURCE_AVAILABILITY_BUSY extra", "MPD disconnected"]) {
     assert.equal(localCatalogErrorKey(code), null);
   }
+});
+
+
+test("addition permission exposes only the retained confirmed catalog and revokes without promoting pending data", async () => {
+  let reads = 0;
+  const catalog = new LocalAlbumCatalog(async () => { reads++; return [album("old")]; });
+  catalog.setConfirmedPlayback(true);
+  assert.equal(confirmedCatalogPlaybackAllowed(catalog.getSnapshot(), true), false);
+  catalog.ensureLoaded(false, true); await tick();
+  const before = catalog.getSnapshot().albums;
+  catalog.setSaveBlocked(true); catalog.onMpdStatus(true);
+  assert.equal(confirmedCatalogPlaybackAllowed(catalog.getSnapshot(), true), false);
+  catalog.setConfirmedPlayback(true);
+  assert.equal(confirmedCatalogPlaybackAllowed(catalog.getSnapshot(), true), true);
+  catalog.requestRefresh(); await tick();
+  assert.equal(reads, 1); assert.equal(catalog.getSnapshot().albums, before);
+  catalog.setConfirmedPlayback(false);
+  assert.equal(confirmedCatalogPlaybackAllowed(catalog.getSnapshot(), true), false);
+  catalog.setSaveBlocked(false); catalog.onMpdStatus(false); await tick();
+  assert.equal(reads, 2); assert.notEqual(catalog.getSnapshot().albums, before);
+  assert.equal(catalog.getSnapshot().confirmedPlayback, false);
 });

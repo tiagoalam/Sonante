@@ -827,6 +827,7 @@ struct ExecutionFault { progress:ExecutionProgress }
 struct LegacyFailure(String);
 struct ExecutionFailure { fault:ExecutionFault, legacy:LegacyFailure }
 impl ExecutionFailure {
+    #[cfg(test)]
     fn into_legacy(self)->String { self.legacy.0 }
     fn safe_fault(&self)->ExecutionFault { self.fault }
 }
@@ -851,6 +852,7 @@ impl ProgressCell {
 impl ExecutionFault {
     // Only for a caller with an explicit missing/unavailable diagnostic outcome.
     // Does NOT catch panic, turn abort into return, or assert completion/quiescence.
+    #[cfg(test)]
     fn unavailable()->Self {Self{progress:ExecutionProgress{checkpoint:Checkpoint::Unknown,
         cause:Cause::LegacyUnknown,may_have_issued:u16::MAX,inherited_facts:0,
         knowledge:Knowledge::Unknown}}}
@@ -958,18 +960,6 @@ pub(crate) fn execute_projected(
         ProjectedExecutionFailure{summary,legacy:failure.legacy}
     })
 }
-pub(crate) fn execute(
-    lease: &Lease,
-    id: &str,
-    expected: &OfferedRecoveryBinding,
-    runtime: &Path,
-    cancel: &dyn Fn() -> bool,
-    validate: &dyn Fn(&[u8], &dyn Fn() -> bool) -> Result<HashSet<String>, String>,
-    hook: &dyn Fn(&str) -> Result<(), String>,
-) -> Result<ResultDto, String> {
-    execute_detailed(lease,id,expected,runtime,cancel,validate,hook)
-        .map_err(ExecutionFailure::into_legacy)
-}
 fn execute_detailed(
     lease: &Lease,
     id: &str,
@@ -990,6 +980,7 @@ fn execute_detailed(
     },&progress,OwnershipContract::FixedLegacyFenceReadOnly)
 }
 // Existing cfgtest component helper callers retain the mandatory expected input.
+#[cfg(test)]
 fn execute_checked(
     lease: &Lease,
     id: &str,
@@ -2132,6 +2123,7 @@ pub(crate) enum PreliminaryRecoveryReason {
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub(crate) enum PreliminaryRecoveryOutcome { MatchesAtInspection, Ineligible, Unconfirmed }
+#[cfg(test)]
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub(crate) enum NotExecutionAdmission { PreliminaryOnly }
 /// Not serialized, not Debug: selected tree and plan hash stay backend-private.
@@ -2178,6 +2170,7 @@ impl PreliminaryRecoveryAssessment {
     pub(crate) fn outcome(&self)->PreliminaryRecoveryOutcome{self.outcome}
     pub(crate) fn reason(&self)->Option<PreliminaryRecoveryReason>{self.reason}
     pub(crate) fn role(&self)->Option<PreliminaryFinalRole>{self.selected.as_ref().map(|s|s.role)}
+    #[cfg(test)]
     pub(crate) fn admission(&self)->NotExecutionAdmission{NotExecutionAdmission::PreliminaryOnly}
     /// Backend plan equality only, never a Lease or execution-admission check.
     pub(crate) fn matches_plan(&self,plan:&Plan)->bool {

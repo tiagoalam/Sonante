@@ -6,6 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub(crate) const BUSY: &str = "CONFIG_SAVE_BUSY";
+pub(crate) const ADDITION_INDEXING: &str = "LOCAL_ADDITION_INDEXING";
 pub(crate) const INITIAL_CATALOG_INDEXING: &str = "FIRST_RUN_CATALOG_INDEXING";
 pub(crate) const INTERRUPTED: &str = "LOCAL_FOLDERS_SAVE_INTERRUPTED_FOR_SHUTDOWN";
 
@@ -33,6 +34,7 @@ pub(crate) struct Snapshot {
     pub error: Option<String>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub coverage: Option<crate::index_coverage::Report>,
+    pub confirmed_playback: bool,
 }
 
 #[derive(Serialize)]
@@ -60,6 +62,7 @@ enum Purpose {
     #[default]
     Save,
     InitialCatalog,
+    Addition,
 }
 
 #[derive(Default)]
@@ -294,6 +297,7 @@ impl Coordinator {
             phase: Phase::Preparing,
             error: None,
             coverage: None,
+            confirmed_playback: false,
         };
         inner.operation = Some(snapshot.clone());
         inner.purpose = Purpose::Save;
@@ -330,6 +334,7 @@ impl Coordinator {
             phase: Phase::Preparing,
             error: None,
             coverage: None,
+            confirmed_playback: false,
         };
         inner.operation = Some(snapshot.clone());
         inner.preview = None;
@@ -464,6 +469,9 @@ impl Coordinator {
         {
             Err(if playback && matches!(inner.purpose, Purpose::InitialCatalog) {
                 INITIAL_CATALOG_INDEXING
+            } else if playback && matches!(inner.purpose, Purpose::Addition)
+                && inner.operation.as_ref().is_some_and(|op| op.phase == Phase::Indexing && op.confirmed_playback) {
+                ADDITION_INDEXING
             } else { BUSY }.into())
         } else {
             Ok(())
@@ -517,6 +525,16 @@ impl Drop for Transaction<'_> {
 }
 
 impl Operation {
+    pub(crate) fn addition_playback(&self, enabled: bool) -> Result<(), String> {
+        let mut inner = self.coordinator.inner.lock().map_err(|_| BUSY)?;
+        if inner.shutdown { return Err(INTERRUPTED.into()); }
+        let op = inner.operation.as_mut().filter(|op| op.id == self.id && !op.phase.terminal()).ok_or(BUSY)?;
+        op.confirmed_playback = enabled && op.phase == Phase::Indexing;
+        inner.purpose = Purpose::Addition;
+        Ok(())
+    }
+    pub(crate) fn id(&self) -> &str { &self.id }
+
     pub(crate) fn initial_catalog_background(&self) {
         let mut inner = self.coordinator.inner.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -622,6 +640,7 @@ impl Operation {
         if let Some(op) = inner.operation.as_mut().filter(|op| op.id == self.id) {
             if !op.phase.terminal() && !phase.terminal() {
                 op.phase = phase;
+                if phase != Phase::Indexing { op.confirmed_playback = false; }
                 if phase == Phase::Validating {
                     inner.preview = None;
                     inner.preview_offsets.clear();
@@ -657,6 +676,7 @@ impl Operation {
             } else {
                 Phase::Failed
             };
+            op.confirmed_playback = false;
             op.error = result.err();
             inner.preview = None;
             inner.preview_offsets.clear();
@@ -683,6 +703,25 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn addition_permission_is_explicit_and_ends_before_validation() {
+        let state = Arc::new(Coordinator::new());
+        let (_, op) = state.reserve().unwrap();
+        assert_eq!(state.reject_playback().unwrap_err(), BUSY);
+        op.phase(Phase::Indexing);
+        assert_eq!(state.reject_playback().unwrap_err(), BUSY);
+        op.addition_playback(true).unwrap();
+        assert_eq!(state.reject_playback().unwrap_err(), ADDITION_INDEXING);
+        assert!(state.snapshot().unwrap().unwrap().confirmed_playback);
+        assert!(state.reject_active().is_err()); assert!(state.reserve().is_err());
+        assert!(state.try_begin_background().is_err());
+        op.phase(Phase::Validating);
+        assert!(!state.snapshot().unwrap().unwrap().confirmed_playback);
+        assert_eq!(state.reject_playback().unwrap_err(), BUSY);
+        op.finish(Err("uncertain".into()), true);
+        assert_eq!(state.reject_playback().unwrap_err(), crate::managed_save_intent::BLOCKED);
+    }
 
     #[test]
     fn initial_catalog_feedback_preserves_all_admission_barriers() {

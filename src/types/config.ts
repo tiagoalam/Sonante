@@ -25,6 +25,7 @@ export interface ConfigSaveOperation {
   phase: ConfigSavePhase;
   error: string | null;
   coverage?: import("../utils/indexCoverage").IndexCoverageReport;
+  confirmed_playback?: boolean;
 }
 export type ConfigSaveWarning = "position_not_restored";
 export type ConfigSaveResponse = { status: "completed"; warning?: ConfigSaveWarning } | { status: "accepted"; operation: ConfigSaveOperation };

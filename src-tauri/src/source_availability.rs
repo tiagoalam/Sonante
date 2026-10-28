@@ -12,8 +12,12 @@ use crate::{local_media::{self,mirror::{ReadonlyMirrorSnapshot,ReadonlyMirrorOpe
 #[serde(rename_all="snake_case")]
 pub(crate) enum InspectionError {
     InventoryUnconfirmed, ConfigBindingUnconfirmed, SnapshotChanged,
-    ObservedIdentityConflict, InvalidUri, UnknownSource, TargetMissing,
-    OutsideRoot, SourceUnavailable,
+    #[cfg(test)] ObservedIdentityConflict,
+    #[cfg(test)] InvalidUri,
+    UnknownSource,
+    #[cfg(test)] TargetMissing,
+    #[cfg(test)] OutsideRoot,
+    #[cfg(test)] SourceUnavailable,
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize)]
 #[serde(rename_all="snake_case")]
@@ -50,7 +54,9 @@ pub(crate) struct PreliminaryInventory {
 }
 /// NOT a product-readable capability. No consumer is connected in this lot.
 /// Residual path race and missing product gates forbid treating it as authorization.
+#[cfg(test)]
 pub(crate) struct PreliminaryTarget { path:PathBuf, source_id:String }
+#[cfg(test)]
 impl PreliminaryTarget {
     pub(crate) fn preliminary_path(&self)->&Path { &self.path }
     pub(crate) fn source_id(&self)->&str { &self.source_id }
@@ -95,6 +101,7 @@ pub(crate) fn with_cached_read_inventory<T>(
 // original entry is checked again before any callback value can escape.
 // Intermediate observations recheck bound identity/manifest and real D03 roots,
 // rather than walking unrelated entries repeatedly within the same request.
+#[cfg(test)]
 pub(crate) fn with_read_inventory<T>(
     library:&Path,configured:&[String],
     read:impl FnOnce(&PreliminaryObservation,
@@ -119,10 +126,12 @@ fn finish_read_inventory<T>(
 }
 
 impl PreliminaryInventory {
+    #[cfg(test)]
     pub(crate) fn inspect(library:&Path,configured:&[String])->Result<Self,InspectionError> {
         let s=Self::capture(library,configured)?;
         s.revalidate(configured)?; Ok(s)
     }
+    #[cfg(test)]
     fn capture(library:&Path,configured:&[String])->Result<Self,InspectionError> {
         let mirror=Arc::new(ReadonlyMirrorSnapshot::open(library).map_err(|_|InspectionError::InventoryUnconfirmed)?);
         Self::capture_with_mirror(library,configured,mirror)
@@ -136,6 +145,7 @@ impl PreliminaryInventory {
         let s=Self {identity,mirror,configured:configured.to_vec(),library:library.into(),observed_conflict:Cell::new(false)};
         s.revalidate_read_bindings(configured)?; Ok(s)
     }
+    #[cfg(test)]
     pub(crate) fn read_cover_pair<T>(
         &self, owner:&crate::profile_lease::Lease,
         transaction:&crate::config_save_operation::Transaction<'_>,
@@ -221,12 +231,14 @@ impl PreliminaryInventory {
         Ok(PreliminarySourceRow {source_id:id.into(),label:id.into(),status,reason})
     }
     /// Explicit full observation may perform IO on A. probe_target(B) does not call it.
+    #[cfg(test)]
     pub(crate) fn observe_all(&self,configured:&[String])->Result<PreliminaryObservation,InspectionError> {
         self.revalidate(configured)?;
         let sources=self.mirror.manifest.sources.keys().map(|id|self.observe_one(id)).collect::<Result<Vec<_>,_>>()?;
         self.revalidate(configured)?;
         Ok(PreliminaryObservation {admission:PreliminaryOnly::NotProductAdmission,sources,observed_conflict:self.observed_conflict.get()})
     }
+    #[cfg(test)]
     pub(crate) fn probe_target(&self,configured:&[String],uri:&str)->Result<PreliminaryTarget,InspectionError> {
         self.revalidate(configured)?;
         if self.observed_conflict.get() { return Err(InspectionError::ObservedIdentityConflict); }

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { CircleAlert, X } from "lucide-react";
+import { coverageNeedsAttention } from "../utils/indexCoverage";
 import { useIndexCoverage } from "../services/indexCoverage";
 
 export function LocalWatchNotice({ onOpenSettings }: { onOpenSettings: () => void }) {
@@ -10,7 +11,7 @@ export function LocalWatchNotice({ onOpenSettings }: { onOpenSettings: () => voi
   const [needsCheck, setNeedsCheck] = useState(false);
   const coverage = useIndexCoverage();
   const [dismissedCoverage, setDismissedCoverage] = useState<number | null>(null);
-  const partial = coverage.report?.outcome === "partial" && dismissedCoverage !== coverage.revision;
+  const partial = coverageNeedsAttention(coverage.report) && dismissedCoverage !== coverage.revision;
   useEffect(() => {
     let disposed = false;
     let revision = 0;

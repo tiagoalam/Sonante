@@ -3951,7 +3951,10 @@ impl PlexClient {
     }
 
     pub(crate) fn initial_stream_references(&self, tracks: &[crate::audio::TrackMetadata]) -> bool {
-        if self.playback_mode == "local" || tracks.is_empty() { return false; }
+        self.playback_mode != "local" && self.playback_references_match(tracks)
+    }
+    pub(crate) fn playback_references_match(&self, tracks: &[crate::audio::TrackMetadata]) -> bool {
+        if tracks.is_empty() { return false; }
         let Ok(snapshot) = self.connection_manager.snapshot() else { return false; };
         let Some(identity) = snapshot.identity.as_ref() else { return false; };
         tracks.iter().all(|track| matches!(&track.media_locator,

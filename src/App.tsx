@@ -56,7 +56,7 @@ import { PlexCatalogCoordinator } from "./utils/plexCatalogCoordinator";
 import { LocalBrowserView, localAlbumCatalog, type LocalSubview } from "./components/LocalBrowserView";
 import { localCatalogActivity } from "./utils/localAlbumCatalog";
 import { localExplorePresentation } from "./utils/localExploreState";
-import { localArtworkEnrichment, localArtworkResolver } from "./utils/localArtworkSession";
+import { localArtworkEnrichment, localArtworkResolver, localAlbumThumbnails } from "./utils/localArtworkSession";
 import { artworkReadBlocked } from "./utils/localArtwork";
 import { createMainSectionPreference, type MainSection } from "./utils/appBootstrap";
 import { FavoritesView } from "./components/FavoritesView";
@@ -353,7 +353,12 @@ PlexAlbumCard.displayName = "PlexAlbumCard";
 export function App() {
   const { t, i18n } = useTranslation();
   const localCatalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
-  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [config, setConfigState] = useState<AppConfig | null>(null);
+  const setConfig = useCallback((next: AppConfig) => {
+    localAlbumThumbnails.setContext(next.first_run ? [] : next.local_folders);
+    localAlbumCatalog.setPresentationContext(next.first_run ? [] : next.local_folders);
+    setConfigState(next);
+  }, []);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const eqReturnSectionRef=useRef<MainSection>("local");
   const eqReturnViewRef=useRef(false);
@@ -782,12 +787,14 @@ export function App() {
       setQueueClearConfirmation(null);
       if (configSavePending(operation)) {
         localAlbumCatalog.setSaveBlocked(true);
+        localAlbumCatalog.setConfirmedPlayback(operation.phase === "indexing" && operation.confirmed_playback === true);
         configSaveInProgressRef.current = true;
         setConfigSavePhase("local");
         setLocalSavePhase(operation.phase);
         setConfigSaveNotice(null);
         return;
       }
+      localAlbumCatalog.setConfirmedPlayback(false);
       void (async () => {
         try {
           if (confirmation) {
@@ -812,6 +819,7 @@ export function App() {
       })();
     }, (error) => {
       logError("settings.save-status", error);
+      localAlbumCatalog.setConfirmedPlayback(false);
       if (configSaveMonitorRef.current?.isPending()) {
         // Losing the observer is not evidence of failure/completion. Keep the
         // pending operation and continue observing without enabling another Save.

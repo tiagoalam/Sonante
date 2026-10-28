@@ -39,6 +39,7 @@ export function useLocalPlaybackArtwork(status: PlaybackStatus, catalog: LocalAl
     })().catch(error => { if (current) logError("artwork.album-load", error); });
     return () => { current = false; unsubscribe(); };
   }, [key, album, version, blocked, onlineEnabled, status.thumb, status.plex_image]);
-  return !blocked && !status.thumb && !status.plex_image && resolved?.key === key
+  // Blocking suspends new reads, not an image already resolved for this media/catalog.
+  return !status.thumb && !status.plex_image && resolved?.key === key
     && resolved.album === album && resolved.version === version ? { ...status, thumb: resolved.thumb } : status;
 }

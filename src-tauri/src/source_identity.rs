@@ -688,6 +688,24 @@ mod tests {
         assert_eq!(after.ids.len(),2);
     }
 
+    #[test]
+    fn addition_identity_reopen_accepts_only_queue_write_not_ledger_replacement() {
+        let f = Fixture::new();
+        f.reserve(&[], &BTreeMap::new());
+        let before = ReadonlyIdentitySnapshot::open(&f.library()).unwrap();
+        // Three small control files, no app profile, media, process or MPD.
+        fs::write(f.0.join("queue_cache.json.writing"), b"[]").unwrap();
+        fs::rename(f.0.join("queue_cache.json.writing"), f.0.join("queue_cache.json")).unwrap();
+        assert!(before.revalidate().is_err(), "the ordinary strict guard stays strict");
+        let current = before.reopen_after_queue_write(&f.library()).unwrap();
+        current.revalidate().unwrap();
+        let bytes = fs::read(f.0.join(NAME)).unwrap();
+        fs::write(f.0.join("replacement"), bytes).unwrap();
+        fs::set_permissions(f.0.join("replacement"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(f.0.join("replacement"), f.0.join(NAME)).unwrap();
+        assert!(current.reopen_after_queue_write(&f.library()).is_err(), "same bytes on a substituted ledger never renew permission");
+    }
+
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
@@ -1593,6 +1611,23 @@ impl ReadonlyIdentitySnapshot {
     }
     pub(crate) fn revalidate(&self) -> Result<(), ()> {
         self.ledger.revalidate(&self.parent)?; self.anchor.revalidate(&self.parent)
+    }
+    /// Addition playback may atomically replace queue_cache.json beside the
+    /// ledger. Reopen only the SAME profile inode and unchanged ledger/anchor;
+    /// existing strict revalidate() callers keep their original contract.
+    pub(crate) fn reopen_after_queue_write(&self, library: &Path) -> Result<Self, ()> {
+        let fresh = Self::open(library)?;
+        let old_parent = ReadonlyStamp::of(&self.parent.file.metadata().map_err(|_| ())?);
+        let same_parent = |stamp: &ReadonlyStamp| stamp.dev == self.parent.stamp.dev
+            && stamp.ino == self.parent.stamp.ino && stamp.mode == self.parent.stamp.mode
+            && stamp.uid == self.parent.stamp.uid && stamp.links == self.parent.stamp.links;
+        if self.parent.path != fresh.parent.path || !same_parent(&old_parent) || !same_parent(&fresh.parent.stamp)
+            || self.ledger.stamp != fresh.ledger.stamp || self.anchor.stamp != fresh.anchor.stamp
+            || self.ledger.bytes() != fresh.ledger.bytes() || self.anchor.bytes() != fresh.anchor.bytes()
+            || ReadonlyStamp::of(&self.ledger.file.metadata().map_err(|_| ())?) != self.ledger.stamp
+            || ReadonlyStamp::of(&self.anchor.file.metadata().map_err(|_| ())?) != self.anchor.stamp { return Err(()); }
+        fresh.revalidate()?;
+        Ok(fresh)
     }
     pub(crate) fn matches_manifest(&self, namespace:&str, sources:&BTreeMap<String,PathBuf>) -> bool {
         namespace==self.registry.namespace && sources.iter().all(|(id,root)|

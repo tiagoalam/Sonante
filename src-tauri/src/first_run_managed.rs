@@ -407,10 +407,6 @@ impl<'a> InitialPublication<'a> {
         Ok(())
     }
 
-    pub(crate) fn coverage(&self) -> crate::index_coverage::Inventory {
-        self.prepared.coverage.clone()
-    }
-
     pub(crate) fn publish(&mut self, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
         self.validate_previous_config()?;
         if self.publication.is_some() || empty_library(&self.profile)? != self.before_library {
@@ -453,6 +449,7 @@ impl<'a> InitialPublication<'a> {
         snapshot.revalidate().map_err(|_| ERROR.to_string())
     }
 
+    #[cfg(test)]
     pub(crate) fn validate_before_commit(&self) -> Result<(), String> {
         self.validate_previous_config()?;
         self.validate_published()?;
@@ -461,6 +458,7 @@ impl<'a> InitialPublication<'a> {
         self.sync_database().map(|_| ())
     }
 
+    #[cfg(test)]
     fn sync_database(&self) -> Result<Identity, String> {
         sync_database(&self.profile)
     }
@@ -519,6 +517,7 @@ impl<'a> InitialPublication<'a> {
 
     /// Config persistence is already confirmed. Failure here must preserve the
     /// published generation and stop startup, never roll back a committed config.
+    #[cfg(test)]
     pub(crate) fn finish_committed(&self) -> Result<(), String> {
         self.validate_published()?;
         if AppConfig::load_from_path(&self.profile.path.join("config.json"))? != self.next {

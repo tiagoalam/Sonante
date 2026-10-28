@@ -128,3 +128,15 @@ test("Save/indexing gates delay and then resume artwork without requiring playba
   g.status={...g.status,is_updating:true};g.render();d.resolve("stale-cover");await flush();assert.equal(g.render().thumb,null);
   g.status={...g.status,is_updating:false};await ready(g);assert.equal(g.display.thumb,"fresh-cover");assert.equal(reads,2);g.dispose();
 });
+
+test("already displayed paused artwork survives save/index gates without additional reads; changed media never inherits it",async()=>{
+ for(const gate of ['save','index']){
+  const f=mount();await ready(f);const reads=f.calls.length;
+  if(gate==='save')f.catalog.setSaveBlocked(true);else f.status={...f.status,is_updating:true};
+  assert.equal((await ready(f)).thumb,'local-cover',gate);
+  assert.equal(f.calls.length,reads,'blocking still prevents new artwork reads');
+  assert.equal(f.display.state,'pause');assert.equal(f.display.elapsed,19.5);
+  f.status={...f.status,current_media:{kind:'local',uri:'Other/Album/two.flac',queue_index:1},title:'Two'};
+  assert.equal(f.render().thumb,null,'never reuse another track artwork while blocked');f.dispose();
+ }
+});

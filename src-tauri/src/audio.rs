@@ -1100,8 +1100,18 @@ struct AlbumCollector {
     discs: Vec<LocalAlbumDisc>,
 }
 
+// The catalog needs the same canonical metadata as track reads, without
+// retaining every URI and LocalItem. Full remains the default for those reads.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum LocalAlbumCollectionMode {
+    Summary,
+    #[default]
+    Full,
+}
+
 #[derive(Clone, Default)]
 struct LocalAlbumCollection {
+    mode: LocalAlbumCollectionMode,
     physical: HashMap<String, AlbumCollector>,
     cue: HashMap<String, AlbumCollector>,
 }
@@ -1597,7 +1607,9 @@ impl AudioEngine {
         socket_path: &str,
         valid_source_ids: &HashSet<String>,
     ) -> Result<Vec<LocalAlbum>, String> {
-        let collection = Self::get_local_album_collection_at(socket_path)?;
+        let collection = Self::get_local_album_collection_scoped_at(
+            socket_path, "\"(base '')\"", None, false, LocalAlbumCollectionMode::Summary,
+        )?;
         Ok(Self::finalize_local_album_collection(
             collection,
             valid_source_ids,
@@ -1616,16 +1628,19 @@ impl AudioEngine {
     }
 
     fn get_local_album_collection_limited_at(socket_path: &str, filter: &str, limit: Option<usize>) -> Result<LocalAlbumCollection, String> {
+        Self::get_local_album_collection_scoped_at(socket_path, filter, limit, false, LocalAlbumCollectionMode::Full)
+    }
+    fn get_local_album_collection_scoped_at(socket_path: &str, filter: &str, limit: Option<usize>, confirmed_addition: bool, mode: LocalAlbumCollectionMode) -> Result<LocalAlbumCollection, String> {
         let status = Self::send_command_to_socket(socket_path, "status")
             .map_err(|e| format!("Falha ao verificar atualização da biblioteca: {e}"))?;
-        if status.iter().any(|line| line.starts_with("updating_db: ")) {
+        if !confirmed_addition && status.iter().any(|line| line.starts_with("updating_db: ")) {
             return Err("Biblioteca local em atualização no MPD; tente novamente após a atualização.".to_string());
         }
         let count = Self::send_command_to_socket(socket_path, &format!("count {filter}"))
             .map_err(|e| format!("Falha ao contar músicas da biblioteca local: {e}"))?;
         let total = Self::parse_local_album_count(&count)?;
         if limit.is_some_and(|limit| total > limit) { return Err("SOURCE_ALBUM_LIMIT".into()); }
-        let mut collection = LocalAlbumCollection::default();
+        let mut collection = LocalAlbumCollection { mode, ..LocalAlbumCollection::default() };
         for (start, end) in Self::local_album_windows(total) {
             let command = format!("find {filter} window {start}:{end}");
             let lines = Self::send_command_to_socket(socket_path, &command)
@@ -1659,6 +1674,16 @@ impl AudioEngine {
         let filter = Self::local_album_base_filter(scope)?;
         let collection = Self::get_local_album_collection_limited_at(socket_path, &filter, Some(32))?;
         Ok(Self::canonical_local_album_map(collection).remove(album_id).map(AlbumCollector::into_disc_tracks))
+    }
+
+    // The caller holds an addition-only peer lease and validates every returned
+    // URI against its immutable pre-addition catalog before exposing this read.
+    pub(crate) fn get_confirmed_album_tracks_at(socket: &str, album_id: &str) -> Result<Option<Vec<LocalAlbumDiscTracks>>, String> {
+        let filter = Self::local_album_base_filter(Self::local_album_scope(album_id)?)?;
+        let collection = Self::get_local_album_collection_scoped_at(socket, &filter, None, true, LocalAlbumCollectionMode::Full)?;
+        Ok(Self::canonical_local_album_map(collection).remove(album_id)
+            .filter(|collector| collector.track_count > 0 && !collector.folder_path.is_empty())
+            .map(AlbumCollector::into_disc_tracks))
     }
 
     pub(crate) fn get_local_album_tracks_at(
@@ -1822,6 +1847,7 @@ impl AudioEngine {
                 .unwrap_or_else(|| (physical_folder.clone(), folder_name.clone()));
             let title = album.unwrap_or(folder_name);
             let key = Self::local_album_id(&physical_folder, &title);
+            let retain_tracks = collection.mode == LocalAlbumCollectionMode::Full;
             let map = if is_cue {
                 &mut collection.cue
             } else {
@@ -1848,23 +1874,25 @@ impl AudioEngine {
             }
             entry.track_count += 1;
             entry.tag_presence.observe(present);
-            entry.track_uris.push(file.to_string());
-            entry.tracks.push((
-                disc_path.clone(),
-                LocalItem {
-                    item_type: "file".to_string(),
-                    path: file.to_string(),
-                    name: path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(file)
-                        .to_string(),
-                    title: track_title,
-                    artist: artist.clone(),
-                    album: Some(title.clone()),
-                    duration,
-                },
-            ));
+            if retain_tracks {
+                entry.track_uris.push(file.to_string());
+                entry.tracks.push((
+                    disc_path.clone(),
+                    LocalItem {
+                        item_type: "file".to_string(),
+                        path: file.to_string(),
+                        name: path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(file)
+                            .to_string(),
+                        title: track_title,
+                        artist: artist.clone(),
+                        album: Some(title.clone()),
+                        duration,
+                    },
+                ));
+            }
             if let Some(disc) = entry
                 .discs
                 .iter_mut()
@@ -2832,6 +2860,12 @@ impl AudioEngine {
         if self.queue_coherent { Ok(()) } else { Err("PLAYBACK_QUEUE_UNCERTAIN".into()) }
     }
 
+    pub(crate) fn ensure_queue_persisted(&self) -> Result<(), String> {
+        self.ensure_queue_coherent()?;
+        if self.cache_persistence_pending { return Err("PLAYBACK_PERSISTENCE_FAILED".into()); }
+        Ok(())
+    }
+
     pub(crate) fn watch_eq_transition(&self) -> EqTransitionWatch {
         EqTransitionWatch {
             epoch: self.eq_intervention.clone(),
@@ -3122,6 +3156,7 @@ impl AudioEngine {
         }
     }
 
+    #[cfg(test)]
     pub fn get_local_cover_at(
         socket_path: &str,
         library_dir: &Path,
@@ -3187,6 +3222,7 @@ impl AudioEngine {
         verify_context()?;target.validate()?;Ok(None)
     }
 
+    #[cfg(test)]
     fn embedded_cover_for_folder(
         socket_path: &str,
         folder: &str,
@@ -3779,6 +3815,7 @@ impl AudioEngine {
         Ok(DeviceSwitchRestoreOutcome::Complete)
     }
 
+    #[cfg(test)]
     pub(crate) fn restore_after_reserved_device_switch(
         &self,
         saved_state: Option<DeviceSwitchSnapshot>,
@@ -3792,6 +3829,7 @@ impl AudioEngine {
         )
     }
 
+    #[cfg(test)]
     fn restore_after_reserved_device_switch_with<F, S>(
         &self,
         saved_state: Option<DeviceSwitchSnapshot>,
@@ -3831,6 +3869,7 @@ impl AudioEngine {
         self.restore_device_switch_playback_with(saved_state, playback_uris, send_command, sleep)
     }
 
+    #[cfg(test)]
     fn restore_device_switch_playback_with<F, S>(
         &self,
         saved_state: Option<DeviceSwitchSnapshot>,
@@ -5504,6 +5543,128 @@ mod tests {
             AudioEngine::collect_local_album_page(&mut collection, page).unwrap();
         }
         collection
+    }
+
+    fn assert_summary_has_no_track_material(collection: &LocalAlbumCollection) {
+        for album in collection.physical.values().chain(collection.cue.values()) {
+            assert_eq!(album.track_uris.len(), 0);
+            assert_eq!(album.track_uris.capacity(), 0);
+            assert_eq!(album.tracks.len(), 0);
+            assert_eq!(album.tracks.capacity(), 0);
+        }
+    }
+
+    fn assert_summary_matches_full(pages: Vec<Vec<String>>, sources: &HashSet<String>) {
+        let mut full = LocalAlbumCollection::default();
+        let mut summary = LocalAlbumCollection {
+            mode: LocalAlbumCollectionMode::Summary,
+            ..LocalAlbumCollection::default()
+        };
+        for page in pages {
+            let full_rows = AudioEngine::collect_local_album_page(&mut full, page.clone()).unwrap();
+            assert_eq!(AudioEngine::collect_local_album_page(&mut summary, page).unwrap(), full_rows);
+            assert_summary_has_no_track_material(&summary);
+        }
+        for album in full.physical.values().chain(full.cue.values()) {
+            assert_eq!(album.track_uris.len(), album.track_count);
+            assert_eq!(album.tracks.len(), album.track_count);
+        }
+        // Canonicalization may replace physical tracks with CUE, absorb title
+        // variants and merge discs; none of those paths may create track data.
+        for album in AudioEngine::canonical_local_album_map(summary.clone()).values() {
+            assert!(album.track_uris.is_empty());
+            assert!(album.tracks.is_empty());
+        }
+        let full = AudioEngine::finalize_local_album_collection(full, sources);
+        let summary = AudioEngine::finalize_local_album_collection(summary, sources);
+        // Keep the existing title-only ordering, including its unspecified
+        // ordering within equal lowercase titles. Compare every payload by ID.
+        let titles = |albums: &[LocalAlbum]| albums.iter()
+            .map(|album| album.title.to_lowercase()).collect::<Vec<_>>();
+        assert_eq!(titles(&summary), titles(&full));
+        let payloads = |albums: Vec<LocalAlbum>| albums.into_iter()
+            .map(|album| (album.id.clone(), serde_json::to_value(album).unwrap()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(payloads(summary), payloads(full));
+    }
+
+    #[test]
+    fn local_album_summary_matches_full_characterization() {
+        let sources = HashSet::from(["Music".into(), "Other".into()]);
+        // Reuse the existing CUE characterization generator and boundary cases.
+        for (physical, cue) in [(20, 20), (1, 10), (1, 1), (0, 4), (3, 0)] {
+            assert_summary_matches_full(vec![
+                cue_fixture_lines("Music/Artist/Album", "Album", physical, 0),
+                cue_fixture_lines("Music/Artist/Album", "Album", 0, cue),
+            ], &sources);
+        }
+        assert_summary_matches_full(vec![album_test_lines(&[
+            "file: Music/Artist/Album/image.flac", "Album: Album", "Genre: Physical",
+            "file: Music/Artist/Album/first.cue/track0001", "Album: Album", "Genre: Cue1",
+            "file: Music/Artist/Album/second.cue/track0001", "Album: Album", "Genre: Cue2",
+            "file: Music/Unknown/one.flac",
+            "file: Music/Blank/two.flac", "Album:   ", "Artist: ", "AlbumArtist:   ", "Date:    ", "Genre:   ",
+            "file: ../rejected.flac", "Album: Rejected",
+        ])], &sources);
+        // Exact 80% title/artist thresholds, including missing AlbumArtist and
+        // a variant on another page. The same titles on another root stay apart.
+        for (main, guest) in [(8, 2), (7, 3), (5, 5), (3, 1)] {
+            let mut first = Vec::new();
+            for i in 0..main {
+                first.extend([format!("file: Music/Box/CD1/{i}.flac"), "Album: Box (Disc 1)".into(),
+                    "Artist: Main".into(), "AlbumArtist: Band".into(), "Date: 2001-03-04".into(), "Genre: Jazz".into()]);
+            }
+            let mut variant = Vec::new();
+            for i in 0..guest {
+                variant.extend([format!("file: Music/Box/CD1/guest-{i}.flac"), "Album: Typo".into(),
+                    "Artist: Guest".into(), "Genre: Rock".into()]);
+            }
+            assert_summary_matches_full(vec![first, variant, album_test_lines(&[
+                "file: Music/Box/CD2/one.flac", "Title: One", "duration: 123.5", "Album: Box (Disc 2)",
+                "Artist: Main", "AlbumArtist: Band", "Date: 2002", "Genre: Blues",
+                "file: Other/Box/CD1/one.flac", "Album: Box (Disc 1)", "Artist: Other",
+                "file: Other/Box/CD2/two.flac", "Album: Box (Disc 2)", "Artist: Other",
+                "file: Music/Case/a.flac", "Album: case", "Artist: A", "Artist: Artist", "Genre: Rock", "Genre: rock",
+                "file: Music/Case/b.flac", "Album: Case", "Artist: Artist",
+            ])], &sources);
+        }
+        // CUE plus a physical sibling disc, tags and presence across pages.
+        assert_summary_matches_full(vec![
+            cue_fixture_lines("Music/Multi/CD1", "Multi", 1, 0),
+            cue_fixture_lines("Music/Multi/CD1", "Multi", 0, 4),
+            album_test_lines(&["file: Music/Multi/CD2/one.flac", "Album: Multi", "Artist: A", "Date: 2024", "Genre: Folk"]),
+        ], &sources);
+        assert_summary_matches_full(Vec::new(), &sources);
+    }
+
+    #[test]
+    fn local_album_summary_large_catalog_retains_no_track_material() {
+        const ALBUMS: usize = 2_000;
+        const TRACKS_PER_ALBUM: usize = 50;
+        const TOTAL: usize = ALBUMS * TRACKS_PER_ALBUM;
+        let mut full = LocalAlbumCollection::default();
+        let mut summary = LocalAlbumCollection { mode: LocalAlbumCollectionMode::Summary, ..LocalAlbumCollection::default() };
+        // Generate at most one existing-size MPD page at a time, only in RAM.
+        for start in (0..TOTAL).step_by(LOCAL_ALBUM_PAGE_SIZE) {
+            let mut page = Vec::new();
+            for i in start..(start + LOCAL_ALBUM_PAGE_SIZE).min(TOTAL) {
+                page.extend([format!("file: Synthetic/Album-{}/{i}.flac", i / TRACKS_PER_ALBUM),
+                    format!("Album: Album-{}", i / TRACKS_PER_ALBUM), "Title: Track".into(),
+                    "Artist: Artist".into(), "AlbumArtist: Artist".into(), "Date: 2001".into(), "duration: 123.5".into()]);
+            }
+            let count = AudioEngine::collect_local_album_page(&mut full, page.clone()).unwrap();
+            assert_eq!(AudioEngine::collect_local_album_page(&mut summary, page).unwrap(), count);
+            assert_summary_has_no_track_material(&summary);
+        }
+        let retained = |collection: &LocalAlbumCollection| collection.physical.values().chain(collection.cue.values())
+            .fold((0, 0, 0), |(uris, items, tracks), album| (uris + album.track_uris.len(), items + album.tracks.len(), tracks + album.track_count));
+        assert_eq!(retained(&full), (TOTAL, TOTAL, TOTAL));
+        assert_eq!(retained(&summary), (0, 0, TOTAL));
+        assert_eq!(summary.physical.len(), ALBUMS);
+        let sources = HashSet::from(["Synthetic".into()]);
+        let full = AudioEngine::finalize_local_album_collection(full, &sources);
+        let summary = AudioEngine::finalize_local_album_collection(summary, &sources);
+        assert_eq!(serde_json::to_value(summary).unwrap(), serde_json::to_value(full).unwrap());
     }
 
     fn cue_fixture_lines(
@@ -8599,6 +8760,55 @@ mod tests {
         assert!(!volume.available);
         assert!(!volume.writable);
         assert_eq!(volume.backend, VolumeBackend::Unavailable);
+    }
+
+    #[test]
+    fn addition_completion_refuses_partial_queue_or_unpersisted_cache() {
+        let mut audio = engine_with_track("old/confirmed.flac");
+        audio.ensure_queue_persisted().unwrap();
+        audio.cache_persistence_pending = true;
+        assert_eq!(audio.ensure_queue_persisted().unwrap_err(), "PLAYBACK_PERSISTENCE_FAILED");
+        audio.cache_persistence_pending = false;
+        audio.mark_queue_uncertain();
+        assert_eq!(audio.ensure_queue_persisted().unwrap_err(), "PLAYBACK_QUEUE_UNCERTAIN");
+    }
+
+    #[test]
+    fn addition_retirement_preserves_inflight_queue_and_current_cache() {
+        use crate::initial_plex_playback::{Gate, check_effect};
+        let gate = Arc::new(Gate::default());
+        gate.publish("addition-test".into(), "unused".into(), std::process::id()).unwrap();
+        let session = gate.current().unwrap().unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (resume, continuing) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let lease = session.enter().unwrap();
+            let mut audio = engine_with_track("old/previous.flac");
+            let mut track = engine_with_track("old/current.flac").queue.remove(0);
+            track.thumb = Some("data:image/png;base64,AA==".into());
+            let mut cache = Vec::new();
+            audio.play_tracks_with_io(vec![track], vec!["old/current.flac".into()], 0, |_| {
+                started.send(()).unwrap(); continuing.recv().unwrap();
+                check_effect()?; Ok(Vec::new())
+            }, |audio| { cache = AudioEngine::encode_queue_cache(&audio.queue)?; Ok(()) }).unwrap();
+            audio.ensure_queue_persisted().unwrap();
+            session.confirm_queue(vec!["old/current.flac".into()]).unwrap();
+            drop(lease);
+            (audio.queue, cache)
+        });
+        ready.recv_timeout(Duration::from_secs(1)).unwrap();
+        let retiring = gate.clone();
+        let (done, retired) = std::sync::mpsc::channel();
+        let closer = std::thread::spawn(move || { retiring.retire().unwrap(); done.send(()).unwrap(); });
+        assert!(retired.recv_timeout(Duration::from_millis(20)).is_err());
+        resume.send(()).unwrap();
+        let (queue, cache) = worker.join().unwrap();
+        retired.recv_timeout(Duration::from_secs(1)).unwrap(); closer.join().unwrap();
+        assert_eq!(queue[0].uri, "old/current.flac");
+        let cached = AudioEngine::decode_queue_cache(cache.as_slice()).unwrap().0;
+        assert_eq!(cached[0].uri, queue[0].uri);
+        assert!(!cache.windows("old/previous.flac".len()).any(|value| value == b"old/previous.flac"));
+        assert!(gate.current().unwrap().is_none());
     }
 
     fn engine_with_track(uri: &str) -> AudioEngine {
