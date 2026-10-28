@@ -11,10 +11,24 @@ use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
+
+// MPD creates its own database/log files with ordinary POSIX modes. Apply
+// privacy only after fork: changing the application's umask would race other
+// threads. Keep this hook allocation-free and async-signal-safe before exec.
+pub(crate) fn spawn_private_mpd(command: &mut Command) -> std::io::Result<Child> {
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o077);
+            Ok(())
+        });
+    }
+    command.spawn()
+}
 
 pub struct MpdSupervisor {
     process: Option<Child>,
@@ -795,11 +809,9 @@ decoder {{
             cfg.audio_buffer_size_kb
         );
 
-        let child = match Command::new(engine.program())
-            .arg("--no-daemon")
-            .arg(&conf_path)
-            .spawn()
-        {
+        let mut command = Command::new(engine.program());
+        command.arg("--no-daemon").arg(&conf_path);
+        let child = match spawn_private_mpd(&mut command) {
             Ok(child) => child,
             Err(error) => {
                 let failure = format!("Falha ao executar o processo do MPD: {}", error);

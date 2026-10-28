@@ -466,3 +466,103 @@ pub(crate) fn writable_published_generation_is_refused_without_permission_repair
         assert!(!f.profile.join("config.json").exists()); assert!(f.marker().exists());
     }
 }
+
+
+// Characterize the R6 failure without a live engine: MPD's FileOutputStream
+// creates a new database with 0666 and atomically publishes that same inode.
+// Rejection of group-writable existing files remains the intended safety rule.
+#[cfg_attr(test, test)]
+pub(crate) fn mpd_style_database_creation_exposes_session_umask() {
+    const CASE: &str = "SONANTE_TEST_MPD_DATABASE_MASK";
+    if let Ok(mask) = std::env::var(CASE) {
+        assert!(["0002", "0022", "0077"].contains(&mask.as_str()));
+        unsafe { libc::umask(u32::from_str_radix(&mask, 8).unwrap()); }
+        let f = Fixture::new(); let (previous, next) = f.configs(false);
+        let owner = Lease::acquire(&f.profile).unwrap();
+        let mut tx = InitialPublication::prepare(&owner, &previous, &next, "mpd-db-mask", &|| false).unwrap();
+        tx.publish(&|| false).unwrap(); f.persist(&next); tx.prepare_background().unwrap();
+        let pending = crate::first_run_managed::PendingPreparation::open(&owner).unwrap();
+        let temporary = f.profile.join("mpd-v2.db.tmp");
+        fs::write(&temporary, b"simulated MPD database; ordinary POSIX creation").unwrap();
+        fs::rename(&temporary, f.profile.join("mpd-v2.db")).unwrap();
+        let mode = fs::metadata(f.profile.join("mpd-v2.db")).unwrap().permissions().mode() & 0o777;
+        let result = pending.finish(&owner);
+        if mask == "0002" {
+            assert_eq!(mode, 0o664);
+            assert_eq!(result.as_ref().map_err(String::as_str), Err("FIRST_RUN_DATABASE_UNCONFIRMED"));
+            assert!(f.marker().exists());
+            assert!(f.profile.join(crate::first_run_managed::PENDING).exists());
+            assert_eq!(crate::first_run_managed::PendingPreparation::config(&f.profile).unwrap(), Some(next.clone()));
+        } else {
+            assert_eq!(mode, if mask == "0022" { 0o644 } else { 0o600 });
+            assert!(result.is_ok(), "{result:?}");
+            assert!(!f.marker().exists());
+            assert!(!f.profile.join(crate::first_run_managed::PENDING).exists());
+        }
+        assert_eq!(AppConfig::load_from_path(&f.profile.join("config.json")).unwrap(), next);
+        f.assert_managed();
+        println!("mask={mask} database_mode={mode:o} catalogue_result={result:?}");
+        return;
+    }
+    for mask in ["0002", "0022", "0077"] {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "first_run_managed::tests::mpd_style_database_creation_exposes_session_umask", "--test-threads=1", "--nocapture"])
+            .env(CASE, mask).output().unwrap();
+        print!("{}", String::from_utf8_lossy(&result.stdout));
+        assert!(result.status.success(), "mask {mask}: {}", String::from_utf8_lossy(&result.stderr));
+    }
+}
+
+// Exercise the actual production spawn policy with a tiny DB writer in place
+// of MPD. No engine, GUI, socket, audio device or personal profile is opened.
+#[cfg_attr(test, test)]
+pub(crate) fn private_mpd_child_database_completes_without_changing_parent_mask() {
+    const TEST: &str = "first_run_managed::tests::private_mpd_child_database_completes_without_changing_parent_mask";
+    const CASE: &str = "SONANTE_TEST_PRIVATE_MPD_PARENT_MASK";
+    const WRITER: &str = "SONANTE_TEST_PRIVATE_MPD_DB_WRITER";
+    if let Some(path) = std::env::var_os(WRITER) {
+        let database = PathBuf::from(path);
+        let temporary = database.with_extension("db.tmp");
+        fs::write(&temporary, b"simulated MPD database; POSIX creation in child").unwrap();
+        fs::rename(temporary, database).unwrap();
+        return;
+    }
+    if let Ok(mask) = std::env::var(CASE) {
+        assert!(["0000", "0002", "0022", "0077"].contains(&mask.as_str()));
+        let mask = u32::from_str_radix(&mask, 8).unwrap();
+        // This is an isolated single-test process, never the test suite parent.
+        unsafe { libc::umask(mask); }
+        let f = Fixture::new(); let (previous, next) = f.configs(false);
+        let source_mode = fs::metadata(f.media.join("track.wav")).unwrap().mode();
+        let owner = Lease::acquire(&f.profile).unwrap();
+        let mut tx = InitialPublication::prepare(&owner, &previous, &next, "private-mpd-db", &||false).unwrap();
+        tx.publish(&||false).unwrap(); f.persist(&next); tx.prepare_background().unwrap();
+        let pending = crate::first_run_managed::PendingPreparation::open(&owner).unwrap();
+        let mut writer = std::process::Command::new(std::env::current_exe().unwrap());
+        writer.args(["--exact", TEST, "--test-threads=1"])
+            .env(WRITER, f.profile.join("mpd-v2.db"));
+        assert!(crate::supervisor::spawn_private_mpd(&mut writer).unwrap().wait().unwrap().success());
+        assert_eq!(fs::metadata(f.profile.join("mpd-v2.db")).unwrap().mode() & 0o777, 0o600);
+        pending.finish(&owner).unwrap();
+        assert!(!f.marker().exists());
+        assert!(!f.profile.join(crate::first_run_managed::PENDING).exists());
+        assert_eq!(AppConfig::load_from_path(&f.profile.join("config.json")).unwrap(), next);
+        f.assert_managed();
+        assert_eq!(fs::metadata(f.media.join("track.wav")).unwrap().mode(), source_mode);
+        // Both successful and failed spawn must leave the parent mask alone.
+        let mut missing = std::process::Command::new(f.root.join("absent-engine"));
+        assert_eq!(crate::supervisor::spawn_private_mpd(&mut missing).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        let probe = f.root.join("parent-permissions");
+        fs::write(&probe, b"parent mask preserved").unwrap();
+        assert_eq!(fs::metadata(probe).unwrap().mode() & 0o777, 0o666 & !mask);
+        println!("parent_mask={mask:o} child_database=600 completion=OK parent_mask_preserved=OK");
+        return;
+    }
+    for mask in ["0000", "0002", "0022", "0077"] {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--test-threads=1", "--nocapture"])
+            .env(CASE, mask).output().unwrap();
+        print!("{}", String::from_utf8_lossy(&result.stdout));
+        assert!(result.status.success(), "mask {mask}: {}", String::from_utf8_lossy(&result.stderr));
+    }
+}
