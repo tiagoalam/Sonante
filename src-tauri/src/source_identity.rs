@@ -692,10 +692,19 @@ mod tests {
     fn addition_identity_reopen_accepts_only_queue_write_not_ledger_replacement() {
         let f = Fixture::new();
         f.reserve(&[], &BTreeMap::new());
+        // A fast create/rename can share the directory's timestamp tick with
+        // reservation on coarse-resolution filesystems. Start in the past so
+        // the real queue write deterministically changes the captured mtime.
+        File::open(&f.0).unwrap().set_times(fs::FileTimes::new().set_modified(
+            UNIX_EPOCH + std::time::Duration::from_secs(1),
+        )).unwrap();
         let before = ReadonlyIdentitySnapshot::open(&f.library()).unwrap();
+        before.revalidate().unwrap();
         // Three small control files, no app profile, media, process or MPD.
         fs::write(f.0.join("queue_cache.json.writing"), b"[]").unwrap();
         fs::rename(f.0.join("queue_cache.json.writing"), f.0.join("queue_cache.json")).unwrap();
+        assert_ne!(before.parent.stamp.mtime, ReadonlyStamp::of(&fs::metadata(&f.0).unwrap()).mtime,
+            "the fixture must exercise a changed directory stamp, independently of timestamp resolution");
         assert!(before.revalidate().is_err(), "the ordinary strict guard stays strict");
         let current = before.reopen_after_queue_write(&f.library()).unwrap();
         current.revalidate().unwrap();
