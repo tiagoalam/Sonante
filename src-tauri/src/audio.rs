@@ -1686,6 +1686,29 @@ impl AudioEngine {
             .map(AlbumCollector::into_disc_tracks))
     }
 
+    pub(crate) fn get_checked_album_tracks_at(socket: &str, album_id: &str, confirmed: &HashSet<String>) -> Result<Option<Vec<LocalAlbumDiscTracks>>, String> {
+        let filter = Self::local_album_base_filter(Self::local_album_scope(album_id)?)?;
+        let lines = Self::send_command_to_socket(socket, &format!("find {filter}"))?;
+        // Exclude new/unconfirmed records BEFORE grouping titles/discs, so a
+        // just-indexed row cannot alter the identity of an existing album.
+        let mut accepted = false;
+        let mut old_lines = Vec::new();
+        for line in lines {
+            if line.starts_with("file:") {
+                let uri = line.strip_prefix("file: ").ok_or("LOCAL_CHECK_TRACK_RESPONSE_INVALID")?;
+                accepted = confirmed.contains(uri);
+            }
+            if accepted { old_lines.push(line); }
+        }
+        let mut collection = LocalAlbumCollection::default();
+        Self::collect_local_album_page(&mut collection, old_lines)?;
+        let Some(collector) = Self::canonical_local_album_map(collection).remove(album_id) else { return Ok(None); };
+        let mut groups = collector.into_disc_tracks();
+        for group in &mut groups { group.tracks.retain(|track| confirmed.contains(&track.path)); }
+        groups.retain(|group| !group.tracks.is_empty());
+        Ok((!groups.is_empty()).then_some(groups))
+    }
+
     pub(crate) fn get_local_album_tracks_at(
         socket_path: &str,
         album_id: &str,
@@ -4779,12 +4802,9 @@ impl AudioEngine {
         let options = crate::playback_options::PlaybackOptions::from_status(&lines);
         let processing = crate::signal_processing::ProcessingStatus::from_status(&lines);
         crate::diagnostics::now_playing_seek_telemetry(&lines);
-        crate::diagnostics::now_playing_mpd_error(
-            lines
-                .iter()
-                .filter_map(|line| line.strip_prefix("error: "))
-                .last(),
-        );
+        let mpd_error = lines.iter().filter_map(|line| line.strip_prefix("error: ")).last();
+        crate::diagnostics::playback_mpd_error(mpd_error);
+        crate::diagnostics::now_playing_mpd_error(mpd_error);
 
         let mut state = None;
         let mut elapsed = 0.0;
@@ -6715,6 +6735,45 @@ mod tests {
         );
         assert_eq!(groups[0].tracks[0].title.as_deref(), Some("First A"));
         assert_eq!(groups[0].tracks[0].duration, Some(61.5));
+    }
+
+    #[test]
+    fn manual_check_tracks_use_one_database_response_and_only_previously_confirmed_files() {
+        let (path, server) = fake_album_mpd(vec![(
+            "find \"(base 'Music/Shared')\"",
+            "file: Music/Shared/first.flac\nTitle: First\nAlbum: First\nduration: 61.5\nfile: Music/Shared/new.flac\nTitle: New\nAlbum: First\nfile: Music/Shared/other.flac\nAlbum: Other\nOK\n",
+        )]);
+        let known = HashSet::from(["Music/Shared/first.flac".to_owned(), "Music/Shared/other.flac".to_owned()]);
+        let groups = AudioEngine::get_checked_album_tracks_at(&path, &album_id("Music/Shared", "First"), &known).unwrap().unwrap();
+        server.join().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].tracks.len(), 1);
+        assert_eq!(groups[0].tracks[0].path, "Music/Shared/first.flac");
+        assert_eq!(groups[0].tracks[0].duration, Some(61.5));
+    }
+
+    #[test]
+    fn manual_check_tracks_keep_multidisc_cue_and_reject_unconfirmed_only_albums() {
+        let (path, server) = fake_album_mpd(vec![(
+            "find \"(base 'Artist/Album')\"",
+            "file: Artist/Album/CD2/disc.cue/track0001\nTitle: Two\nAlbum: Album CD2\nDisc: 2\nfile: Artist/Album/CD1/one.flac\nTitle: One\nAlbum: Album CD1\nDisc: 1\nOK\n",
+        )]);
+        let known = HashSet::from(["Artist/Album/CD2/disc.cue/track0001".to_owned(), "Artist/Album/CD1/one.flac".to_owned()]);
+        let groups = AudioEngine::get_checked_album_tracks_at(&path, &album_id("Artist/Album", "Album"), &known).unwrap().unwrap();
+        server.join().unwrap();
+        assert_eq!(groups.len(), 2);
+        let (baseline_path, baseline_server) = fake_album_mpd(vec![
+            ("status", "state: stop\nOK\n"),
+            ("count \"(base 'Artist/Album')\"", "songs: 2\nOK\n"),
+            ("find \"(base 'Artist/Album')\" window 0:2", "file: Artist/Album/CD2/disc.cue/track0001\nTitle: Two\nAlbum: Album CD2\nDisc: 2\nfile: Artist/Album/CD1/one.flac\nTitle: One\nAlbum: Album CD1\nDisc: 1\nOK\n"),
+        ]);
+        let baseline = AudioEngine::get_local_album_tracks_at(&baseline_path, &album_id("Artist/Album", "Album")).unwrap().unwrap();
+        baseline_server.join().unwrap();
+        assert_eq!(serde_json::to_value(&groups).unwrap(), serde_json::to_value(&baseline).unwrap());
+        assert_eq!(groups.iter().flat_map(|g| g.tracks.iter().map(|t| t.path.clone())).collect::<HashSet<_>>(), known);
+        let (path, server) = fake_album_mpd(vec![("find \"(base 'Music/New')\"", "file: Music/New/new.flac\nAlbum: New\nOK\n")]);
+        assert!(AudioEngine::get_checked_album_tracks_at(&path, &album_id("Music/New", "New"), &known).unwrap().is_none());
+        server.join().unwrap();
     }
 
     #[test]
@@ -8809,6 +8868,53 @@ mod tests {
         assert_eq!(cached[0].uri, queue[0].uri);
         assert!(!cache.windows("old/previous.flac".len()).any(|value| value == b"old/previous.flac"));
         assert!(gate.current().unwrap().is_none());
+    }
+
+    #[test]
+    fn manual_check_real_direct_guard_allows_queue_start_and_cache_commit() {
+        use crate::{direct_playback, direct_volume};
+        let transactions = crate::ConfigTransactionState::new();
+        let operations = transactions.operations.clone();
+        let check = operations.manual_check_playback.clone();
+        let gate = direct_playback::Gate::new(operations.clone());
+        let mut volume = 100;
+        let mut state = "stop";
+        let mut commands = Vec::new();
+        let mut io = |command: &str| -> Result<Vec<String>, String> {
+            commands.push(command.to_owned());
+            for line in command.lines() {
+                if line == "setvol 0" { volume = 0; }
+                if line == "setvol 100" { volume = 100; }
+                if line.starts_with("play ") { state = "play"; }
+            }
+            Ok(if command.lines().any(|line| line == "status") { vec![format!("volume: {volume}"), format!("state: {state}"), "playlist: 1".into()] } else { vec![] })
+        };
+        let volume_session = direct_volume::Session::initialize(&mut io).unwrap();
+        let mut config = crate::config::AppConfig::default();
+        config.first_run = false;
+        config.audio_output_type = "alsa".into();
+        config.alsa_device = "hw:CARD=Fixture,DEV=0".into();
+        config.direct_volume_choice = config.direct_context();
+        gate.commit_choice(&config);
+        gate.bind(&config, 17, Some(volume_session));
+        let owner = operations.begin().unwrap();
+        let session = check.begin(&owner, &operations, &["file: old/current.flac".into()].into()).unwrap();
+        let audio = Mutex::new(engine_with_track("old/previous.flac"));
+        let mut track = engine_with_track("old/current.flac").queue.remove(0);
+        track.thumb = Some("data:image/png;base64,AA==".into());
+        let mut cache = Vec::new();
+        let token = crate::admit_or_validate_playback(&audio, &transactions, None).unwrap();
+        let result = crate::finish_playback_intent(&audio, &transactions, &token, |audio|
+            audio.play_tracks_with_io(vec![track], vec!["old/current.flac".into()], 0,
+                |command| gate.send_with(command, |pid, cmd| { assert_eq!(pid, Some(17)); io(cmd) }),
+                |audio| { cache = AudioEngine::encode_queue_cache(&audio.queue)?; Ok(()) }));
+        assert_eq!(result, Ok(()), "real Direct command admission must accept its own explicit Check");
+        audio.lock().unwrap().ensure_queue_persisted().unwrap();
+        assert_eq!(AudioEngine::decode_queue_cache(cache.as_slice()).unwrap().0[0].uri, "old/current.flac");
+        assert!(commands.iter().any(|c| c.contains("play 0")));
+        assert_eq!(volume, 100);
+        assert_eq!(state, "play");
+        session.confirm();
     }
 
     fn engine_with_track(uri: &str) -> AudioEngine {

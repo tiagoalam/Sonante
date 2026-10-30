@@ -37,7 +37,7 @@ jobs:
             librsvg2-dev \
             webp-pixbuf-loader \
             libasound2-dev \
-            pkg-config rpm desktop-file-utils python3
+            pkg-config rpm desktop-file-utils python3 libarchive-tools zstd
 
       - name: Verify AppIndicator discovery for Tauri bundling
         run: |
@@ -116,13 +116,14 @@ jobs:
           cp src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/rpm/*.rpm artifacts/
           cp native-abi.txt package-inspection.txt artifacts/
           cd artifacts
-          sha256sum *.deb *.rpm > SHA256SUMS-ubuntu.txt
+          git rev-parse HEAD > source-commit.txt
+          sha256sum *.deb *.rpm source-commit.txt > SHA256SUMS-ubuntu.txt
           sha256sum -c SHA256SUMS-ubuntu.txt
 
       - name: Upload DEB and RPM candidates
         uses: actions/upload-artifact@v4
         with:
-          name: sonante-ubuntu-22.04-packages
+          name: sonante-compilation-ubuntu-inputs
           path: artifacts/*
           if-no-files-found: error
 
@@ -146,7 +147,7 @@ jobs:
       - name: Upload Fedora runtime profile executable
         uses: actions/upload-artifact@v4
         with:
-          name: sonante-fedora-profile-native
+          name: sonante-compilation-fedora-inputs
           path: fedora-native/*
           if-no-files-found: error
 
@@ -185,15 +186,57 @@ jobs:
           bsdtar -tf ./*.pkg.tar.zst | grep -Fx usr/bin/sonante
           desktop-file-validate src/sonante.desktop
           bash ../scripts/inspect-elf.sh src/sonante/src-tauri/target/release/sonante | tee native-abi-arch.txt
-          sha256sum *.pkg.tar.zst > SHA256SUMS-arch.txt
+          runuser -u builder -- git -C .. rev-parse HEAD > source-commit.txt
+          sha256sum *.pkg.tar.zst source-commit.txt > SHA256SUMS-arch.txt
           sha256sum -c SHA256SUMS-arch.txt
       - name: Upload Arch candidate
         uses: actions/upload-artifact@v4
         with:
-          name: sonante-arch-package
+          name: sonante-compilation-arch-inputs
           path: |
             arch-build/*.pkg.tar.zst
             arch-build/SHA256SUMS-arch.txt
             arch-build/package-info.txt
             arch-build/native-abi-arch.txt
+            arch-build/source-commit.txt
+          if-no-files-found: error
+
+
+  complete:
+    name: Complete Linux installers
+    needs: [linux, arch]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install packaging tools only
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils dpkg-dev rpm libarchive-tools zstd python3
+      - uses: actions/download-artifact@v4
+        with:
+          name: sonante-compilation-ubuntu-inputs
+          path: ${{ runner.temp }}/sonante-candidates/ubuntu
+      - uses: actions/download-artifact@v4
+        with:
+          name: sonante-compilation-fedora-inputs
+          path: ${{ runner.temp }}/sonante-candidates/fedora
+      - uses: actions/download-artifact@v4
+        with:
+          name: sonante-compilation-arch-inputs
+          path: ${{ runner.temp }}/sonante-candidates/arch
+      - name: Assemble and verify complete installers and corresponding sources
+        run: |
+          python3 scripts/complete-packages.py \
+            --candidates "$RUNNER_TEMP/sonante-candidates" \
+            --work-dir "$RUNNER_TEMP/sonante-complete-work" \
+            --output "$RUNNER_TEMP/sonante-complete-output" \
+            --revision 2
+      - name: Upload complete installable packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonante-complete-linux-packages
+          path: ${{ runner.temp }}/sonante-complete-output/*
+          compression-level: 0
           if-no-files-found: error

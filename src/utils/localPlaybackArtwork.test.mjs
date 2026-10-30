@@ -202,3 +202,17 @@ test("an existing browser thumbnail can preview the restored player before the n
  assert.equal(f.catalog.getSnapshot().loaded,false,'preview never confirms the saved catalog');
  pending.resolve('current-full-cover');await flush();assert.equal(f.render().thumb,'current-full-cover');f.dispose();
 });
+
+
+test("a changed Local track obtains its cover during a bound Check, while Preparing remains suspended", async () => {
+  const f = mount(); f.catalog.ensureLoaded(false, true); await flush();
+  f.status = { ...f.status, is_updating: true };
+  f.catalog.onMpdStatus(true, true, false); await ready(f);
+  assert.deepEqual(coverPaths(f.calls), []);
+  const before = structuredClone(f.status);
+  f.catalog.onMpdStatus(true, true, true); await ready(f);
+  assert.equal(f.display.thumb, "local-cover");
+  assert.deepEqual(coverPaths(f.calls), ["Source/Album"]);
+  assert.deepEqual(f.status, before, "artwork must not change raw playback state or queue");
+  f.dispose();
+});

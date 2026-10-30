@@ -691,3 +691,10 @@ test("local library offers one explicit incremental check and no full-rescan act
   assert.equal(f.calls.save.length, 0);
   f.h.dispose();
 });
+
+test('local Settings keeps the all-folder check and omits the technical coverage panel',()=>{
+ const text=readFileSync(new URL('../components/SettingsModal.tsx',import.meta.url),'utf8');
+ assert.doesNotMatch(text,/LocalIndexCoverageStatus/);
+ assert.match(text,/audioService\.checkLocalLibrary/);
+ assert.match(text,/t\("settings\.checkNew"\)/);
+});

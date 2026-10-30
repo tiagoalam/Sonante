@@ -526,7 +526,7 @@ export function App() {
     // Publish the artwork gate before child passive effects start cover queries.
     const blocked = artworkReadBlocked(playbackStatus.is_updating, localCatalog);
     localArtworkResolver.setContext(blocked, localCatalog.albums);
-    localArtworkEnrichment.setUpdating(blocked);
+    localArtworkEnrichment.setUpdating(blocked || localCatalog.manualCheckPlayback === true);
   }, [playbackStatus.is_updating, localCatalog]);
   useEffect(() => {
     localArtworkEnrichment.setOnlineEnabled(config?.online_artwork_enabled ?? false);
@@ -994,7 +994,7 @@ export function App() {
         if (disposed || generation !== statusRequestGenerationRef.current) return;
 
         if (snapshot.health.state === "available" && snapshot.playback) {
-          localAlbumCatalog.onMpdStatus(snapshot.playback.is_updating);
+          localAlbumCatalog.onMpdStatus(snapshot.playback.is_updating, snapshot.manual_check_playback === true, snapshot.manual_check_artwork === true);
           setMpdHealth(snapshot.health);
           setPlaybackStatus({ ...snapshot.playback, output_observation: snapshot.output_observation ?? null, engine_evidence: snapshot.engine_evidence ?? null, shared_dsp: snapshot.shared_dsp ?? null });
         } else if (snapshot.health.state === "available") {

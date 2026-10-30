@@ -129,7 +129,8 @@ export const audioService = {
   resolveLocalLibraryPath: (path: string): Promise<string> =>
     invoke<string>("resolve_local_library_path", { path }),
   pickDirectory: (): Promise<string | null> => invoke<string | null>("pick_directory"),
-  checkLocalLibrary: (): Promise<boolean> => invoke<boolean>("check_local_library"),
+  checkLocalLibrary: (sourceId?: string, expectedFolders?: readonly string[]): Promise<boolean> =>
+    invoke<boolean>("check_local_library", sourceId === undefined && expectedFolders === undefined ? undefined : { sourceId, expectedFolders }),
   rescanLibrary: (): Promise<void> => invoke<void>("rescan_library"),
 };
 

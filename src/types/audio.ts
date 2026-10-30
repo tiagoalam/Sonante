@@ -112,6 +112,8 @@ export type MpdHealth =
   | { state: "stopping" };
 
 export interface MpdStatusSnapshot {
+  manual_check_playback?: boolean;
+  manual_check_artwork?: boolean;
   output_observation?: OutputObservation | null;
   engine_evidence?: EngineEvidence | null;
   shared_dsp?: DspSnapshot | null;

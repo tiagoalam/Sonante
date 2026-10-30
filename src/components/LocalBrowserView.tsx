@@ -16,6 +16,7 @@ import {
   Tags,
   Clock,
   Sparkles,
+  RefreshCw,
   Heart,
   ListPlus,
   Pencil,
@@ -34,7 +35,7 @@ import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
 import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDiscs";
 import { localAlbumCatalog } from "../utils/localAlbumCatalogSession";
-import { confirmedCatalogPlaybackAllowed, emptyLocalAlbumCatalogState, localCatalogActivity, localCatalogErrorKey, localCatalogPresentationAlbums } from "../utils/localAlbumCatalog";
+import { confirmedCatalogPlaybackAllowed, emptyLocalAlbumCatalogState, refreshCatalogAfterSuccessfulCheck, localCatalogActivity, localCatalogErrorKey, localCatalogPresentationAlbums } from "../utils/localAlbumCatalog";
 import { albumLocationSources } from "../utils/localAlbumLocations";
 import { localArtworkEnrichment, localArtworkResolver, localAlbumThumbnails } from "../utils/localArtworkSession";
 import {
@@ -286,7 +287,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 }) => {
   const { t } = useTranslation();
   const catalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
-  const artworkStatus = useSyncExternalStore(localArtworkEnrichment.subscribe, localArtworkEnrichment.getSnapshot);
+  const artworkActivity = useSyncExternalStore(localArtworkEnrichment.subscribe, localArtworkEnrichment.getOnlineActivitySnapshot);
   const albums = localCatalogPresentationAlbums(catalog);
   const openingAlbums = useMemo(() => sortLocalAlbums(albums, "album-asc"), [albums]);
   useLayoutEffect(() => { localAlbumThumbnails.setOpeningOrder(openingAlbums); }, [openingAlbums]);
@@ -322,6 +323,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     playerTarget, () => localAlbumCatalog.getSnapshot().albums, audioService.getLocalAlbumTracks,
   ), setTrackState, () => localAlbumCatalog.waitForMpd()), []);
   const catalogConfirmed = !detailUnavailable && confirmedCatalogPlaybackAllowed(catalog, isLibraryUpdating);
+  // A check permits playback of confirmed tracks, not editing/inspecting a
+  // generation while its writer owns it. Keep those existing guards strict.
+  const catalogInspectionAllowed = catalogConfirmed && !isLibraryUpdating && !catalog.manualCheckPlayback;
   const artworkBlocked = metadataMode || artworkReadBlocked(isLibraryUpdating, catalog);
   const tracksReady = catalogConfirmed && trackState.catalogVersion === albums && trackState.phase === "ready" && trackState.albumId === selectedAlbum?.id;
   const { tracks: albumTracks, sections: albumSections } = useMemo(
@@ -332,7 +336,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const artistListRef = useRef<VirtualListHandle>(null);
   const onlineEnabledRef = useRef(onlineArtworkEnabled);
   const libraryUpdatingRef = useRef(isLibraryUpdating);
-  onlineEnabledRef.current = onlineArtworkEnabled;
+  const artworkBlockedRef = useRef(artworkBlocked);
+  artworkBlockedRef.current = artworkBlocked;
+  onlineEnabledRef.current = onlineArtworkEnabled && !catalog.manualCheckPlayback;
   libraryUpdatingRef.current = isLibraryUpdating;
   const initialCatalogMountHandled = useRef(false);
   const observedCatalogRefreshRevision = useRef(catalogRefreshRevision);
@@ -349,7 +355,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const albumTagEditingAvailable = (albumId: string) => {
     const current = localAlbumCatalog.getSnapshot();
     return !detailUnavailable && current.loaded && !current.loading && !current.error && !current.mpdBusy
-      && !current.saveBlocked && !libraryUpdatingForTags.current
+      && !current.saveBlocked && !current.manualCheckPlayback && !libraryUpdatingForTags.current
       && current.albums.some((album) => album.id === albumId);
   };
   const [tagEditorTrack, setTagEditorTrack] = useState<LocalItem | null>(null);
@@ -415,7 +421,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   useEffect(() => {
     if (!selectedAlbum || artworkBlocked) return;
     let active = true;
-    void getLocalAlbumCover(selectedAlbum, () => onlineEnabledRef.current, () => libraryUpdatingRef.current, () => active && browserReads.current)
+    void getLocalAlbumCover(selectedAlbum, () => onlineEnabledRef.current, () => artworkBlockedRef.current, () => active && browserReads.current)
       .then(cover => { if (active && cover) setAlbumCover(cover); })
       .catch(error => logError("artwork.album-load", error));
     return () => { active = false; };
@@ -560,7 +566,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const handlePlayEntireAlbum = (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => runLocalPlayback(async intent => {
     if (!isPlaybackAvailable || !catalogConfirmed || (trackItems && !tracksReady)) return;
     const files = trackItems ?? flattenAlbumDiscs(await loadAlbumDiscTracks(album)).tracks;
-    const cov = (selectedAlbum?.id === album.id ? albumCover : null) || await localArtworkResolver.resolveLocalOnly(album, () => artworkReadBlocked(libraryUpdatingRef.current, localAlbumCatalog.getSnapshot()));
+    const cov = (selectedAlbum?.id === album.id ? albumCover : null) || await localArtworkResolver.resolveLocalOnly(album, () => artworkReadBlocked(libraryUpdatingRef.current, localAlbumCatalog.getSnapshot())).catch(error => {
+      // Optional artwork must not reject a valid playback request when the
+      // catalog writer owns its read scope. Native music/queue errors still fail.
+      logError("local.album-artwork", error);
+      return null;
+    });
     const currentCatalog = localAlbumCatalog.getSnapshot();
     if (currentCatalog.albums !== albums || !confirmedCatalogPlaybackAllowed(currentCatalog, libraryUpdatingRef.current)) return;
     const meta = files.map((f) => ({
@@ -610,6 +621,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     setTagEditorTrack((current) => current ? updateTrack(current) : null);
   };
 
+  const [checkingLibrary, setCheckingLibrary] = useState(false);
+  const [checkFeedback, setCheckFeedback] = useState<{scope: string; kind: "updated" | "unchanged" | "failed"} | null>(null);
+  const libraryCheckInFlight = useRef(false);
+  const browserMounted = useRef(true);
+  useEffect(() => { browserMounted.current = true; return () => { browserMounted.current = false; }; }, []);
+
   const sourceOptions = useMemo(() => localLibrarySourceOptions(albums), [albums]);
   const libraryPresentation = localLibrarySelectorPresentation(configuredLocalFolders);
   const librarySelectOptions = useMemo(() => [
@@ -629,6 +646,32 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     { value: "artist-desc", label: t("localBrowser.sortArtistDesc") },
   ], [t]);
   const activeSourceId = validLocalLibrarySourceSelection(selectedSourceId, sourceOptions);
+  // No source ID uses the same all-folder check as Settings. A bound ID limits discovery.
+  const canSelectLibraryCheck = configuredLocalFolders.length > 0;
+  const libraryCheckScope = JSON.stringify([configuredLocalFolders, activeSourceId]);
+  const checkDisabled = checkingLibrary || !catalog.loaded || catalog.loading || catalog.saveBlocked
+    || catalog.mpdBusy || !!catalog.error || isLibraryUpdating || !isPlaybackAvailable
+    || !!(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack);
+  const handleLibraryCheck = async () => {
+    if (!canSelectLibraryCheck || checkDisabled || libraryCheckInFlight.current) return;
+    libraryCheckInFlight.current = true;
+    const scope = libraryCheckScope;
+    const source = activeSourceId ?? undefined;
+    setCheckingLibrary(true);
+    setCheckFeedback(null);
+    try {
+      const changed = await refreshCatalogAfterSuccessfulCheck(
+        () => audioService.checkLocalLibrary(source, configuredLocalFolders), () => localAlbumCatalog.requestRefresh(),
+      );
+      if (browserMounted.current) setCheckFeedback({scope, kind: changed ? "updated" : "unchanged"});
+    } catch (error) {
+      logError("library.check-changes", error);
+      if (browserMounted.current) setCheckFeedback({scope, kind: "failed"});
+    } finally {
+      libraryCheckInFlight.current = false;
+      if (browserMounted.current) setCheckingLibrary(false);
+    }
+  };
   // A successful catalog publication advances data and revision together. This
   // switches the render in one snapshot, before async partial/cache cleanup.
   const confirmedPreviewRevision = localAlbumCatalog.getConfirmedRevision();
@@ -671,8 +714,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     [scopedAlbums, albumSearch],
   );
   const sortedAlbums = useMemo(
-    () => sortLocalAlbums(filteredAlbums, albumSortMode),
-    [filteredAlbums, albumSortMode],
+    () => albumSortMode === "album-asc" && activeSourceId === null && albumSearch === ""
+      ? openingAlbums
+      : sortLocalAlbums(filteredAlbums, albumSortMode),
+    [openingAlbums, filteredAlbums, albumSortMode, activeSourceId, albumSearch],
   );
   const albumBucketIndices = useMemo(
     () => localAlbumBucketFirstIndices(sortedAlbums, albumSortMode),
@@ -862,11 +907,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           <div>
             <h2 className="text-2xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight">{headerTitle}</h2>
             <p className="text-xs text-[color:var(--theme-fg-muted,#888888)] mt-0.5">{headerCount}</p>
-            {viewMode === "albums" && artworkStatus.onlineActivity && (
+            {viewMode === "albums" && artworkActivity && (
               <div className="text-[11px] text-[color:var(--theme-fg-muted,#777777)] mt-1 flex flex-wrap items-center gap-x-2">
-                <span className="text-[color:var(--theme-fg-accent,#E5A00D)] flex items-center gap-1 max-w-72 truncate" title={artworkStatus.onlineActivity.title}>
-                  {artworkStatus.onlineActivity.kind === "searching" && <Disc3 size={11} className="animate-spin" />}
-                  {t(artworkStatus.onlineActivity.kind === "searching" ? "artwork.searchingOnline" : "artwork.foundOnline", { title: artworkStatus.onlineActivity.title })}
+                <span className="text-[color:var(--theme-fg-accent,#E5A00D)] flex items-center gap-1 max-w-72 truncate" title={artworkActivity.title}>
+                  {artworkActivity.kind === "searching" && <Disc3 size={11} className="animate-spin" />}
+                  {t(artworkActivity.kind === "searching" ? "artwork.searchingOnline" : "artwork.foundOnline", { title: artworkActivity.title })}
                 </span>
               </div>
             )}
@@ -948,6 +993,19 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               </div>
             </>
           )}
+          {canSelectLibraryCheck && <div className="ml-auto flex min-w-0 shrink-0 items-center gap-2">
+            {checkFeedback?.scope === libraryCheckScope && <span role="status" className="max-w-40 truncate text-[11px] text-[color:var(--theme-fg-muted,#888888)]">
+              {t(checkFeedback.kind === "updated" ? "localBrowser.checkLibrary.updated"
+                : checkFeedback.kind === "unchanged" ? "localBrowser.checkLibrary.unchanged" : "localBrowser.checkLibrary.failed")}
+            </span>}
+            <button type="button" onClick={handleLibraryCheck} disabled={checkDisabled} aria-busy={checkingLibrary}
+              title={t(checkingLibrary ? "localBrowser.checkLibrary.checking" : activeSourceId !== null || libraryPresentation.mode === "single"
+                ? "localBrowser.checkLibrary.help" : "localBrowser.checkLibrary.helpAll")}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded px-2 py-1 text-xs text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:cursor-default disabled:opacity-50">
+              <RefreshCw size={12} aria-hidden="true" className={checkingLibrary ? "animate-spin motion-reduce:animate-none" : ""} />
+              {t("localBrowser.checkLibrary.button")}
+            </button>
+          </div>}
         </div>
       )}
 
@@ -1182,7 +1240,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     >
                       <ListPlus size={15} />
                     </button>
-                    <button type="button" onClick={(event) => { event.stopPropagation(); setFileInfoTrack({ track: track, catalog: localAlbumCatalog.getSnapshot() }); }}
+                    <button type="button" disabled={!catalogInspectionAllowed} onClick={(event) => { event.stopPropagation(); setFileInfoTrack({ track: track, catalog: localAlbumCatalog.getSnapshot() }); }}
                       title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: track.title || track.name })}
                       className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
                       <Info size={14} />
@@ -1191,7 +1249,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       type="button"
                       onClick={(event) => {
                         event.stopPropagation();
-                        setTagEditorTrack(track);
+                        if (catalogInspectionAllowed) setTagEditorTrack(track);
                       }}
                       className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
                       title={t("tagEditor.edit")}
@@ -1235,7 +1293,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       handlePlayEntireAlbum(album);
                     }}
                     isPlaybackAvailable={isPlaybackAvailable}
-                    onlineArtworkEnabled={onlineArtworkEnabled}
+                    onlineArtworkEnabled={onlineArtworkEnabled && !catalog.manualCheckPlayback}
                     isLibraryUpdating={artworkBlocked}
                   />
                 )}
@@ -1273,7 +1331,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       handlePlayEntireAlbum(album);
                     }}
                     isPlaybackAvailable={isPlaybackAvailable && catalogConfirmed}
-                    onlineArtworkEnabled={onlineArtworkEnabled}
+                    onlineArtworkEnabled={onlineArtworkEnabled && !catalog.manualCheckPlayback}
                     isLibraryUpdating={artworkBlocked}
                   />
                 )}
@@ -1336,7 +1394,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       handlePlayEntireAlbum(album);
                     }}
                     isPlaybackAvailable={isPlaybackAvailable}
-                    onlineArtworkEnabled={onlineArtworkEnabled}
+                    onlineArtworkEnabled={onlineArtworkEnabled && !catalog.manualCheckPlayback}
                     isLibraryUpdating={artworkBlocked}
                   />
                 )}
@@ -1375,7 +1433,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       handlePlayEntireAlbum(album);
                     }}
                     isPlaybackAvailable={isPlaybackAvailable}
-                    onlineArtworkEnabled={onlineArtworkEnabled}
+                    onlineArtworkEnabled={onlineArtworkEnabled && !catalog.manualCheckPlayback}
                     isLibraryUpdating={artworkBlocked}
                   />
                 )}
@@ -1512,7 +1570,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                           >
                             <ListPlus size={15} />
                           </button>
-                          <button type="button" onClick={(event) => { event.stopPropagation(); setFileInfoTrack({ track: item, catalog: localAlbumCatalog.getSnapshot() }); }}
+                          <button type="button" disabled={!catalogInspectionAllowed} onClick={(event) => { event.stopPropagation(); setFileInfoTrack({ track: item, catalog: localAlbumCatalog.getSnapshot() }); }}
                             title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: item.title || item.name })}
                             className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
                             <Info size={14} />
@@ -1521,7 +1579,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                             type="button"
                             onClick={(event) => {
                               event.stopPropagation();
-                              setTagEditorTrack(item);
+                              if (catalogInspectionAllowed) setTagEditorTrack(item);
                             }}
                             className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
                             title={t("tagEditor.edit")}
@@ -1542,7 +1600,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       </div>
       {fileInfoTrack && <LocalFileInfoModal path={fileInfoTrack.track.path}
         displayName={fileInfoTrack.track.title || fileInfoTrack.track.name}
-        available={catalogConfirmed && localAlbumCatalog.getSnapshot() === fileInfoTrack.catalog}
+        available={catalogInspectionAllowed && localAlbumCatalog.getSnapshot() === fileInfoTrack.catalog}
         onClose={() => setFileInfoTrack(null)} />}
       {(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack) && <span data-local-tag-dialog-open hidden />}
       {playlistItems && (
@@ -1560,7 +1618,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         <LocalAlbumTagEditorModal
           albumId={tagEditorAlbum.id}
           displayName={tagEditorAlbum.title}
-          available={catalogConfirmed && albums.some((album) => album.id === tagEditorAlbum.id)}
+          available={catalogInspectionAllowed && albums.some((album) => album.id === tagEditorAlbum.id)}
           catalogVersion={catalog}
           reviewContext={doctorReviewContext}
           isAvailable={() => localAlbumCatalog.getSnapshot() === catalog && albumTagEditingAvailable(tagEditorAlbum.id)}
@@ -1578,7 +1636,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         <LibraryDoctorModal
           albumId={doctorAlbum.id}
           displayName={doctorAlbum.title}
-          available={catalogConfirmed && albums.some(album => album.id === doctorAlbum.id)}
+          available={catalogInspectionAllowed && albums.some(album => album.id === doctorAlbum.id)}
           catalogVersion={catalog}
           isAvailable={() => localAlbumCatalog.getSnapshot() === catalog
             && doctorSelectedAlbum.current === doctorAlbum.id

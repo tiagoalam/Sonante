@@ -27,6 +27,7 @@ mod recovery_set;
 mod profile_lease;
 mod local_media;
 mod library_refresh;
+mod manual_check_playback;
 mod source_identity;
 mod source_availability;
 mod local_import_preview;
@@ -91,6 +92,7 @@ pub struct ConfigTransactionState {
     operations: Arc<config_save_operation::Coordinator>,
     initial_plex: initial_plex_playback::Gate,
     addition_playback: initial_plex_playback::Gate,
+    manual_check_playback: Arc<manual_check_playback::Gate>,
     startup_config_read_gate: Mutex<bool>,
     source_mirror_cache: source_availability::MirrorReadCache,
     restart_gate: Mutex<()>,
@@ -104,7 +106,7 @@ struct RestartPermit<'a> {
     _guard: std::sync::MutexGuard<'a, ()>,
 }
 
-// Only a validated, live startup reconciliation may own library.next.
+// Only a validated, live startup reconciliation or explicit check may own library.next.
 // Hold the gate through admission, then let readers check persistent config and
 // journal without mistaking this operation's staging for an abandoned Save.
 struct StartupConfigReadGuard<'a> {
@@ -1074,25 +1076,47 @@ fn explicit_incremental_check_plan(
     Ok(plan)
 }
 
+fn scoped_incremental_check_plan(
+    plan: local_media::mirror::ManagedRefreshPlan,
+    sources: &std::collections::BTreeMap<String, PathBuf>,
+    source_id: Option<&str>,
+) -> Result<local_media::mirror::ManagedRefreshPlan, String> {
+    let Some(id) = source_id else { return explicit_incremental_check_plan(plan, sources); };
+    let root = sources.get(id).ok_or("LOCAL_INCREMENTAL_CHECK_SCOPE_CHANGED")?;
+    let selected = [(id.to_owned(), root.clone())].into();
+    let plan = explicit_incremental_check_plan(plan, &selected)?;
+    if let local_media::mirror::ManagedRefreshPlan::Targeted { directories, .. } = &plan {
+        if directories.iter().any(|path| Path::new(path).components().next()
+            .and_then(|part| part.as_os_str().to_str()) != Some(id)) {
+            return Err("LOCAL_INCREMENTAL_CHECK_SCOPE_CHANGED".into());
+        }
+    }
+    Ok(plan)
+}
+
 fn run_managed_manual_rescan(app: &AppHandle) -> Result<(), String> {
-    run_managed_mirror_refresh(app, ManagedMirrorRefreshMode::Manual).map(|_| ())
+    run_managed_mirror_refresh(app, ManagedMirrorRefreshMode::Manual, None, None).map(|_| ())
 }
 
 fn run_managed_mirror_refresh(
     app: &AppHandle,
     mode: ManagedMirrorRefreshMode,
+    source_id: Option<&str>,
+    expected_folders: Option<&[String]>,
 ) -> Result<bool, String> {
     let transaction_state = app.state::<ConfigTransactionState>();
     let config_read_guard = transaction_state.lock_startup_config_reads(mode)?;
-    let _transaction_guard = transaction_state.begin()?;
-    // Revoke startup read ownership BEFORE releasing transaction admission.
+    let transaction_guard = transaction_state.begin()?;
+    // Revoke startup/check read ownership BEFORE releasing transaction admission.
     let mut config_read_guard = config_read_guard;
     let prepared_watch = if mode == ManagedMirrorRefreshMode::Manual {
         let roots = app.state::<ConfigState>().0.lock().map_err(|_| "LOCAL_WATCH_CONFIG_UNAVAILABLE")?.local_folders.iter().map(PathBuf::from).collect();
         Some(app.state::<LocalWatcherState>().prepare(roots)?)
     } else { None };
-    let result = run_managed_mirror_refresh_admitted(app, mode, None, &mut config_read_guard);
-    if matches!(result, Ok(true)) { install_committed_local_watcher(app, prepared_watch); }
+    let result = run_managed_mirror_refresh_admitted(app, mode, None, source_id, expected_folders, &mut config_read_guard, Some(&transaction_guard));
+    if mode != ManagedMirrorRefreshMode::Check && matches!(result, Ok(true)) {
+        install_committed_local_watcher(app, prepared_watch);
+    }
     result
 }
 
@@ -1100,7 +1124,10 @@ fn run_managed_mirror_refresh_admitted(
     app: &AppHandle,
     mode: ManagedMirrorRefreshMode,
     dirty_plan: Option<&local_media::mirror::ManagedRefreshPlan>,
+    source_id: Option<&str>,
+    expected_folders: Option<&[String]>,
     config_read_guard: &mut Option<StartupConfigReadGuard<'_>>,
+    transaction_guard: Option<&config_save_operation::Transaction<'_>>,
 ) -> Result<bool, String> {
     let transaction_state = app.state::<ConfigTransactionState>();
     managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())?;
@@ -1110,6 +1137,11 @@ fn run_managed_mirror_refresh_admitted(
         .lock()
         .map_err(|error| format!("Falha ao acessar pastas locais: {error}"))?
         .clone();
+    if let Some(expected) = expected_folders {
+        if config.local_folders != expected {
+            return Err("LOCAL_INCREMENTAL_CHECK_SCOPE_CHANGED".into());
+        }
+    }
     if let Some(guard) = config_read_guard.as_mut() {
         guard.allow_reads(&MpdSupervisor::sonante_config_dir())?;
     }
@@ -1119,6 +1151,23 @@ fn run_managed_mirror_refresh_admitted(
         .lock()
         .map_err(|error| format!("Falha ao acessar a biblioteca local: {error}"))?
         .local_album_socket_path();
+    // Admit Direct commands before the catalog snapshot I/O too. During this
+    // initial phase album reads keep their ordinary confirmed-database path.
+    let check_session = if mode == ManagedMirrorRefreshMode::Check {
+        Some(transaction_state.manual_check_playback.begin_preparing(
+            transaction_guard.ok_or(manual_check_playback::BLOCKED)?, transaction_state.operations.as_ref())?)
+    } else { None };
+    // Capture the same pre-update catalog used by coverage, before preparation.
+    // Only this real Check owner can expose it while MPD updates in the background.
+    let previous_catalog = if mode == ManagedMirrorRefreshMode::Check {
+        match AudioEngine::wait_for_managed_mpd_update(&socket_path, None, MANUAL_RESCAN_POLL_INTERVAL,
+            || transaction_state.shutdown_requested()) {
+            Ok(MpdRefreshCompletion::Completed) => {},
+            _ => return Err("LOCAL_INDEX_PREVIOUS_UNAVAILABLE".into()),
+        }
+        Some(AudioEngine::read_validated_local_catalog_at(&socket_path)?)
+    } else { None };
+    if let (Some(session), Some(records)) = (&check_session, &previous_catalog) { session.bind_catalog(records)?; }
     let live_path = MpdSupervisor::library_dir();
     let staging_path = live_path.with_file_name("library.next");
     let roots = config
@@ -1136,13 +1185,13 @@ fn run_managed_mirror_refresh_admitted(
         std::process::id(),
         MIRROR_GENERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
-    let preparation = local_media::mirror::prepare_managed_generation_for_refresh(
-        &live_path,
-        &staging_path,
-        &roots,
-        &generation_id,
-        mode != ManagedMirrorRefreshMode::Startup || dirty_plan.is_some(),
-    )?;
+    let preparation = if let Some(id) = source_id {
+        if mode != ManagedMirrorRefreshMode::Check { return Err("LOCAL_INCREMENTAL_CHECK_SCOPE_CHANGED".into()); }
+        local_media::mirror::prepare_managed_generation_for_source_check(&live_path, &staging_path, &roots, &generation_id, id)?
+    } else {
+        local_media::mirror::prepare_managed_generation_for_refresh(&live_path, &staging_path, &roots,
+            &generation_id, mode != ManagedMirrorRefreshMode::Startup || dirty_plan.is_some())?
+    };
     let local_media::mirror::ManagedGenerationPreparation::Prepared(prepared) = preparation else {
         return match dirty_plan {
             Some(_) => Err(index_coverage::INVALID.into()),
@@ -1164,7 +1213,7 @@ fn run_managed_mirror_refresh_admitted(
     } else { prepared.refresh_plan.clone() };
     let combined_plan = dirty_plan.map_or_else(|| structural_plan.clone(), |dirty| local_changes::merge(&structural_plan, dirty));
     let combined_plan = if mode != ManagedMirrorRefreshMode::Startup {
-        explicit_incremental_check_plan(combined_plan, &prepared.manifest.sources)
+        scoped_incremental_check_plan(combined_plan, &prepared.manifest.sources, source_id)
             .map_err(|error|error_with_rollback(error,
                 local_media::mirror::cleanup_prepared_managed_generation(&prepared)))?
     } else { combined_plan };
@@ -1197,18 +1246,22 @@ fn run_managed_mirror_refresh_admitted(
             Ok(manifest) => manifest.sources.keys().cloned().collect(),
             Err(_) => local_media::resolve_local_sources(&live_path, &config.local_folders).map_err(|e|e.to_string())?.sources().keys().cloned().collect(),
         };
-        Some(prepare_index_check(&socket_path, prepared.coverage.clone(), previous_ids, ||transaction_state.shutdown_requested(), None)
+        Some(prepare_index_check(&socket_path, prepared.coverage.clone(), previous_ids, ||transaction_state.shutdown_requested(), previous_catalog)
             .map_err(|error|error_with_rollback(error,local_media::mirror::cleanup_prepared_managed_generation(&prepared)))?)
     };
     let coverage_report = std::cell::RefCell::new(None);
     let refresh_plan = prepared.refresh_plan.clone();
-    let publication = match local_media::mirror::publish_prepared_managed_generation(
-        &live_path,
-        &prepared,
-    ) {
+    let publication_result = local_media::mirror::publish_prepared_managed_generation_fenced(
+        &live_path, &prepared, || {
+            let guard = check_session.as_ref().map(|session| session.publication()).transpose()?;
+            if transaction_state.shutdown_requested() { return Err(library_refresh::CANCELLED.into()); }
+            Ok(guard)
+        });
+    let publication = match publication_result {
         Ok(publication) => publication,
         Err(error) if error.starts_with(local_media::mirror::PUBLICATION_UNCONFIRMED) => return Err(error),
         Err(error) => {
+            if let Some(session) = &check_session { session.confirm(); }
             return Err(error_with_rollback(
                 format!("Falha ao publicar o mirror preparado: {error}"),
                 local_media::mirror::cleanup_managed_generation(&prepared.staging_path),
@@ -1216,6 +1269,7 @@ fn run_managed_mirror_refresh_admitted(
         }
     };
     if transaction_state.shutdown_requested() {
+        if let Some(session) = &check_session { session.revoke(); }
         let rollback = publication
             .rollback()
             .and_then(|_| publication.cleanup_rejected_after_rollback());
@@ -1233,6 +1287,12 @@ fn run_managed_mirror_refresh_admitted(
         let (report, _) = coverage_check.as_ref().ok_or(index_coverage::INVALID)?.finish_at(&socket_path, &live_path)?;
         *coverage_report.borrow_mut() = Some(report); Ok(())
     });
+    if result != Ok(library_refresh::Outcome::Completed) {
+        if let Some(session) = &check_session {
+            session.revoke();
+            app.state::<AudioState>().0.lock().map_err(|_| manual_check_playback::BLOCKED)?.invalidate_playback_intents();
+        }
+    }
     let completion = library_refresh::finish(result, |refresh_result| complete_published_mirror_refresh(
         || refresh_result.clone(),
         || AudioEngine::capture_mpd_playback_snapshot(&socket_path),
@@ -1256,14 +1316,22 @@ fn run_managed_mirror_refresh_admitted(
             }?;
             covered_index_recovery(outcome, coverage_check.as_ref(), &socket_path)
         },
-        || publication.cleanup_rejected_after_rollback(),
+        || {
+            publication.cleanup_rejected_after_rollback()?;
+            if let Some(session) = &check_session { session.confirm(); }
+            Ok(())
+        },
         || Ok(()),
         || if refresh_plan == local_media::mirror::ManagedRefreshPlan::MetadataOnly {
             publication.cleanup_previous_durable()
         } else { publication.cleanup_previous() },
     ));
     if completion.is_ok() {
+        if let Some(session) = &check_session { session.confirm(); }
         if let Some(report) = coverage_report.into_inner() { publish_index_coverage(app, coverage_token, &config.local_folders, report); } else { inherit_index_coverage(app,coverage_token,&config.local_folders); }
+        // Keep Check read/control ownership through final watcher bookkeeping,
+        // while the same transaction still excludes competing source writers.
+        if mode == ManagedMirrorRefreshMode::Check { install_committed_local_watcher(app, None); }
     }
     completion.map(|_| true)
 }
@@ -2998,6 +3066,8 @@ fn stop_audio_analyzer(
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MpdStatusSnapshot {
+    pub manual_check_playback: bool,
+    pub manual_check_artwork: bool,
     pub health: MpdHealth,
     pub playback: Option<PlaybackStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3010,10 +3080,13 @@ pub struct MpdStatusSnapshot {
 
 impl ConfigTransactionState {
     fn new() -> Self {
+        let operations = Arc::new(config_save_operation::Coordinator::new());
+        let manual_check_playback = operations.manual_check_playback.clone();
         Self {
-            operations: Arc::new(config_save_operation::Coordinator::new()),
+            operations,
             initial_plex: initial_plex_playback::Gate::default(),
             addition_playback: initial_plex_playback::Gate::default(),
+            manual_check_playback,
             startup_config_read_gate: Mutex::new(false),
             source_mirror_cache: source_availability::MirrorReadCache::default(),
             restart_gate: Mutex::new(()),
@@ -3032,7 +3105,7 @@ impl ConfigTransactionState {
         &self,
         mode: ManagedMirrorRefreshMode,
     ) -> Result<Option<StartupConfigReadGuard<'_>>, String> {
-        if mode != ManagedMirrorRefreshMode::Startup {
+        if !matches!(mode, ManagedMirrorRefreshMode::Startup | ManagedMirrorRefreshMode::Check) {
             return Ok(None);
         }
         let admission = self
@@ -3144,6 +3217,8 @@ async fn get_mpd_status_snapshot(app: AppHandle, diagnostic_id: Option<u64>) -> 
         let result = collect_mpd_status_snapshot_with_diagnostic(
             &app.state::<SupervisorState>().0, &app.state::<AudioState>().0, &diagnostic)
             .map(|mut snapshot| {
+                snapshot.manual_check_playback = app.state::<ConfigTransactionState>().manual_check_playback.active();
+                snapshot.manual_check_artwork = app.state::<ConfigTransactionState>().manual_check_playback.artwork_ready();
                 let playing = snapshot.health == MpdHealth::Available
                     && snapshot.playback.as_ref().is_some_and(|p| p.state == "play" && p.snapshot_consistent);
                 snapshot.output_observation = Some(alsa_observation::sample(playing, before.clone(),
@@ -3232,6 +3307,8 @@ fn observe_mpd_process(supervisor: &Mutex<MpdSupervisor>, diagnostic: &diagnosti
 
 fn unavailable_snapshot(health: MpdHealth) -> MpdStatusSnapshot {
     MpdStatusSnapshot {
+        manual_check_playback: false,
+        manual_check_artwork: false,
         health,
         playback: None,
         output_observation: None,
@@ -3332,6 +3409,8 @@ fn collect_mpd_status_snapshot_with_diagnostic(
             apply_volume_context(&mut playback, &before, &after);
             attach_shared_mute(&mut playback,supervisor,shared_before)?;
             Ok(MpdStatusSnapshot {
+                manual_check_playback: false,
+        manual_check_artwork: false,
                 health,
                 playback: Some(playback),
                 output_observation: None,
@@ -3461,6 +3540,7 @@ fn seek_playback(
 // Audio -> short Coordinator snapshot -> session lease. Never a Plex await.
 fn initial_playback_context(transactions: &ConfigTransactionState, token: Option<&str>) -> Result<Option<Arc<initial_plex_playback::Session>>, String> {
     if transactions.shutdown_requested() || transactions.shutdown_started() { return Err("PLAYBACK_SUPERSEDED".into()); }
+    transactions.manual_check_playback.admit()?;
     let bound = match token { Some(token) => transactions.addition_playback.bound(token)?.or(transactions.initial_plex.bound(token)?), None => None };
     match transactions.operations.reject_playback() {
         Ok(()) => Ok(bound),
@@ -3520,6 +3600,8 @@ fn finish_playback_effect<T>(
     effect: InitialPlaybackEffect, apply: impl FnOnce(&mut AudioEngine) -> Result<T, String>,
 ) -> Result<T, String> {
     let mut audio = audio.lock().map_err(|_| "Playback unavailable")?;
+    // The attached command gate owns Check fencing at the actual MPD effect.
+    // Taking the same read lock here could deadlock when publication is waiting.
     let context = initial_playback_context(transactions, Some(token))?;
     audio.validate_playback_intent(token)?;
     if let Some(context) = context {
@@ -4081,8 +4163,15 @@ async fn get_local_album_tracks(album_id: String, app: AppHandle, diagnostic_id:
                     return Ok(groups);
                 }
             }
-            AudioEngine::get_local_album_tracks_at(&socket_path, &album_id)?
-                .ok_or_else(|| "Álbum local não encontrado no catálogo atual.".to_string())
+            transactions.manual_check_playback.album(|files| {
+                if transactions.shutdown_requested() { return Err(library_refresh::CANCELLED.into()); }
+                let groups = match files {
+                    Some(files) => AudioEngine::get_checked_album_tracks_at(&socket_path, &album_id, files)?,
+                    None => AudioEngine::get_local_album_tracks_at(&socket_path, &album_id)?,
+                };
+                if transactions.shutdown_requested() { return Err(library_refresh::CANCELLED.into()); }
+                groups.ok_or_else(|| "Álbum local não encontrado no catálogo atual.".to_string())
+            })
         })();
         diagnostic.result(&result);
         result
@@ -4856,7 +4945,7 @@ async fn get_local_cover(path: String, app: AppHandle, diagnostic_id: Option<u64
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
         diagnostic.phase("wait.config");
-        let result = with_local_source_context(&app, |before, recheck, context| {
+        let result = with_local_cover_context(&app, |before, recheck, context| {
             if before.observed_conflict { return Err("LOCAL_COVER_IDENTITY_CONFLICT".into()); }
             let socket_path = MpdSupervisor::socket_path().to_string_lossy().into_owned();
             let verify = || -> Result<(), String> {
@@ -4873,7 +4962,7 @@ async fn get_local_cover(path: String, app: AppHandle, diagnostic_id: Option<u64
             verify()?;
             diagnostic.phase("filesystem");
             let cover = local_media::with_source_cover_target(
-                context.owner, context.transaction, context.coordinator, context.library, context.configured, &path,
+                context.owner, context.cover_owner, context.coordinator, context.library, context.configured, &path,
                 |target| AudioEngine::get_local_cover_from_source(&socket_path, &path, target, &verify),
             )?;
             verify()?;
@@ -4896,7 +4985,7 @@ async fn get_local_covers(paths: Vec<String>, app: AppHandle) -> Result<Vec<Resu
     let permit=bounded_artwork_io::COVER_READS.acquire()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _permit=permit;
-        with_local_source_context(&app, |before,recheck,context| {
+        with_local_cover_context(&app, |before,recheck,context| {
             if before.observed_conflict {return Err("LOCAL_COVER_IDENTITY_CONFLICT".into());}
             let socket=MpdSupervisor::socket_path().to_string_lossy().into_owned();
             let verify=||->Result<(),String> {
@@ -4907,7 +4996,7 @@ async fn get_local_covers(paths: Vec<String>, app: AppHandle) -> Result<Vec<Resu
                 Ok(())
             };
             verify()?;
-            let covers=context.inventory.read_cover_pair_in_context(context.owner,context.transaction,context.coordinator,
+            let covers=context.inventory.read_cover_pair_in_context(context.owner,context.cover_owner,context.coordinator,
                 context.library,context.configured,&paths,|path,target|
                     AudioEngine::get_local_cover_from_source(&socket,path,target,&verify))?;
             verify()?;
@@ -4981,9 +5070,9 @@ async fn pick_directory() -> Option<String> {
 }
 
 #[tauri::command]
-async fn check_local_library(app: AppHandle) -> Result<bool, String> {
+async fn check_local_library(app: AppHandle, source_id: Option<String>, expected_folders: Option<Vec<String>>) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_managed_mirror_refresh(&app, ManagedMirrorRefreshMode::Check)
+        run_managed_mirror_refresh(&app, ManagedMirrorRefreshMode::Check, source_id.as_deref(), expected_folders.as_deref())
     })
     .await
     .map_err(|error| format!("Falha na tarefa de verificação da biblioteca: {error}"))?
@@ -5016,7 +5105,7 @@ async fn get_config(app: AppHandle) -> Result<AppConfig, String> {
 // Constructed only by the real guard-owning helper; never serialized.
 struct LocalSourceReadContext<'a> {
     owner: &'a profile_lease::Lease,
-    transaction: &'a config_save_operation::Transaction<'a>,
+    cover_owner: local_media::CoverReadOwner<'a>,
     coordinator: &'a config_save_operation::Coordinator,
     library: &'a Path,
     configured: &'a [String],
@@ -5065,6 +5154,29 @@ fn with_local_source_context<T>(
         &LocalSourceReadContext<'_>,
     ) -> Result<T, String>,
 ) -> Result<(T, source_availability::PreliminaryObservation), String> {
+    with_local_source_context_mode(app, false, read)
+}
+
+fn with_local_cover_context<T>(
+    app: &AppHandle,
+    read: impl FnOnce(
+        &source_availability::PreliminaryObservation,
+        &dyn Fn() -> Result<source_availability::PreliminaryObservation, String>,
+        &LocalSourceReadContext<'_>,
+    ) -> Result<T, String>,
+) -> Result<(T, source_availability::PreliminaryObservation), String> {
+    with_local_source_context_mode(app, true, read)
+}
+
+fn with_local_source_context_mode<T>(
+    app: &AppHandle,
+    allow_check_covers: bool,
+    read: impl FnOnce(
+        &source_availability::PreliminaryObservation,
+        &dyn Fn() -> Result<source_availability::PreliminaryObservation, String>,
+        &LocalSourceReadContext<'_>,
+    ) -> Result<T, String>,
+) -> Result<(T, source_availability::PreliminaryObservation), String> {
     const BUSY: &str = "SOURCE_AVAILABILITY_BUSY";
     const BLOCKED: &str = "SOURCE_AVAILABILITY_BLOCKED";
     const CHANGED: &str = "SOURCE_AVAILABILITY_CHANGED";
@@ -5072,19 +5184,23 @@ fn with_local_source_context<T>(
     let owner = app.state::<profile_lease::State>().lease().map_err(|_| BLOCKED)?;
     owner.validate().map_err(|_| BLOCKED)?;
     let transactions = app.state::<ConfigTransactionState>();
-    // Match startup's order. Neither admission waits behind another worker.
-    let startup_owned = transactions.startup_config_read_gate.try_lock().map_err(|error| {
+    // Cover readers hold the actual Check owner's read fence through final validation.
+    // Other readers retain startup + exclusive transaction admission unchanged.
+    let check_lease = if allow_check_covers { Some(transactions.manual_check_playback.control()?) } else { None };
+    let in_check = check_lease.as_ref().is_some_and(|lease| lease.is_check());
+    if in_check && !check_lease.as_ref().is_some_and(|lease| lease.cover_ready()) { return Err(BUSY.into()); }
+    let startup_owned = if in_check { None } else { Some(transactions.startup_config_read_gate.try_lock().map_err(|error| {
         match error {
             std::sync::TryLockError::WouldBlock => BUSY,
             std::sync::TryLockError::Poisoned(_) => BLOCKED,
         }
-    })?;
-    let _transaction = transactions.operations.try_begin_background().map_err(|error| {
+    })?) };
+    let transaction = if in_check { None } else { Some(transactions.operations.try_begin_background().map_err(|error| {
         match error {
             config_save_operation::BackgroundAdmission::Busy => BUSY,
             config_save_operation::BackgroundAdmission::Blocked => BLOCKED,
         }
-    })?;
+    })?) };
     let shutdown = || transactions.shutdown_requested() || transactions.shutdown_started()
         || transactions.operations.shutdown_requested();
     if shutdown() { return Err(BLOCKED.into()); }
@@ -5093,7 +5209,7 @@ fn with_local_source_context<T>(
     let profile = recovery_fs::Dir::open(&config_dir).map_err(|_| BLOCKED)?;
     let library = recovery_fs::Dir::open(&library_dir).map_err(|_| UNCONFIRMED)?;
     let validate_context = || -> Result<(), String> {
-        if shutdown() { return Err(BLOCKED.into()); }
+        if shutdown() || (in_check && !check_lease.as_ref().is_some_and(|lease| lease.cover_ready())) { return Err(BLOCKED.into()); }
         owner.validate().map_err(|_| CHANGED)?;
         profile.validate().map_err(|_| CHANGED)?;
         library.validate().map_err(|_| CHANGED)?;
@@ -5107,8 +5223,17 @@ fn with_local_source_context<T>(
     };
     validate_context()?;
     let state = app.state::<ConfigState>();
-    let config = read_local_source_config_with_startup_guard(&state, &transactions, &config_dir, &startup_owned)
-        .map_err(|_| BLOCKED)?;
+    let read_config = || -> Result<AppConfig,String> {
+        if let Some(startup) = &startup_owned {
+            return read_local_source_config_with_startup_guard(&state, &transactions, &config_dir, startup).map_err(|_|BLOCKED.into());
+        }
+        if !in_check || !check_lease.as_ref().is_some_and(|lease| lease.cover_ready())
+            || transactions.operations.snapshot()?.is_some_and(|op| op.phase == config_save_operation::Phase::Uncertain) {
+            return Err(BLOCKED.into());
+        }
+        Ok(state.0.lock().map_err(|_|BLOCKED)?.clone())
+    };
+    let config = read_config()?;
     // Pin bounded persisted bytes and identity as well as the live config.
     // No raw config, paths, errors, or credentials enter the response.
     let config_id = profile.file_identity("config.json").map_err(|_| CHANGED)?;
@@ -5123,8 +5248,7 @@ fn with_local_source_context<T>(
     // The callback borrows only finite observations and a readonly recheck.
     // It cannot retain our guards or turn a path into a product capability.
     let validate_config = || -> Result<(), String> {
-        let current = read_local_source_config_with_startup_guard(&state, &transactions, &config_dir, &startup_owned)
-            .map_err(|_| BLOCKED)?;
+        let current = read_config()?;
         if current != config
             || profile.file_identity("config.json").map_err(|_| CHANGED)? != config_id
             || profile.read("config.json", 16 * 1024 * 1024, &shutdown).map_err(|_| CHANGED)?.as_deref()
@@ -5140,7 +5264,9 @@ fn with_local_source_context<T>(
             validate_config()?;
             Ok(current)
         };
-        let context=LocalSourceReadContext {owner:&owner,transaction:&_transaction,
+        let cover_owner = if let Some(transaction) = &transaction { local_media::CoverReadOwner::Transaction(transaction) }
+            else { local_media::CoverReadOwner::Check(check_lease.as_ref().ok_or(BLOCKED)?) };
+        let context=LocalSourceReadContext {owner:&owner,cover_owner,
             coordinator:transactions.operations.as_ref(),library:&library_dir,configured:&config.local_folders,
             validate_config:&validate_config,inventory};
         let value=read(before,&recheck,&context)?;
@@ -5148,7 +5274,8 @@ fn with_local_source_context<T>(
         Ok(value)
     })?;
     // This runs AFTER the read scope's final full original topology check.
-    // Both real guards remain owned through this final config/Lease validation.
+    // The ordinary startup/transaction guards or actual Check read fence remain
+    // owned through this final config/Lease validation.
     validate_config()?;
     Ok(value)
 }
@@ -6603,7 +6730,11 @@ fn start_initial_mpd(
     let mut persisted:AppConfig=serde_json::from_slice(&pins[0].2).map_err(|_|InitialManagedGeneration::ERROR)?;
     persisted.apply_legacy_migrations();
     if persisted!=*config{return Err(InitialManagedGeneration::ERROR.into());}
-    let mirror=local_media::mirror::ReadonlyMirrorSnapshot::open(&library_dir).map_err(|_|InitialManagedGeneration::ERROR)?;
+    // This proof lives only through startup. Use the existing watched snapshot
+    // to avoid rereading every link at all five admission boundaries. Capture
+    // and post-registration validation stay complete; unsupported notifications
+    // retain full revalidation. Origins/config/Lease are still checked afresh.
+    let mirror=local_media::mirror::ReadonlyMirrorSnapshot::open_cached(&library_dir).map_err(|_|InitialManagedGeneration::ERROR)?;
     if !local_media::configured_source_binding_matches(&config.local_folders,&mirror.manifest.sources) {
         return Err(InitialManagedGeneration::ERROR.into());
     }
@@ -8730,7 +8861,10 @@ mod tests {
     fn config_read_during_startup_reconciliation_preserves_orphan_guard() {
         // Both the cleaned-up and incomplete startup use the same production
         // admission/read helpers. No process, MPD socket or personal config.
-        for cleanup_completed in [true, false] {
+        for (mode, cleanup_completed) in [
+            (ManagedMirrorRefreshMode::Startup, true), (ManagedMirrorRefreshMode::Startup, false),
+            (ManagedMirrorRefreshMode::Check, true), (ManagedMirrorRefreshMode::Check, false),
+        ] {
             let fixture = LocalPathFixture::new();
             let source = fixture.root.join("Initial");
             fs::create_dir(&source).unwrap();
@@ -8748,7 +8882,7 @@ mod tests {
             let state = Arc::new(ConfigState(Mutex::new(config.clone())));
             let transactions = Arc::new(ConfigTransactionState::new());
             let mut startup_guard = transactions
-                .lock_startup_config_reads(ManagedMirrorRefreshMode::Startup)
+                .lock_startup_config_reads(mode)
                 .unwrap()
                 .unwrap();
             let transaction_guard = transactions.begin().unwrap();
@@ -8798,7 +8932,7 @@ mod tests {
             assert!(staging.exists());
             assert!(transactions.operations.reserve().is_err());
             assert!(transactions
-                .lock_startup_config_reads(ManagedMirrorRefreshMode::Startup)
+                .lock_startup_config_reads(mode)
                 .is_err());
             if cleanup_completed {
                 local_media::mirror::cleanup_managed_generation(&staging).unwrap();
@@ -12692,6 +12826,25 @@ mod tests {
 mod playback_intent_regressions {
     use super::*;
     #[test]
+    fn manual_check_allows_latest_playback_but_failure_and_shutdown_reject_effects() {
+        for closing in [false, true] {
+            let audio = Mutex::new(audio::reliability_tests::fixture());
+            let tx = ConfigTransactionState::new();
+            let owner = tx.begin().unwrap();
+            let session = tx.manual_check_playback.begin(&owner, tx.operations.as_ref(), &Default::default()).unwrap();
+            let old = admit_or_validate_playback(&audio, &tx, None).unwrap();
+            let latest = admit_or_validate_playback(&audio, &tx, None).unwrap();
+            assert_eq!(finish_playback_intent(&audio, &tx, &old, |_| -> Result<(),String> { panic!("superseded effect") }).unwrap_err(), "PLAYBACK_SUPERSEDED");
+            let mut applied = false;
+            finish_playback_intent(&audio, &tx, &latest, |_| { applied = true; Ok(()) }).unwrap();
+            assert!(applied);
+            if closing { tx.request_shutdown(); } else { session.revoke(); }
+            assert!(finish_playback_intent(&audio, &tx, &latest, |_| -> Result<(),String> { panic!("effect after revoke/shutdown") }).is_err());
+            assert!(admit_or_validate_playback(&audio, &tx, None).is_err());
+        }
+    }
+
+    #[test]
     fn delayed_backend_resolution_cannot_override_newer_local_or_playlist_or_error() {
         for resolver_failed in [false,true] {
             let audio=Mutex::new(audio::reliability_tests::fixture());
@@ -12791,6 +12944,16 @@ mod explicit_incremental_check_tests {
     use local_media::mirror::ManagedRefreshPlan as Plan;
     fn sources() -> std::collections::BTreeMap<String,PathBuf> {
         [("Music".into(),PathBuf::from("/fixture/music")),("Other".into(),PathBuf::from("/fixture/other"))].into()
+    }
+    #[test]
+    fn scoped_incremental_check_same_path_update_never_expands_to_other_sources() {
+        assert_eq!(scoped_incremental_check_plan(Plan::Targeted {directories:vec![],changed_files:0},&sources(),Some("Music")).unwrap(),
+            Plan::Targeted {directories:vec!["Music".into()],changed_files:0});
+        for plan in [Plan::Full,Plan::Targeted {directories:vec!["Other/Album".into()],changed_files:1},
+            Plan::Targeted {directories:vec!["Musicology".into()],changed_files:1}] {
+            assert!(scoped_incremental_check_plan(plan,&sources(),Some("Music")).is_err());
+        }
+        assert!(scoped_incremental_check_plan(Plan::MetadataOnly,&sources(),Some("missing")).is_err());
     }
     #[test]
     fn explicit_incremental_check_preserves_scoped_large_and_cue_updates() {

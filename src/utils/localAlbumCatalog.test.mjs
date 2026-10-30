@@ -362,3 +362,51 @@ test("addition permission exposes only the retained confirmed catalog and revoke
   assert.equal(reads, 2); assert.notEqual(catalog.getSnapshot().albums, before);
   assert.equal(catalog.getSnapshot().confirmedPlayback, false);
 });
+
+
+test("manual check retains confirmed albums and immediate playback through update until one final refresh", async () => {
+  let reads = 0;
+  const catalog = new LocalAlbumCatalog(async () => { reads++; return [album(`version-${reads}`)]; });
+  catalog.setUpdating(false, true); await tick();
+  const rows = catalog.getSnapshot().albums;
+  catalog.onMpdStatus(false, true);
+  catalog.requestRefresh(); await tick();
+  assert.equal(catalog.getSnapshot().albums, rows);
+  assert.equal(reads, 1);
+  catalog.onMpdStatus(true, true); await tick();
+  assert.equal(catalog.getSnapshot().loading, false);
+  assert.equal(confirmedCatalogPlaybackAllowed(catalog.getSnapshot(), true), true);
+  assert.equal(reads, 1);
+  catalog.onMpdStatus(false, true); await tick();
+  assert.equal(reads, 1); // MPD idle is not final coverage confirmation.
+  catalog.onMpdStatus(false, false); await tick();
+  assert.equal(reads, 2);
+  assert.notEqual(catalog.getSnapshot().albums, rows);
+  assert.equal(confirmedCatalogPlaybackAllowed(catalog.getSnapshot(), false), true);
+});
+
+test("manual check hint never overrides Save, unavailable catalog, or ordinary update guards", () => {
+  const ready = { albums: [album('old')], loaded: true, loading: false, error: null, mpdBusy: false, saveBlocked: false, manualCheckPlayback: true };
+  assert.equal(confirmedCatalogPlaybackAllowed(ready, true), true);
+  for (const patch of [{saveBlocked:true}, {loaded:false}, {loading:true}, {error:'uncertain'}, {mpdBusy:true}]) {
+    assert.equal(confirmedCatalogPlaybackAllowed({...ready, ...patch}, true), false);
+  }
+  assert.equal(confirmedCatalogPlaybackAllowed({...ready, manualCheckPlayback:false}, true), false);
+});
+
+
+test("cover readiness changes preserve the confirmed check catalog and never grant a catalog refresh", async () => {
+  let reads = 0;
+  const catalog = new LocalAlbumCatalog(async () => { reads++; return [album("confirmed")]; });
+  catalog.ensureLoaded(false, true); await tick();
+  const original = catalog.getSnapshot().albums;
+  catalog.onMpdStatus(true, true, false);
+  assert.equal(catalog.getSnapshot().manualCheckArtwork, false);
+  catalog.onMpdStatus(true, true, true);
+  assert.equal(catalog.getSnapshot().manualCheckArtwork, true);
+  assert.equal(catalog.getSnapshot().albums, original);
+  catalog.requestRefresh(); await tick();
+  assert.equal(reads, 1, "no catalog read while its writer owns the Check");
+  catalog.onMpdStatus(true, false, true);
+  assert.equal(catalog.getSnapshot().manualCheckArtwork, false, "artwork cannot outlive the Check hint");
+});

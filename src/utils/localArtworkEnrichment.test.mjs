@@ -399,3 +399,48 @@ test("catalog reconciliation waits for browser yield and stale generation stays 
   await until(() => queue.getSnapshot().processed === 1 && !queue.getSnapshot().active);
   assert.deepEqual(calls, ["new"]);
 });
+
+
+test("local artwork progress preserves the browser activity snapshot and all progress writes", async () => {
+  const writes = [];
+  const queue = new LocalArtworkEnrichment({ get: () => null, resolve: async () => null }, immediate, assert.fail, {
+    load: async () => ({}), save: async changes => writes.push(...changes),
+  });
+  const initialActivity = queue.getOnlineActivitySnapshot();
+  let fullSnapshot = queue.getSnapshot(), fullChanges = 0, activityChanges = 0;
+  const unsubscribe = queue.subscribe(() => {
+    if (!Object.is(fullSnapshot, queue.getSnapshot())) fullChanges++;
+    fullSnapshot = queue.getSnapshot();
+    if (!Object.is(initialActivity, queue.getOnlineActivitySnapshot())) activityChanges++;
+  });
+  queue.setCatalog(Array.from({length: 20}, (_, id) => album(String(id))));
+  await until(() => queue.getSnapshot().processed === 20 && !queue.getSnapshot().active);
+  await until(() => writes.length === 20);
+  unsubscribe();
+  assert.ok(fullChanges >= 20);
+  assert.equal(activityChanges, 0);
+  assert.deepEqual(writes.map(row => row.album_id).sort(), Array.from({length: 20}, (_, id) => String(id)).sort());
+});
+
+test("the selected browser activity snapshot retains online search, success and clearing", async () => {
+  const gate = deferred();
+  const resolver = new LocalArtworkResolver(async () => null, async () => gate.promise, 150, async () => "miss");
+  const queue = new LocalArtworkEnrichment(resolver, immediate);
+  const notices = [];
+  let previous = queue.getOnlineActivitySnapshot();
+  const unsubscribe = queue.subscribe(() => {
+    const current = queue.getOnlineActivitySnapshot();
+    if (!Object.is(previous, current)) notices.push(current?.kind ?? null);
+    previous = current;
+  });
+  queue.setOnlineEnabled(true);
+  queue.setCatalog([album("online")]);
+  await until(() => queue.getOnlineActivitySnapshot()?.kind === "searching");
+  assert.equal(queue.getOnlineActivitySnapshot().title, "Album online");
+  gate.resolve("online cover");
+  await until(() => queue.getSnapshot().processed === 1 && !queue.getSnapshot().active);
+  assert.equal(queue.getOnlineActivitySnapshot().title, "Album online");
+  queue.setUpdating(true);
+  unsubscribe();
+  assert.deepEqual(notices, ["searching", null, "found", null]);
+});

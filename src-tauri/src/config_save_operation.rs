@@ -88,6 +88,8 @@ pub(crate) enum BackgroundAdmission { Busy, Blocked }
 pub(crate) struct Coordinator {
     inner: Mutex<Inner>,
     idle: Condvar,
+    // One per coordinator, shared by command admission and the Check owner.
+    pub(crate) manual_check_playback: Arc<crate::manual_check_playback::Gate>,
 }
 
 #[derive(Debug)]
@@ -223,6 +225,7 @@ impl Coordinator {
         Self {
             inner: Mutex::new(Inner::default()),
             idle: Condvar::new(),
+            manual_check_playback: Arc::new(crate::manual_check_playback::Gate::default()),
         }
     }
 

@@ -10,13 +10,15 @@ export interface LocalAlbumCatalogState {
   mpdBusy: boolean;
   saveBlocked: boolean;
   confirmedPlayback?: boolean;
+  manualCheckPlayback?: boolean;
+  manualCheckArtwork?: boolean;
 }
 
-// Permission is supplied by the native addition worker, never inferred from an
-// updating flag. The retained list is not refreshed or promoted by this flag.
+// Exceptions come from native workers, never from the updating flag alone.
+// Existing rows stay stable during a check; new rows wait for final validation.
 export function confirmedCatalogPlaybackAllowed(state: LocalAlbumCatalogState, updating: boolean): boolean {
   return state.loaded && !state.loading && !state.error && !state.mpdBusy
-    && (state.confirmedPlayback === true || (!state.saveBlocked && !updating));
+    && (state.confirmedPlayback === true || (!state.saveBlocked && (!updating || state.manualCheckPlayback === true)));
 }
 
 // Saved rows have a separate slot: existing consumers of `albums` continue to
@@ -107,7 +109,7 @@ export class LocalAlbumCatalog {
       try { albums = this.presentationCache?.read(context) ?? []; } catch { /* Optional cache. */ }
     }
     this.waitingForMpd = false;
-    this.publish({ albums: [], presentationAlbums: albums, loaded: false, loading: false, error: null, mpdBusy: false, confirmedPlayback: false });
+    this.publish({ albums: [], presentationAlbums: albums, loaded: false, loading: false, error: null, mpdBusy: false, confirmedPlayback: false, manualCheckPlayback: false, manualCheckArtwork: false });
     this.pending = this.pending || wasReady;
     this.refresh();
   }
@@ -141,8 +143,18 @@ export class LocalAlbumCatalog {
     }
   }
 
-  onMpdStatus(updating: boolean): void {
+  onMpdStatus(updating: boolean, manualCheckPlayback = false, manualCheckArtwork = false): void {
+    const previous = this.state.manualCheckPlayback === true;
+    if (previous !== manualCheckPlayback) {
+      this.generation += 1;
+      this.pending = true;
+      this.publish({ manualCheckPlayback, loading: false });
+    }
+    if (this.state.manualCheckArtwork !== (manualCheckPlayback && manualCheckArtwork)) {
+      this.publish({ manualCheckArtwork: manualCheckPlayback && manualCheckArtwork });
+    }
     this.setUpdating(updating);
+    this.refresh();
   }
 
   setConfirmedPlayback(allowed: boolean): void {
@@ -179,7 +191,7 @@ export class LocalAlbumCatalog {
   }
 
   private refresh(): void {
-    if (!this.contextReady || !this.pending || this.updating || this.state.saveBlocked || this.inFlight) return;
+    if (!this.contextReady || !this.pending || this.updating || this.state.saveBlocked || this.state.manualCheckPlayback || this.inFlight) return;
     this.pending = false;
     this.inFlight = true;
     this.waitingForMpd = false;

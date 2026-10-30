@@ -80,11 +80,23 @@ export function pickExploreSuggestions(pool: readonly ExploreEntry[], retained: 
   // Artist variety is chosen when creating/renewing, never by displacing valid cards.
   const candidates = candidatesByGroup.map(group => group.candidate).filter(entry => !selected.includes(entry));
   for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(random() * (i + 1)); [candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
+  // Keys and counts live only for this selection; no stale catalog metadata
+  // can survive a later call. Preserve shuffle draws and first-wins tie order.
+  const artistKeys = new Map<ExploreEntry, string>();
+  const keyOf = (entry: ExploreEntry) => {
+    let key = artistKeys.get(entry);
+    if (key === undefined) { key = artistKey(entry); artistKeys.set(entry, key); }
+    return key;
+  };
+  const artistCounts = new Map<string, number>();
+  const countArtist = (entry: ExploreEntry) => {
+    const key = keyOf(entry); artistCounts.set(key, (artistCounts.get(key) ?? 0) + 1);
+  };
+  for (const entry of selected) countArtist(entry);
+  const score = (entry: ExploreEntry) => artistCounts.get(keyOf(entry)) ?? 0;
   while (selected.length < EXPLORE_SUGGESTION_COUNT && candidates.length) {
-    const choices = candidates;
-    const score = (entry: ExploreEntry) => selected.filter(item => artistKey(item) === artistKey(entry)).length;
-    const best = choices.reduce((a, b) => score(b) < score(a) ? b : a);
-    selected.push(best); candidates.splice(candidates.indexOf(best), 1);
+    const best = candidates.reduce((a, b) => score(b) < score(a) ? b : a);
+    selected.push(best); countArtist(best); candidates.splice(candidates.indexOf(best), 1);
   }
   return selected;
 }

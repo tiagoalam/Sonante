@@ -24,7 +24,6 @@ import {
 import { useTranslation } from "react-i18next";
 import { SettingsPages, type SettingsPage } from "./SettingsPages";
 import { AppearanceSetting } from "./AppearanceSetting";
-import { LocalIndexCoverageStatus } from "./LocalIndexCoverage";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
 import { AppConfig, ConfigSaveOperation, ConfigSaveWarning } from "../types/config";
 import { AudioDevice } from "../types/audio";
@@ -710,7 +709,6 @@ export const SettingsModal: React.FC<Props> = ({
             </div>
           </>}
           local={<>
-            <LocalIndexCoverageStatus />
             {/* Fontes e atualização */}
             <div className="space-y-3 pt-3 border-t border-[color:var(--theme-border-soft,#242424)]">
               <div className="flex flex-wrap items-center justify-between gap-2">

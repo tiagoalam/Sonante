@@ -468,3 +468,22 @@ test('actual App and PlayerBar callbacks retain a decoded cover across reopening
  current={...current,thumb:jpeg};render().props.onError();assert.equal(cache.get(current.current_media),null);
  configExports.configure({first_run:true,local_folders:['/music']});assert.equal(cache.get(current.current_media),null);
 });
+
+test('Now Playing omits only the retained generic MPD notice and keeps actionable diagnostics',()=>{
+ for(const state of ['play','pause','stop']) {
+  const html=renderToStaticMarkup(React.createElement(View,{...props,snapshot:{...snapshot,playback:{...snapshot.playback,state,playback_error:{code:'playback_error'}}}}));
+  assert.ok(!html.includes(i18n.t('player.playbackError.playback_error')));
+ }
+ for(const code of ['queue_uncertain','persistence_failed','format_unsupported']) {
+  const html=renderToStaticMarkup(React.createElement(View,{...props,snapshot:{...snapshot,playback:{...snapshot.playback,playback_error:{code}}}}));
+  assert.ok(html.includes(i18n.t(`player.playbackError.${code}`)));
+ }
+});
+
+
+test('Now Playing suppresses stale DAC output notices only after confirmed playback resumes',()=>{
+ for(const code of ['output_busy','output_unavailable'])for(const state of ['stop','play']) {
+  const html=renderToStaticMarkup(React.createElement(View,{...props,snapshot:{...snapshot,playback:{...snapshot.playback,state,playback_error:{code}}}}));
+  assert.equal(html.includes(i18n.t(`player.playbackError.${code}`)),state==='stop');
+ }
+});

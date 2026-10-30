@@ -26,7 +26,8 @@ export function useLocalPlaybackArtwork(status: PlaybackStatus, catalog: LocalAl
   // A cold catalog load is not an index update and cannot hold the player
   // artwork hostage. The existing source-scoped IPC still validates ownership,
   // current configuration and the target at every filesystem boundary.
-  const blocked = !active || !available || status.is_updating || catalog.saveBlocked
+  const confirmedCheck = catalog.manualCheckPlayback === true && catalog.manualCheckArtwork === true;
+  const blocked = !active || !available || (status.is_updating && !confirmedCheck) || (catalog.manualCheckPlayback === true && !confirmedCheck) || catalog.saveBlocked
     || catalog.mpdBusy || !!catalog.error || (catalog.loaded && catalog.loading);
   const [resolved, setResolved] = useState<{ key: string; version: readonly LocalAlbum[]; thumb: string } | null>(null);
   useLayoutEffect(() => {

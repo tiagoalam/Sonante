@@ -50,6 +50,9 @@ pub(crate) struct Inventory {
     unaddressable: BTreeMap<String, usize>,
     /// None is the entire scanned generation; Some is exactly the observed dirty paths.
     scope: Option<BTreeSet<String>>,
+    // Sources physically enumerated in a scoped check; other sources retain
+    // only their observed published paths and cannot lose prior records.
+    complete_sources: BTreeSet<String>,
 }
 impl Inventory {
     pub fn new(
@@ -72,6 +75,7 @@ impl Inventory {
             excluded: BTreeMap::new(),
             unaddressable: BTreeMap::new(),
             scope: (!full).then(BTreeSet::new),
+            complete_sources: BTreeSet::new(),
         })
     }
     pub fn observe(
@@ -107,6 +111,12 @@ impl Inventory {
         );
         Ok(())
     }
+    // Call only after a successful complete scan/policy projection of this source.
+    pub(crate) fn mark_source_complete(&mut self, id: &str) -> Result<(), String> {
+        if !self.roots.contains_key(id) { return Err(CHANGED.into()); }
+        self.complete_sources.insert(id.to_owned());
+        Ok(())
+    }
     pub fn source_ids(&self) -> BTreeSet<String> {
         self.roots.keys().cloned().collect()
     }
@@ -133,7 +143,8 @@ impl Inventory {
     }
     fn observes(&self, uri: &str) -> bool {
         self.scope.as_ref().is_none_or(|paths| {
-            paths.contains(uri) || cue_parent(uri).is_some_and(|p| paths.contains(p))
+            uri.split('/').next().is_some_and(|id| self.complete_sources.contains(id))
+                || paths.contains(uri) || cue_parent(uri).is_some_and(|p| paths.contains(p))
         })
     }
 }

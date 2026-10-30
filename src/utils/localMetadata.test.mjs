@@ -22,7 +22,7 @@ for (const language of ["pt-BR", "en"]) {
 const audioUrl = dataModule('export const audioService = new Proxy({}, { get: (_, method) => (...args) => globalThis.__metadataSpaceAudio(method, args) });');
 const favoritesUrl = dataModule('export const favoritesService = { getFavorites: () => Promise.resolve([]) };');
 const artworkUrl = dataModule(`const status = {onlineActivity: null}; export const localArtworkEnrichment = {
- subscribe: () => () => {}, getSnapshot: () => status, setCatalog: () => globalThis.__metadataSpaceReads.push("artwork.setCatalog") };
+ subscribe: () => () => {}, getSnapshot: () => status, getOnlineActivitySnapshot: () => status.onlineActivity, setCatalog: () => globalThis.__metadataSpaceReads.push("artwork.setCatalog") };
  export const localArtworkResolver = {get: () => null, subscribe: () => () => {}, resolve: async () => { globalThis.__metadataSpaceReads.push("artwork.resolve"); return null; }};
  export const localAlbumThumbnails = {get: () => null, setOpeningOrder() {}, observeInitialCard() {}, capture() {}, forget() {}};`);
 const virtualUrl = dataModule(`import React from ${JSON.stringify(import.meta.resolve("react"))};

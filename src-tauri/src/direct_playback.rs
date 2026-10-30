@@ -36,12 +36,22 @@ impl Gate {
     }
     pub(crate) fn send_with(&self,command:&str,mut io:impl FnMut(Option<u32>,&str)->Result<Vec<String>,String>)->Result<Vec<String>,String> {
         if !may_start(command){return io(None,command);}
+        // This lease belongs to this exact coordinator's explicit Check. Hold
+        // it through gain readback AND the MPD command, fencing publication and
+        // recovery at the effect boundary without another exclusive reservation.
+        let check = self.operations.manual_check_playback.control()
+            .map_err(|error| format!("{NOT_ADMITTED}{error}"))?;
         // Shared/EQ already owns its lifecycle reservation during restoration.
         // Leave that established path unchanged; only Direct needs this guard.
         let shared={let b=self.binding.read().map_err(|_|direct_volume::STALE)?;!b.direct && b.available};
-        if shared{return io(None,command);}
-        let _permit=self.operations.try_begin_background().map_err(|_|format!("{NOT_ADMITTED}CONFIG_SAVE_BUSY"))?;
-        self.send_admitted_with(command, &mut io, || !self.operations.shutdown_requested(),false)
+        if shared {
+            if !check.current() || self.operations.shutdown_requested() { return Err(format!("{NOT_ADMITTED}PLAYBACK_SUPERSEDED")); }
+            return io(None,command);
+        }
+        let _permit = if check.is_check() { None } else {
+            Some(self.operations.try_begin_background().map_err(|_|format!("{NOT_ADMITTED}CONFIG_SAVE_BUSY"))?)
+        };
+        self.send_admitted_with(command, &mut io, || check.current() && !self.operations.shutdown_requested(),false)
     }
     // Fixed resume effect for the existing Save owner; never a public bypass.
     pub(crate) fn start_saved_route(&self,socket:&str,owner:&crate::config_save_operation::Transaction<'_>,current:impl Fn()->bool,index:usize,elapsed:f64,verify:impl FnOnce()->Result<(),String>)->Result<Vec<String>,String>{
@@ -108,6 +118,63 @@ mod tests {
   if muted{session.set_mute(true,false,&session.token(),|c|m.io(c)).unwrap();}
   let gate=Gate::new(Arc::new(Coordinator::new()));gate.commit_choice(&cfg);gate.bind(&cfg,7,Some(session.clone()));m.commands.clear();(gate,session,m,cfg)
  }
+ #[test]
+ fn manual_check_preparation_and_bound_catalog_allow_explicit_direct_transport_without_releasing_writer() {
+  let(g,_,mut m,_)=fixture(true,false);
+  let check=g.operations.manual_check_playback.clone();let owner=g.operations.begin().unwrap();
+  let session=check.begin_preparing(&owner,&g.operations).unwrap();
+  assert!(check.album(|files|Ok(files.is_none())).unwrap());
+  g.send_with("play",|_,cmd|m.io(cmd)).unwrap();
+  assert_eq!(m.volume,100);assert!(g.operations.try_begin_background().is_err());assert!(g.operations.reserve().is_err());
+  session.bind_catalog(&["file: Music/track.flac".into()].into()).unwrap();
+  for command in ["next","previous","play 0","seekcur 2"] {g.send_with(command,|_,cmd|m.io(cmd)).unwrap();}
+  assert_eq!(m.commands.iter().filter(|c|c.contains("setvol 100")).count(),1);
+  assert!(session.bind_catalog(&Default::default()).is_err());
+  session.confirm();
+ }
+ #[test]
+ fn manual_check_never_overrides_route_choice_mute_health_session_or_shutdown() {
+  for mode in 0..5 {
+   let(g,volume,mut m,_)=fixture(mode!=0,false);let check=g.operations.manual_check_playback.clone();let owner=g.operations.begin().unwrap();
+   let session=check.begin_preparing(&owner,&g.operations).unwrap();
+   match mode {1=>g.set_available(false),2=>volume.invalidate(),3=>g.operations.request_shutdown(||{}),4=>session.revoke(),_=>{}}
+   assert!(g.send_with("play",|_,cmd|m.io(cmd)).is_err());
+   assert!(!m.commands.iter().any(|c|c=="play"||c.contains("setvol 100")));
+  }
+  let(g,_,mut m,_)=fixture(true,true);let check=g.operations.manual_check_playback.clone();let owner=g.operations.begin().unwrap();
+  let _session=check.begin_preparing(&owner,&g.operations).unwrap();g.send_with("play",|_,cmd|m.io(cmd)).unwrap();
+  assert_eq!(m.volume,0);assert!(!m.commands.iter().any(|c|c.contains("setvol 100")));
+ }
+ #[test]
+ fn manual_check_keeps_shared_commands_without_gain_and_revokes_them_on_failure() {
+  let(g,_,mut m,mut config)=fixture(true,false);config.audio_output_type="pipewire".into();config.alsa_device="default".into();config.direct_volume_choice=None;
+  g.bind(&config,7,None);g.commit_choice(&config);
+  let check=g.operations.manual_check_playback.clone();let owner=g.operations.begin().unwrap();let session=check.begin_preparing(&owner,&g.operations).unwrap();
+  g.send_with("play",|pid,command|{assert_eq!(pid,None);m.io(command)}).unwrap();assert_eq!(m.commands,vec!["play"]);
+  session.revoke();assert!(g.send_with("next",|_,cmd|m.io(cmd)).is_err());assert_eq!(m.commands,vec!["play"]);
+ }
+ #[test]
+ fn manual_check_revocation_during_direct_gain_readback_drains_without_sending_play() {
+  use std::{thread,sync::mpsc,time::{Duration,Instant}};
+  let(g,_,mut m,_)=fixture(true,false);let check=g.operations.manual_check_playback.clone();let owner=g.operations.begin().unwrap();
+  let session=check.begin_preparing(&owner,&g.operations).unwrap();
+  thread::scope(|scope| {
+   let(start,started)=mpsc::channel();let(done,finished)=mpsc::channel();
+   let worker=scope.spawn(move||{started.recv_timeout(Duration::from_secs(1)).unwrap();session.revoke();done.send(()).unwrap();session});
+   let result=g.send_with("play",|_,cmd|{
+    let result=m.io(cmd);
+    if cmd.contains("setvol 100") {
+     start.send(()).unwrap();let deadline=Instant::now()+Duration::from_secs(1);
+     while check.active()&&Instant::now()<deadline {thread::yield_now();}
+     assert!(!check.active());assert!(finished.try_recv().is_err());
+    }
+    result
+   });
+   assert!(result.is_err());assert!(!m.commands.iter().any(|c|c=="play"));
+   finished.recv_timeout(Duration::from_secs(1)).unwrap();drop(worker.join().unwrap());
+  });
+ }
+
  #[test]fn unconfirmed_legacy_and_mpris_play_have_no_gain_or_transport_effects(){
   let(g,_,mut m,_)=fixture(false,false);
   for cmd in["play","play 0","playid 2","pause 0","next","previous","seekcur 3","command_list_begin\nclear\nadd x\nplay 0\ncommand_list_end"]{

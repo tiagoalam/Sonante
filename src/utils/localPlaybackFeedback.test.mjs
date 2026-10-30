@@ -35,7 +35,7 @@ const replacements={
  '../services/audio':{audioService},'../services/favorites':{favoritesService:{getFavorites:async()=>[]}},
  '../utils/frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})}, './frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})},
  '../utils/localAlbumCatalogSession':{localAlbumCatalog:catalog},
- '../utils/localArtworkSession':{localAlbumThumbnails:{setOpeningOrder(){}},localArtworkResolver:artwork,localArtworkEnrichment:{subscribe:()=>()=>{},getSnapshot:()=>({active:0,queued:0,inFlight:0,blocked:false}),setCatalog(){}}},
+ '../utils/localArtworkSession':{localAlbumThumbnails:{setOpeningOrder(){}},localArtworkResolver:artwork,localArtworkEnrichment:{subscribe:()=>()=>{},getOnlineActivitySnapshot:()=>undefined,getSnapshot:()=>({active:0,queued:0,inFlight:0,blocked:false}),setCatalog(){}}},
 };
 const cache=new Map();
 function load(path){
@@ -113,3 +113,86 @@ for(const lng of ['pt-BR','en']){
   }finally{h.close();}
  });
 }
+
+async function libraryCheckHarness(folders) {
+ language=i18next.createInstance();await language.init({lng:'pt-BR',resources:{'pt-BR':{translation:JSON.parse(readFileSync(resolve(root,'src/locales/pt-BR.json'),'utf8'))}}});
+ const h=setup();h.props={...h.props,initialAlbumId:undefined,configuredLocalFolders:folders};
+ snapshot={...snapshot,albums:folders.map((_,i)=>({...album,id:`album-${i}`,source_id:`source-${i}`,source_label:`Library ${i}`}))};
+ await h.settle();return h;
+}
+function selectLibrary(h,id) {
+ const selector=nodes(h.tree,n=>n.props?.label===language.t('localBrowser.libraryScope')&&typeof n.props.onChange==='function')[0];
+ assert.ok(selector);selector.props.onChange(id);h.render();
+}
+
+test('library toolbar checks All only on demand and prevents duplicate submissions without playback actions',async()=>{
+ const folders=['/fixture/one','/fixture/two'],h=await libraryCheckHarness(folders),gate=deferred(),calls=[];
+ const original=catalog.requestRefresh;let refreshes=0;catalog.requestRefresh=()=>refreshes++;
+ audioService.checkLocalLibrary=(...args)=>{calls.push(args);return gate.promise;};
+ try {
+  const rows=snapshot.albums;await h.settle();assert.deepEqual(calls,[]);
+  const pending=h.click(language.t('localBrowser.checkLibrary.button'));
+  h.click(language.t('localBrowser.checkLibrary.button'));h.render();
+  assert.deepEqual(calls,[[undefined,folders]]);
+  const button=nodes(h.tree,n=>n.type==='button'&&n.props['aria-busy']===true)[0];assert.ok(button?.props.disabled);
+  assert.equal(snapshot.albums,rows);assert.deepEqual(requests,[]);
+  gate.resolve(true);await pending;await h.settle();
+  assert.equal(refreshes,1);assert.equal(snapshot.albums,rows);assert.deepEqual(requests,[]);
+  assert.ok(markup(h.tree).includes(language.t('localBrowser.checkLibrary.updated')));
+ }finally{catalog.requestRefresh=original;h.close();}
+});
+
+test('library toolbar binds the selected source and never labels a different scope with its late result',async()=>{
+ const folders=['/fixture/one','/fixture/two'],h=await libraryCheckHarness(folders),gate=deferred(),calls=[];
+ audioService.checkLocalLibrary=(...args)=>{calls.push(args);return gate.promise;};
+ try {
+  selectLibrary(h,'source-0');const pending=h.click(language.t('localBrowser.checkLibrary.button'));
+  selectLibrary(h,'source-1');assert.deepEqual(calls,[['source-0',folders]]);
+  gate.resolve(false);await pending;await h.settle();
+  assert.ok(!markup(h.tree).includes(language.t('localBrowser.checkLibrary.unchanged')));
+  selectLibrary(h,'source-0');assert.ok(markup(h.tree).includes(language.t('localBrowser.checkLibrary.unchanged')));
+ }finally{h.close();}
+});
+
+test('single-library no-change check retains the catalog and needs no album-derived source ID',async()=>{
+ const folders=['/fixture/empty'],h=await libraryCheckHarness(folders),calls=[];
+ snapshot={...snapshot,albums:[]};await h.settle();
+ const original=catalog.requestRefresh;catalog.requestRefresh=()=>assert.fail('unchanged check must not reload');
+ audioService.checkLocalLibrary=async(...args)=>{calls.push(args);return false;};
+ try {
+  await h.click(language.t('localBrowser.checkLibrary.button'));await h.settle();
+  assert.deepEqual(calls,[[undefined,folders]]);
+  assert.ok(markup(h.tree).includes(language.t('localBrowser.checkLibrary.unchanged')));
+ }finally{catalog.requestRefresh=original;h.close();}
+});
+
+test('library check reports a concise failure and discards late UI work after unmount',async()=>{
+ const h=await libraryCheckHarness(['/fixture/one']),gate=deferred();
+ audioService.checkLocalLibrary=()=>gate.promise;
+ const pending=h.click(language.t('localBrowser.checkLibrary.button'));h.close();const writes=h.writes;
+ gate.reject(new Error('private /fixture/file X-Plex-Token=SECRET'));await pending;
+ assert.equal(h.writes,writes);assert.equal(logs.at(-1).op,'library.check-changes');assert.deepEqual(requests,[]);
+ const next=await libraryCheckHarness(['/fixture/one']);audioService.checkLocalLibrary=async()=>{throw new Error('private /fixture/file X-Plex-Token=SECRET');};
+ try {
+  await next.click(language.t('localBrowser.checkLibrary.button'));await next.settle();
+  const html=markup(next.tree);assert.ok(html.includes(language.t('localBrowser.checkLibrary.failed')));
+  assert.doesNotMatch(html,/SECRET|X-Plex-Token|private \/fixture/);
+ }finally{next.close();}
+});
+
+
+test('manual check keeps Local album playback available and a refused optional cover cannot reject music', async () => {
+ language=i18next.createInstance();await language.init({lng:'pt-BR',resources:{'pt-BR':{translation:JSON.parse(readFileSync(resolve(root,'src/locales/pt-BR.json'),'utf8'))}}});
+ const h=setup();
+ try {
+  snapshot={...snapshot,manualCheckPlayback:true};
+  h.props={...h.props,isLibraryUpdating:true};
+  coverRead=async()=>{throw 'SOURCE_AVAILABILITY_BUSY';};
+  await h.settle();h.click(language.t('localBrowser.playAlbum'));await flush();
+  assert.equal(requests.length,1);assert.equal(requests[0].args[0][0].uri,track.path);
+  requests[0].resolve();await flush();assert.equal(h.alerts().length,0);
+  const info=nodes(h.render(),n=>n.type==='button'&&n.props['aria-label']===language.t('fileInfo.forTrack',{title:track.title}));
+  assert.equal(info.length,1);assert.equal(info[0].props.disabled,true);
+  assert.equal(logs.at(-1).op,'local.album-artwork');
+ }finally{h.close();}
+});

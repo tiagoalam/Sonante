@@ -21,17 +21,17 @@ Sonante is a desktop music player built for people who want to **listen to, navi
 
 Sonante is designed for substantial, imperfect real-world libraries: multiple storage locations, multi-disc albums, CUE-based albums, varying metadata, and sources that may temporarily become unavailable.
 
-## Installation — 0.5.5
+## Installation — 0.5.6
 
-Use the complete package and SHA256SUMS delivered together for your distribution:
+Download the complete package and `SHA256SUMS.txt` from [Sonante 0.5.6](https://github.com/tiagoalam/Sonante/releases/tag/v0.5.6) for your distribution:
 
-- Ubuntu 22.04: `sonante_0.5.5-10_amd64.deb` (`apt install ./sonante_0.5.5-10_amd64.deb`).
-- Fedora 44: `sonante-0.5.5-10.x86_64.rpm` (`dnf install ./sonante-0.5.5-10.x86_64.rpm`).
-- Arch Linux / Manjaro: `sonante-0.5.5-10-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.5.5-10-x86_64.pkg.tar.zst`).
+- Ubuntu 22.04: `sonante_0.5.6-2_amd64.deb` (`apt install ./sonante_0.5.6-2_amd64.deb`).
+- Fedora 44: `sonante-0.5.6-2.x86_64.rpm` (`dnf install ./sonante-0.5.6-2.x86_64.rpm`).
+- Arch Linux / Manjaro: `sonante-0.5.6-2-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.5.6-2-x86_64.pkg.tar.zst`).
 
 Close Sonante before upgrading, and install with your distribution's package manager. Verify the supplied checksum first. Packages manage their own pinned audio runtimes and do not enable a system MPD service. Corresponding runtime source sidecars accompany the packages; they are not installed into `/usr`.
 
-Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the final qualified 0.5.5 payload.
+Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the complete 0.5.6 release payload.
 
 ### System requirements
 
@@ -127,12 +127,12 @@ Configuration directories and sensitive files are created with restrictive Linux
 
 Development requires **Node.js 22**, npm, a stable Rust toolchain, and the native development dependencies for Tauri 2, GTK 3, WebKitGTK 4.1, ALSA, and OpenSSL. See the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/) and the [CI workflow](https://github.com/tiagoalam/Sonante/blob/main/.github/workflows/ci.yml) for the Ubuntu build environment.
 
-For a development compilation of the verified 0.5.5 source archive without installation, extract the supplied source archive and run the normal build commands. This compilation alone does not create the complete release packages.
+For a development compilation of the verified 0.5.6 source archive without installation, extract the supplied source archive and run the normal build commands. This compilation alone does not create the complete release packages.
 
 ```bash
 # Extract the supplied, SHA-verified source archive first.
 cd sonante
-# The supplied sources already identify version 0.5.5; no unpublished tag is required.
+# The supplied sources already identify version 0.5.6; no unpublished tag is required.
 npm ci
 npm run tauri -- build --no-bundle -- --locked
 ```
@@ -152,16 +152,16 @@ npm run test:frontend
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 cargo check --manifest-path src-tauri/Cargo.toml --locked
-python3 -m unittest discover -s tests -p 'packaging_test.py'
+python3 -m unittest discover -s tests -p '*packaging_test.py'
 ```
 
-The manual CI workflow is retained for compilation checks. Publishing 0.5.5 uses the exact complete DEB/RPM/Arch payloads after their distribution checks, with corresponding sources and checksums; no automatic rebuild substitutes other assets. AppImage is outside this release scope.
+Development CI now produces **`sonante-complete-linux-packages`** after both native build jobs pass. This artifact contains complete DEB, Fedora RPM and Arch installers, corresponding sources and `SHA256SUMS.txt`. The separate `sonante-compilation-*-inputs` artifacts are intermediate build inputs. See [complete-package assembly](packaging/COMPLETE_PACKAGES.md) for provenance, checks and local reproduction. The manual workflow uses the same assembly; it does not publish a release. Published 0.5.6 downloads are the revision-2 packages listed above; CI rebuilds do not replace those tested release assets. AppImage is outside this scope.
 
 ## Project status and scope
 
 Sonante prioritizes **reliable playback, conservative MPD lifecycle management, safe library changes, and clear audio reporting** over claiming support for every possible codec or audio feature. Platform and hardware behavior must be tested rather than inferred from a successful build.
 
-Local tag editing is limited to supported physical FLAC files and reports independent per-file results. Availability of codecs, network sources, and DAC capabilities depends on the configured system. The 0.5.5 release targets DEB, RPM, and Arch packages for x86_64; each requires its own final installation and startup evidence.
+Local tag editing is limited to supported physical FLAC files and reports independent per-file results. Availability of codecs, network sources, and DAC capabilities depends on the configured system. The 0.5.6 release targets DEB, RPM, and Arch packages for x86_64; each requires its own final installation and startup evidence.
 
 Bug reports and reproducible feedback can be submitted through [GitHub Issues](https://github.com/tiagoalam/Sonante/issues).
 

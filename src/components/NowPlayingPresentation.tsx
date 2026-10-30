@@ -53,6 +53,11 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
   const status = props.snapshot?.playback;
   const health = props.snapshot?.health;
   const available = health?.state === "available";
+  const playbackDiagnostic = status?.playback_error;
+  const playbackNotice = playbackDiagnostic?.code === "playback_error"
+    || (available && status?.state === "play"
+      && (playbackDiagnostic?.code === "output_busy" || playbackDiagnostic?.code === "output_unavailable"))
+    ? null : playbackDiagnostic;
   const interactive = available && !props.controlsDisabled;
   const hasTrack = Boolean(status?.current_media && status.title);
   const deviceVolume = requiresDeviceVolumeControl(props.snapshot?.route, status);
@@ -99,7 +104,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
               </div>
                 {hasTrack && available && props.snapshot?.sourceInfo && currentMediaKey(props.snapshot.sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={props.snapshot.sourceInfo.info} />}
               {!available && <p role="status" className="np-notice">{t(health?.state === "unavailable" ? "player.engineUnavailable" : "player.engineTransitioning")}{hasTrack && ` · ${t("player.lastKnown")}`}</p>}
-              {status?.playback_error && <p role="alert" className="np-error">{t(`player.playbackError.${status.playback_error.code}`)}</p>}
+              {playbackNotice && <p role="alert" className="np-error">{t(`player.playbackError.${playbackNotice.code}`)}</p>}
               {props.controlFailed && <p role="alert" className="np-error">{t("nowPlaying.controlFailed")}</p>}
               <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
                 inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} fullscreen={props.fullscreen} />

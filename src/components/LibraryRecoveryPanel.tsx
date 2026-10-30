@@ -177,12 +177,14 @@ export function LibraryRecoveryPanel() {
   const hasOffer = offer !== null && offer.visit === visit.current && offer.observation.recovery_available && !!offer.observation.plan;
   const reportCurrent = snapshot !== null && !snapshot.prior && snapshot.visit === visit.current && !result;
   const reasons = observation && Array.isArray(observation.reasons) ? ANALYSIS_REASONS.filter(reason => observation.reasons.includes(reason)) : [];
+  const working = phase === "analyzing" || phase === "exporting" || phase === "executing" || phase === "reopening";
   const countsKnown = observation?.plan && Number.isSafeInteger(observation.plan.previous_tracks) && observation.plan.previous_tracks >= 0 && Number.isSafeInteger(observation.plan.backup_bytes) && observation.plan.backup_bytes >= 0;
   return (
     <section aria-labelledby="library-recovery-title" className="mt-6 space-y-4 text-left">
       <h2 id="library-recovery-title" ref={heading} tabIndex={-1} className="text-base font-semibold">{t("libraryRecovery.title")}</h2>
-      <p className="text-sm">{t("libraryRecovery.explanation")}</p>
-      <div role="status" aria-live="polite" aria-busy={phase === "executing"} className="text-sm">
+      {!result && phase !== "executing" && phase !== "reopening" && <p className="text-sm">{t("libraryRecovery.explanation")}</p>}
+      <div role="status" aria-live="polite" aria-busy={working} className="flex items-center gap-2 text-sm">
+        {working && <span aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent motion-reduce:animate-none" />}
         {phase === "analyzing" ? t("libraryRecovery.analyzing") : phase === "exporting" ? t("libraryRecovery.exporting") : phase === "executing" ? t(`libraryRecovery.progress.${progressStage}`) : phase === "reopening" ? t("libraryRecovery.reopening") : notice ? t(`libraryRecovery.${notice}`) : null}
       </div>
       {result?.completed && <div className="space-y-2 text-sm" role="status">
