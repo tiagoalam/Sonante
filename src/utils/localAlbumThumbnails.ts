@@ -30,7 +30,7 @@ function albumKey(album: LocalAlbum): string | null {
 
 // Only bounded JPEG data, including an actual small SOF frame. Never accept
 // SVG, remote/file/asset URLs or an unbounded image hidden behind a data URL.
-function validThumbnail(value: unknown): value is string {
+export function validThumbnail(value: unknown): value is string {
   if (typeof value !== "string" || value.length > MAX_THUMBNAIL_BYTES
     || !/^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(value)) return false;
   try {

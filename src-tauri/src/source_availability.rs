@@ -3,7 +3,7 @@
 //! recovery, config-generation, or UI/MPD bridge exists here. The caller-supplied
 //! config slice is a consistency input, never evidence of a live product gate.
 //! Paths are preliminary and retain a validation/open TOCTOU window.
-use std::{cell::Cell, collections::BTreeSet, fs, sync::{Arc,Mutex}, path::{Path,PathBuf}};
+use std::{cell::Cell, fs, sync::{Arc,Mutex}, path::{Path,PathBuf}};
 use serde::Serialize;
 use crate::{local_media::{self,mirror::{ReadonlyMirrorSnapshot,ReadonlyMirrorOpenError}},
     source_identity::{ReadonlyIdentitySnapshot,ReadonlyOriginObservation}};
@@ -49,6 +49,7 @@ pub(crate) struct PreliminaryInventory {
     identity:ReadonlyIdentitySnapshot,
     mirror:Arc<ReadonlyMirrorSnapshot>,
     configured:Vec<String>,
+    labels:std::collections::BTreeMap<String,String>,
     library:PathBuf,
     observed_conflict:Cell<bool>,
 }
@@ -142,7 +143,8 @@ impl PreliminaryInventory {
             return Err(InspectionError::InventoryUnconfirmed);
         }
         Self::check_binding(&mirror,configured)?;
-        let s=Self {identity,mirror,configured:configured.to_vec(),library:library.into(),observed_conflict:Cell::new(false)};
+        let labels=local_media::source_display_labels(&mirror.manifest.sources);
+        let s=Self {identity,mirror,configured:configured.to_vec(),labels,library:library.into(),observed_conflict:Cell::new(false)};
         s.revalidate_read_bindings(configured)?; Ok(s)
     }
     #[cfg(test)]
@@ -190,16 +192,9 @@ impl PreliminaryInventory {
         Ok(PreliminaryObservation {admission:PreliminaryOnly::NotProductAdmission,sources,observed_conflict:self.observed_conflict.get()})
     }
     fn check_binding(mirror:&ReadonlyMirrorSnapshot,configured:&[String])->Result<(),InspectionError> {
-        use std::os::unix::ffi::OsStrExt;
-        if configured.len()>65_536 { return Err(InspectionError::ConfigBindingUnconfirmed); }
-        let mut config=BTreeSet::new();
-        for value in configured {
-            if value.len()>4096 || !Path::new(value).is_absolute() || !config.insert(value.as_bytes()) {
-                return Err(InspectionError::ConfigBindingUnconfirmed);
-            }
+        if !crate::local_media::configured_source_binding_matches(configured,&mirror.manifest.sources) {
+            return Err(InspectionError::ConfigBindingUnconfirmed);
         }
-        let registered:BTreeSet<_>=mirror.manifest.sources.values().map(|p|p.as_os_str().as_bytes()).collect();
-        if config!=registered { return Err(InspectionError::ConfigBindingUnconfirmed); }
         Ok(())
     }
     fn revalidate(&self,configured:&[String])->Result<(),InspectionError> {
@@ -228,7 +223,7 @@ impl PreliminaryInventory {
             O::PermissionDenied=>(Unavailable,Some(PermissionDenied)), O::IoError=>(Unavailable,Some(IoError)),
             O::Conflict=>{self.observed_conflict.set(true); (IdentityConflict,Some(OriginMismatch))},
         };
-        Ok(PreliminarySourceRow {source_id:id.into(),label:id.into(),status,reason})
+        Ok(PreliminarySourceRow {source_id:id.into(),label:self.labels.get(id).cloned().ok_or(InspectionError::UnknownSource)?,status,reason})
     }
     /// Explicit full observation may perform IO on A. probe_target(B) does not call it.
     #[cfg(test)]
@@ -440,6 +435,21 @@ mod tests {
         fs::set_permissions(&p,fs::Permissions::from_mode(0o600)).unwrap();
         f.readonly(||assert!(matches!(i.probe_target(&f.config,&b),Err(InspectionError::SnapshotChanged))));
     }
+    #[test] fn xrcd_path_binding_reads_trailing_slash_without_mutation_and_keeps_stale_guard() {
+        let f=Fixture::new(false);let b=f.id(&f.b);
+        let mut configured=f.config.clone();configured[0].push('/');configured[1].push('/');
+        f.readonly(||{
+            let i=PreliminaryInventory::inspect(&f.library,&configured).unwrap();
+            let target=i.probe_target(&configured,&format!("{b}/b.flac")).unwrap();
+            assert_eq!(target.source_id(),b);
+            assert_eq!(fs::read(target.preliminary_path()).unwrap(),b"own fixture B metadata only");
+            assert_eq!(i.observe_all(&configured).unwrap().sources.len(),2);
+            // Equivalent roots do not allow a changed config within one read.
+            assert!(matches!(i.probe_target(&f.config,&b),Err(InspectionError::SnapshotChanged)));
+            let mut duplicate=configured.clone();duplicate[1]=f.config[0].clone();
+            assert!(matches!(PreliminaryInventory::inspect(&f.library,&duplicate),Err(InspectionError::ConfigBindingUnconfirmed)));
+        });
+    }
     #[test] fn config_mismatch_and_stale_slice_refuse() {
         let f=Fixture::new(false);let i=f.inspect().unwrap();let b=f.id(&f.b);let mut config=f.config.clone();config.pop();
         f.readonly(||{
@@ -505,6 +515,59 @@ mod tests {
             let fresh=f.inspect().unwrap();
             assert!(fresh.observe_all(&f.config).unwrap().sources.iter().all(|r|r.status==AvailabilityStatus::Available));
             assert_eq!(fresh.probe_target(&f.config,&format!("{b}/b.flac")).unwrap().source_id(),b);
+        });
+    }
+
+    #[test]
+    fn source_cover_terminal_separator_keeps_single_and_batch_reads_for_all_sources() {
+        use std::io::Read;
+        let f=Fixture::new(false);let a=f.id(&f.a);let b=f.id(&f.b);
+        fs::write(f.a.join("cover.jpg"),b"A").unwrap();
+        fs::write(f.b.join("cover.jpg"),b"B").unwrap();
+        f.readonly(||{
+            let coordinator=crate::config_save_operation::Coordinator::new();
+            let transaction=coordinator.try_begin_background().unwrap();
+            let read=|target:&crate::local_media::SourceCoverTarget<'_>|->Result<Vec<u8>,String>{
+                let cover=target.open_cover("cover.jpg")?.ok_or("missing own cover")?;
+                let mut bytes=vec![0;1];let mut reader=cover.reader();
+                reader.read_exact(&mut bytes).map_err(|_|"own fixture read failed")?;
+                cover.validate()?;Ok(bytes)
+            };
+            // A trailing separator on B must not disable A's cover either.
+            for suffixes in [[false,false],[false,true],[true,false],[true,true]] {
+                let mut config=f.config.clone();
+                for (path,suffix) in config.iter_mut().zip(suffixes) {if suffix {path.push('/');}}
+                for (id,expected) in [(&a,b"A".to_vec()),(&b,b"B".to_vec())] {
+                    let bytes=crate::local_media::with_source_cover_target(
+                        &f._lease,&transaction,&coordinator,&f.library,&config,id,|target|read(target)).unwrap();
+                    assert_eq!(bytes,expected);
+                }
+                let inventory=PreliminaryInventory::inspect(&f.library,&config).unwrap();
+                let covers=inventory.read_cover_pair(&f._lease,&transaction,&coordinator,
+                    &f.library,&config,&[a.clone(),b.clone()],|_,target|read(target)).unwrap();
+                assert_eq!(covers,vec![Ok(b"A".to_vec()),Ok(b"B".to_vec())]);
+            }
+        });
+    }
+
+    #[test]
+    fn source_cover_terminal_separator_keeps_duplicate_and_alias_refusal_before_read() {
+        let f=Fixture::new(false);let a=f.id(&f.a);
+        let alias=f.root.join("alias-A");symlink(&f.a,&alias).unwrap();
+        f.readonly(||{
+            let coordinator=crate::config_save_operation::Coordinator::new();
+            let transaction=coordinator.try_begin_background().unwrap();
+            let calls=std::cell::Cell::new(0);
+            let mut duplicate=f.config.clone();duplicate[1]=format!("{}/",duplicate[0]);
+            let mut aliased=f.config.clone();aliased[0]=format!("{}/",alias.to_str().unwrap());
+            let mut dotted=f.config.clone();dotted[0]=format!("{}/./",dotted[0]);
+            for config in [duplicate,aliased,dotted] {
+                let result=crate::local_media::with_source_cover_target(
+                    &f._lease,&transaction,&coordinator,&f.library,&config,&a,
+                    |_|{calls.set(calls.get()+1);Ok(())});
+                assert_eq!(result.unwrap_err(),"LOCAL_COVER_CONTEXT_CHANGED");
+            }
+            assert_eq!(calls.get(),0);
         });
     }
 

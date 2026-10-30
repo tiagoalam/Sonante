@@ -78,3 +78,7 @@ export interface SafeOfferAssessment {
   readonly reason: AssessmentReason | null;
   readonly targetRole: AssessmentRole | null;
 }
+
+// Observation only; completed/reopen authority remains in the invocation result.
+export const RECOVERY_PROGRESS = ["checking", "protecting", "restoring", "validating", "finalizing"] as const;
+export type RecoveryProgress = typeof RECOVERY_PROGRESS[number];

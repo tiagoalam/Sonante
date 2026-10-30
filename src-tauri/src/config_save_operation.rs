@@ -14,6 +14,7 @@ pub(crate) const INTERRUPTED: &str = "LOCAL_FOLDERS_SAVE_INTERRUPTED_FOR_SHUTDOW
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
     Preparing,
+    Removing,
     Indexing,
     Validating,
     Completed,

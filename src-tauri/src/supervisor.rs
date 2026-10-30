@@ -30,6 +30,40 @@ pub(crate) fn spawn_private_mpd(command: &mut Command) -> std::io::Result<Child>
     command.spawn()
 }
 
+// Keep the config inode stable: retirement/recovery bind its identity. Create
+// privately and harden an owned legacy file through its descriptor before any
+// truncation. Never follow a symlink or write through a shared hard link.
+pub(crate) fn write_mpd_config_file(directory: &Path, content: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let root = crate::recovery_fs::Dir::open(directory)?;
+    let path = root.entry("mpd.conf")?;
+    let previous = root.file_identity("mpd.conf")?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    if previous.is_none() { options.create_new(true).mode(0o600); }
+    let mut file = options.open(&path).map_err(|_| "MPD_CONFIG_UNSAFE_FILESYSTEM")?;
+    let metadata = file.metadata().map_err(|_| "MPD_CONFIG_UNSAFE_FILESYSTEM")?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.nlink() != 1
+        || previous.as_ref().is_some_and(|id| (id.dev,id.ino)!=(metadata.dev(),metadata.ino())) {
+        return Err("MPD_CONFIG_UNSAFE_FILESYSTEM".into());
+    }
+    root.validate()?;
+    let current = fs::symlink_metadata(&path).map_err(|_| crate::recovery_fs::CHANGED)?;
+    if !current.is_file() || (current.dev(),current.ino()) != (metadata.dev(),metadata.ino()) {
+        return Err(crate::recovery_fs::CHANGED.into());
+    }
+    file.set_permissions(fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    file.set_len(0).and_then(|_| file.write_all(content)).and_then(|_| file.sync_all())
+        .map_err(|e| e.to_string())?;
+    let current = fs::symlink_metadata(&path).map_err(|_| crate::recovery_fs::CHANGED)?;
+    let written = file.metadata().map_err(|_| crate::recovery_fs::CHANGED)?;
+    if !current.is_file() || (current.dev(),current.ino()) != (metadata.dev(),metadata.ino())
+        || written.nlink() != 1 || written.mode() & 0o7777 != 0o600 {
+        return Err(crate::recovery_fs::CHANGED.into());
+    }
+    root.validate()
+}
+
 pub struct MpdSupervisor {
     process: Option<Child>,
     socket_path: String,
@@ -545,7 +579,7 @@ impl MpdSupervisor {
             &analyzer_output_section,
         );
 
-        fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
+        write_mpd_config_file(&dir, conf_content.as_bytes())?;
         Ok((conf_path, volume_backend, library_sync))
     }
 
@@ -1352,6 +1386,55 @@ mod tests {
         let library = root.join("library");
         fs::create_dir(&library).unwrap();
         (root, library)
+    }
+
+    #[test]
+    fn mpd_config_private_writer_repairs_664_and_preserves_inode_and_exact_rendering() {
+        let (root, _, _) = test_runtime_paths("mpd-config-legacy-permissions");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("mpd.conf");
+        fs::write(&path, b"old configuration with a longer tail").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let profile = crate::recovery_fs::Dir::open(&root).unwrap();
+        assert_eq!(profile.read("mpd.conf", 4096, &||false), Err(crate::recovery_fs::UNSAFE.into()));
+        let content = b"music_directory \"fixture\"\n";
+        write_mpd_config_file(&root, content).unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!((after.dev(),after.ino()), (before.dev(),before.ino()));
+        assert_eq!(after.mode() & 0o7777, 0o600);
+        assert_eq!(profile.read("mpd.conf", 4096, &||false).unwrap().unwrap(), content);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn mpd_config_private_writer_creates_private_file_without_a_global_umask_change() {
+        let (root, _, _) = test_runtime_paths("mpd-config-new-permissions");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        write_mpd_config_file(&root, b"fixture").unwrap();
+        let profile = crate::recovery_fs::Dir::open(&root).unwrap();
+        assert_eq!(fs::metadata(root.join("mpd.conf")).unwrap().mode() & 0o7777, 0o600);
+        assert_eq!(profile.read("mpd.conf", 4096, &||false).unwrap(), Some(b"fixture".to_vec()));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn mpd_config_private_writer_refuses_symlink_hardlink_and_directory_without_touching_target() {
+        let (root, _, _) = test_runtime_paths("mpd-config-unsafe-destination");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = root.join("preserved"); let path = root.join("mpd.conf");
+        fs::write(&target, b"preserved bytes").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o664)).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(write_mpd_config_file(&root,b"refused").is_err());
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        fs::remove_file(&path).unwrap();fs::hard_link(&target,&path).unwrap();
+        assert!(write_mpd_config_file(&root,b"refused").is_err());
+        assert_eq!(fs::metadata(&target).unwrap().nlink(),2);
+        assert_eq!(fs::read(&target).unwrap(),b"preserved bytes");
+        assert_eq!(fs::metadata(&target).unwrap().mode()&0o777,0o664);
+        fs::remove_file(&path).unwrap();fs::create_dir(&path).unwrap();
+        assert!(write_mpd_config_file(&root,b"refused").is_err());assert!(path.is_dir());
+        assert_eq!(fs::read(&target).unwrap(),b"preserved bytes");
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn configured_folder(path: &Path) -> String {

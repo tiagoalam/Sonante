@@ -3,14 +3,18 @@
 use crate::local_media::{
     self,
     mirror::{ManagedRefreshPlan, MirrorManifest},
-    LocalMediaClass,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     os::unix::fs::MetadataExt,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
+
+#[cfg(test)]
+use crate::local_media::LocalMediaClass;
+#[cfg(test)]
+use std::path::Component;
 
 pub(crate) const MAX_DIRTY_PATHS: usize = 4096;
 
@@ -119,6 +123,15 @@ impl Context {
         }
     }
 
+    // Only retire already observed sources; never use this to add/rebind a
+    // source, reset its namespace or authorize product filesystem access.
+    pub(crate) fn is_source_removal_from(&self, previous: &Self) -> bool {
+        self.sources.len() < previous.sources.len()
+            && self.manifest.as_ref().and_then(|m|m.registry_id.as_ref())
+                == previous.manifest.as_ref().and_then(|m|m.registry_id.as_ref())
+            && self.sources.iter().all(|(id,source)| previous.sources.get(id)==Some(source))
+    }
+
     /// Pending paths can cross a confirmed generation change only for the
     /// same reserved ID and the same physical source. Removed/rebound IDs drop.
     pub(crate) fn retains(&self, previous: &Self, path: &Path) -> bool {
@@ -168,6 +181,7 @@ pub(crate) struct Batch {
     pub paths: BTreeSet<PathBuf>,
 }
 
+#[cfg(test)]
 pub(crate) struct Plan {
     pub refresh: ManagedRefreshPlan,
     pub needs_mirror: bool,
@@ -177,6 +191,7 @@ pub(crate) struct Plan {
 impl Batch {
     /// Files already represented by the same link need only an MPD directory
     /// update. CUE/new/deleted/directory entries retain the structural builder.
+    #[cfg(test)]
     pub(crate) fn plan(&self, library: &Path) -> Result<Option<Plan>, String> {
         if self.paths.len() > MAX_DIRTY_PATHS {
             return Err("LOCAL_WATCH_OVERFLOW".into());
@@ -304,5 +319,22 @@ pub(crate) fn merge(
                 changed_files: nb,
             },
         ) => targeted(a.iter().chain(b).cloned().collect(), na + nb),
+    }
+}
+
+#[cfg(test)]
+mod source_removal_tests {
+    use super::*;
+    #[test]
+    fn indexed_source_removal_requires_identical_survivor_id_origin_and_namespace() {
+        let source=Source{root:"/fixture/Keep".into(),device:1,inode:7};
+        let mut before=Context{sources:BTreeMap::from([("Keep".into(),source.clone()),("Remove".into(),Source{root:"/fixture/Remove".into(),device:1,inode:8})]),
+            manifest:Some(MirrorManifest{schema_version:2,generation_id:"before".into(),registry_id:Some("a".repeat(32)),sources:BTreeMap::new()}),generation:(1,9)};
+        let mut after=before.clone();after.sources.remove("Remove");
+        assert!(after.is_source_removal_from(&before));
+        after.manifest.as_mut().unwrap().registry_id=Some("b".repeat(32));assert!(!after.is_source_removal_from(&before));
+        after.manifest=before.manifest.clone();after.sources.get_mut("Keep").unwrap().inode+=1;assert!(!after.is_source_removal_from(&before));
+        after.sources=BTreeMap::from([("DifferentID".into(),source)]);assert!(!after.is_source_removal_from(&before));
+        before.sources.clear();after.sources.clear();assert!(!after.is_source_removal_from(&before));
     }
 }

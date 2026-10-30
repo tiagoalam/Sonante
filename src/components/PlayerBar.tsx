@@ -29,6 +29,8 @@ interface Props {
   onNavigateToAlbum?: () => void;
   onOpenNowPlaying?: () => void;
   status: PlaybackStatus;
+  onArtworkLoaded?: (status: PlaybackStatus, image: HTMLImageElement) => void;
+  onArtworkFailed?: (status: PlaybackStatus, source: string) => void;
   health: MpdHealth;
   route: ConfiguredSignalRoute | null;
   sourceInfo?: PlayerSourceInfo | null;
@@ -41,6 +43,8 @@ export const PlayerBar: React.FC<Props> = ({
   onNavigateToAlbum,
   onOpenNowPlaying,
   status,
+  onArtworkLoaded,
+  onArtworkFailed,
   health,
   route,
   sourceInfo,
@@ -174,7 +178,14 @@ export const PlayerBar: React.FC<Props> = ({
             ) : status.thumb && status.thumb !== failedCover && !isNoTrack ? (
               <img
                 src={status.thumb}
-                onError={() => setFailedCover(status.thumb ?? null)}
+                ref={image => {
+                  if (image?.complete && image.naturalWidth) onArtworkLoaded?.(status, image);
+                }}
+                onLoad={event => onArtworkLoaded?.(status, event.currentTarget)}
+                onError={() => {
+                  setFailedCover(status.thumb ?? null);
+                  if (status.thumb) onArtworkFailed?.(status, status.thumb);
+                }}
                 alt=""
                 className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
               />

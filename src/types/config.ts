@@ -19,7 +19,7 @@ export interface AppConfig {
   replay_gain: "off" | "track" | "album";
 }
 
-export type ConfigSavePhase = "preparing" | "indexing" | "validating" | "completed" | "failed" | "uncertain";
+export type ConfigSavePhase = "preparing" | "removing" | "indexing" | "validating" | "completed" | "failed" | "uncertain";
 export interface ConfigSaveOperation {
   id: string;
   phase: ConfigSavePhase;

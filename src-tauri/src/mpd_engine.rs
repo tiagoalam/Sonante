@@ -97,15 +97,23 @@ impl MpdEngine {
         if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
             return Err("O motor MPD experimental precisa ser um arquivo executável.".into());
         }
-        if hash_file(&program)? != expected {
+        let actual = Self::validated_override_hash(hash_file(&program)?, expected)?;
+        Ok(Self {
+            program,
+            private_sha256: Some(actual),
+        })
+    }
+
+    fn validated_override_hash(actual: String, expected: &str) -> Result<String, String> {
+        // Explicit Linux debug override only. No path fallback or release change.
+        let installed_direct = cfg!(all(debug_assertions, target_os = "linux"))
+            && expected == PRIVATE_SHA256 && actual == INSTALLED_DIRECT_SHA256;
+        if actual != expected && !installed_direct {
             return Err(
                 "O motor MPD experimental não corresponde à compilação privada validada.".into(),
             );
         }
-        Ok(Self {
-            program,
-            private_sha256: Some(expected.into()),
-        })
+        Ok(actual)
     }
 
     pub(crate) fn program(&self) -> &Path {
@@ -293,6 +301,54 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
         }
+    }
+
+    #[test]
+    fn explicit_debug_direct_hash_admission_preserves_the_matched_identity() {
+        let accepted = MpdEngine::validated_override_hash(
+            INSTALLED_DIRECT_SHA256.into(), PRIVATE_SHA256,
+        );
+        if cfg!(all(debug_assertions, target_os = "linux")) {
+            assert_eq!(accepted.unwrap(), INSTALLED_DIRECT_SHA256);
+        } else {
+            assert!(accepted.is_err());
+        }
+        assert_eq!(MpdEngine::validated_override_hash(
+            PRIVATE_SHA256.into(), PRIVATE_SHA256,
+        ).unwrap(), PRIVATE_SHA256);
+        assert_eq!(MpdEngine::validated_override_hash(
+            INSTALLED_EQ_SHA256.into(), INSTALLED_EQ_SHA256,
+        ).unwrap(), INSTALLED_EQ_SHA256);
+        for (actual, expected) in [
+            (INSTALLED_EQ_SHA256, PRIVATE_SHA256),
+            (INSTALLED_DIRECT_SHA256, INSTALLED_EQ_SHA256),
+            (PRIVATE_SHA256, INSTALLED_EQ_SHA256),
+            (&INSTALLED_DIRECT_SHA256[..63], PRIVATE_SHA256),
+            ("changed candidate", PRIVATE_SHA256),
+        ] {
+            assert!(MpdEngine::validated_override_hash(actual.into(), expected).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_installed_direct_identity_keeps_its_build_evidence_and_output_policy() {
+        if !cfg!(all(debug_assertions, target_os = "linux")) { return; }
+        let actual = MpdEngine::validated_override_hash(
+            INSTALLED_DIRECT_SHA256.into(), PRIVATE_SHA256,
+        ).unwrap();
+        let engine = MpdEngine {
+            program: "/not-executed/explicit-installed-direct".into(),
+            private_sha256: Some(actual),
+        };
+        let evidence = serde_json::to_value(engine.evidence(false).unwrap()).unwrap();
+        assert_eq!(evidence["evidence_id"], "mpd-strict-ubuntu2204-remap-20261018");
+        assert_eq!(evidence["pcm_eof_flush"], true);
+        assert!(evidence.get("bitperfect").is_none());
+        let shared = "audio_output {\n type \"alsa\"\n}".to_string();
+        assert_eq!(engine.configure_output(shared.clone(), true).unwrap(), shared);
+        let direct = engine.configure_output(shared, false).unwrap();
+        assert_eq!(direct.matches("pcm_eof_flush").count(), 1);
+        assert_eq!(direct.matches("sonante_direct_strict").count(), 1);
     }
 
     #[test]

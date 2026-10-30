@@ -15,6 +15,7 @@ pub(crate) struct Catalog {
     runtime: shared_dsp::Snapshot,
     shared: bool,
     runtime_available: bool,
+    pulse_audio: bool,
 }
 fn revision(config: &EqualizerConfig) -> Result<String, String> {
     let bytes = serde_json::to_vec(config).map_err(|_| "EQ_STORE_FAILED")?;
@@ -62,16 +63,17 @@ fn runtime_snapshot(app: &AppHandle) -> shared_dsp::Snapshot {
 pub(crate) async fn get_equalizer(app: AppHandle) -> Result<Catalog, String> {
     let result = tauri::async_runtime::spawn_blocking(|| {
         load().map(|loaded| {
-            // Availability is not activation. Hash resources on the blocking
-            // worker without starting any child or holding configuration locks.
+            // Availability is not activation. Hash resources and query server
+            // compatibility without starting audio engines or holding locks.
             let available = shared_dsp::binary_path().is_ok()
                 && crate::mpd_engine::MpdEngine::resolve_eq().is_ok();
-            (loaded, available)
+            let pulse_audio = shared_dsp::availability::pulse_audio_in_use();
+            (loaded, available, pulse_audio)
         })
     })
         .await
         .map_err(|_| "EQ_STORE_UNAVAILABLE")??;
-    let ((mut config, revision), runtime_available) = result;
+    let ((mut config, revision), runtime_available, pulse_audio) = result;
     config.enabled = false; // Stored desire is never runtime truth.
     let shared = app
         .state::<ConfigState>()
@@ -87,6 +89,7 @@ pub(crate) async fn get_equalizer(app: AppHandle) -> Result<Catalog, String> {
         runtime: runtime_snapshot(&app),
         shared,
         runtime_available,
+        pulse_audio,
     })
 }
 
@@ -251,6 +254,12 @@ pub(crate) async fn apply_equalizer(
     bypass_expected: Option<EqPreset>,
     app: AppHandle,
 ) -> Result<shared_dsp::Snapshot, String> {
+    if enabled {
+        // Recheck the live server; a catalog observation is not authorization
+        // to activate after the system audio server changes. Bypass stays usable.
+        tauri::async_runtime::spawn_blocking(shared_dsp::availability::require_supported)
+            .await.map_err(|_| "EQ_AVAILABILITY_UNCONFIRMED")??;
+    }
     app.state::<AudioState>().0.lock().map_err(|_|"EQ_AUDIO_UNAVAILABLE")?.note_eq_intervention();
     if enabled {
         shared_config(&app)?;
@@ -298,6 +307,7 @@ pub(crate) async fn compare_equalizer(action:shared_dsp::comparison::Action,toke
         if action==shared_dsp::comparison::Action::Finish {
             return worker.state::<shared_dsp::State>().compare(action,token,expected,None).map_err(|e|e.to_string());
         }
+        shared_dsp::availability::require_supported()?;
         let tx=worker.state::<ConfigTransactionState>();let _guard=tx.begin()?;
         shared_config(&worker)?;
         if worker.state::<SupervisorState>().0.lock().map_err(|_|"EQ_SUPERVISOR_UNAVAILABLE")?.shared_eq_pipe().is_none(){return Err("EQ_COMPARISON_UNAVAILABLE".into())}

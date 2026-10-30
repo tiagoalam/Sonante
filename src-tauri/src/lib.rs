@@ -20,6 +20,7 @@ mod favorites;
 mod library_doctor;
 mod library_recovery;
 mod recovery_fs;
+mod source_retirement;
 mod recovery_catalog;
 mod recovery_sandbox;
 mod recovery_set;
@@ -792,7 +793,6 @@ enum ManagedMirrorRefreshMode {
     Manual,
     Check,
     Startup,
-    Filesystem,
 }
 
 fn finish_unchanged_managed_generation(
@@ -809,7 +809,7 @@ fn finish_unchanged_managed_generation(
         }
         ManagedMirrorRefreshMode::Check
         | ManagedMirrorRefreshMode::Startup
-        | ManagedMirrorRefreshMode::Filesystem => Ok(false),
+        => Ok(false),
     }
 }
 
@@ -823,7 +823,7 @@ fn refresh_published_managed_generation(
         ManagedMirrorRefreshMode::Manual => request_rescan_wait_and_audit(socket_path),
         ManagedMirrorRefreshMode::Check
         | ManagedMirrorRefreshMode::Startup
-        | ManagedMirrorRefreshMode::Filesystem => {
+        => {
             request_startup_refresh_and_audit(socket_path, refresh_plan)
         }
     }
@@ -1057,6 +1057,23 @@ fn restore_previous_after_manual_rescan(
     }
 }
 
+// This policy never turns a manual check into permission to reread every
+// unchanged track. The existing filesystem planner still proves path scope.
+fn explicit_incremental_check_plan(
+    mut plan: local_media::mirror::ManagedRefreshPlan,
+    sources: &std::collections::BTreeMap<String, PathBuf>,
+) -> Result<local_media::mirror::ManagedRefreshPlan, String> {
+    match &mut plan {
+        local_media::mirror::ManagedRefreshPlan::Targeted { directories, .. } if directories.is_empty() => {
+            // Same virtual paths may have changed tags/mtime while closed.
+            directories.extend(sources.keys().cloned());
+        }
+        local_media::mirror::ManagedRefreshPlan::Full => return Err("LOCAL_INCREMENTAL_CHECK_UNCONFIRMED".into()),
+        _ => {}
+    }
+    Ok(plan)
+}
+
 fn run_managed_manual_rescan(app: &AppHandle) -> Result<(), String> {
     run_managed_mirror_refresh(app, ManagedMirrorRefreshMode::Manual).map(|_| ())
 }
@@ -1115,7 +1132,6 @@ fn run_managed_mirror_refresh_admitted(
             ManagedMirrorRefreshMode::Manual => "manual-rescan",
             ManagedMirrorRefreshMode::Check => "manual-check",
             ManagedMirrorRefreshMode::Startup => "startup-reconcile",
-            ManagedMirrorRefreshMode::Filesystem => "filesystem-reconcile",
         },
         std::process::id(),
         MIRROR_GENERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
@@ -1125,7 +1141,7 @@ fn run_managed_mirror_refresh_admitted(
         &staging_path,
         &roots,
         &generation_id,
-        mode == ManagedMirrorRefreshMode::Manual || dirty_plan.is_some(),
+        mode != ManagedMirrorRefreshMode::Startup || dirty_plan.is_some(),
     )?;
     let local_media::mirror::ManagedGenerationPreparation::Prepared(prepared) = preparation else {
         return match dirty_plan {
@@ -1140,13 +1156,18 @@ fn run_managed_mirror_refresh_admitted(
             local_media::mirror::cleanup_managed_generation(&prepared.staging_path),
         ));
     }
-    let structural_plan = if dirty_plan.is_some() {
+    let structural_plan = if dirty_plan.is_some() || mode != ManagedMirrorRefreshMode::Startup {
         match local_media::mirror::plan_filesystem_refresh(&live_path, &prepared) {
             Ok(plan) => plan,
             Err(error) => return Err(error_with_rollback(error, local_media::mirror::cleanup_prepared_managed_generation(&prepared))),
         }
     } else { prepared.refresh_plan.clone() };
     let combined_plan = dirty_plan.map_or_else(|| structural_plan.clone(), |dirty| local_changes::merge(&structural_plan, dirty));
+    let combined_plan = if mode != ManagedMirrorRefreshMode::Startup {
+        explicit_incremental_check_plan(combined_plan, &prepared.manifest.sources)
+            .map_err(|error|error_with_rollback(error,
+                local_media::mirror::cleanup_prepared_managed_generation(&prepared)))?
+    } else { combined_plan };
     if mode != ManagedMirrorRefreshMode::Manual
         && combined_plan != local_media::mirror::ManagedRefreshPlan::MetadataOnly
     {
@@ -1206,9 +1227,8 @@ fn run_managed_mirror_refresh_admitted(
     }
     let supervisor_state = app.state::<SupervisorState>();
     let previous_kind = publication.previous_kind();
-    let effective_plan = if mode == ManagedMirrorRefreshMode::Manual {
-        &local_media::mirror::ManagedRefreshPlan::Full
-    } else { &combined_plan };
+    // Both explicit actions retain the incremental plan admitted above.
+    let effective_plan = &combined_plan;
     let result = library_refresh::refresh_inspected(&socket_path, effective_plan, true, || transaction_state.shutdown_requested(), dirty_plan.is_some(), || {
         let (report, _) = coverage_check.as_ref().ok_or(index_coverage::INVALID)?.finish_at(&socket_path, &live_path)?;
         *coverage_report.borrow_mut() = Some(report); Ok(())
@@ -1407,9 +1427,13 @@ fn queue_references_removed_sources(
     logical: &[TrackMetadata],
     queue: &audio::MpdQueueStructure,
 ) -> bool {
+    queue_references_removed_ids(&plan.removed_ids, logical, queue)
+}
+
+fn queue_references_removed_ids(removed_ids: &[String], logical: &[TrackMetadata], queue: &audio::MpdQueueStructure) -> bool {
     let affected = |uri: &str| {
         uri.split_once('/')
-            .is_some_and(|(id, _)| plan.removed_ids.iter().any(|removed| removed == id))
+            .is_some_and(|(id, _)| removed_ids.iter().any(|removed| removed == id))
     };
     logical.iter().any(|track| {
         affected(&track.uri)
@@ -1424,19 +1448,62 @@ fn queue_clear_binding(
     plan: &local_media::mirror::PureSourceRemoval,
     backup: &managed_save_intent::QueueBackup,
 ) -> Result<String, String> {
+    queue_clear_binding_ids(previous, next, &plan.removed_ids, &plan.remaining_ids, backup)
+}
+
+fn queue_clear_binding_ids(previous: &AppConfig, next: &AppConfig, removed: &[String], remaining: &[String], backup: &managed_save_intent::QueueBackup) -> Result<String, String> {
     // Playback may advance naturally during confirmation. Bind structural state,
     // occurrences/IDs and exact configs/sources, not wall-clock elapsed/cursor.
     let bytes = serde_json::to_vec(&(
         previous,
         next,
-        &plan.removed_ids,
-        &plan.remaining_ids,
+        removed,
+        remaining,
         &backup.tracks,
         &backup.mpd,
         backup.playlist_version,
     ))
     .map_err(|_| "LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_UNAVAILABLE")?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+// Ask before recursive watcher registration, physical enumeration and staging.
+// This reserves/captures only the current queue. Consent never authorizes a
+// clear/publication: the original late admission rechecks catalog, queue and
+// exact binding after preparation, including any natural track advancement.
+fn audio_socket_for_removal_consent(audio: &Mutex<AudioEngine>) -> Result<String, String> {
+    Ok(audio.lock().map_err(|_| "LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_UNAVAILABLE")?.local_album_socket_path())
+}
+
+fn early_removal_queue_consent(audio: &Mutex<AudioEngine>, socket: &str, previous: &AppConfig, next: &AppConfig,
+    sources: &local_media::mirror::RemovalConsentSources) -> Result<(), String> {
+    let (_owner, tracks) = {
+        let mut audio = audio.lock().map_err(|_| "LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_UNAVAILABLE")?;
+        // Preserve the established logical-resume policy; no new confirmation
+        // or cursor/MPD effect is introduced for an already stopped restore.
+        if audio.queue_has_logical_resume() { return Ok(()); }
+        let owner = audio.reserve_queue_structure().ok_or("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_UNAVAILABLE")?;
+        (owner, audio.get_queue())
+    };
+    early_removal_queue_consent_with(previous, next, sources, &tracks,
+        || AudioEngine::capture_mpd_queue_structure(socket).map_err(|e| e.to_string()),
+        || AudioEngine::capture_mpd_playback_snapshot(socket))
+}
+
+fn early_removal_queue_consent_with(previous: &AppConfig, next: &AppConfig,
+    sources: &local_media::mirror::RemovalConsentSources, tracks: &[TrackMetadata],
+    capture_queue: impl FnOnce() -> Result<audio::MpdQueueStructure, String>,
+    capture_playback: impl FnOnce() -> Result<audio::MpdPlaybackSnapshot, String>) -> Result<(), String> {
+    let queue = capture_queue()?;
+    if !queue_references_removed_ids(&sources.removed_ids, tracks, &queue) { return Ok(()); }
+    let playback = capture_playback()?;
+    if playback.state == audio::PlaybackState::Stopped
+        && (playback.current_index.is_some() || playback.elapsed != 0.0) {
+        return Err("LOCAL_SOURCE_REMOVAL_QUEUE_BACKUP_UNSUPPORTED".into());
+    }
+    let backup = managed_save_intent::QueueBackup::new(tracks, &playback.uris, &queue, &playback)?;
+    let binding = queue_clear_binding_ids(previous, next, &sources.removed_ids, &sources.remaining_ids, &backup)?;
+    Err(format!("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_REQUIRED:{binding}"))
 }
 
 fn admit_confirmed_queue_removal(
@@ -1958,6 +2025,329 @@ fn spawn_initial_catalog(app: AppHandle, operation: config_save_operation::Opera
     });
 }
 
+fn retirement_consent_for_profile(
+    library: &Path,
+    current: &AppConfig,
+    next: &AppConfig,
+) -> Result<Option<local_media::mirror::RemovalConsentSources>, String> {
+    let roots = local_media::mirror::canonical_configured_roots(
+        &next
+            .local_folders
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>(),
+    )?
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    match std::fs::symlink_metadata(library.join(local_media::mirror::MANIFEST_NAME)) {
+        Ok(_) => {
+            let manifest = local_media::mirror::read_manifest(library)?;
+            let previous = manifest
+                .sources
+                .values()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            if roots.is_subset(&previous) && roots.len() < previous.len() {
+                if manifest.registry_id.is_none() {
+                    return Err("LOCAL_SOURCE_REMOVAL_PLAN_UNCONFIRMED".into());
+                }
+                return local_media::mirror::source_removal_consent(
+                    &manifest.sources,
+                    &roots.into_iter().collect::<Vec<_>>(),
+                )?
+                .map(Some)
+                .ok_or_else(|| "LOCAL_SOURCE_REMOVAL_PLAN_UNCONFIRMED".into());
+            }
+            Ok(None)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Preserve legacy addition admission, but never silently rebuild a
+            // legacy collection as a side effect of a source-only removal.
+            let previous = local_media::mirror::canonical_configured_roots(
+                &current
+                    .local_folders
+                    .iter()
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>(),
+            )?
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+            if roots.is_subset(&previous) && roots.len() < previous.len() {
+                return Err("LOCAL_SOURCE_REMOVAL_PLAN_UNCONFIRMED".into());
+            }
+            Ok(None)
+        }
+        Err(_) => Err("LOCAL_SOURCE_REMOVAL_PLAN_UNCONFIRMED".into()),
+    }
+}
+
+// A retirement updates only source IDs which no longer exist in the virtual
+// library. There is no complete-generation construction or Full-plan fallback.
+fn run_source_retirement_save(
+    app: &AppHandle,
+    current: &AppConfig,
+    next: &AppConfig,
+    sources: &local_media::mirror::RemovalConsentSources,
+    diagnostics: &SettingsSaveDiagnostics,
+    operation: &config_save_operation::Operation,
+    uncertain: &Cell<bool>,
+    authorization: Option<&QueueClearAuthorization>,
+) -> Result<(), String> {
+    let owner = app.state::<profile_lease::State>().lease()?;
+    let audio_state = app.state::<AudioState>();
+    let socket = audio_socket_for_removal_consent(&audio_state.0)?;
+    if authorization.is_none() {
+        early_removal_queue_consent(&audio_state.0, &socket, current, next, sources)?;
+    }
+    let plan = local_media::mirror::PureSourceRemoval {
+        removed_ids: sources.removed_ids.clone(),
+        remaining_ids: sources.remaining_ids.clone(),
+        refresh_plan: local_media::mirror::ManagedRefreshPlan::Targeted {
+            directories: sources.removed_ids.clone(),
+            changed_files: 0,
+        },
+    };
+    // Existing affected-queue admission keeps exact source/config/queue consent.
+    // An unaffected Plex or paused logical queue needs no mapping to local URIs:
+    // both logical and native structures are kept unchanged and rechecked.
+    let mut confirmed = admit_confirmed_queue_removal(
+        &audio_state.0,
+        &socket,
+        current,
+        next,
+        &plan,
+        authorization,
+    )?;
+    let untouched = if confirmed.is_none() {
+        if authorization.is_some() {
+            return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE".into());
+        }
+        Some(admit_untouched_retirement_queue(
+            &audio_state.0,
+            &socket,
+            &plan,
+        )?)
+    } else {
+        None
+    };
+    let before = if let Some(confirmed) = &confirmed {
+        confirmed.catalog_before.clone()
+    } else {
+        untouched
+            .as_ref()
+            .ok_or("LOCAL_SOURCE_REMOVAL_QUEUE_UNCONFIRMED")?
+            .1
+            .before_catalog
+            .clone()
+    };
+    let expected = RemovalCatalogExpectation::from_before(&plan, before.clone())
+        .ok_or("LOCAL_SOURCE_REMOVAL_CATALOG_UNCONFIRMED")?;
+    let cancelled = || operation.shutdown_requested();
+    recovery_fs::check(&cancelled)?;
+    let captured = audio_state
+        .0
+        .lock()
+        .map_err(|_| "Playback unavailable")?
+        .get_queue();
+    let cache = owner
+        .root()
+        .read("queue_cache.json", 16 * 1024 * 1024, &cancelled)?;
+    recovery_set::validate_queue_capture(cache.as_deref(), &captured)?;
+    diagnostics.strategy.set("retire_sources");
+    operation.phase(config_save_operation::Phase::Removing);
+    let coverage_token = app.state::<index_coverage::State>().begin()?;
+    let started = Instant::now();
+    let retirement = match source_retirement::prepare(
+        &owner,
+        current,
+        next,
+        before,
+        &cancelled,
+        &recovery_catalog::inspect,
+    ) {
+        Ok(tx) => tx,
+        Err(error) => {
+            if owner
+                .root()
+                .exists(source_retirement::PENDING)
+                .unwrap_or(true)
+            {
+                uncertain.set(true);
+                return Err(error_with_rollback(
+                    error,
+                    stop_supervisor(&app.state::<SupervisorState>().0),
+                ));
+            }
+            return Err(error);
+        }
+    };
+    diagnostics.stage("retirement_backup", started, "ok");
+    let result = (|| -> Result<(), String> {
+        if retirement.removed_ids() != plan.removed_ids || retirement.after() != expected.0 {
+            return Err("LOCAL_SOURCE_REMOVAL_PLAN_CHANGED".into());
+        }
+        recovery_fs::check(&cancelled)?;
+        if let Some(confirmed) = confirmed.as_mut() {
+            clear_retirement_queue(confirmed, &audio_state.0, &retirement, &owner, &cancelled)?;
+        }
+        let expected_queue = if let Some(confirmed) = &confirmed {
+            &confirmed.queue
+        } else {
+            &untouched
+                .as_ref()
+                .ok_or("LOCAL_SOURCE_REMOVAL_QUEUE_UNCONFIRMED")?
+                .1
+                .queue
+        };
+        if !removal_queue_before_publish(&socket, expected_queue)? {
+            return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CHANGED".into());
+        }
+        if AudioEngine::read_validated_local_catalog_at(&socket)? != retirement.before() {
+            return Err("LOCAL_SOURCE_REMOVAL_CATALOG_CHANGED".into());
+        }
+        let started = Instant::now();
+        retirement.publish(&owner, &cancelled, &|_| Ok(()))?;
+        diagnostics.stage("retirement_publish", started, "ok");
+        operation.phase(config_save_operation::Phase::Removing);
+        request_refresh_and_inspect(
+            &socket,
+            &plan.refresh_plan,
+            Some(diagnostics),
+            Some(operation),
+            || {
+                if AudioEngine::read_validated_local_catalog_at(&socket)? != expected.0 {
+                    return Err("LOCAL_SOURCE_REMOVAL_CATALOG_MISMATCH".into());
+                }
+                if !removal_queue_before_publish(&socket, expected_queue)? {
+                    return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CHANGED".into());
+                }
+                Ok(())
+            },
+        )?;
+        recovery_fs::check(&cancelled)?;
+        // The transaction slot excludes another writer; refuse an unexpected
+        // memory change before exchanging the durable configuration.
+        if *app
+            .state::<ConfigState>()
+            .0
+            .lock()
+            .map_err(|_| "Config unavailable")?
+            != *current
+        {
+            return Err("LOCAL_SOURCE_REMOVAL_CONFIG_CHANGED".into());
+        }
+        retirement.commit(&owner, &cancelled, &recovery_catalog::inspect, &|_| Ok(()))?;
+        adopt_retired_source_config(app, current, next)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        uncertain.set(true);
+        // No rollback of a live daemon's DB. Stop only the owned runtime and
+        // retain the journal/queue fence for the explicit recovery protocol.
+        if let Some(confirmed) = confirmed.as_mut() {
+            if let Ok(mut audio) = audio_state.0.lock() {
+                audio.retain_uncertain_queue_reservation(&mut confirmed.owner);
+            }
+        }
+        let stopped = stop_supervisor(&app.state::<SupervisorState>().0);
+        return Err(error_with_rollback(error, stopped));
+    }
+    if let Some(confirmed) = confirmed.as_mut() {
+        confirmed.owner.release_after_confirmed_completion();
+    }
+    inherit_index_coverage(app, coverage_token, &next.local_folders);
+    install_saved_folders_watcher(app, None, true);
+    Ok(())
+}
+
+fn admit_untouched_retirement_queue(
+    audio: &Mutex<AudioEngine>,
+    socket: &str,
+    plan: &local_media::mirror::PureSourceRemoval,
+) -> Result<(audio::QueueStructureReservation, RemovalRefreshExpectation), String> {
+    let (reservation, logical) = {
+        let mut audio = audio.lock().map_err(|_| "Playback unavailable")?;
+        let owner = audio
+            .reserve_queue_structure()
+            .ok_or("LOCAL_SOURCE_REMOVAL_QUEUE_UNCONFIRMED")?;
+        (owner, audio.get_queue())
+    };
+    let queue = AudioEngine::capture_mpd_queue_structure(socket).map_err(|e| e.to_string())?;
+    if queue_references_removed_sources(plan, &logical, &queue) {
+        return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CHANGED".into());
+    }
+    let before = AudioEngine::read_validated_local_catalog_at(socket)?;
+    let catalog = RemovalCatalogExpectation::from_before(plan, before.clone())
+        .ok_or("LOCAL_SOURCE_REMOVAL_CATALOG_UNCONFIRMED")?;
+    if !removal_queue_before_publish(socket, &queue)? {
+        return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CHANGED".into());
+    }
+    Ok((
+        reservation,
+        RemovalRefreshExpectation {
+            before_catalog: before,
+            catalog,
+            queue,
+        },
+    ))
+}
+
+fn clear_retirement_queue(
+    confirmed: &mut ConfirmedQueueRemoval,
+    audio: &Mutex<AudioEngine>,
+    retirement: &source_retirement::Transaction,
+    owner: &profile_lease::Lease,
+    cancel: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    recovery_fs::check(cancel)?;
+    let (effect, socket) = {
+        let mut audio = audio.lock().map_err(|_| "Playback unavailable")?;
+        if let Some(captured) = &confirmed.logical_resume {
+            let current = audio.capture_reserved_logical_queue(&confirmed.owner)?;
+            if current.resume != captured.resume || current.tracks != captured.tracks {
+                return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE".into());
+            }
+        }
+        let socket = audio.local_album_socket_path();
+        (
+            audio.begin_reserved_queue_effect(&mut confirmed.owner)?,
+            socket,
+        )
+    };
+    if confirmed.logical_resume.is_some()
+        && AudioEngine::capture_mpd_playback_snapshot(&socket)? != confirmed.playback
+    {
+        return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE".into());
+    }
+    retirement.validate_before_effect(owner, cancel)?;
+    let (empty, bytes) = effect.clear_reserved_queue(&confirmed.queue)?;
+    audio
+        .lock()
+        .map_err(|_| "Playback unavailable")?
+        .apply_verified_reserved_queue(&confirmed.owner, Vec::new())?;
+    confirmed.queue = empty;
+    retirement.persist_queue_cache(owner, &bytes)
+}
+
+fn adopt_retired_source_config(
+    app: &AppHandle,
+    previous: &AppConfig,
+    next: &AppConfig,
+) -> Result<(), String> {
+    let state = app.state::<ConfigState>();
+    let plex_state = app.state::<PlexState>();
+    let mut config = state.0.lock().map_err(|_| "Config unavailable")?;
+    let mut plex = plex_state.0.lock().map_err(|_| "Plex unavailable")?;
+    if *config != *previous || AppConfig::load()? != *next {
+        return Err("LOCAL_SOURCE_REMOVAL_CONFIG_CHANGED".into());
+    }
+    // The journal already durably exchanged config.json; do not save it again.
+    plex.update_config(next);
+    *config = next.clone();
+    app.state::<Arc<direct_playback::Gate>>()
+        .commit_choice(next);
+    Ok(())
+}
 fn run_experimental_local_folders_save_inner(
     app: &AppHandle,
     observed_config: &AppConfig,
@@ -1990,6 +2380,10 @@ fn run_experimental_local_folders_save_inner(
         return Err("A transação experimental aceita somente alteração de pastas locais.".to_string());
     }
 
+    if let Some(sources)=retirement_consent_for_profile(&MpdSupervisor::library_dir(),&current_config,new_config)?{
+        return run_source_retirement_save(app,&current_config,new_config,&sources,diagnostics,operation,uncertain,queue_clear_authorization);
+    }
+
     let live_path = MpdSupervisor::library_dir();
     let previous_sources = local_media::resolve_local_sources(&live_path, &current_config.local_folders)
         .map_err(|error| format!("A geração local anterior não pôde ser validada: {error}"))?;
@@ -1999,7 +2393,21 @@ fn run_experimental_local_folders_save_inner(
         .iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    let prepared_watch = app.state::<LocalWatcherState>().prepare(roots.clone())?;
+    let removal_sources = if previous_sources.topology() == local_media::LocalLibraryTopology::Managed
+        && local_media::mirror::read_manifest(&live_path)?.registry_id.is_some() {
+        local_media::mirror::source_removal_consent(previous_sources.sources(), &roots)?
+    } else { None };
+    if queue_clear_authorization.is_none() {
+        if let Some(sources) = &removal_sources {
+            let socket = audio_socket_for_removal_consent(&app.state::<AudioState>().0)?;
+            early_removal_queue_consent(&app.state::<AudioState>().0, &socket, &current_config, new_config, sources)?;
+        }
+    }
+    // A source removal retires existing watches after commit; it neither
+    // enumerates surviving physical trees nor starts new recursive monitoring.
+    let prepared_watch = if removal_sources.is_some() { None } else {
+        Some(app.state::<LocalWatcherState>().prepare(roots.clone())?)
+    };
     let generation_id = format!(
         "folders-save-{}-{}",
         std::process::id(),
@@ -2020,7 +2428,7 @@ fn run_experimental_local_folders_save_inner(
         if result.is_ok() && !uncertain.get() {
             if let Ok(token)=app.state::<index_coverage::State>().begin(){inherit_index_coverage(app,token,&new_config.local_folders);}
         }
-        return after_confirmed_local_folders_save(result, uncertain.get(), || install_committed_local_watcher(app, Some(prepared_watch)));
+        return after_confirmed_local_folders_save(result, uncertain.get(), || install_saved_folders_watcher(app, prepared_watch, removal_sources.is_some()));
     };
 
     if operation.shutdown_requested() {
@@ -2297,8 +2705,18 @@ fn run_experimental_local_folders_save_inner(
         .as_ref()
         .map(|confirmed| confirmed.playback.clone());
     let config_persistence_failed = Cell::new(false);
+    let prepared_database = std::cell::RefCell::new(None::<recovery_set::PreparedDatabase>);
     let result = complete_published_mirror_refresh(
-        || refresh_result.take().unwrap_or_else(|| Err("Refresh já consumido.".to_string())),
+        || {
+            refresh_result.take().unwrap_or_else(|| Err("Refresh já consumido.".to_string()))?;
+            // A validator refusal is a pre-commit refresh failure. Recover the
+            // previous library before changing config, rather than declaring
+            // config persistence uncertain solely because a validator failed.
+            let proof = recovery_set::prepare_database(&profile_owner, coverage_catalog.borrow().as_ref(),
+                &||operation.shutdown_requested(), &recovery_catalog::inspect)?;
+            *prepared_database.borrow_mut() = Some(proof);
+            Ok(())
+        },
         || match &original_snapshot {
             Some(snapshot) => Ok(snapshot.clone()),
             None => AudioEngine::capture_mpd_playback_snapshot(&socket_path),
@@ -2373,9 +2791,17 @@ fn run_experimental_local_folders_save_inner(
             Ok(())
         },
         || {
-            let result = persist_experimental_local_folders_config(app, &current_config, new_config)
-                .and_then(|_| recovery_set::confirm_next(&profile_owner,coverage_catalog.borrow().as_ref(),&||operation.shutdown_requested(),&recovery_catalog::inspect)
-                    .map_err(ConfigSaveError::AfterRenameUnconfirmed));
+            let result = (|| {
+                let proof = prepared_database.borrow();
+                let proof = proof.as_ref().ok_or_else(|| ConfigSaveError::BeforeRename("LIBRARY_RECOVERY_DATABASE_UNCONFIRMED".into()))?;
+                proof.validate_current(&profile_owner, &||operation.shutdown_requested()).map_err(ConfigSaveError::BeforeRename)?;
+                persist_experimental_local_folders_config(app, &current_config, new_config)?;
+                // Keep confirm_next's complete profile/config/generation/scope
+                // checks; reuse only the exact already validated DB contents.
+                recovery_set::confirm_next(&profile_owner, coverage_catalog.borrow().as_ref(), &||operation.shutdown_requested(),
+                    &|bytes, cancel|proof.validate_bytes(&profile_owner.root().id(), bytes, cancel))
+                    .map_err(ConfigSaveError::AfterRenameUnconfirmed)
+            })();
             if result.is_err() {
                 config_persistence_failed.set(true);
             }
@@ -2389,7 +2815,17 @@ fn run_experimental_local_folders_save_inner(
     );
     let (mut result, mut unconfirmed) = intent.conclude_transaction(result, completed.get());
     if !unconfirmed {
-        if let Err(error)=recovery_set::finish_save(&profile_owner,&||operation.shutdown_requested(),&recovery_catalog::inspect){
+        let validate = |bytes: &[u8], cancel: &dyn Fn() -> bool| {
+            if matches!(completed.get(), Some(managed_save_intent::Completed::Committed)) {
+                let proof = prepared_database.borrow();
+                proof.as_ref().ok_or("LIBRARY_RECOVERY_DATABASE_UNCONFIRMED".to_string())?
+                    .validate_bytes(&profile_owner.root().id(), bytes, cancel)
+            } else {
+                // Recovery validates the previous database, never the rejected one.
+                recovery_catalog::inspect(bytes, cancel)
+            }
+        };
+        if let Err(error)=recovery_set::finish_save(&profile_owner,&||operation.shutdown_requested(),&validate){
             result=Err(format!("{error}; {}: conclusão do conjunto de recuperação pendente.",managed_save_intent::BLOCKED));unconfirmed=true;
         }
     }
@@ -2410,7 +2846,7 @@ fn run_experimental_local_folders_save_inner(
             publish_index_coverage(app, coverage_token, &new_config.local_folders, report);
         } else { inherit_index_coverage(app,coverage_token,&new_config.local_folders); }
     }
-    after_confirmed_local_folders_save(result, unconfirmed, || install_committed_local_watcher(app, Some(prepared_watch)))
+    after_confirmed_local_folders_save(result, unconfirmed, || install_saved_folders_watcher(app, prepared_watch, removal_sources.is_some()))
 }
 
 /// Owns the addition-only permission; every return/panic revokes it. No
@@ -3287,6 +3723,18 @@ fn current_local_watch_context(app: &AppHandle) -> Result<local_changes::Context
     local_changes::Context::capture(&MpdSupervisor::library_dir(), &folders)
 }
 
+fn install_saved_folders_watcher(app: &AppHandle, prepared: Option<local_watcher::PreparedWatch>, removal: bool) {
+    if !removal { install_committed_local_watcher(app, prepared); return; }
+    // Match manual-only startup: do not start a recursive reader merely to
+    // remove a source. A reader already present keeps its survivor watches.
+    let watcher=app.state::<LocalWatcherState>();
+    if !watcher.running() { return; }
+    let result=current_local_watch_context(app).and_then(|context|watcher.install(context,None));
+    if result.is_err() && !app.state::<ConfigTransactionState>().shutdown_requested() {
+        local_watch_needs_check(app,"confirmed_removal_subscription_unconfirmed");
+    }
+}
+
 fn install_committed_local_watcher(app: &AppHandle, prepared: Option<local_watcher::PreparedWatch>) {
     let result = current_local_watch_context(app).and_then(|context| app.state::<LocalWatcherState>().install(context, prepared));
     if result.is_err() && !app.state::<ConfigTransactionState>().shutdown_requested() {
@@ -3296,6 +3744,7 @@ fn install_committed_local_watcher(app: &AppHandle, prepared: Option<local_watch
     }
 }
 
+#[cfg(test)]
 fn run_local_content_coverage(socket:&str,plan:&local_media::mirror::ManagedRefreshPlan,inventory:index_coverage::Inventory,library:&Path,shutdown:impl Fn()->bool)->Result<index_coverage::Report,String>{
     let ids=inventory.source_ids();
     let check=prepare_index_check(socket,inventory,ids,&shutdown,None)?;
@@ -3307,101 +3756,33 @@ fn run_local_content_coverage(socket:&str,plan:&local_media::mirror::ManagedRefr
         library_refresh::Outcome::Completed=>report.into_inner().ok_or(index_coverage::INVALID.into()),
     }
 }
-fn refresh_existing_local_content(app:&AppHandle,socket:&str,plan:&local_media::mirror::ManagedRefreshPlan,inventory:index_coverage::Inventory,folders:&[String],shutdown:impl Fn()->bool)->Result<bool,String>{
-    let token=app.state::<index_coverage::State>().begin()?;
-    // No mirror exists to roll back here; errors become the existing needs-check.
-    let report=run_local_content_coverage(socket,plan,inventory,&MpdSupervisor::library_dir(),shutdown)?;
-    publish_index_coverage(app,token,folders,report);Ok(true)
-}
-
-fn run_local_filesystem_batch(app: &AppHandle, batch: local_changes::Batch) -> local_watcher::Reconcile {
-    use local_watcher::Reconcile;
-    let transactions = app.state::<ConfigTransactionState>();
-    let _guard = match transactions.operations.try_begin_background() {
-        Ok(guard) => guard,
-        Err(config_save_operation::BackgroundAdmission::Busy) => return Reconcile::Busy,
-        Err(config_save_operation::BackgroundAdmission::Blocked) => return Reconcile::Blocked,
-    };
-    let Some(batch) = app.state::<LocalWatcherState>().own_writes.filter(batch) else { return Reconcile::Busy; };
-    let result = (|| {
-        managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())?;
-        let folders = app.state::<ConfigState>().0.lock().map_err(|_| "LOCAL_WATCH_CONFIG_UNAVAILABLE")?.local_folders.clone();
-        let library = MpdSupervisor::library_dir();
-        if !batch.context.is_current(&library, &folders) {
-            let rebound = current_local_watch_context(app).and_then(|context| app.state::<LocalWatcherState>().install(context, None));
-            return Ok(if rebound.is_ok() { Reconcile::Stale } else { Reconcile::Blocked });
-        }
-        let Some(plan) = batch.plan(&library)? else { return Ok(Reconcile::Confirmed); };
-        let changed = if plan.needs_mirror {
-            let changed = run_managed_mirror_refresh_admitted(app, ManagedMirrorRefreshMode::Filesystem, Some(&plan.refresh), &mut None)?;
-            if changed { install_committed_local_watcher(app, None); }
-            changed
-        } else {
-            let socket = app.state::<AudioState>().0.lock().map_err(|_| "LOCAL_WATCH_AUDIO_UNAVAILABLE")?.local_album_socket_path();
-            refresh_existing_local_content(app, &socket, &plan.refresh, plan.coverage, &folders, || transactions.shutdown_requested())?
-        };
-        if changed {
-            // A failed notification must not repeat an already confirmed job.
-            if app.emit(LOCAL_LIBRARY_RECONCILED_EVENT, ()).is_err() {
-                local_watch_needs_check(app, "catalog_notification_failed");
-            }
-        }
-        Ok::<_, String>(Reconcile::Confirmed)
-    })();
-    result.unwrap_or(Reconcile::Blocked)
-}
-
 fn start_local_watcher(app: &AppHandle) {
-    let watcher_app = app.clone();
     let notice_app = app.clone();
+    let watcher_app = app.clone();
     let result = current_local_watch_context(app).and_then(|context| app.state::<LocalWatcherState>().start_context(context,
-        move |batch| run_local_filesystem_batch(&watcher_app, batch),
+        // File events may request a manual check; they never publish a new
+        // generation or update the MPD database without a user action.
+        move |batch| {
+            use local_watcher::Reconcile;
+            let folders = match watcher_app.state::<ConfigState>().0.lock() {
+                Ok(config) => config.local_folders.clone(), Err(_) => return Reconcile::Blocked,
+            };
+            if !batch.context.is_current(&MpdSupervisor::library_dir(), &folders) { return Reconcile::Blocked; }
+            match watcher_app.state::<LocalWatcherState>().own_writes.filter(batch) {
+                None => Reconcile::Busy,
+                Some(batch) if batch.paths.is_empty() => Reconcile::Confirmed,
+                Some(_) => Reconcile::Blocked,
+            }
+        },
         move |reason| local_watch_needs_check(&notice_app, reason)));
     if result.is_err() { local_watch_needs_check(app, "start_failed"); }
 }
 
 async fn complete_startup_after_ready(app: AppHandle) {
-    restore_cached_queue_after_ready(app.clone()).await;
-    if app
-        .state::<ConfigTransactionState>()
-        .shutdown_requested()
-    {
-        return;
-    }
-    start_local_watcher(&app);
-    if app
-        .state::<ConfigTransactionState>()
-        .shutdown_requested()
-    {
-        app.state::<LocalWatcherState>().stop_and_join();
-        return;
-    }
-    let reconciliation_app = app.clone();
-    match tauri::async_runtime::spawn_blocking(move || {
-        run_managed_mirror_refresh(&reconciliation_app, ManagedMirrorRefreshMode::Startup)
-    })
-    .await
-    {
-        Ok(Ok(_)) => {
-            if let Err(error) = app.emit(LOCAL_LIBRARY_RECONCILED_EVENT, ()) {
-                eprintln!(
-                    "[Mirror] Failed to notify reconciled local catalog: {}",
-                    crate::diagnostics::error_summary(&error)
-                );
-            }
-        }
-        Ok(Err(error)) => {
-            local_watch_needs_check(&app, "startup_index_unconfirmed");
-            eprintln!(
-                "[Mirror] Automatic startup reconciliation failed: {}",
-                crate::diagnostics::error_summary(&error)
-            )
-        }
-        Err(error) => eprintln!(
-            "[Mirror] Automatic startup reconciliation task failed: {}",
-            crate::diagnostics::error_summary(&error)
-        ),
-    }
+    // An indexed library opens from its saved database. Restoring the logical
+    // queue must not register a recursive watcher, enumerate source contents,
+    // rebuild the mirror or schedule an MPD update/rescan.
+    restore_cached_queue_after_ready(app).await;
 }
 
 #[tauri::command]
@@ -4829,12 +5210,13 @@ fn get_library_recovery_attempt_diagnostic(app:AppHandle,analysis_key:String)->l
 }
 
 #[tauri::command]
-async fn execute_library_recovery(app:AppHandle,analysis_id:u64,plan_id:String)->Result<recovery_set::ResultDto,String>{
+async fn execute_library_recovery(app:AppHandle,analysis_id:u64,plan_id:String,progress:Option<tauri::ipc::JavaScriptChannelId>,webview:tauri::Webview)->Result<recovery_set::ResultDto,String>{
     let owner=app.state::<profile_lease::State>().lease()?;owner.validate()?;
     let admission=app.state::<library_recovery::State>().admission(analysis_id,&plan_id)?;
     let(_,operation)=app.state::<ConfigTransactionState>().operations.reserve_recovery(admission)?;
+    let progress=progress.map(|id|id.channel_on::<_,library_recovery::Progress>(webview));
     tauri::async_runtime::spawn_blocking(move||{
-        let result=app.state::<library_recovery::State>().execute(&owner,analysis_id,&plan_id,||operation.shutdown_requested());
+        let result=app.state::<library_recovery::State>().execute_with_progress(&owner,analysis_id,&plan_id,||operation.shutdown_requested(),&|stage|{if let Some(channel)=&progress{let _=channel.send(stage);}});
         drop(owner);
         operation.finish(result.as_ref().map(|_|()).map_err(|e|e.clone()),result.is_err());result
     }).await.map_err(|_|library_recovery::UNAVAILABLE.to_string())?
@@ -6222,9 +6604,7 @@ fn start_initial_mpd(
     persisted.apply_legacy_migrations();
     if persisted!=*config{return Err(InitialManagedGeneration::ERROR.into());}
     let mirror=local_media::mirror::ReadonlyMirrorSnapshot::open(&library_dir).map_err(|_|InitialManagedGeneration::ERROR)?;
-    let configured=config.local_folders.iter().collect::<std::collections::BTreeSet<_>>();
-    let bound=mirror.manifest.sources.values().map(|p|p.to_str().ok_or(InitialManagedGeneration::ERROR)).collect::<Result<std::collections::BTreeSet<_>,_>>()?;
-    if configured.len()!=config.local_folders.len() || configured.iter().map(|s|s.as_str()).collect::<std::collections::BTreeSet<_>>()!=bound {
+    if !local_media::configured_source_binding_matches(&config.local_folders,&mirror.manifest.sources) {
         return Err(InitialManagedGeneration::ERROR.into());
     }
     let mut admission=InitialManagedGeneration{owner:&owner,transactions,transaction:&transaction,_startup_owned:&startup_owned,
@@ -7844,13 +8224,6 @@ mod tests {
         assert_eq!(
             finish_unchanged_managed_generation(
                 ManagedMirrorRefreshMode::Startup,
-                &missing_socket,
-            ),
-            Ok(false)
-        );
-        assert_eq!(
-            finish_unchanged_managed_generation(
-                ManagedMirrorRefreshMode::Filesystem,
                 &missing_socket,
             ),
             Ok(false)
@@ -10101,6 +10474,52 @@ mod tests {
         }
     }
 
+    fn early_consent_fixture() -> (AppConfig, AppConfig, local_media::mirror::RemovalConsentSources, Vec<TrackMetadata>, audio::MpdQueueStructure, audio::MpdPlaybackSnapshot) {
+        let previous = AppConfig { first_run: false, local_folders: vec!["/fixture/Keep".into(), "/fixture/Remove".into()], ..AppConfig::default() };
+        let next = AppConfig { local_folders: vec!["/fixture/Keep".into()], ..previous.clone() };
+        let sources = local_media::mirror::RemovalConsentSources { removed_ids: vec!["Remove".into()], remaining_ids: vec!["Keep".into()] };
+        let tracks = ["Keep/a.flac", "Remove/b.flac", "Remove/b.flac"].into_iter().map(|uri| TrackMetadata {
+            title: "Fixture".into(), artist: "Fixture".into(), album: "Fixture".into(), thumb: None, plex_image: None,
+            media_locator: None, uri: uri.into(), duration: Some(30.),
+        }).collect::<Vec<_>>();
+        let queue = audio::MpdQueueStructure { playlist_version: 31, entries: tracks.iter().enumerate().map(|(pos,t)| audio::MpdQueueEntry { uri:t.uri.clone(), pos, id:70+pos as u64 }).collect() };
+        let playback = audio::MpdPlaybackSnapshot { uris:tracks.iter().map(|t|t.uri.clone()).collect(), current_index:Some(1), elapsed:17., state:audio::PlaybackState::Playing, playlist_version:31 };
+        (previous,next,sources,tracks,queue,playback)
+    }
+
+    #[test]
+    fn early_removal_consent_uses_the_same_fresh_binding_without_catalog_or_effects() {
+        let (previous,next,sources,tracks,queue,playback)=early_consent_fixture();
+        let backup=managed_save_intent::QueueBackup::new(&tracks,&playback.uris,&queue,&playback).unwrap();
+        let plan=local_media::mirror::PureSourceRemoval {removed_ids:sources.removed_ids.clone(),remaining_ids:sources.remaining_ids.clone(),refresh_plan:local_media::mirror::ManagedRefreshPlan::Full};
+        let expected=queue_clear_binding(&previous,&next,&plan,&backup).unwrap();
+        let error=early_removal_queue_consent_with(&previous,&next,&sources,&tracks,||Ok(queue.clone()),||Ok(playback.clone())).unwrap_err();
+        assert_eq!(error,format!("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_REQUIRED:{expected}"));
+        let mut progressed=playback.clone();progressed.elapsed+=1.;
+        assert_eq!(early_removal_queue_consent_with(&previous,&next,&sources,&tracks,||Ok(queue.clone()),||Ok(progressed)).unwrap_err(),error);
+        let mut changed=queue.clone();changed.entries[1].id+=100;
+        assert_ne!(early_removal_queue_consent_with(&previous,&next,&sources,&tracks,||Ok(changed),||Ok(playback.clone())).unwrap_err(),error);
+    }
+
+    #[test]
+    fn early_removal_consent_skips_unaffected_queue_and_keeps_capture_failures() {
+        let (previous,next,mut sources,tracks,queue,playback)=early_consent_fixture();
+        sources.removed_ids=vec!["Other".into()];
+        early_removal_queue_consent_with(&previous,&next,&sources,&tracks,||Ok(queue.clone()),||panic!("unaffected queue needs no playback capture")).unwrap();
+        assert_eq!(early_removal_queue_consent_with(&previous,&next,&sources,&tracks,||Err("fixture read unavailable".into()),||Ok(playback)).unwrap_err(),"fixture read unavailable");
+    }
+
+    #[test]
+    fn early_removal_consent_precedes_recursive_preparation_and_does_not_replace_final_admission() {
+        let source=include_str!("lib.rs");
+        let worker=source.split("fn run_experimental_local_folders_save_inner(").nth(1).unwrap().split("struct AdditionPlaybackWindow").next().unwrap();
+        let early=worker.find("early_removal_queue_consent(").unwrap();
+        assert!(early<worker.find("LocalWatcherState>().prepare(").unwrap());
+        assert!(early<worker.find("mirror::prepare_managed_generation(").unwrap());
+        assert!(worker.find("admit_confirmed_queue_removal(").unwrap()>worker.find("plan_saved_folders_refresh(").unwrap());
+        assert!(worker.contains("queue_clear_authorization.is_none()"));
+    }
+
     #[test]
     fn confirmed_queue_removal_requires_explicit_fresh_authorization_and_checks_both_queues() {
         let fixture = ConfirmedRemovalFixture::new();
@@ -11701,6 +12120,28 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn source_retirement_untouched_plex_queue_is_reserved_without_local_mapping_or_rescan(){
+        let fixture=LocalPathFixture::new();
+        let status="playlist: 7\nplaylistlength: 1\nstate: pause\nsong: 0\nelapsed: 0\nOK\n";
+        let queue="file: https://fixture.invalid/stream\nPos: 0\nId: 81\nOK\n";
+        let mut script=vec![("command_list_begin\nclear\nadd \"https://fixture.invalid/stream\"\nplay 0\ncommand_list_end","OK\n")];
+        script.extend([("status",status),("playlistinfo",queue),("status",status),("listall",REMOVAL_BEFORE),
+            ("status",status),("playlistinfo",queue),("status",status)]);
+        let(socket,server)=fake_restorative_rescan_mpd(script);
+        let mut engine=AudioEngine::new(&socket,&fixture.library.to_string_lossy());
+        let track=TrackMetadata{uri:String::new(),media_locator:Some(MediaLocator::Plex{server_id:"fixture".into(),
+            part_key:"/library/parts/1/file.flac".into(),rating_key:None,file_path:None}),
+            title:String::new(),artist:String::new(),album:String::new(),duration:None,thumb:None,plex_image:None};
+        engine.play_tracks(vec![track],vec!["https://fixture.invalid/stream".into()],0).unwrap();
+        let audio=Mutex::new(engine);let(owner,expected)=admit_untouched_retirement_queue(&audio,&socket,&removal_test_plan()).unwrap();
+        assert_eq!(expected.queue.entries[0].id,81);
+        assert!(expected.catalog.0.iter().all(|record|!record.contains("Remove/")));
+        assert_eq!(audio.lock().unwrap().get_queue().len(),1);
+        assert!(audio.lock().unwrap().clear_queue().unwrap_err().starts_with("LOCAL_SOURCE_REMOVAL_QUEUE_RESERVED"));
+        drop(owner);server.join().unwrap();
+    }
     #[test]
     fn settings_save_removal_eligibility_requires_proven_remaining_queue_entries() {
         let plan = removal_test_plan();
@@ -12342,4 +12783,28 @@ mod local_updates_tests;
 fn eq_resume_new_play_caller_revokes_during_eq_queue_reservation(){
     let audio=Mutex::new(audio::reliability_tests::fixture());let tx=ConfigTransactionState::new();let watch=audio.lock().unwrap().watch_eq_transition();let _operation=tx.begin().unwrap();let _reservation=audio.lock().unwrap().capture_device_switch_queue().unwrap();
     assert!(admit_or_validate_playback(&audio,&tx,None).is_err());assert!(!watch.current());
+}
+
+#[cfg(test)]
+mod explicit_incremental_check_tests {
+    use super::*;
+    use local_media::mirror::ManagedRefreshPlan as Plan;
+    fn sources() -> std::collections::BTreeMap<String,PathBuf> {
+        [("Music".into(),PathBuf::from("/fixture/music")),("Other".into(),PathBuf::from("/fixture/other"))].into()
+    }
+    #[test]
+    fn explicit_incremental_check_preserves_scoped_large_and_cue_updates() {
+        let plan=Plan::Targeted {directories:vec!["Music/Album".into()],changed_files:40};
+        assert_eq!(explicit_incremental_check_plan(plan.clone(),&sources()).unwrap(),plan);
+    }
+    #[test]
+    fn explicit_incremental_check_checks_same_path_changes_by_source() {
+        assert_eq!(explicit_incremental_check_plan(Plan::Targeted {directories:vec![],changed_files:0},&sources()).unwrap(),
+            Plan::Targeted {directories:vec!["Music".into(),"Other".into()],changed_files:0});
+    }
+    #[test]
+    fn explicit_incremental_check_refuses_global_rescan_without_relabeling_it() {
+        assert_eq!(explicit_incremental_check_plan(Plan::Full,&sources()).unwrap_err(),"LOCAL_INCREMENTAL_CHECK_UNCONFIRMED");
+        assert_eq!(explicit_incremental_check_plan(Plan::MetadataOnly,&sources()).unwrap(),Plan::MetadataOnly);
+    }
 }

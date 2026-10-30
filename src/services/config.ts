@@ -1,3 +1,4 @@
+import { localSourceReadQueue } from "../utils/localSourceReadQueue.ts";
 import i18n from "i18next";
 import { hasDirectVolumeChoice, confirmDirectVolumeConfig } from "../utils/directVolumeChoice.ts";
 import { playbackIntentToken, type PlaybackIntent } from "../utils/playbackIntent.ts";
@@ -20,11 +21,13 @@ export const configService = {
   getAudioDevices: (): Promise<AudioDevice[]> => invoke<AudioDevice[]>("get_audio_devices"),
   checkDirectDeviceAvailability: (deviceId: string): Promise<DeviceAvailability[]> =>
     invoke<DeviceAvailability[]>("check_direct_device_availability", { deviceId }),
-  saveConfig: async (newConfig: AppConfig, queueClearAuthorization?: QueueClearAuthorization): Promise<ConfigSaveResponse> =>
-    invoke<ConfigSaveResponse>("save_config", {
-      newConfig: await confirmDirectVolumeConfig(newConfig,askDirectVolumeChoice),
+  saveConfig: async (newConfig: AppConfig, queueClearAuthorization?: QueueClearAuthorization): Promise<ConfigSaveResponse> => {
+    const confirmed = await confirmDirectVolumeConfig(newConfig,askDirectVolumeChoice);
+    return localSourceReadQueue.control(() => invoke<ConfigSaveResponse>("save_config", {
+      newConfig: confirmed,
       ...(queueClearAuthorization ? { queueClearAuthorization } : {}),
-    }),
+    }));
+  },
   getLocalImportPreview: (operationId: string): Promise<LocalImportPreview> =>
     invoke<LocalImportPreview>("get_local_import_preview", { operationId }),
   getLocalImportArtwork: (operationId: string, reference: string): Promise<string | null> =>

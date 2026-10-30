@@ -40,6 +40,7 @@ import { localArtworkEnrichment, localArtworkResolver, localAlbumThumbnails } fr
 import {
   filterLocalAlbumsByScope,
   localLibrarySourceOptions,
+  localLibraryPathLabel,
   localLibrarySelectorPresentation,
   validLocalLibrarySourceSelection,
 } from "../utils/localLibraryScope";
@@ -773,7 +774,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               ? t("localBrowser.artistsCount", { count: visibleArtists.length })
               : viewMode === "years" || viewMode === "genres"
                 ? t("localBrowser.albumsCount", { count: scopedAlbums.length })
-                : currentPath || t("localBrowser.root");
+                : localLibraryPathLabel(currentPath, sourceOptions) || t("localBrowser.root");
 
   const handleContextBack = () => {
     if (initialAlbumId && (!selectedAlbum || selectedAlbum.id === initialAlbumId)) {
@@ -1491,7 +1492,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                           <Music size={18} className="text-[color:var(--theme-fg-muted,#888888)] group-hover:text-[color:var(--theme-fg-primary,#ffffff)] shrink-0" />
                         )}
                         <span className="text-xs font-medium text-[color:var(--theme-fg-primary,#ffffff)] truncate">
-                          {item.title || item.name}
+                          {isDir && !currentPath ? localLibraryPathLabel(item.path, sourceOptions) : item.title || item.name}
                         </span>
                       </div>
 

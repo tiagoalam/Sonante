@@ -678,3 +678,16 @@ test("initial page survives config loading, tab selection survives rerenders, an
     pages.dispose(); f.h.dispose();
   }
 });
+
+
+test("local library offers one explicit incremental check and no full-rescan action", async () => {
+  const f = await modal();
+  const tree = f.tree();
+  assert.equal(nodes(tree).filter(node => node.type === "button" && node.props.title === "settings.checkNew").length, 1);
+  assert.equal(nodes(tree).filter(node => node.type === "button" && node.props.title === "settings.fullRescan").length, 0);
+  const action = nodes(tree).find(node => node.type === "button" && node.props.title === "settings.checkNew");
+  await action.props.onClick(); f.render();
+  assert.equal(f.calls.scans, 1);
+  assert.equal(f.calls.save.length, 0);
+  f.h.dispose();
+});

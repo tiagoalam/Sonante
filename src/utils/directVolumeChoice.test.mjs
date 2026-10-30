@@ -15,7 +15,7 @@ function fixture({accept=true,playing=false}={}){
  };
  globalThis.window={confirm:message=>{prompts++;assert.equal(message,i18n.t('player.directVolumeChoiceConfirm'));return accept;},__TAURI_INTERNALS__:{invoke:native}};
  const js=ts.transpileModule(readFileSync(new URL('../services/audio.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};
- const deps={'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue},'./config':{ensureDirectOutputChoice},'../utils/playbackIntent':intents,'@tauri-apps/api/core':{invoke:native},'../utils/frontendDiagnostics':{diagnosticInvoke:(fn,c,a)=>fn(c,a)}};
+ const deps={'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice},'../utils/playbackIntent':intents,'@tauri-apps/api/core':{invoke:native},'../utils/frontendDiagnostics':{diagnosticInvoke:(fn,c,a)=>fn(c,a)}};
  new Function('require','exports',js)(id=>{assert.ok(id in deps,id);return deps[id]},exports);
  return{service:exports.audioService,calls,get cfg(){return cfg},set cfg(v){cfg=v},get prompts(){return prompts},native};
 }

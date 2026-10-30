@@ -1,17 +1,24 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import type { LibraryRecoveryObservation, LibraryRecoveryResult } from "../types/libraryRecovery";
 import {
-  DIAGNOSTIC_SCHEMA_VERSION, AVAILABILITIES, FAILURE_CLASSES, FAILURE_BOUNDARIES,
+  RECOVERY_PROGRESS, DIAGNOSTIC_SCHEMA_VERSION, AVAILABILITIES, FAILURE_CLASSES, FAILURE_BOUNDARIES,
   FAILURE_KNOWLEDGE, POSSIBLE_EFFECTS, INHERITED_OBSERVED, FRESHNESS, OUTCOMES,
   UNAVAILABLE_REASONS, ASSESSMENT_STATUSES, ASSESSMENT_REASONS, ASSESSMENT_ROLES,
   ASSESSMENT_SCOPE,
 } from "../types/libraryRecovery";
-import type { AttemptDiagnostic, SafeOfferAssessment } from "../types/libraryRecovery";
+import type { AttemptDiagnostic, SafeOfferAssessment, RecoveryProgress } from "../types/libraryRecovery";
 
 export const libraryRecoveryService = {
   analyze: (requestId: string) => invoke<LibraryRecoveryObservation>("analyze_library_recovery", { requestId }),
   cancel: (requestId: string) => invoke<void>("cancel_library_recovery_analysis", { requestId }),
-  execute: (analysisId: number, planId: string) => invoke<LibraryRecoveryResult>("execute_library_recovery", { analysisId, planId }),
+  execute: (analysisId: number, planId: string, onProgress?: (stage: RecoveryProgress) => void) => {
+    const progress = onProgress ? new Channel<unknown>() : undefined;
+    if (progress && onProgress) progress.onmessage = (value) => {
+      const stage = RECOVERY_PROGRESS.find((stage) => stage === value);
+      if (stage) onProgress(stage);
+    };
+    return invoke<LibraryRecoveryResult>("execute_library_recovery", { analysisId, planId, ...(progress ? { progress } : {}) });
+  },
   reopen: (planId: string) => invoke<void>("reopen_library_after_recovery", { planId }),
   exportReport: (analysisId: number) => invoke<boolean>("export_library_recovery_report", { analysisId }),
   diagnostic: queryAttemptDiagnostic,

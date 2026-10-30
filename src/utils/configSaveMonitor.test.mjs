@@ -108,3 +108,12 @@ test("disposing an in-flight read cannot publish or restart its timer", async ()
   resolve(operation("completed")); await flush();
   assert.deepEqual(changes, []);
 });
+
+test("removing stays pending across renderer reload and cannot regress to preparing", async () => {
+  const f = fixture(); await flush();
+  await f.poll(operation("removing")); assert.ok(f.monitor.isPending());
+  await f.poll(operation("preparing")); assert.equal(f.changes.at(-1).phase,"removing");
+  await f.poll(operation("validating")); assert.ok(f.monitor.isPending());
+  await f.poll(operation("completed")); assert.equal(f.monitor.isPending(),false);
+  f.monitor.dispose();
+});

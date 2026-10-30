@@ -1,3 +1,4 @@
+import { LocalPlaybackThumbnail } from "../src/utils/localPlaybackThumbnail.ts";
 import { createLocalCoverBatch } from "../src/utils/localCoverBatch.ts";
 import { createLocalSourceReadQueue } from "../src/utils/localSourceReadQueue.ts";
 import * as directVolumeHelpers from "../src/utils/signalPath.ts";
@@ -17,7 +18,7 @@ import { routeConditions } from '../src/utils/routeConditions.ts';
 import { signalPathInformation, requiresDeviceVolumeControl } from '../src/utils/signalPath.ts';
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(l=>[l,{translation:JSON.parse(readFileSync(new URL(`../src/locales/${l}.json`,import.meta.url)))}]))});
 globalThis.window={localStorage:{getItem:()=>null,setItem(){}},screen:{availWidth:1920,availHeight:1040},crypto:{randomUUID:()=> 'synthetic-session'},setTimeout,clearTimeout,addEventListener(){},removeEventListener(){}};
-const dependencies={'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
+const dependencies={'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
 const compile=(file,extra={})=>{const js=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',js)(name=>{assert.ok(name in extra||name in dependencies,name);return extra[name]??dependencies[name];},ex);return ex;};
 dependencies['./PlexImage']={PlexImage:({alt,className})=>React.createElement('div',{'data-plex-artwork':true,'aria-label':alt,className})};
 dependencies['./TrackArtwork']=compile('components/TrackArtwork.tsx');
@@ -432,3 +433,38 @@ test('embedded and detached hosts use explicit mute without an independent prepa
   const tree=NowPlayingHost({snapshot:{...snapshot,playback:{...snapshot.playback,volume:{value:0,muted:true,writable:true,available:true,backend:'mpd_software',shared_token:'shared-session'}}},owner,embedded:true,onReady(){}});
   tree.props.onMute();await flush();assert.deepEqual(calls,[{muted:false,token:'shared-session'}]);
  });
+
+
+test('actual App and PlayerBar callbacks retain a decoded cover across reopening and same-image track changes',()=>{
+ const source=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
+ const ast=ts.createSourceFile('App.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ let player,configure;
+ const walk=node=>{
+  if(ts.isJsxSelfClosingElement(node)&&node.tagName.getText(ast)==='PlayerBar')player=node;
+  if(ts.isVariableDeclaration(node)&&node.name.getText(ast)==='setConfig')configure=node.initializer.arguments[0].getText(ast);
+  ts.forEachChild(node,walk);
+ };walk(ast);assert.ok(player&&configure);
+ const jpeg='data:image/jpeg;base64,'+Buffer.from([255,216,255,192,0,11,8,0,80,0,80,1,1,17,0,255,217]).toString('base64');
+ let value=null,reductions=0;
+ const storage={getItem:()=>value,setItem:(_key,next)=>{value=next},removeItem:()=>{value=null}};
+ const cache=new LocalPlaybackThumbnail(()=>storage,()=>{reductions++;return jpeg});
+ const configFn=ts.transpileModule('exports.configure = '+configure,{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
+ const configExports={};new Function('exports','localPlaybackThumbnail','localAlbumThumbnails','localAlbumCatalog','setConfigState',configFn)(configExports,cache,{setContext(){}},{setPresentationContext(){}},()=>{});
+ configExports.configure({first_run:false,local_folders:['/music']});
+ const callback=name=>new Function('localPlaybackThumbnail','return ('+player.attributes.properties.find(p=>p.name?.getText(ast)===name).initializer.expression.getText(ast)+')')(cache);
+ const loaded=callback('onArtworkLoaded'),failed=callback('onArtworkFailed');
+ const hooks={...React,default:React,useEffect(){},useRef:v=>({current:v}),useState:v=>[v,()=>{}]};
+ const {PlayerBar}=compile('components/PlayerBar.tsx',{'react':hooks,'../services/audio':{audioService:{}}});
+ const image={src:'data:image/png;base64,AAAA',complete:true,naturalWidth:80,naturalHeight:80};
+ let current={...snapshot.playback,current_media:{kind:'local',uri:'Source/Album/one.flac',queue_index:0},thumb:image.src};
+ const render=()=>nodes(PlayerBar({status:current,health:snapshot.health,route:snapshot.route,isQueueOpen:false,onToggleQueue(){},onArtworkLoaded:loaded,onArtworkFailed:failed}),n=>n.type==='img')[0];
+ render().props.onLoad({currentTarget:image});assert.equal(cache.get(current.current_media),jpeg);
+ const restored=new LocalPlaybackThumbnail(()=>storage);restored.setContext(['/music']);
+ assert.equal(restored.get(current.current_media),jpeg,'the next session needs no image or metadata lookup');
+ current={...current,current_media:{...current.current_media,uri:'Source/Album/two.flac',queue_index:1}};
+ render().props.ref(image);assert.equal(cache.get(current.current_media),jpeg,'already decoded unchanged src is retained for the new track too');
+ for(let n=0;n<10;n++)render().props.ref(image);
+ assert.equal(reductions,2,'status renders do not redraw canvas or write storage repeatedly');
+ current={...current,thumb:jpeg};render().props.onError();assert.equal(cache.get(current.current_media),null);
+ configExports.configure({first_run:true,local_folders:['/music']});assert.equal(cache.get(current.current_media),null);
+});

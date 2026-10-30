@@ -17,7 +17,7 @@ function nodes(n){return React.isValidElement(n)?[n,...nodes(n.props.children)]:
 async function host(language='pt-BR'){
  const i18n=i18next.createInstance();await i18n.init({lng:language,resources,fallbackLng:false});let cursor=0;const slots=[],effects=[],calls=[],pending=[],exports=[],executions=[],reopenings=[];
  const hooks={useState(value){const i=cursor++;if(!(i in slots))slots[i]=value;return[slots[i],next=>slots[i]=typeof next==='function'?next(slots[i]):next]},useRef(value){const i=cursor++;if(!(i in slots))slots[i]={current:value};return slots[i]},useEffect(fn){const i=cursor++;if(!(i in slots)){slots[i]=true;effects.push(fn)}}};
- const service={diagnostic:async()=>({kind:'unknown'}),execute(analysisId,planId){calls.push(['execute',analysisId,planId]);const d=deferred();executions.push(d);return d.promise},reopen(planId){calls.push(['reopen',planId]);const d=deferred();reopenings.push(d);return d.promise},analyze(id){calls.push(['analyze',id]);const d=deferred();pending.push(d);return d.promise},cancel(id){calls.push(['cancel',id]);return Promise.resolve()},exportReport(id){calls.push(['export',id]);const d=deferred();exports.push(d);return d.promise}};
+ const service={diagnostic:async()=>({kind:'unknown'}),execute(analysisId,planId){calls.push(['execute',analysisId,planId]);const d=deferred();d.progress=arguments[2];executions.push(d);return d.promise},reopen(planId){calls.push(['reopen',planId]);const d=deferred();reopenings.push(d);return d.promise},analyze(id){calls.push(['analyze',id]);const d=deferred();pending.push(d);return d.promise},cancel(id){calls.push(['cancel',id]);return Promise.resolve()},exportReport(id){calls.push(['export',id]);const d=deferred();exports.push(d);return d.promise}};
  const {LibraryRecoveryPanel}=compile('../src/components/LibraryRecoveryPanel.tsx',{react:hooks,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../services/libraryRecovery':{...recoveryExports,libraryRecoveryService:service},'../utils/frontendDiagnostics':{logError:(...args)=>calls.push(['log',...args])}});
  const draw=()=>{cursor=0;return LibraryRecoveryPanel()};draw();const cleanups=effects.map(fn=>fn());
  const click=key=>{const button=nodes(draw()).find(n=>n.type==='button'&&n.props.children===i18n.t('libraryRecovery.'+key));assert.ok(button,key);assert.ok(!button.props.disabled,key);return button.props.onClick()};
@@ -58,4 +58,68 @@ test('cancel or uncertain execution cannot publish success or reopen',async()=>{
 test('legacy or absent evidence never exposes Execute and errors stay sanitized',async()=>{
  const h=await host();h.click('analyze');h.pending[0].resolve({...observation,recovery_available:true});await h.settle();assert.ok(!nodes(h.draw()).some(n=>n.type==='button'&&n.props.children===h.i18n.t('libraryRecovery.execute')));
  h.click('again');h.pending[1].resolve(executable);await h.settle();h.click('execute');h.executions[0].reject(new Error('/home/private X-Plex-Token=secret'));await h.settle();assert.ok(h.text().includes(h.i18n.t('libraryRecovery.executionFailed')));assert.doesNotMatch(h.text(),/secret|private/);h.cleanup();
+});
+
+test('recovery keeps the impact and explicit action visible while technical evidence stays collapsed in both languages',async()=>{
+ function visible(node){
+  if(Array.isArray(node))return node.map(visible);
+  if(!React.isValidElement(node))return node;
+  if(node.type==='details')return null;
+  return React.cloneElement(node,{},visible(node.props.children));
+ }
+ for(const language of ['pt-BR','en']){
+  const h=await host(language);
+  assert.equal(h.calls.length,0,'opening recovery never runs analysis or execution automatically');
+  h.click('analyze');h.pending[0].resolve(executable);await h.settle();
+  const tree=h.draw();const main=renderToStaticMarkup(visible(tree));
+  assert.ok(main.includes(h.i18n.t('libraryRecovery.summaryImpact')));
+  assert.ok(main.includes(h.i18n.t('libraryRecovery.execute')));
+  assert.ok(!main.includes(h.i18n.t('libraryRecovery.impact')));
+  for(const reason of executable.reasons)assert.ok(!main.includes(h.i18n.t(`libraryRecovery.reasons.${reason}`)));
+  const details=nodes(tree).filter(node=>node.type==='details');
+  assert.ok(details.length>0);assert.ok(details.every(node=>!node.props.open),'details are closed by default');
+  assert.equal(h.calls.filter(call=>call[0]==='execute').length,0,'displaying a plan cannot execute recovery');
+  h.click('execute');assert.equal(h.calls.filter(call=>call[0]==='execute').length,1);
+  h.executions[0].resolve({completed:true,backup_retained:true,requires_reopen:true});await h.settle();
+  assert.ok(h.text().includes(h.i18n.t('libraryRecovery.completed')));h.cleanup();
+ }
+});
+
+for (const language of ['pt-BR', 'en']) test(`pending recovery reports progress without claiming failure in ${language}`, async () => {
+ const h = await host(language);
+ h.click('analyze'); h.pending[0].resolve(executable); await h.settle(); h.click('execute');
+ const pendingMarkup = h.text();
+ assert.ok(pendingMarkup.includes(h.i18n.t('libraryRecovery.progress.checking')));
+ assert.ok(!pendingMarkup.includes(h.i18n.t('libraryRecovery.unavailable')), 'consumed offer is not a failed analysis');
+ assert.ok(!pendingMarkup.includes(h.i18n.t('libraryRecovery.sessionUnconfirmed')), 'pending execution has no terminal outcome yet');
+ assert.ok(!pendingMarkup.includes(h.i18n.t('libraryRecovery.completed')));
+ const buttons = nodes(h.draw()).filter(n => n.type === 'button');
+ assert.ok(!buttons.some(n => n.props.children === h.i18n.t('libraryRecovery.execute')));
+ assert.ok(!buttons.some(n => n.props.children === h.i18n.t('libraryRecovery.reopen')));
+ assert.equal(h.calls.filter(c => c[0] === 'execute').length, 1);
+ h.executions[0].reject(new Error('fixture failure')); await h.settle();
+ const failedMarkup = h.text();
+ assert.ok(failedMarkup.includes(h.i18n.t('libraryRecovery.executionFailed')));
+ assert.ok(failedMarkup.includes(h.i18n.t('libraryRecovery.sessionUnconfirmed')));
+ assert.ok(!failedMarkup.includes(h.i18n.t('libraryRecovery.unavailable')), 'prior analysis is not a fresh refused offer');
+ assert.ok(!failedMarkup.includes(h.i18n.t('libraryRecovery.completed')));
+ assert.equal(h.calls.filter(c => c[0] === 'reopen').length, 0);
+ h.cleanup();
+});
+
+test('finite recovery progress is presentation only and late progress after cancellation is ignored',async()=>{
+ const h=await host();h.click('analyze');h.pending[0].resolve(executable);await h.settle();h.click('execute');
+ for(const stage of ['protecting','restoring','validating','finalizing']){
+   h.executions[0].progress(stage);await h.settle();assert.ok(h.text().includes(h.i18n.t('libraryRecovery.progress.'+stage)));
+   assert.equal(h.calls.filter(c=>c[0]==='reopen').length,0);assert.ok(!h.text().includes(h.i18n.t('libraryRecovery.completed')));
+ }
+ h.click('cancelExecution');await h.settle();const afterCancel=h.text();h.executions[0].progress('restoring');await h.settle();assert.equal(h.text(),afterCancel);
+ h.executions[0].resolve({completed:true,backup_retained:true,requires_reopen:true});await h.settle();assert.ok(!h.text().includes(h.i18n.t('libraryRecovery.completed')));h.cleanup();
+});
+test('recovery service drops unknown progress and preserves the invocation result',async()=>{
+ const calls=[],seen=[];class Channel{onmessage;}
+ const {libraryRecoveryService:service}=compile('../src/services/libraryRecovery.ts',{'@tauri-apps/api/core':{Channel,invoke:(...args)=>{calls.push(args);return Promise.resolve({completed:true,backup_retained:true,requires_reopen:true})}}});
+ const result=service.execute(7,'safe-plan',stage=>seen.push(stage));const progress=calls[0][1].progress;
+ for(const stage of ['checking','/private/path','completed','reopen',{stage:'restoring'},'restoring'])progress.onmessage(stage);
+ assert.deepEqual(seen,['checking','restoring']);assert.deepEqual(await result,{completed:true,backup_retained:true,requires_reopen:true});
 });

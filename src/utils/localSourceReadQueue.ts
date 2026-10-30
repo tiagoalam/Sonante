@@ -1,12 +1,30 @@
-// Each read retains the backend startup gate until I/O and final validation
-// finish. Avoid competing with our own concurrent webview read requests.
-// Playback, Save and cancellation never enter this queue.
+// Source reads retain the backend's exclusive config/profile guards. A user
+// gesture waits for the current read, then runs before queued gallery work.
+// Native admission and cancellation remain authoritative; never retry a refusal.
 export function createLocalSourceReadQueue() {
-  let settled: Promise<void> = Promise.resolve();
-  return function run<T>(read: () => Promise<T>): Promise<T> {
-    const result = settled.then(read);
-    // Only the queue tail absorbs rejection; the caller receives the exact error.
-    settled = result.then(() => undefined, () => undefined);
-    return result;
-  };
+  type Job = () => Promise<void>;
+  const reads: Job[] = [], controls: Job[] = [];
+  let active = false;
+  function drain() {
+    if (active) return;
+    const job = controls.shift() ?? reads.shift();
+    if (!job) return;
+    active = true;
+    void job().then(() => { active = false; drain(); });
+  }
+  function enqueue<T>(queue: Job[], work: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      // Resolve/reject only this caller; a failed boundary releases the queue.
+      queue.push(() => Promise.resolve().then(work).then(resolve, reject));
+      queueMicrotask(drain);
+    });
+  }
+  const run = <T>(read: () => Promise<T>): Promise<T> => enqueue(reads, read);
+  return Object.assign(run, {
+    control: <T>(action: () => Promise<T>): Promise<T> => enqueue(controls, action),
+  });
 }
+
+// Shared by audio and Settings in this renderer. Other windows/native clients
+// still use the unchanged backend guards; this queue grants no native access.
+export const localSourceReadQueue = createLocalSourceReadQueue();

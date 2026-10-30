@@ -848,7 +848,7 @@ const present = (catalog, overrides={}) => {
 test("App producer separates confirmed activity from real errors, offline and uncertain save blocks", () => {
   const c={albums:[local("FLAC")],loaded:true,loading:false,error:null,mpdBusy:false,saveBlocked:false};
   assert.deepEqual(present(c),{state:"ready",activity:null});
-  for(const x of [{updating:true},{savePhase:"preparing"},{savePhase:"indexing"},{savePhase:"validating"}])
+  for(const x of [{updating:true},{savePhase:"preparing"},{savePhase:"removing"},{savePhase:"indexing"},{savePhase:"validating"}])
     assert.deepEqual(present({...c,saveBlocked:!!x.savePhase},x),{state:"loading",activity:"indexing"});
   assert.deepEqual(present({...c,mpdBusy:true}),{state:"loading",activity:"indexing"});
   assert.deepEqual(present({...c,loading:true}),{state:"loading",activity:"organizing"});

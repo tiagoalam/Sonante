@@ -16,7 +16,129 @@ use std::{
 struct Probe {
     dir: PathBuf,
     child: Option<Child>,
-    diagnostics: Option<std::thread::JoinHandle<Result<bool, std::io::Error>>>,
+    diagnostics: Option<std::thread::JoinHandle<DiagnosticSummary>>,
+}
+// Observations only: stderr is untrusted and may contain paths, tags or tokens.
+// Never retain/return it, including in test builds. A matched phrase is not proof
+// of database corruption; the failure code describes the observed phase only.
+const DIAGNOSTIC_PATTERNS: &[(&str, &[u8])] = &[
+    ("socket_bind", b"failed to bind"),
+    ("address_in_use", b"address already in use"),
+    ("permission_denied", b"permission denied"),
+    ("operation_not_permitted", b"operation not permitted"),
+    ("path_too_long", b"file name too long"),
+    ("missing_file", b"no such file"),
+    ("dynamic_loader", b"error while loading shared libraries"),
+    ("database_reported", b"database corrupted"),
+    ("database_eof", b"unexpected end of file"),
+    ("database_line", b"unknown line in db"),
+    ("database_format", b"database format mismatch"),
+    ("database_tags", b"tag list mismatch"),
+    ("output_buffer", b"output buffer"),
+    ("invalid_argument", b"invalid argument"),
+];
+const DIAGNOSTIC_TAIL: usize = 63;
+#[derive(Default, Debug)]
+struct DiagnosticSummary {
+    seen: bool,
+    observations: u32,
+    complete: bool,
+}
+#[derive(Clone, Copy)]
+enum ValidationFailure {
+    StartupExited,
+    StartupTimeout,
+    CatalogRead,
+    Diagnostics,
+}
+impl ValidationFailure {
+    fn code(self) -> &'static str {
+        match self {
+            Self::StartupExited => "LIBRARY_RECOVERY_DATABASE_VALIDATOR_START_FAILED",
+            Self::StartupTimeout => "LIBRARY_RECOVERY_DATABASE_VALIDATOR_START_TIMEOUT",
+            Self::CatalogRead => "LIBRARY_RECOVERY_DATABASE_CATALOG_UNCONFIRMED",
+            Self::Diagnostics => "LIBRARY_RECOVERY_DATABASE_DIAGNOSTICS_UNCONFIRMED",
+        }
+    }
+}
+impl DiagnosticSummary {
+    fn ensure_clean(&self) -> Result<(), String> {
+        if self.seen || !self.complete {
+            Err(self.failure(ValidationFailure::Diagnostics, None))
+        } else {
+            Ok(())
+        }
+    }
+    fn failure(&self, phase: ValidationFailure, exit: Option<i32>) -> String {
+        let observations: Vec<_> = DIAGNOSTIC_PATTERNS
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.observations & (1 << index) != 0)
+            .map(|(_, (label, _))| *label)
+            .collect();
+        format!(
+            "{}: stderr={}; observations={}; read={}; exit={}",
+            phase.code(),
+            if self.seen { "present" } else { "absent" },
+            if observations.is_empty() {
+                "none".into()
+            } else {
+                observations.join(",")
+            },
+            if self.complete {
+                "complete"
+            } else {
+                "incomplete"
+            },
+            exit.map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        )
+    }
+}
+fn read_diagnostics(mut stream: impl Read) -> DiagnosticSummary {
+    let mut summary = DiagnosticSummary::default();
+    let mut buffer = [0u8; 4096];
+    // Fixed-size streaming window detects phrases split across reads. No raw
+    // diagnostics escape this reader; memory use is independent of stderr size.
+    let mut window = [0u8; 4096 + DIAGNOSTIC_TAIL];
+    let mut tail = 0;
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                summary.complete = true;
+                return summary;
+            }
+            Ok(n) => {
+                summary.seen = true;
+                for (target, byte) in window[tail..tail + n].iter_mut().zip(&buffer[..n]) {
+                    *target = byte.to_ascii_lowercase();
+                }
+                let used = tail + n;
+                for (index, (_, pattern)) in DIAGNOSTIC_PATTERNS.iter().enumerate() {
+                    if window[..used]
+                        .windows(pattern.len())
+                        .any(|bytes| bytes == *pattern)
+                    {
+                        summary.observations |= 1 << index;
+                    }
+                }
+                tail = used.min(DIAGNOSTIC_TAIL);
+                window.copy_within(used - tail..used, 0);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return summary,
+        }
+    }
+}
+fn finish_diagnostics(probe: &mut Probe) -> Result<DiagnosticSummary, String> {
+    // Reap only this owned child before waiting for EOF from its diagnostic pipe.
+    reap(probe)?;
+    probe
+        .diagnostics
+        .take()
+        .ok_or(INCOMPLETE)?
+        .join()
+        .map_err(|_| "LIBRARY_RECOVERY_DATABASE_DIAGNOSTICS_UNAVAILABLE".into())
 }
 fn reap(probe: &mut Probe) -> Result<(), String> {
     if let Some(mut child) = probe.child.take() {
@@ -112,70 +234,158 @@ pub(crate) fn inspect(
         .stderr
         .take()
         .ok_or(INCOMPLETE)?;
-    probe.diagnostics = Some(std::thread::spawn(move || {
-        let mut stream = stderr;
-        let mut buffer = [0u8; 4096];
-        let mut any = false;
-        loop {
-            match stream.read(&mut buffer) {
-                Ok(0) => return Ok::<bool, std::io::Error>(any),
-                Ok(n) => {
-                    #[cfg(test)]
-                    eprintln!(
-                        "isolated validator: {}",
-                        String::from_utf8_lossy(&buffer[..n])
-                    );
-                    let _ = n;
-                    any = true
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            }
-        }
-    }));
+    probe.diagnostics = Some(std::thread::spawn(move || read_diagnostics(stderr)));
     let started = Instant::now();
     let socket = path.join("socket");
     loop {
         recovery_fs::check(cancelled)?;
-        if probe
+        if let Some(status) = probe
             .child
             .as_mut()
             .ok_or(INCOMPLETE)?
             .try_wait()
             .map_err(|_| INCOMPLETE)?
-            .is_some()
         {
-            return Err("LIBRARY_RECOVERY_DATABASE_INVALID".into());
+            let diagnostics = finish_diagnostics(&mut probe)?;
+            return Err(diagnostics.failure(ValidationFailure::StartupExited, status.code()));
         }
         if socket.exists() {
             break;
         }
         if started.elapsed() > Duration::from_secs(10) {
-            return Err("LIBRARY_RECOVERY_DATABASE_VALIDATOR_UNAVAILABLE".into());
+            let diagnostics = finish_diagnostics(&mut probe)?;
+            return Err(diagnostics.failure(ValidationFailure::StartupTimeout, None));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let catalog = Catalog::read(socket.to_str().ok_or(INCOMPLETE)?)?;
+    let catalog = match Catalog::read(socket.to_str().ok_or(INCOMPLETE)?) {
+        Ok(catalog) => catalog,
+        Err(_) => {
+            let diagnostics = finish_diagnostics(&mut probe)?;
+            return Err(diagnostics.failure(ValidationFailure::CatalogRead, None));
+        }
+    };
     recovery_fs::check(cancelled)?;
     root.validate()?;
-    // Child owns only this scratch copy. Drop reaps it before any scratch cleanup.
-    reap(&mut probe)?;
-    let has_diagnostics = probe
-        .diagnostics
-        .take()
-        .ok_or(INCOMPLETE)?
-        .join()
-        .map_err(|_| INCOMPLETE)?
-        .map_err(|_| INCOMPLETE)?;
+    let diagnostics = finish_diagnostics(&mut probe)?;
     drop(probe);
-    if has_diagnostics {
-        return Err("LIBRARY_RECOVERY_DATABASE_INVALID".into());
-    }
+    // Preserve the existing fail-closed contract, including unknown stderr and
+    // incomplete reads. The diagnostic categories never authorize acceptance.
+    diagnostics.ensure_clean()?;
     Ok(catalog.records)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct Chunks {
+        bytes: std::io::Cursor<Vec<u8>>,
+        size: usize,
+    }
+    impl Read for Chunks {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let size = output.len().min(self.size);
+            self.bytes.read(&mut output[..size])
+        }
+    }
+    #[test]
+    fn validator_diagnostics_observations_survive_every_read_boundary_without_private_text() {
+        for (index, (_, pattern)) in DIAGNOSTIC_PATTERNS.iter().enumerate() {
+            assert!(!pattern.is_empty() && pattern.len() <= DIAGNOSTIC_TAIL + 1);
+            for size in 1..=pattern.len() + 1 {
+                let mut bytes = b"private-path/album-secret X-Plex-Token=private-token ".to_vec();
+                bytes.extend(pattern.iter().map(u8::to_ascii_uppercase));
+                bytes.extend(b"\xff\x00 private-tag");
+                let summary = read_diagnostics(Chunks {
+                    bytes: std::io::Cursor::new(bytes),
+                    size,
+                });
+                assert!(summary.seen && summary.complete);
+                assert_ne!(summary.observations & (1 << index), 0);
+                let safe = summary.failure(ValidationFailure::StartupExited, Some(1));
+                for private in [
+                    "private-path",
+                    "album-secret",
+                    "X-Plex",
+                    "private-token",
+                    "private-tag",
+                ] {
+                    assert!(!safe.contains(private));
+                }
+                assert!(safe.len() < 600 && !safe.contains("DATABASE_INVALID"));
+            }
+        }
+    }
+    #[test]
+    fn validator_diagnostics_phase_is_observed_not_inferred_from_untrusted_message() {
+        let summary = read_diagnostics(&b"database corrupted: /private/failed to bind.flac"[..]);
+        for (phase, prefix) in [
+            (
+                ValidationFailure::StartupExited,
+                "LIBRARY_RECOVERY_DATABASE_VALIDATOR_START_FAILED:",
+            ),
+            (
+                ValidationFailure::StartupTimeout,
+                "LIBRARY_RECOVERY_DATABASE_VALIDATOR_START_TIMEOUT:",
+            ),
+            (
+                ValidationFailure::CatalogRead,
+                "LIBRARY_RECOVERY_DATABASE_CATALOG_UNCONFIRMED:",
+            ),
+            (
+                ValidationFailure::Diagnostics,
+                "LIBRARY_RECOVERY_DATABASE_DIAGNOSTICS_UNCONFIRMED:",
+            ),
+        ] {
+            let safe = summary.failure(phase, Some(127));
+            assert!(safe.starts_with(prefix) && safe.ends_with("exit=127"));
+            assert!(safe.contains("socket_bind") && safe.contains("database_reported"));
+            assert!(!safe.contains("/private") && !safe.contains("DATABASE_INVALID"));
+        }
+        let silent = read_diagnostics(&b""[..]);
+        assert!(silent
+            .failure(ValidationFailure::StartupExited, None)
+            .ends_with("stderr=absent; observations=none; read=complete; exit=unknown"));
+    }
+    #[test]
+    fn validator_diagnostics_unknown_and_incomplete_are_still_rejected() {
+        let silent = read_diagnostics(&b""[..]);
+        assert!(silent.ensure_clean().is_ok());
+        let unknown = read_diagnostics(&b"unrecognized private diagnostic"[..]);
+        assert_eq!(unknown.observations, 0);
+        let error = unknown.ensure_clean().unwrap_err();
+        assert!(error.starts_with("LIBRARY_RECOVERY_DATABASE_DIAGNOSTICS_UNCONFIRMED:"));
+        assert!(!error.contains("private"));
+        struct InterruptedThenError(bool);
+        impl Read for InterruptedThenError {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                if !self.0 {
+                    self.0 = true;
+                    Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+                } else {
+                    Err(std::io::Error::other("private diagnostic reader failure"))
+                }
+            }
+        }
+        let incomplete = read_diagnostics(InterruptedThenError(false));
+        assert!(!incomplete.seen && !incomplete.complete);
+        let error = incomplete.ensure_clean().unwrap_err();
+        assert!(error.contains("read=incomplete") && !error.contains("private"));
+    }
+    #[test]
+    fn validator_diagnostics_stream_is_bounded_and_keeps_all_finite_observations() {
+        let mut message = Vec::new();
+        for (_, pattern) in DIAGNOSTIC_PATTERNS {
+            message.extend_from_slice(pattern);
+            message.push(b'\n');
+        }
+        let stream = std::io::repeat(b'x')
+            .take(1024 * 1024)
+            .chain(std::io::Cursor::new(message));
+        let summary = read_diagnostics(stream);
+        assert_eq!(summary.observations, (1 << DIAGNOSTIC_PATTERNS.len()) - 1);
+        assert!(summary.seen && summary.complete && summary.ensure_clean().is_err());
+        assert!(summary.failure(ValidationFailure::Diagnostics, None).len() < 600);
+    }
     #[test]
     #[ignore = "owned real MPD/null, synthetic WAV and DB only; no personal runtime"]
     fn real_null_daemon_reopens_immutable_catalog_without_media_or_rescan() {

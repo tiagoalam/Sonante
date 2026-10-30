@@ -167,6 +167,22 @@ impl InotifyReader {
         Ok(true)
     }
 
+    // No physical tree walk on a confirmed source removal. Keep existing
+    // registrations for survivors and retire descriptors belonging only to
+    // removed roots. Pending paths are fenced/rebased by the owning worker.
+    fn retain_roots(&mut self, roots: &[PathBuf]) -> Result<(), String> {
+        let retired=self.directories.iter().filter(|(_,path)| !roots.iter().any(|root|path.starts_with(root)))
+            .map(|(wd,_)|*wd).collect::<Vec<_>>();
+        for wd in retired {
+            if unsafe {libc::inotify_rm_watch(self.fd.as_raw_fd(),wd)} < 0
+                && std::io::Error::last_os_error().raw_os_error()!=Some(libc::EINVAL) {
+                return Err("LOCAL_WATCH_RETIRE_UNCONFIRMED".into());
+            }
+            self.directories.remove(&wd);
+        }
+        Ok(())
+    }
+
     fn watch_directory(
         &mut self,
         directory: &Path,
@@ -386,7 +402,6 @@ type Mailbox = Arc<Mutex<Option<Install>>>;
 pub(crate) enum Reconcile {
     Confirmed,
     Busy,
-    Stale,
     Blocked,
 }
 
@@ -771,8 +786,11 @@ fn run_watcher<F, N>(
                 paused = false;
                 needs_check("ready");
             } else if context.sources != install.context.sources {
-                needs_check("unprepared_roots_change");
-                return;
+                if !install.context.is_source_removal_from(&context) || !install.context.available()
+                    || reader.retain_roots(&install.context.roots()).is_err() {
+                    needs_check("unprepared_roots_change");
+                    return;
+                }
             }
             pending.rebase(&context, &install.context);
             context = install.context;
@@ -846,7 +864,7 @@ fn run_watcher<F, N>(
                 paths: pending.paths.clone(),
             }) {
                 Reconcile::Confirmed => pending.clear(),
-                Reconcile::Busy | Reconcile::Stale => {
+                Reconcile::Busy => {
                     // No attempt ceiling: bounded memory and at most 1 retry/s.
                     // poll continues draining/coalescing events and shutdown.
                     pending.retry_not_before = Some(Instant::now() + BUSY_RETRY_INTERVAL);
@@ -1216,6 +1234,46 @@ mod tests {
 
         watcher.join();
         fs::remove_dir_all(unavailable).unwrap();
+    }
+
+    #[test]
+    fn indexed_source_removal_worker_handoff_keeps_survivor_events_without_new_registration() {
+        let root=fixture();let keep=root.join("Keep");let removed=root.join("Remove");
+        fs::create_dir_all(&keep).unwrap();fs::create_dir_all(&removed).unwrap();
+        let before=Context::for_roots(&[keep.clone(),removed.clone()]);let mut after=before.clone();after.sources.retain(|_,s|s.root==keep);
+        let mailbox=Arc::new(Mutex::new(None));let (send,receive)=std::sync::mpsc::channel();
+        let watcher=LocalWatcher::start_context(before,mailbox.clone(),Duration::from_millis(80),Duration::from_millis(10),
+            Duration::from_millis(100),Duration::from_secs(2),Arc::new(AtomicBool::new(false)),
+            move |batch| {let _=send.send((batch.context.sources.len(),batch.paths));Reconcile::Confirmed}, |_|{}).unwrap();
+        assert!(watcher.wait_until_ready(Duration::from_secs(3)));
+        *mailbox.lock().unwrap()=Some(Install{context:after,prepared:None});
+        fs::write(removed.join("changed.flac"),b"removed event").unwrap();fs::write(keep.join("changed.flac"),b"survivor event").unwrap();
+        let observed=receive.recv_timeout(Duration::from_secs(3));
+        fs::write(removed.join("later.flac"),b"retired event").unwrap();
+        let late=receive.recv_timeout(Duration::from_millis(200));
+        watcher.join();fs::remove_dir_all(root).unwrap();
+        let (sources,paths)=observed.unwrap();assert_eq!(sources,1);
+        assert!(paths.contains(&keep.join("changed.flac")));assert!(!paths.iter().any(|p|p.starts_with(&removed)));
+        assert!(late.is_err(),"retired roots must not generate a survivor notification");
+    }
+
+    #[test]
+    fn indexed_source_removal_retires_only_owned_watches_and_keeps_pending_survivors() {
+        let root=fixture();let keep=root.join("Keep");let removed=root.join("Remove");
+        fs::create_dir_all(keep.join("Album")).unwrap();fs::create_dir_all(removed.join("Album")).unwrap();
+        let sources=vec![SourceIdentity::capture(keep.clone()).unwrap(),SourceIdentity::capture(removed.clone()).unwrap()];
+        let control=WatcherControl::new();let shutdown=AtomicBool::new(false);
+        let mut reader=InotifyReader::new(&sources,&control,&shutdown).unwrap().unwrap();
+        let before=reader.directories.iter().filter(|(_,p)|p.starts_with(&keep)).map(|(wd,p)|(*wd,p.clone())).collect::<HashMap<_,_>>();
+        let previous=Context::for_roots(&[keep.clone(),removed.clone()]);let mut current=previous.clone();current.sources.retain(|_,s|s.root==keep);
+        assert!(current.is_source_removal_from(&previous));assert!(!previous.is_source_removal_from(&current));
+        let mut changed=current.clone();changed.sources.values_mut().next().unwrap().inode+=1;
+        assert!(!changed.is_source_removal_from(&previous));
+        let mut pending=PendingChanges::default();pending.mark_path(keep.join("Album/a.flac"),Instant::now());pending.mark_path(removed.join("Album/b.flac"),Instant::now());
+        reader.retain_roots(&current.roots()).unwrap();pending.rebase(&previous,&current);
+        assert_eq!(reader.directories,before);assert_eq!(pending.paths,BTreeSet::from([keep.join("Album/a.flac")]));
+        reader.retain_roots(&[]).unwrap();assert!(reader.directories.is_empty());
+        drop(reader);fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

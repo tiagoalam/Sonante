@@ -576,6 +576,12 @@ fn check_startup_state(config_dir: &Path, startup_owns_staging: bool) -> Result<
         Ok(_) => {}
     }
     let parent = Parent::inspect(config_dir)?;
+    // A source retirement has its own bound recovery protocol.
+    match fs::symlink_metadata(parent.entry(crate::source_retirement::PENDING)) {
+        Ok(_) => return Err(format!("{}: Há uma remoção de pasta local pendente.",crate::source_retirement::BLOCKED)),
+        Err(e) if e.kind()==ErrorKind::NotFound => {},
+        Err(_) => return Err(blocked("Remoção de pasta local indisponível.")),
+    }
     // Only first_run_managed's typed resume path may interpret this record.
     match fs::symlink_metadata(parent.entry(crate::first_run_managed::PENDING)) {
         Ok(_) => return Err(blocked("A biblioteca inicial está em preparação.")),

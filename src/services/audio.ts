@@ -1,7 +1,6 @@
 import { ensureDirectOutputChoice } from "./config";
 import { createLocalCoverBatch, type LocalCoverReply } from "../utils/localCoverBatch";
-import { createLocalSourceReadQueue } from "../utils/localSourceReadQueue";
-const runLocalSourceRead = createLocalSourceReadQueue();
+import { localSourceReadQueue as runLocalSourceRead } from "../utils/localSourceReadQueue";
 import { beginPlaybackIntent, configurePlaybackIntents, playbackIntentToken, type PlaybackIntent } from "../utils/playbackIntent";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { MpdStatusSnapshot, PlaybackStatus, PlaybackOptions, PlaybackOptionAction, TrackMetadata } from "../types/audio";
@@ -26,13 +25,22 @@ const onlineArtworkRequest = (album: LocalAlbum) => ({
 configurePlaybackIntents(() => invoke<string>("admit_playback_intent"), token => invoke("cancel_playback_intent", { token }), token => invoke<boolean>("playback_intent_current", { token }));
 
 async function requestedPlayback<T>(command:string,args:Record<string,unknown>,intent:PlaybackIntent):Promise<T>{
- const token=await playbackIntentToken(intent);await ensureDirectOutputChoice(intent);if(!intent.current())throw 'PLAYBACK_SUPERSEDED';return invoke<T>(command,{...args,intent:token});
+ const token=await playbackIntentToken(intent);
+ return runLocalSourceRead.control(async()=>{
+  if(!intent.current())throw 'PLAYBACK_SUPERSEDED';
+  await ensureDirectOutputChoice(intent);if(!intent.current())throw 'PLAYBACK_SUPERSEDED';
+  return invoke<T>(command,{...args,intent:token});
+ });
 }
 async function ordinaryToggle():Promise<void>{
- const intent=beginPlaybackIntent(),token=await playbackIntentToken(intent),status=await invoke<PlaybackStatus>('get_playback_status');
- if(!intent.current())throw 'PLAYBACK_SUPERSEDED';const wantPlay=status.state!=='play';
- if(wantPlay)await ensureDirectOutputChoice(intent);if(!intent.current())throw 'PLAYBACK_SUPERSEDED';
- await invoke('toggle_playback',{intent:token,wantPlay});
+ const intent=beginPlaybackIntent(),token=await playbackIntentToken(intent);
+ return runLocalSourceRead.control(async()=>{
+  if(!intent.current())throw 'PLAYBACK_SUPERSEDED';
+  const status=await invoke<PlaybackStatus>('get_playback_status');
+  if(!intent.current())throw 'PLAYBACK_SUPERSEDED';const wantPlay=status.state!=='play';
+  if(wantPlay)await ensureDirectOutputChoice(intent);if(!intent.current())throw 'PLAYBACK_SUPERSEDED';
+  await invoke('toggle_playback',{intent:token,wantPlay});
+ });
 }
 // This decoder accepts observations only. Reject the entire payload on any
 // malformed row; never drop a source or turn missing evidence into Available.
@@ -88,11 +96,22 @@ export const audioService = {
   setVolume: (volume: number): Promise<void> => invoke<void>("set_volume", { volume }),
   getQueue: (): Promise<TrackMetadata[]> => invoke<TrackMetadata[]>("get_queue"),
   playQueueIndex: async (index: number, intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> => requestedPlayback<void>("play_queue_index", { index },intent),
-  clearQueue: async (intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> => invoke<void>("clear_queue", { intent: await playbackIntentToken(intent) }),
+  clearQueue: async (intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> => {
+    const token = await playbackIntentToken(intent);
+    return runLocalSourceRead.control(() => {
+      if (!intent.current()) throw "PLAYBACK_SUPERSEDED";
+      return invoke<void>("clear_queue", { intent: token });
+    });
+  },
   setWindowTitle: (title: string): Promise<void> => invoke<void>("set_window_title", { title }),
   listLocalDirectory: (path: string): Promise<LocalItem[]> =>
     invoke<LocalItem[]>("list_local_directory", { path }),
   getLocalCover: readLocalCover,
+  // Enqueue the restored player's one focal read immediately, ahead of the
+  // browser's passive catalog load. It shares the same serial source queue
+  // and native admission; no parallel worker or privilege bypass is added.
+  getPlayerLocalCover: (path: string): Promise<string | null> =>
+    runLocalSourceRead(() => invoke<string | null>("get_local_cover", { path })),
   getOnlineAlbumCover: (album: LocalAlbum): Promise<string | null> =>
     invoke<string | null>("get_online_album_cover", { request: onlineArtworkRequest(album) }),
   getCachedOnlineAlbumCover: (album: LocalAlbum): Promise<string | null> =>

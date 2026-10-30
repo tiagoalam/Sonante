@@ -36,7 +36,7 @@ export function createQueueClearConfirmationFlow() {
       if (pending && BigInt(operation.id) > BigInt(pending.operationId)) pending = null;
       if (attempt?.operationId && BigInt(operation.id) > BigInt(attempt.operationId)) attempt = null;
       if (!attempt || attempt.operationId !== operation.id) return null;
-      if (["preparing", "indexing", "validating"].includes(operation.phase)) return null;
+      if (["preparing", "removing", "indexing", "validating"].includes(operation.phase)) return null;
       const config = attempt.config;
       attempt = null;
       const binding = operation.phase === "failed" ? queueClearBinding(operation.error) : null;

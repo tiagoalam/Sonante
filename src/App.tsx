@@ -7,6 +7,7 @@ import { LocalWatchNotice } from "./components/LocalWatchNotice";
 import { usePlaybackAttempt } from "./utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./components/PlaybackRequestNotice";
 import { usePlayerSourceInfo } from "./utils/usePlayerSourceInfo";
+import { localPlaybackThumbnail } from "./utils/localPlaybackThumbnail";
 import { useLocalPlaybackArtwork } from "./utils/useLocalPlaybackArtwork";
 import { createLocalAlbumPlayback } from "./utils/localAlbumPlayback";
 import { localLibrarySourceOptions, validLocalLibrarySourceSelection, filterLocalAlbumsByScope } from "./utils/localLibraryScope";
@@ -356,6 +357,7 @@ export function App() {
   const [config, setConfigState] = useState<AppConfig | null>(null);
   const setConfig = useCallback((next: AppConfig) => {
     localAlbumThumbnails.setContext(next.first_run ? [] : next.local_folders);
+    localPlaybackThumbnail.setContext(next.first_run ? [] : next.local_folders);
     localAlbumCatalog.setPresentationContext(next.first_run ? [] : next.local_folders);
     setConfigState(next);
   }, []);
@@ -2442,6 +2444,11 @@ export function App() {
       <PlayerBar
         route={configuredSignalRoute(config)}
         status={presentationPlayback}
+        onArtworkLoaded={(status, image) => {
+          if (!status.plex_image) localPlaybackThumbnail.capture(status.current_media, image,
+            () => (image.currentSrc || image.src) === status.thumb);
+        }}
+        onArtworkFailed={(status, source) => localPlaybackThumbnail.forget(status.current_media, source)}
         sourceInfo={sourceInfo}
         health={mpdHealth}
         onOpenNowPlaying={showNowPlaying}
@@ -2468,6 +2475,7 @@ export function App() {
             <div className="min-w-0 flex-1">
               <div className="font-semibold">
                 {configSavePhase === "local" ? t(localSavePhase === "preparing" ? "settings.preparingLibrary"
+                  : localSavePhase === "removing" ? "settings.removingLibrary"
                   : localSavePhase === "validating" ? "settings.validatingLibrary" : "settings.updatingLibrary")
                   : configSavePhase === "other" ? t("settings.savingSettings")
                   : configSaveNotice?.positionNotRestored ? t("settings.outputPositionNotRestored")
@@ -2481,13 +2489,16 @@ export function App() {
                   : configSaveNotice?.refusal === "queueCheckRequired" ? t("settings.queueClearCheckRequired")
                   : t("settings.libraryUpdateFailed")}
               </div>
-              {configSavePhase === "local" && <div className="mt-1 text-[color:var(--theme-fg-secondary,#999999)]">{t("settings.indexingMayTakeTime")}</div>}
+              {configSavePhase === "local" && (localSavePhase === "preparing" || localSavePhase === "indexing") && <div className="mt-1 text-[color:var(--theme-fg-secondary,#999999)]">{t("settings.indexingMayTakeTime")}</div>}
               {configSaveNotice?.kind === "error" && (
                 <div className="mt-1 whitespace-pre-wrap break-words text-[color:var(--theme-fg-error,var(--color-red-300))]">
                   {configSaveNotice.refusal && <div>{t("settings.noChangesApplied")}</div>}
                   {configSaveNotice.refusal === "fullRescan" && <div className="mt-1">{t("settings.fullIndexNotStarted")}</div>}
                   {(configSaveNotice.refusal === "queueChanged" || configSaveNotice.refusal === "queueCheckRequired") && <div className="mt-1">{t("settings.queueClearRecheck")}</div>}
-                  {configSaveNotice.detail}
+                  {configSaveNotice.detail && <details className="mt-2">
+                    <summary className="cursor-pointer">{t("libraryRecovery.details")}</summary>
+                    <div className="mt-1">{configSaveNotice.detail}</div>
+                  </details>}
                   {configSaveNotice.statusUnavailable && <div>{t("settings.librarySaveStatusUnavailable")}</div>}
                   {configSaveNotice.stagingCleanupFailed && <div className="mt-1">{t("settings.stagingCleanupFailed")}</div>}
                   {configSaveNotice.reloadFailed && <div className="mt-1">{t("settings.confirmedConfigUnavailable")}</div>}

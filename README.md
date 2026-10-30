@@ -25,11 +25,11 @@ Sonante is designed for substantial, imperfect real-world libraries: multiple st
 
 Use the complete package and SHA256SUMS delivered together for your distribution:
 
-- Ubuntu 22.04: `sonante_0.5.5-1_amd64.deb` (`apt install ./sonante_0.5.5-1_amd64.deb`).
-- Fedora 44: `sonante-0.5.5-1.x86_64.rpm` (`dnf install ./sonante-0.5.5-1.x86_64.rpm`).
-- Arch Linux / Manjaro: `sonante-0.5.5-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.5.5-1-x86_64.pkg.tar.zst`).
+- Ubuntu 22.04: `sonante_0.5.5-10_amd64.deb` (`apt install ./sonante_0.5.5-10_amd64.deb`).
+- Fedora 44: `sonante-0.5.5-10.x86_64.rpm` (`dnf install ./sonante-0.5.5-10.x86_64.rpm`).
+- Arch Linux / Manjaro: `sonante-0.5.5-10-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.5.5-10-x86_64.pkg.tar.zst`).
 
-Run package installation with the normal administrator workflow on the test system. Verify the supplied checksum first. Packages manage their own pinned audio runtimes and do not enable a system MPD service. Corresponding runtime source sidecars accompany the packages; they are not installed into `/usr`.
+Close Sonante before upgrading, and install with your distribution's package manager. Verify the supplied checksum first. Packages manage their own pinned audio runtimes and do not enable a system MPD service. Corresponding runtime source sidecars accompany the packages; they are not installed into `/usr`.
 
 Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the final qualified 0.5.5 payload.
 
@@ -40,6 +40,8 @@ Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary
 - **ALSA** and `aplay` (usually from `alsa-utils`) for audio devices.
 - **OpenSSL 3**, `xdg-open`, and an **XDG Desktop Portal** backend for integration with the desktop and folder selection.
 - **WirePlumber / `wpctl` is optional**, used when available for Shared-mode volume control through PipeWire.
+- **Shared EQ requires PipeWire** and an available stereo output. Native PulseAudio is not supported for EQ; activation is blocked when it is detected. Normal Shared playback remains available.
+- The native Arch/Manjaro package requires the glibc version declared in its package metadata; it does not share the Ubuntu GLIBC 2.35 baseline.
 - Artwork decoding depends on the supported image loaders. Invalid images use the existing placeholder; decoder-specific validation is recorded separately.
 
 Exact native dependencies vary by distribution and are checked as part of packaging. The Ubuntu 22.04 build is additionally checked against a maximum required **GLIBC 2.35** symbol version; this does not guarantee compatibility with every distribution or device.
@@ -64,6 +66,8 @@ The first-run wizard guides you through these choices. Plex sign-in uses an exte
 ### Local collections
 
 Sonante presents multiple configured roots through a managed virtual library indexed by MPD. Library changes use guarded preparation and verification rather than rewriting the original music files simply to make them discoverable. Mounted volumes and network shares may be used as local sources if they are accessible to the process.
+
+Startup reuses the saved local index. Use **Check for changes** to request a library update; adding a folder indexes the new source, and removing a folder does not reindex surviving sources.
 
 Local browsing includes **Albums, Artists, Years, Genres, and Folders**. Album handling also accounts for multi-disc layouts and supported physical/virtual CUE representations. The interface is designed to remain usable with large catalogs through pagination and virtualized rendering.
 
@@ -95,7 +99,7 @@ Sonante uses its **own supervised MPD process** as the actual decoder and playba
 | --- | --- | --- |
 | **MPD output** | ALSA `default` | Selected ALSA hardware endpoint (typically `hw:CARD=...,DEV=...`) |
 | **System audio** | May coexist with other applications through PipeWire, PulseAudio, or dmix, depending on the host | Requests access to a hardware endpoint; availability and exclusivity depend on the device and host |
-| **Volume** | PipeWire sink via `wpctl` when available and verified; otherwise MPD software volume | ALSA hardware mixer when a usable control can be identified; otherwise MPD software volume |
+| **Volume** | PipeWire sink via `wpctl` when available and verified; otherwise MPD software volume | Volume is controlled on the equipment; Sonante provides explicit software mute |
 | **Resampling / mixing** | May occur in the host audio stack | Depends on the effective MPD/ALSA/device configuration |
 
 The interface offers **ReplayGain** controls and can request **DoP** when configured for a compatible Direct output. DoP is not the same as native DSD, and enabling it does not prove that a DAC received DSD data.
@@ -113,7 +117,7 @@ Sonante stores its per-user configuration and library state locally. Typical pat
 | `~/.config/sonante/config.json` | Audio, source, and Plex settings |
 | `~/.config/sonante/favorites.json` | Favorite albums |
 | `~/.config/sonante/queue_cache.json` | Cached queue metadata |
-| `~/.config/sonante/mpd.conf` and `mpd.db` | Private MPD configuration and catalog |
+| `~/.config/sonante/mpd.conf` and `mpd-v2.db` | Private MPD configuration and catalog |
 | `~/.config/sonante/library/` | Managed virtual library |
 | `$XDG_RUNTIME_DIR/sonante/` | Private MPD runtime socket and process metadata, when the runtime directory is available |
 

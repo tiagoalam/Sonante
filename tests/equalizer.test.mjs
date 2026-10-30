@@ -86,3 +86,51 @@ test('reference route is labeled honestly; unsaved draft survives and global gai
  const calls=[];const h=host({get:async()=>catalog(),apply:async(...v)=>calls.push(v),compare:async(...v)=>calls.push(v)},{runtime:ref});h.render();await flush();let tree=h.render();const html=renderToStaticMarkup(tree);assert.match(html,/Reference A/);assert.match(html,/Comparison preset/);assert.doesNotMatch(html,/Routed preset: Source/);
  const graph=nodes(tree,n=>typeof n.type==='function'&&n.props.onAdd)[0];assert.equal(graph.props.showGain,false);graph.props.onToggleGain();tree=h.render();assert.equal(nodes(tree,n=>typeof n.type==='function'&&n.props.onAdd)[0].props.showGain,true);assert.deepEqual(calls,[]);h.unmount();
 });
+
+
+test('native PulseAudio explains and blocks both activation controls, but presets remain editable',async()=>{
+ const calls=[];const data={...catalog(),pulse_audio:true};
+ const h=host({get:async()=>data,apply:async()=>calls.push('apply')});
+ h.render();await flush();
+ for(const lang of ['en','pt-BR']){
+  await i18n.changeLanguage(lang);const tree=h.render();const html=renderToStaticMarkup(tree);
+  assert.ok(html.includes(i18n.t('equalizer.pulseAudioNotice')));
+  assert.ok(html.includes(i18n.t('equalizer.pulseAudioState')));
+  assert.equal(nodes(tree,n=>n.props.id==='eq-pulseaudio-notice').length,1);
+  const enable=nodes(tree,n=>n.type==='button'&&n.props.children?.includes?.(i18n.t('equalizer.enable')))[0];
+  const apply=by(tree,i18n.t('equalizer.apply'));
+  for(const button of [enable,apply]){
+   assert.equal(button.props.disabled,true);assert.equal(button.props['aria-describedby'],'eq-pulseaudio-notice');
+   button.props.onClick();await flush();
+  }
+  assert.equal(nodes(tree,n=>n.type==='select'&&n.props['aria-label']===i18n.t('equalizer.preset'))[0].props.disabled,false);
+  assert.equal(nodes(tree,n=>n.props.role==='alert').length,0);assert.deepEqual(calls,[]);
+ }
+ h.unmount();await i18n.changeLanguage('en');
+});
+
+test('a server changed after loading is refused by backend and becomes an explicit UI block',async()=>{
+ let data={...catalog(),pulse_audio:false};const calls=[];
+ const h=host({get:async()=>data,apply:async()=>{calls.push('apply');throw 'EQ_PULSEAUDIO_UNSUPPORTED'}});
+ h.render();await flush();by(h.render(),i18n.t('equalizer.apply')).props.onClick();await flush();
+ let tree=h.render();assert.equal(calls.length,1);assert.equal(by(tree,i18n.t('equalizer.apply')).props.disabled,true);
+ assert.equal(nodes(tree,n=>n.props.id==='eq-pulseaudio-notice').length,1);
+ assert.equal(nodes(tree,n=>n.props.role==='alert').length,0);
+ // An explicit reload removes the block after a compatible server is observed.
+ data={...catalog(),pulse_audio:false};by(tree,i18n.t('equalizer.reload')).props.onClick();await flush();tree=h.render();
+ assert.equal(by(tree,i18n.t('equalizer.apply')).props.disabled,false);
+ assert.equal(nodes(tree,n=>n.props.id==='eq-pulseaudio-notice').length,0);h.unmount();
+});
+
+test('PulseAudio activation restriction preserves routed bypass and unrelated preset errors',async()=>{
+ const calls=[];const p=math.flatPreset();
+ const active={...off,revision:5,phase:'active',applied:p,verified:true,in_path:true};
+ const h=host({get:async()=>({...catalog(),pulse_audio:true}),apply:async(...v)=>{calls.push(v);return{...off,revision:6}},edit:async()=>{throw Error('fixture store refusal')}},{runtime:active});
+ h.render();await flush();let tree=h.render();
+ const bypass=nodes(tree,n=>n.type==='button'&&n.props.children?.includes?.(i18n.t('equalizer.bypass')))[0];
+ assert.equal(bypass.props.disabled,false);bypass.props.onClick();tree=h.render();
+ by(tree,i18n.t('equalizer.confirmBypass')).props.onClick();await flush();assert.equal(calls.length,1);assert.equal(calls[0][0],false);
+ tree=h.render();const select=nodes(tree,n=>n.type==='select'&&n.props['aria-label']===i18n.t('equalizer.preset'))[0];
+ select.props.onChange({target:{value:JSON.stringify({kind:'built_in',id:'flat'})}});await flush();
+ assert.equal(nodes(h.render(),n=>n.props.role==='alert').length,1);h.unmount();
+});

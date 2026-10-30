@@ -7,7 +7,7 @@ import {
   INHERITED_OBSERVED, FRESHNESS, OUTCOMES, UNAVAILABLE_REASONS,
   ASSESSMENT_STATUSES, ASSESSMENT_REASONS, ASSESSMENT_ROLES,
 } from "../types/libraryRecovery";
-import type { AttemptDiagnostic, SafeOfferAssessment, LibraryRecoveryObservation, LibraryRecoveryResult } from "../types/libraryRecovery";
+import type { RecoveryProgress, AttemptDiagnostic, SafeOfferAssessment, LibraryRecoveryObservation, LibraryRecoveryResult } from "../types/libraryRecovery";
 
 type Phase = "idle" | "analyzing" | "ready" | "exporting" | "executing" | "reopening";
 type Notice = "failed" | "exportFailed" | "exported" | "cancelFailed" | "executionFailed" | "reopenFailed" | "analysisCancelled" | "executionCancelled" | "executionCancelFailed" | null;
@@ -22,6 +22,7 @@ const ANALYSIS_REASONS = ["intent_valid", "intent_invalid", "orphan_staging", "c
 export function LibraryRecoveryPanel() {
   const { t } = useTranslation();
   const [phase, setPhase] = useState<Phase>("idle");
+  const [progressStage, setProgressStage] = useState<RecoveryProgress>("checking");
   const [result, setResult] = useState<LibraryRecoveryResult | null>(null);
   const completedPlan = useRef<string | null>(null);
   const [offer, setOffer] = useState<Offer | null>(null);
@@ -137,10 +138,12 @@ export function LibraryRecoveryPanel() {
     const epoch = ++visit.current;
     const context: AttemptContext = { analysisId: selected.observation.analysis_id, safeKey: diagnosticKeyForAnalysisId(selected.observation.analysis_id), visit: epoch, queryIssued: false };
     attempt.current = context;
-    clearActions(); keepAsPrior(); setPhase("executing"); setNotice(null); setSessionUnconfirmed(true);
+    clearActions(); keepAsPrior(); setProgressStage("checking"); setPhase("executing"); setNotice(null); setSessionUnconfirmed(true);
     // Offer was consumed synchronously before the first await. Backend gates remain decisive.
     try {
-      const outcome = await libraryRecoveryService.execute(context.analysisId, plan.id);
+      const outcome = await libraryRecoveryService.execute(context.analysisId, plan.id, (stage) => {
+        if (visit.current === epoch && active.current && operation.current === "execution") setProgressStage(stage);
+      });
       if (visit.current !== epoch) return;
       if (outcome.completed !== true || outcome.backup_retained !== true || outcome.requires_reopen !== true) throw new Error("unconfirmed");
       completedPlan.current = plan.id;
@@ -179,24 +182,29 @@ export function LibraryRecoveryPanel() {
     <section aria-labelledby="library-recovery-title" className="mt-6 space-y-4 text-left">
       <h2 id="library-recovery-title" ref={heading} tabIndex={-1} className="text-base font-semibold">{t("libraryRecovery.title")}</h2>
       <p className="text-sm">{t("libraryRecovery.explanation")}</p>
-      <div role="status" aria-live="polite" className="text-sm">
-        {phase === "analyzing" ? t("libraryRecovery.analyzing") : phase === "exporting" ? t("libraryRecovery.exporting") : phase === "executing" ? t("libraryRecovery.executing") : phase === "reopening" ? t("libraryRecovery.reopening") : notice ? t(`libraryRecovery.${notice}`) : null}
+      <div role="status" aria-live="polite" aria-busy={phase === "executing"} className="text-sm">
+        {phase === "analyzing" ? t("libraryRecovery.analyzing") : phase === "exporting" ? t("libraryRecovery.exporting") : phase === "executing" ? t(`libraryRecovery.progress.${progressStage}`) : phase === "reopening" ? t("libraryRecovery.reopening") : notice ? t(`libraryRecovery.${notice}`) : null}
       </div>
       {result?.completed && <div className="space-y-2 text-sm" role="status">
         <p className="font-semibold">{t("libraryRecovery.completed")}</p>
         <p>{t("libraryRecovery.backupRetained")}</p>
       </div>}
-      {sessionUnconfirmed && <p className="text-sm">{t("libraryRecovery.sessionUnconfirmed")}</p>}
+      {sessionUnconfirmed && phase !== "executing" && <p className="text-sm">{t("libraryRecovery.sessionUnconfirmed")}</p>}
       {observation && !result && <div className="space-y-3 text-sm">
         {snapshot?.prior && <p className="font-semibold">{t("libraryRecovery.priorAnalysis")}</p>}
-        <p className="font-semibold">{t(hasOffer ? "libraryRecovery.planReady" : "libraryRecovery.unavailable")}</p>
+        {!snapshot?.prior && <p className="font-semibold">{t(hasOffer ? "libraryRecovery.planReady" : "libraryRecovery.unavailable")}</p>}
         {hasOffer && observation.plan && <div className="space-y-2 rounded border border-current p-3">
           <h3 className="font-semibold">{label("choices", observation.plan.choice, CHOICES)}</h3>
-          <p>{t("libraryRecovery.impact")}</p>
-          <p>{countsKnown ? t("libraryRecovery.proof", { tracks: observation.plan.previous_tracks, bytes: observation.plan.backup_bytes }) : t("libraryRecovery.proofUnavailable")}</p>
-          <p>{t("libraryRecovery.noMusicBackup")}</p>
+          <p>{t("libraryRecovery.summaryImpact")}</p>
           {observation.plan.resumes_interrupted && <p>{t("libraryRecovery.resumePlan")}</p>}
         </div>}
+        <details>
+          <summary className="cursor-pointer">{t("libraryRecovery.details")}</summary>
+          {hasOffer && observation.plan && <div className="mt-2 space-y-2">
+            <p>{t("libraryRecovery.impact")}</p>
+            <p>{countsKnown ? t("libraryRecovery.proof", { tracks: observation.plan.previous_tracks, bytes: observation.plan.backup_bytes }) : t("libraryRecovery.proofUnavailable")}</p>
+            <p>{t("libraryRecovery.noMusicBackup")}</p>
+          </div>}
         <ul className="list-disc space-y-2 pl-5">{reasons.map(reason => <li key={reason}>{label("reasons", reason, ANALYSIS_REASONS)}</li>)}</ul>
         {assessment && <div className="space-y-2">
           <p>{label("assessment.status", assessment.status, ASSESSMENT_STATUSES)}</p>
@@ -205,15 +213,14 @@ export function LibraryRecoveryPanel() {
           <p>{t("libraryRecovery.assessment.scope")}</p>
         </div>}
         <p>{t("libraryRecovery.guidance")}</p>
-        <details>
-          <summary className="cursor-pointer">{t("libraryRecovery.details")}</summary>
           <p className="mt-2">{label("config", observation.config_matches, CONFIG_MATCHES)}</p>
           {typeof observation.intent_version === "number" && Number.isSafeInteger(observation.intent_version) && observation.intent_version >= 0 && <p>{t("libraryRecovery.intentVersion", { version: observation.intent_version })}</p>}
           {typeof observation.queue_backup_version === "number" && Number.isSafeInteger(observation.queue_backup_version) && observation.queue_backup_version >= 0 && <p>{t("libraryRecovery.queueVersion", { version: observation.queue_backup_version })}</p>}
           <p>{t("libraryRecovery.observationOnly")}</p>
+          <p>{t("libraryRecovery.reportV1")}</p>
+          {snapshot?.prior && <p>{t("libraryRecovery.reportPriorRefused")}</p>}
+          {reportCurrent && <button type="button" disabled={phase !== "ready"} onClick={() => void exportReport()} className="mt-2 rounded border border-current px-4 py-2 text-sm disabled:opacity-50">{t("libraryRecovery.export")}</button>}
         </details>
-        <p>{t("libraryRecovery.reportV1")}</p>
-        {snapshot?.prior && <p>{t("libraryRecovery.reportPriorRefused")}</p>}
       </div>}
       {diagnostic && <details className="space-y-2 text-sm">
         <summary className="cursor-pointer">{t("libraryRecovery.diagnostic.title")}</summary>
@@ -244,7 +251,6 @@ export function LibraryRecoveryPanel() {
           {t(snapshot || diagnostic ? "libraryRecovery.again" : "libraryRecovery.analyze")}
         </button>
         {(phase === "analyzing" || phase === "executing") && <button type="button" onClick={() => void cancel()} className="rounded border border-current px-4 py-2 text-sm">{t(phase === "executing" ? "libraryRecovery.cancelExecution" : "libraryRecovery.cancel")}</button>}
-        {reportCurrent && <button type="button" disabled={phase !== "ready"} onClick={() => void exportReport()} className="rounded border border-current px-4 py-2 text-sm disabled:opacity-50">{t("libraryRecovery.export")}</button>}
         {hasOffer && !result && <button type="button" disabled={phase !== "ready"} onClick={() => void execute()} className="rounded border border-current px-4 py-2 text-sm disabled:opacity-50">{t("libraryRecovery.execute")}</button>}
         {result?.completed && <button type="button" disabled={phase === "reopening"} onClick={() => void reopen()} className="rounded border border-current px-4 py-2 text-sm disabled:opacity-50">{t("libraryRecovery.reopen")}</button>}
       </div>

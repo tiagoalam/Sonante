@@ -482,6 +482,47 @@ fn open_set(root: &Dir, cancel: &dyn Fn() -> bool) -> Result<(Dir, Set), String>
     }
     Ok((dir, set))
 }
+// One in-memory proof for the exact immutable database bytes read before
+// config persistence. It is never serialized or accepted for another profile.
+pub(crate) struct PreparedDatabase {
+    profile: Identity,
+    hash: String,
+    records: HashSet<String>,
+}
+impl PreparedDatabase {
+    pub(crate) fn validate_bytes(&self, profile: &Identity, bytes: &[u8], cancel: &dyn Fn() -> bool) -> Result<HashSet<String>, String> {
+        recovery_fs::check(cancel)?;
+        if profile != &self.profile || recovery_fs::hash(bytes) != self.hash { return Err(CHANGED.into()); }
+        Ok(self.records.clone())
+    }
+    pub(crate) fn validate_current(&self, lease: &Lease, cancel: &dyn Fn() -> bool) -> Result<(), String> {
+        lease.validate()?;
+        let bytes = lease.root().read("mpd-v2.db", LIMIT, cancel)?.ok_or(INCOMPLETE)?;
+        self.validate_bytes(&lease.root().id(), &bytes, cancel)?;
+        lease.validate()
+    }
+}
+fn prepare_database_bytes(
+    profile: Identity, bytes: &[u8], expected: Option<&HashSet<String>>, cancel: &dyn Fn() -> bool,
+    validate: &dyn Fn(&[u8], &dyn Fn() -> bool) -> Result<HashSet<String>, String>,
+) -> Result<PreparedDatabase, String> {
+    recovery_fs::check(cancel)?;
+    let records = validate(bytes, cancel)?;
+    recovery_fs::check(cancel)?;
+    if expected.is_some_and(|expected| expected != &records) { return Err("LIBRARY_RECOVERY_DATABASE_CATALOG_MISMATCH".into()); }
+    Ok(PreparedDatabase { profile, hash: recovery_fs::hash(bytes), records })
+}
+pub(crate) fn prepare_database(
+    lease: &Lease, expected: Option<&HashSet<String>>, cancel: &dyn Fn() -> bool,
+    validate: &dyn Fn(&[u8], &dyn Fn() -> bool) -> Result<HashSet<String>, String>,
+) -> Result<PreparedDatabase, String> {
+    lease.validate()?;
+    let bytes = lease.root().read("mpd-v2.db", LIMIT, cancel)?.ok_or(INCOMPLETE)?;
+    let proof = prepare_database_bytes(lease.root().id(), &bytes, expected, cancel, validate)?;
+    proof.validate_current(lease, cancel)?;
+    Ok(proof)
+}
+
 /// Called only after config persistence AND the existing B5 audit succeeded,
 /// before the caller may clean the previous generation or stop marker.
 pub(crate) fn confirm_next(
@@ -2961,4 +3002,119 @@ mod failure_projection_unit_text {
         assert!(!summary.observed(ObservedInherited::CommittedNameNotCompleted));
     }
 
+}
+
+#[cfg(test)]
+mod precommit_database_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn precommit_database_proof_reuses_only_same_profile_and_bytes_without_count_limit() {
+        let profile = Identity { dev: 1, ino: 2 };
+        let records = (0..57_223).map(|n|format!("file: Source/Album{}/track{n}.flac", n/30)).collect::<HashSet<_>>();
+        let calls = Cell::new(0);
+        let proof = prepare_database_bytes(profile.clone(), b"immutable database", Some(&records), &||false,
+            &|_,_| {calls.set(calls.get()+1);Ok(records.clone())}).unwrap();
+        assert_eq!(proof.validate_bytes(&profile,b"immutable database",&||false).unwrap(),records);
+        assert_eq!(calls.get(),1,"confirmation must not reopen another validator");
+        assert_eq!(proof.validate_bytes(&Identity {dev:1,ino:3},b"immutable database",&||false).unwrap_err(),CHANGED);
+        assert_eq!(proof.validate_bytes(&profile,b"changed database",&||false).unwrap_err(),CHANGED);
+        assert_eq!(proof.validate_bytes(&profile,b"immutable database",&||true).unwrap_err(),recovery_fs::CANCELLED);
+    }
+
+    #[test]
+    fn precommit_database_refuses_validator_error_mismatch_and_late_cancellation() {
+        let profile=Identity {dev:1,ino:2};
+        assert!(matches!(prepare_database_bytes(profile.clone(),b"db",None,&||false,
+            &|_,_|Err("LIBRARY_RECOVERY_DATABASE_INVALID".into())),Err(error) if error=="LIBRARY_RECOVERY_DATABASE_INVALID"));
+        let expected=HashSet::from(["file: Source/track.flac".into()]);
+        assert!(matches!(prepare_database_bytes(profile.clone(),b"db",Some(&expected),&||false,
+            &|_,_|Ok(HashSet::new())),Err(error) if error=="LIBRARY_RECOVERY_DATABASE_CATALOG_MISMATCH"));
+        let cancelled=Cell::new(false);
+        assert!(matches!(prepare_database_bytes(profile,b"db",None,&||cancelled.get(),
+            &|_,_|{cancelled.set(true);Ok(expected.clone())}),Err(error) if error==recovery_fs::CANCELLED));
+    }
+
+    #[test]
+    fn precommit_database_integrates_owned_lease_confirmation_and_recovered_database() {
+        use crate::{config::AppConfig, local_media::mirror, managed_save_intent::{SaveIntent, Completed}};
+        use std::os::unix::fs::DirBuilderExt;
+        for recovered in [false, true] {
+            let mut entropy=[0u8;16];
+            use std::io::Read;
+            fs::File::open("/dev/urandom").unwrap().read_exact(&mut entropy).unwrap();
+            let base=std::env::temp_dir().join(format!("sonante-precommit-{}",&recovery_fs::hash(&entropy)[..16]));
+            fs::DirBuilder::new().mode(0o700).create(&base).unwrap();
+            let profile=base.join("profile");let old=base.join("Old");let added=base.join("Added");
+            for path in [&profile,&old,&added] {fs::DirBuilder::new().mode(0o700).create(path).unwrap();}
+            for path in [&old,&added] {fs::write(path.join("track.flac"),b"metadata fixture only").unwrap();}
+            let owner=Lease::acquire(&profile).unwrap();
+            let library=profile.join("library");let staging=profile.join("library.next");
+            let mirror::ManagedGenerationPreparation::Prepared(initial)=mirror::prepare_managed_generation(&library,&staging,&[old.clone()],"precommit-old").unwrap() else {panic!("initial generation")};
+            mirror::publish_prepared_managed_generation(&library,&initial).unwrap();
+            let old_catalog=initial.manifest.sources.keys().map(|id|format!("file: {id}/track.flac")).collect::<HashSet<_>>();
+            let previous=AppConfig {first_run:false,local_folders:vec![old.to_str().unwrap().into()],..AppConfig::default()};
+            crate::persistence::atomic_write_private_synced(&profile.join("config.json"),&serde_json::to_vec(&previous).unwrap(),"config.json").unwrap();
+            owner.root().write_new("mpd-v2.db",b"old").unwrap();
+            let mirror::ManagedGenerationPreparation::Prepared(prepared)=mirror::prepare_managed_generation(&library,&staging,&[old.clone(),added.clone()],"precommit-new").unwrap() else {panic!("new generation")};
+            let new_catalog=prepared.manifest.sources.keys().map(|id|format!("file: {id}/track.flac")).collect::<HashSet<_>>();
+            let mut next=previous.clone();next.local_folders.push(added.to_str().unwrap().into());
+            let intent=SaveIntent::create(&profile,&previous,&next,&prepared).unwrap();
+            let calls=Cell::new(0);
+            let validator=|bytes:&[u8],cancel:&dyn Fn()->bool| {
+                recovery_fs::check(cancel)?;calls.set(calls.get()+1);
+                match bytes {b"old"=>Ok(old_catalog.clone()),b"new"=>Ok(new_catalog.clone()),_=>Err("fixture database refused".into())}
+            };
+            capture_before(&owner,Some(&old_catalog),&||false,&validator).unwrap();
+            let publication=intent.publish(&prepared,None).unwrap();
+            fs::write(profile.join("mpd-v2.db"),b"new").unwrap();
+            let proof=prepare_database(&owner,Some(&new_catalog),&||false,&validator).unwrap();
+            assert_eq!(calls.get(),2,"one old and one new validation");
+            proof.validate_current(&owner,&||false).unwrap();
+            fs::write(profile.join("mpd-v2.db"),b"changed").unwrap();
+            assert_eq!(proof.validate_current(&owner,&||false).unwrap_err(),CHANGED);
+            assert_eq!(AppConfig::load_from_path(&profile.join("config.json")).unwrap(),previous,"changed DB cannot commit config");
+            fs::write(profile.join("mpd-v2.db"),b"new").unwrap();
+            assert_eq!(proof.validate_current(&owner,&||true).unwrap_err(),recovery_fs::CANCELLED);
+            let foreign=base.join("foreign");fs::DirBuilder::new().mode(0o700).create(&foreign).unwrap();
+            let foreign_owner=Lease::acquire(&foreign).unwrap();foreign_owner.root().write_new("mpd-v2.db",b"new").unwrap();
+            assert_eq!(proof.validate_current(&foreign_owner,&||false).unwrap_err(),CHANGED);
+            if recovered {
+                publication.rollback().unwrap();fs::write(profile.join("mpd-v2.db"),b"old").unwrap();
+                assert!(proof.validate_current(&owner,&||false).is_err(),"rejected DB proof cannot validate restored DB");
+                publication.cleanup_rejected_after_rollback().unwrap();
+                let (_,uncertain)=intent.conclude_transaction(Err("validator refused new database".into()),Some(Completed::Recovered));assert!(!uncertain);
+                finish_save(&owner,&||false,&validator).unwrap();assert_eq!(calls.get(),3,"recovery validates the old database");
+            } else {
+                crate::persistence::atomic_write_private_synced(&profile.join("config.json"),&serde_json::to_vec(&next).unwrap(),"config.json").unwrap();
+                let reuse=|bytes:&[u8],cancel:&dyn Fn()->bool|proof.validate_bytes(&owner.root().id(),bytes,cancel);
+                confirm_next(&owner,Some(&new_catalog),&||false,&reuse).unwrap();
+                publication.cleanup_previous().unwrap();
+                intent.complete_transaction(Ok(()),Some(Completed::Committed)).unwrap();
+                finish_save(&owner,&||false,&reuse).unwrap();assert_eq!(calls.get(),2,"confirmed DB is not reopened by confirm/finish");
+            }
+            assert!(!profile.join(managed_save_intent::NAME).exists());assert!(!profile.join(PENDING).exists());assert!(profile.join(LAST).is_dir());
+            eprintln!("retained precommit fixture: {}",base.display());
+        }
+    }
+
+    #[test]
+    fn precommit_database_failure_rolls_back_without_config_commit_or_uncertain_persistence() {
+        let events=RefCell::new(Vec::new());
+        let result=crate::complete_published_mirror_refresh(
+            ||prepare_database_bytes(Identity {dev:1,ino:2},b"new db",None,&||false,
+                &|_,_|Err("LIBRARY_RECOVERY_DATABASE_INVALID".into())).map(|_|()),
+            ||{events.borrow_mut().push("capture");Ok(())},
+            ||{events.borrow_mut().push("stop");Ok(())},
+            ||{events.borrow_mut().push("rollback");Ok(())},
+            |_|{events.borrow_mut().push("restore");Ok(crate::RestorePreviousOutcome::Restored)},
+            ||{events.borrow_mut().push("cleanup_rejected");Ok(())},
+            ||{events.borrow_mut().push("commit");Ok(())},
+            ||{events.borrow_mut().push("cleanup_previous");Ok(())},
+        ).unwrap_err();
+        assert!(result.contains("LIBRARY_RECOVERY_DATABASE_INVALID"));
+        assert!(!result.contains("CONFIG_PERSISTENCE_UNCERTAIN"));
+        assert_eq!(*events.borrow(),["capture","stop","rollback","restore","cleanup_rejected"]);
+    }
 }

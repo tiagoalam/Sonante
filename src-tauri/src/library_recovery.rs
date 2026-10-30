@@ -157,11 +157,43 @@ pub(crate) const CANCELLED: &str = "LIBRARY_RECOVERY_ANALYSIS_CANCELLED";
 pub(crate) const UNAVAILABLE: &str = "LIBRARY_RECOVERY_ANALYSIS_UNAVAILABLE";
 pub(crate) const BUSY: &str = "LIBRARY_RECOVERY_ANALYSIS_BUSY";
 
+// Presentation only. No progress message grants completion or reopening.
+#[derive(Clone,Copy,Serialize)]
+#[serde(rename_all="snake_case")]
+pub(crate) enum Progress { Checking, Protecting, Restoring, Validating, Finalizing }
+impl Progress {
+    fn from_stage(name:&str)->Option<Self>{Some(match name {
+        "backup_complete"=>Self::Protecting,
+        "applying"|"exchanged"|"staging_retained"|"previous_database_validated"|"control_restored"|"source_restored"|"database_restored"|"queue_restored"=>Self::Restoring,
+        "validating"=>Self::Validating,
+        "committed"|"intent_retained"|"finalized"=>Self::Finalizing,
+        _=>return None,
+    })}
+}
+
+#[derive(Clone,Copy,PartialEq,Eq)]
+enum RecoveryProtocol { Generation, Retirement }
+// Private capabilities for the two independently validated recovery protocols.
+enum RecoveryBinding {
+    Generation(crate::recovery_set::OfferedRecoveryBinding),
+    Retirement(crate::source_retirement::Offer),
+}
+impl RecoveryBinding {
+    fn protocol(&self)->RecoveryProtocol{match self {
+        Self::Generation(_)=>RecoveryProtocol::Generation,Self::Retirement(_)=>RecoveryProtocol::Retirement,
+    }}
+    fn matches_owner(&self,owner:&crate::profile_lease::Lease)->bool{match self {
+        Self::Generation(binding)=>binding.matches_owner(owner),Self::Retirement(binding)=>binding.matches_owner(owner),
+    }}
+    fn matches_offer(&self,id:u64,plan:&crate::recovery_set::Plan)->bool{match self {
+        Self::Generation(binding)=>binding.matches_offer(id,plan),Self::Retirement(binding)=>binding.matches_offer(id,plan),
+    }}
+}
 // One publication unit under last, with no independent binding store.
 // Neither private record is serialized or Debug-formatted.
 struct PublishedAnalysis {
     observation:Observation,
-    binding:Option<Arc<crate::recovery_set::OfferedRecoveryBinding>>,
+    binding:Option<Arc<RecoveryBinding>>,
     attempt:Option<AttemptRecord>,
 }
 struct AttemptRecord { analysis_epoch:u64, plan_id:String, outcome:AttemptOutcome }
@@ -177,22 +209,31 @@ impl AttemptView {
 }
 struct AnalysisDraft {
     observation:Observation,
-    binding:Option<Arc<crate::recovery_set::OfferedRecoveryBinding>>,
+    binding:Option<Arc<RecoveryBinding>>,
 }
 impl AnalysisDraft {
     fn unbound(observation:Observation)->Self {Self{observation,binding:None}}
+    fn retirement(id:u64,offer:crate::source_retirement::Offer)->Self {
+        let mut observation=Observation::new(id);
+        observation.note(Reason::IntentValid);observation.note(Reason::DatabaseUnproven);observation.intent_version=Some(1);
+        observation.config_matches=offer.config_match();observation.plan=Some(offer.plan());observation.recovery_available=true;
+        observation.assessment=Some(OfferAssessment{status:OfferAssessmentStatus::EligibleAtObservation,reason:None,
+            target_role:Some(OfferTargetRole::Previous),scope:OfferScope::ReadonlyOfferOnly});
+        Self{observation,binding:Some(Arc::new(RecoveryBinding::Retirement(offer)))}
+    }
 }
 // Backend completion data only; never serialized, Debug-formatted or a credential.
 // Constructed in production only after the actual executor returns Ok.
 #[derive(Clone)]
 struct CompletedRecoveryProof {
+    protocol:RecoveryProtocol,
     analysis_epoch:u64,
     plan_id:String,
     observed_profile:crate::recovery_fs::Identity,
 }
 impl CompletedRecoveryProof {
     fn same_context(&self,other:&Self)->bool {
-        self.analysis_epoch==other.analysis_epoch && self.plan_id==other.plan_id
+        self.protocol==other.protocol && self.analysis_epoch==other.analysis_epoch && self.plan_id==other.plan_id
             && self.observed_profile==other.observed_profile
     }
 }
@@ -254,6 +295,23 @@ impl State {
         // The explicit drop is AFTER analyze_with_context returns, never at the
         // end of the inspection closure. No lock/permissions are acquired here.
         let result=self.analyze_with_context(request_id,shutdown,Some(root),owner.as_ref(),|id,cancelled| {
+            if let Ok(dir)=crate::recovery_fs::Dir::open(root) {
+                if dir.exists(crate::source_retirement::PENDING)? {
+                    let mut observation=Observation::new(id);
+                    observation.note(Reason::DatabaseUnproven);
+                    observation.assessment=Some(OfferAssessment::unconfirmed(OfferAssessmentReason::OwnershipUnconfirmed));
+                    if !Self::owner_matches_dir(owner.as_ref(),&dir){return Ok(AnalysisDraft::unbound(observation));}
+                    let actual_owner=owner.as_ref().ok_or(UNAVAILABLE)?;
+                    return match crate::source_retirement::analyze(actual_owner,id,&crate::supervisor::MpdSupervisor::socket_path(),cancelled) {
+                        Ok(offer)=>{
+                            Ok(AnalysisDraft::retirement(id,offer))
+                        },
+                        Err(_)=>{crate::recovery_fs::check(cancelled)?;observation.note(Reason::RecoverySetUnproven);
+                            observation.assessment=Some(OfferAssessment::unconfirmed(OfferAssessmentReason::PlanningUnconfirmed));
+                            Ok(AnalysisDraft::unbound(observation))},
+                    };
+                }
+            }
             let mut observation=crate::managed_save_intent::inspect_recovery(root,id,cancelled)?;
             let mut binding=None;
             observation.assessment=Some(OfferAssessment::unconfirmed(OfferAssessmentReason::OwnershipUnconfirmed));
@@ -274,7 +332,7 @@ impl State {
                             if let Some(actual_owner)=owner.as_ref() {
                                 match core.into_offer_binding(id,&plan,actual_owner) {
                                     Ok(context)=>{
-                                        binding=Some(Arc::new(context));
+                                        binding=Some(Arc::new(RecoveryBinding::Generation(context)));
                                         observation.plan=Some(plan);observation.recovery_available=true;
                                         observation.reasons.retain(|r|*r!=Reason::OwnershipUnknown);
                                     }
@@ -308,6 +366,13 @@ impl State {
         });
         drop(owner);
         result
+    }
+    // Component fixture entry: the same publication/epoch/owner gates, with
+    // an already-inspected own fixture offer instead of a process inventory.
+    #[cfg(test)]
+    pub(crate) fn unit_retirement_analysis(&self,root:&std::path::Path,owner:&Arc<crate::profile_lease::Lease>,
+        request:&str,make:impl FnOnce(u64)->crate::source_retirement::Offer)->Result<Observation,String>{
+        self.analyze_with_context(request,||false,Some(root),Some(owner),|id,_|Ok(AnalysisDraft::retirement(id,make(id))))
     }
     fn owner_matches(owner:Option<&std::sync::Arc<crate::profile_lease::Lease>>,root:Option<&std::path::Path>)->bool {
         let (Some(owner),Some(root))=(owner,root) else{return false};
@@ -450,7 +515,11 @@ impl State {
         }
         Ok(RecoveryAdmission(()))
     }
+    #[cfg(test)]
     pub(crate) fn execute(&self,owner:&crate::profile_lease::Lease,analysis_id:u64,plan_id:&str,shutdown:impl Fn()->bool)->Result<crate::recovery_set::ResultDto,String>{
+        self.execute_with_progress(owner,analysis_id,plan_id,shutdown,&|_|{})
+    }
+    pub(crate) fn execute_with_progress(&self,owner:&crate::profile_lease::Lease,analysis_id:u64,plan_id:&str,shutdown:impl Fn()->bool,progress:&dyn Fn(Progress))->Result<crate::recovery_set::ResultDto,String>{
         self.admission(analysis_id,plan_id)?;
         if self.busy.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err(){return Err(BUSY.into())}let _lease=Lease(self);
         let cancelled=||shutdown()||self.epoch.load(Ordering::Acquire)!=analysis_id;
@@ -458,19 +527,25 @@ impl State {
         if cancelled(){return Err(CANCELLED.into());}
         let expected=self.claim_attempt(analysis_id,plan_id)?;
         let mut captured=None;
+        let stage=|name:&str|->Result<(),String>{if let Some(value)=Progress::from_stage(name){progress(value);}Ok(())};
         let outcome=(||->Result<crate::recovery_set::ResultDto,String>{
             if !expected.matches_owner(owner){return Err(UNAVAILABLE.into());}
             if cancelled(){return Err(CANCELLED.into());}
-            let result=match crate::recovery_set::execute_projected(owner,plan_id,&expected,
-                &crate::supervisor::MpdSupervisor::socket_path(),&cancelled,
-                &crate::recovery_catalog::inspect,&|_|Ok(())) {
-                Ok(result)=>result,
-                Err(failure)=>{let(summary,legacy)=failure.into_parts();captured=Some(summary);return Err(legacy);}
+            progress(Progress::Checking);
+            let result=match expected.as_ref() {
+                RecoveryBinding::Generation(binding)=>match crate::recovery_set::execute_projected(owner,plan_id,binding,
+                    &crate::supervisor::MpdSupervisor::socket_path(),&cancelled,
+                    &crate::recovery_catalog::inspect,&stage) {
+                    Ok(result)=>result,
+                    Err(failure)=>{let(summary,legacy)=failure.into_parts();captured=Some(summary);return Err(legacy);}
+                },
+                RecoveryBinding::Retirement(binding)=>crate::source_retirement::execute(owner,binding,
+                    &crate::supervisor::MpdSupervisor::socket_path(),&cancelled,&crate::recovery_catalog::inspect,&stage)?,
             };
             if cancelled(){return Err(CANCELLED.into());}
             if !expected.matches_owner(owner){return Err(UNAVAILABLE.into());}
             if cancelled(){return Err(CANCELLED.into());}
-            self.publish_completed(CompletedRecoveryProof{analysis_epoch:analysis_id,
+            self.publish_completed(CompletedRecoveryProof{protocol:expected.protocol(),analysis_epoch:analysis_id,
                 plan_id:plan_id.into(),observed_profile:owner.root().id()})?;
             Ok(result)
         })();
@@ -482,7 +557,7 @@ impl State {
         let _=self.finish_attempt(analysis_id,plan_id,terminal);
         outcome
     }
-    fn claim_attempt(&self,analysis_id:u64,plan_id:&str)->Result<Arc<crate::recovery_set::OfferedRecoveryBinding>,String> {
+    fn claim_attempt(&self,analysis_id:u64,plan_id:&str)->Result<Arc<RecoveryBinding>,String> {
         let _request=self.request.lock().map_err(|_|UNAVAILABLE)?;
         let mut last=self.last.lock().map_err(|_|UNAVAILABLE)?;
         if self.epoch.load(Ordering::Acquire)!=analysis_id{return Err(CANCELLED.into());}
@@ -541,7 +616,10 @@ impl State {
         if dir.id()!=proof.observed_profile {return Err(UNAVAILABLE.into());}
         // Keep both old disk gates and their exact legacy errors. No completed lock over IO.
         crate::managed_save_intent::check_startup(root)?;
-        crate::recovery_set::validate_reopen_state(root)?;
+        match proof.protocol {
+            RecoveryProtocol::Retirement=>crate::source_retirement::validate_reopen_dir(&dir,id)?,
+            RecoveryProtocol::Generation=>crate::recovery_set::validate_reopen_state(root)?,
+        }
         dir.validate().map_err(|_|UNAVAILABLE)?;
         self.consume_completed(&proof)
     }
@@ -770,7 +848,7 @@ mod ff04_offer_tests {
         assert!(state.admission(id,"unit-plan-not-physical-proof").is_err());
         let own=Own::new();let o=unit_offer(id);
         let binding=crate::recovery_set::unit_only_synthetic_offer_binding(id,o.plan.as_ref().unwrap(),&own.owner);
-        *state.last.lock().unwrap()=Some(PublishedAnalysis{observation:o,binding:Some(Arc::new(binding)),attempt:None});
+        *state.last.lock().unwrap()=Some(PublishedAnalysis{observation:o,binding:Some(Arc::new(RecoveryBinding::Generation(binding))),attempt:None});
         assert!(state.admission(id,"unit-plan-not-physical-proof").is_ok()); // UNIT classification gate only
         assert!(state.admission(id+1,"unit-plan-not-physical-proof").is_err());
     }
@@ -812,7 +890,7 @@ mod ff04_offer_tests {
     fn unit_bound_draft(id:u64,owner:&crate::profile_lease::Lease)->AnalysisDraft {
         let observation=unit_offer(id);
         let binding=crate::recovery_set::unit_only_synthetic_offer_binding(id,observation.plan.as_ref().unwrap(),owner);
-        AnalysisDraft{observation,binding:Some(Arc::new(binding))}
+        AnalysisDraft{observation,binding:Some(Arc::new(RecoveryBinding::Generation(binding)))}
     }
     #[test] fn ff04_binding_atomic_record_none_stale_epoch_and_choice_refuse() {
         let own=Own::new();let state=State::new(true);
@@ -827,7 +905,7 @@ mod ff04_offer_tests {
         assert!(state.admission(o.analysis_id,"unit-plan-not-physical-proof").is_err());
         let o=state.analyze_with_context("unit-old-epoch",||false,Some(&own.root),Some(&own.owner),|id,_|{
             let mut d=unit_bound_draft(id,&own.owner);
-            d.binding=Some(Arc::new(crate::recovery_set::unit_only_synthetic_offer_binding(id+1,d.observation.plan.as_ref().unwrap(),&own.owner)));Ok(d)
+            d.binding=Some(Arc::new(RecoveryBinding::Generation(crate::recovery_set::unit_only_synthetic_offer_binding(id+1,d.observation.plan.as_ref().unwrap(),&own.owner))));Ok(d)
         }).unwrap();
         assert!(o.plan.is_none()&&!o.recovery_available);
     }
@@ -906,7 +984,7 @@ mod completion_publication_protocol_tests {
         s
     }
     fn unit_record(epoch:u64)->CompletedRecoveryProof {
-        CompletedRecoveryProof{analysis_epoch:epoch,plan_id:"fixed-unit-plan".into(),
+        CompletedRecoveryProof{protocol:RecoveryProtocol::Generation,analysis_epoch:epoch,plan_id:"fixed-unit-plan".into(),
             observed_profile:crate::recovery_fs::Identity{dev:1,ino:2}}
     }
     #[test] fn completion_unit_cancel_before_publish_refuses_obsolete_worker() {

@@ -8,7 +8,7 @@ export function localExplorePresentation(input: {
   catalog: LocalAlbumCatalogState; savePhase: ConfigSavePhase | null; saveStatusUncertain: boolean;
 }): { state: ExploreSourceState; activity: "indexing" | "organizing" | null } {
   const { configured, starting, available, updating, catalog, savePhase, saveStatusUncertain } = input;
-  const confirmedSave = !saveStatusUncertain && savePhase !== null && ["preparing", "indexing", "validating"].includes(savePhase);
+  const confirmedSave = !saveStatusUncertain && savePhase !== null && ["preparing", "removing", "indexing", "validating"].includes(savePhase);
   const result = (state: ExploreSourceState, activity: "indexing" | "organizing" | null = null) => ({ state, activity });
   if (!configured) return result("not_configured");
   if (saveStatusUncertain || catalog.error || catalog.saveBlocked && !confirmedSave) return result("unavailable");

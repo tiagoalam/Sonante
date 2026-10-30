@@ -33,7 +33,7 @@ import { configService } from "../services/config";
 import { audioService } from "../services/audio";
 import { plexService } from "../services/plex";
 import { audioRestartExpected, localFoldersOnlyChanged } from "../utils/audioConfigChange";
-import { refreshCatalogAfterSuccessfulCheck, refreshCatalogAfterSuccessfulRescan } from "../utils/localAlbumCatalog";
+import { refreshCatalogAfterSuccessfulCheck } from "../utils/localAlbumCatalog";
 import { createDeviceAvailabilityQuery, newPhysicalOutputChoice, shouldCheckContextualDevice, type AvailabilityQueryState } from "../utils/deviceAvailability";
 
 interface Props {
@@ -92,7 +92,7 @@ export const SettingsModal: React.FC<Props> = ({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [isPickingFolder, setIsPickingFolder] = useState(false);
-  const [scanning, setScanning] = useState<"check" | "full" | null>(null);
+  const [scanning, setScanning] = useState<"check" | null>(null);
   const [scanUnchanged, setScanUnchanged] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState(i18n.language || "pt-BR");
@@ -205,25 +205,6 @@ export const SettingsModal: React.FC<Props> = ({
         onLibraryRescanned,
       );
       setScanUnchanged(!changed);
-    } catch (err) {
-      setScanError(formatConfigError(err).includes("LOCAL_INDEX_") ? t("indexCoverage.failed") : formatConfigError(err));
-    } finally {
-      scanInProgressRef.current = false;
-      setScanning(null);
-    }
-  };
-
-  const handleForceRescan = async () => {
-    if (scanInProgressRef.current) return;
-    scanInProgressRef.current = true;
-    setScanning("full");
-    setScanUnchanged(false);
-    setScanError(null);
-    try {
-      await refreshCatalogAfterSuccessfulRescan(
-        audioService.rescanLibrary,
-        onLibraryRescanned,
-      );
     } catch (err) {
       setScanError(formatConfigError(err).includes("LOCAL_INDEX_") ? t("indexCoverage.failed") : formatConfigError(err));
     } finally {
@@ -748,17 +729,6 @@ export const SettingsModal: React.FC<Props> = ({
                   >
                     <RefreshCw size={12} className={scanning === "check" || isLibraryUpdating ? "animate-spin text-[color:var(--theme-fg-accent,#E5A00D)]" : ""} />
                     <span>{t("settings.checkNew")}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleForceRescan}
-                    disabled={scanning !== null || isLibraryUpdating || saving}
-                    className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-[var(--theme-surface-raised,#242424)] hover:bg-[var(--theme-surface-hover,#2C2C2C)] text-[color:var(--theme-fg-secondary,#CCCCCC)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
-                    title={t("settings.fullRescan")}
-                  >
-                    <RefreshCw size={12} className={scanning === "full" ? "animate-spin text-[color:var(--theme-fg-accent,#E5A00D)]" : ""} />
-                    <span>{t("settings.fullRescan")}</span>
                   </button>
 
                   <button

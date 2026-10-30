@@ -40,7 +40,7 @@ test('backend rejection and navigation cancellation never resume a stale prepara
  reset();
 });
 
-const compile=(file,deps)=>{const result={};new Function('require','exports',ts.transpileModule(readFileSync(file,'utf8'),{fileName:file.pathname,compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText)(id=>{if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; if(id==="../utils/localCoverBatch")return {createLocalCoverBatch}; if(id==="../utils/localSourceReadQueue")return {createLocalSourceReadQueue}; assert.ok(id in deps,id);return deps[id]},result);return result};
+const compile=(file,deps)=>{const result={};new Function('require','exports',ts.transpileModule(readFileSync(file,'utf8'),{fileName:file.pathname,compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText)(id=>{if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; if(id==="../utils/localCoverBatch")return {createLocalCoverBatch}; if(id==="../utils/localSourceReadQueue")return {createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()}; assert.ok(id in deps,id);return deps[id]},result);return result};
 const root=new URL('../',import.meta.url);
 const source=file=>new URL(file,root);
 const nodes=tree=>React.isValidElement(tree)?[tree,...nodes(tree.props.children)]:Array.isArray(tree)?tree.flatMap(nodes):[];

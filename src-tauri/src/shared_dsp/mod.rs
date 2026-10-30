@@ -1,4 +1,5 @@
 //! Shared-only DSP: an owned MPD PCM pipe, never a system capture or Direct route.
+pub(crate) mod availability;
 mod binary;
 mod continuity;
 pub(crate) mod comparison;
