@@ -1,0 +1,34 @@
+{
+  "MediaContainer": {
+    "size": 1,
+    "totalSize": 1,
+    "offset": 0,
+    "librarySectionID": 7,
+    "Metadata": [
+      {
+        "type": "track",
+        "ratingKey": "99",
+        "parentRatingKey": "12",
+        "librarySectionID": 7,
+        "Media": [
+          {
+            "audioCodec": "flac",
+            "Part": [
+              {
+                "key": "/library/parts/99/file.flac",
+                "Stream": [
+                  {
+                    "streamType": 2,
+                    "codec": "flac",
+                    "samplingRate": 96000,
+                    "bitDepth": 24
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

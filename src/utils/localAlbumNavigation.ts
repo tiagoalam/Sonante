@@ -44,6 +44,11 @@ function compareTextFields(
   return compareRaw(left.id, right.id) * direction;
 }
 
+// Shared by the opening grid and its bounded presentation preview.
+export function compareLocalAlbumsAscending(left: LocalAlbum, right: LocalAlbum): number {
+  return compareTextFields(left, right, ["title", "artist", "year", "id"], 1);
+}
+
 export function parseLocalAlbumYear(
   year: string | undefined,
   currentYear = new Date().getFullYear(),
@@ -62,7 +67,7 @@ export function sortLocalAlbums(
   sorted.sort((left, right) => {
     switch (mode) {
       case "album-asc":
-        return compareTextFields(left, right, ["title", "artist", "year", "id"], 1);
+        return compareLocalAlbumsAscending(left, right);
       case "album-desc":
         return compareTextFields(left, right, ["title", "artist", "year", "id"], -1);
       case "artist-asc":

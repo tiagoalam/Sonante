@@ -18,9 +18,8 @@ test("App keeps local Save pending and confirms success only after backend compl
   assert.match(app, /if \(configSaveInProgressRef\.current\) return false/);
   assert.match(app, /response\.status === "accepted"\) \{\s*queueClearFlowRef\.current\.accepted\(response\.operation\.id\);\s*monitor\.accepted\(response\.operation\);\s*\} else/);
   assert.doesNotMatch(app, /setConfig\(nextConfig\)/);
-  assert.match(app, /operation\.phase === "completed"[\s\S]*?await configService\.getConfig\(\)[\s\S]*?setConfigSaveNotice\(\{ kind: "success" \}\)/);
+  assert.match(app, /operation\.phase === "completed"[\s\S]*?await configService\.getConfig\(\)[\s\S]*?setConfigSaveNotice\(operation\.coverage\?\.outcome === "partial" \? null : \{ kind: "success" \}\)/);
   assert.match(app, /monitorConfigSave\(configService\.getSaveOperation/);
-  assert.match(app, /setConfigSaveNotice\(\{[\s\S]*?kind: "error",[\s\S]*?detail: refusal \? undefined : detail,[\s\S]*?reloadFailed,[\s\S]*?refusal,/);
   assert.match(app, /finally \{\s*if \(isCurrent\(\)\) finishConfigSave\(\)/);
   assert.match(app, /t\(localSavePhase === "preparing"/);
   assert.match(app, /onSaveFinished=\{finishConfigSave\}/);
@@ -76,19 +75,63 @@ test("modal transfers an accepted operation without reporting completion or rele
   assert.match(modal, /if \(!transferred\) onSaveFinished\(\)/);
 });
 
-test("App localizes full-rescan refusal and staging cleanup failure without masking unrelated errors", () => {
+test("App localizes refusals, pending catalog and indexing failures without masking unrelated errors", async () => {
   assert.match(app, /reason === "LOCAL_SOURCE_FULL_RESCAN_REQUIRED" \? "fullRescan"/);
   assert.match(app, /reason === "LOCAL_SOURCE_TARGETED_PLAN_CHANGED" \? "planChanged"/);
   assert.match(app, /Boolean\(refusal\) && cleanup === "LOCAL_SOURCE_STAGING_CLEANUP_FAILED"/);
-  assert.match(app, /detail: refusal \? undefined : detail/);
   assert.match(app, /t\("settings\.fullIndexRequired"\)/);
   assert.match(app, /t\("settings\.fullIndexNotStarted"\)/);
   assert.match(app, /t\("settings\.noChangesApplied"\)/);
   assert.match(app, /t\("settings\.stagingCleanupFailed"\)/);
+  // Execute the real failure handler and notice title, as the Preferences action
+  // above does, instead of pinning the spelling of the detail conditional.
+  const tree = ts.createSourceFile("App.tsx", app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let handler, title;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(tree) === "reportLocalFoldersSaveFailure") handler = node.initializer;
+    if (ts.isJsxExpression(node) && node.expression && ts.isConditionalExpression(node.expression)
+      && node.expression.condition.getText(tree) === 'configSavePhase === "local"') title = node.expression;
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  assert.ok(handler); assert.ok(title);
+  const compile = expression => ts.transpileModule(`const value = ${expression.getText(tree)};`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText;
   for (const locale of ["pt-BR", "en"]) {
-    const { settings } = JSON.parse(readFileSync(new URL(`../locales/${locale}.json`, import.meta.url), "utf8"));
+    const translations = JSON.parse(readFileSync(new URL(`../locales/${locale}.json`, import.meta.url), "utf8"));
+    const { settings } = translations;
+    const t = key => key.split('.').reduce((value, part) => value?.[part], translations);
     for (const key of ["fullIndexRequired", "libraryChangedBeforeSave", "noChangesApplied", "fullIndexNotStarted", "stagingCleanupFailed"]) {
       assert.ok(settings[key]);
+    }
+    for (const [error, refusal, detail, titleKey, uncertain = false] of [
+      ["LOCAL_SOURCE_FULL_RESCAN_REQUIRED;LOCAL_SOURCE_STAGING_CLEANUP_FAILED", "fullRescan", undefined, "fullIndexRequired"],
+      ["LOCAL_SOURCE_TARGETED_PLAN_CHANGED", "planChanged", undefined, "libraryChangedBeforeSave"],
+      ["LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE", "queueChanged", undefined, "queueClearStale"],
+      ["LOCAL_SOURCE_NEW_OVERLAP", "overlap", undefined, "localFolderOverlap"],
+      ["QUEUE_BINDING_FIXTURE", "queueCheckRequired", undefined, "queueClearCheckRequired"],
+      ["LOCAL_INDEX_COVERAGE_FAILED;private diagnostic", undefined, t("indexCoverage.failed"), "libraryUpdateFailed"],
+      ["UNRELATED_FAILURE;keep diagnostic", undefined, "UNRELATED_FAILURE;keep diagnostic", "libraryUpdateFailed"],
+      ["FIRST_RUN_CATALOG_PENDING: private diagnostic", undefined, undefined, "initialLibraryFailed"],
+      ["FIRST_RUN_CATALOG_PENDING: private diagnostic", undefined, undefined, "initialLibraryFailed", true],
+    ]) {
+      let notice;
+      const confirmed = { first_run: false }, confirmedWrites = [], blocked = [], logs = [];
+      const report = new Function("formatConfigError", "queueClearBinding", "logError", "configService", "setConfig", "localAlbumCatalog", "setConfigSaveNotice", "t", `${compile(handler)}; return value;`)(
+        String, value => value === "QUEUE_BINDING_FIXTURE", (...args) => logs.push(args), { getConfig: async () => confirmed },
+        value => confirmedWrites.push(value), { setSaveBlocked: value => blocked.push(value) }, value => { notice = value; }, t,
+      );
+      await report(error, uncertain);
+      assert.equal(notice.kind, "error"); assert.equal(notice.refusal, refusal);
+      assert.equal(notice.detail, detail); assert.equal(notice.uncertain, uncertain);
+      assert.equal(notice.initialPreparationFailed, titleKey === "initialLibraryFailed");
+      assert.equal(notice.stagingCleanupFailed, error.endsWith("LOCAL_SOURCE_STAGING_CLEANUP_FAILED"));
+      assert.equal(notice.reloadFailed, false); assert.deepEqual(confirmedWrites, [confirmed]);
+      assert.deepEqual(blocked, uncertain ? [] : [false]); assert.equal(logs.length, 1);
+      const renderedTitle = new Function("configSavePhase", "localSavePhase", "configSaveNotice", "t", `${compile(title)}; return value;`)(null, null, notice, t);
+      assert.ok(settings[titleKey]); assert.equal(renderedTitle, settings[titleKey], locale+": "+error);
+      assert.ok(!renderedTitle.includes("FIRST_RUN_") && !renderedTitle.includes("private diagnostic"));
     }
   }
 });

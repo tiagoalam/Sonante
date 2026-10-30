@@ -138,3 +138,23 @@ test('context switch invalidates old save success/errors and retains physical wr
   if(fail)write.reject('playlists.duplicateName');else write.resolve({});await pending;assert.equal(p.getSnapshot().mixSave.saved,false);assert.equal(p.getSnapshot().mixSave.error,null);assert.equal(p.getSnapshot().mixSave.busy,false);p.openMixSave();assert.equal(p.getSnapshot().mixSave.opened,true);
  }
 });
+
+test('mix parent navigation retains per-track source identities and never enters playback or playlist metadata',async()=>{
+ for(const s of [scope(['1']),scope(['1','2'])]){
+  let calls=0;const p=create(s,async(_,id)=>{calls++;return reply(s,id,[{...track('99',id),album_rating_key:'12',artist_rating_key:'13'}]);});await flush();p.openMix();await flush();const selected=p.getSnapshot().mix.tracks;const before=calls;
+  for(const row of selected){
+   const a=p.mixAlbum(row),r=p.mixArtist(row);assert.equal(a.rating_key,'12');assert.equal(r.rating_key,'13');
+   for(const item of[a,r]){assert.equal(item.server_id,s.serverId);assert.equal(item.library_id,row.library_id);}
+   assert.equal(r.thumb,null,'an album/track cover is not an artist portrait');
+   assert.equal(p.mixAlbum({...row}),null,'a cloned or old row is not the owned selection');
+   for(const value of [undefined,null,'','../12','12?token=secret','１２','123456789012345678901',12,{},false]){
+    const old=row.artist_rating_key;row.artist_rating_key=value;assert.equal(p.mixArtist(row),null);assert.ok(p.mixAlbum(row));row.artist_rating_key=old;
+    const albumId=row.album_rating_key;row.album_rating_key=value;assert.equal(p.mixAlbum(row),null);assert.ok(p.mixArtist(row));row.album_rating_key=albumId;
+   }
+  }
+  assert.equal(p.getSnapshot().mix.tracks,selected);assert.equal(calls,before);
+  const output=JSON.stringify([mixPlaybackMetadata(selected),mixPlaylistItems(selected)]);assert.ok(!output.includes('album_rating_key')&&!output.includes('artist_rating_key'));
+  p.closeMix();assert.equal(p.mixAlbum(selected[0]),null);p.openMix();assert.equal(p.getSnapshot().mix.tracks,selected);
+  p.setContext({...s,identity:{}});assert.equal(p.mixAlbum(selected[0]),null);assert.equal(p.mixArtist(selected[0]),null);
+ }
+});

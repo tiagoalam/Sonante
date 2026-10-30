@@ -25,11 +25,11 @@ export const OnlineMetadataComparison: React.FC<Props> = ({ details, draft, avai
     : text === "" ? t("onlineMetadata.empty") : text;
   const summary = (field: LocalAlbumFieldSummary) => field.state === "common" ? value(field.value)
     : t(`albumTagEditor.states.${field.state}`);
-  return <section aria-labelledby={`${id}-title`} className="mt-4 rounded-lg border border-[#555555] p-3 text-xs">
-    <h4 id={`${id}-title`} className="font-bold text-white">{t("onlineMetadata.comparison.title")}</h4>
+  return <section aria-labelledby={`${id}-title`} className="mt-4 rounded-lg border border-[color:var(--theme-border-soft,#555555)] p-3 text-xs">
+    <h4 id={`${id}-title`} className="font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{t("onlineMetadata.comparison.title")}</h4>
     <p className="mt-2 whitespace-pre-wrap break-words">{t("onlineMetadata.comparison.source")} {value(details.title)}</p>
     <p className="break-all font-mono text-[10px]">{details.id}</p>
-    <p className="mt-2 text-[#BBBBBB]">{t("onlineMetadata.comparison.explanation")}</p>
+    <p className="mt-2 text-[color:var(--theme-fg-secondary,#BBBBBB)]">{t("onlineMetadata.comparison.explanation")}</p>
     <fieldset className="mt-3 space-y-2">
       <legend className="font-bold">{t("onlineMetadata.comparison.dateSource")}</legend>
       {(["edition", "first_release"] as const).map(source => {
@@ -38,7 +38,7 @@ export const OnlineMetadataComparison: React.FC<Props> = ({ details, draft, avai
           <input type="radio" name={`${id}-date-source`} checked={dateSource === source} disabled={!available || !!reason}
             onChange={() => onDateSource(source)} className="mr-2" />
           {t(`onlineMetadata.comparison.${source}`)}: {value(date)}
-          {reason && <span className="ml-2 text-amber-200">{t(`onlineMetadata.comparison.reasons.${reason}`)}</span>}
+          {reason && <span className="ml-2 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t(`onlineMetadata.comparison.reasons.${reason}`)}</span>}
         </label>;
       })}
       {details.release_group_id && <p className="break-all font-mono text-[10px]">{t("onlineMetadata.comparison.releaseGroup")}: {details.release_group_id}</p>}
@@ -50,21 +50,21 @@ export const OnlineMetadataComparison: React.FC<Props> = ({ details, draft, avai
         <tbody>{transferFields.map(field => {
           const entry = draft.fields[field], proposed = suggestionValue(details, field, dateSource);
           const reason = field === "date" && !dateSource ? "chooseDateSource" : transferReason(proposed, field === "date");
-          return <tr key={field} className="border-t border-[#444444]">
+          return <tr key={field} className="border-t border-[color:var(--theme-border-soft,#444444)]">
             <th className="p-2 align-top"><label><input type="checkbox" checked={choices.includes(field)} disabled={!available || !!reason}
               onChange={event => onChoose(field, event.target.checked)} className="mr-2" />{t(`tagEditor.fields.${field}`)}</label></th>
             <td className="whitespace-pre-wrap break-words p-2 align-top">{summary(draft.inspection.fields[field])}</td>
             <td className="whitespace-pre-wrap break-words p-2 align-top">{entry.clearAll ? t("onlineMetadata.comparison.remove")
-              : entry.touched ? value(entry.value) : <>{summary(entry.summary)} <span className="text-[#999999]">({t("onlineMetadata.comparison.unchanged")})</span></>}</td>
+              : entry.touched ? value(entry.value) : <>{summary(entry.summary)} <span className="text-[color:var(--theme-fg-secondary,#999999)]">({t("onlineMetadata.comparison.unchanged")})</span></>}</td>
             <td className="whitespace-pre-wrap break-words p-2 align-top">{value(proposed)}
-              {reason && <p className="text-amber-200">{t(`onlineMetadata.comparison.reasons.${reason}`)}</p>}</td>
+              {reason && <p className="text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t(`onlineMetadata.comparison.reasons.${reason}`)}</p>}</td>
           </tr>;
         })}</tbody>
       </table>
     </div>
-    {!available && <p role="status" className="mt-2 text-amber-200">{t("onlineMetadata.comparison.blocked")}</p>}
+    {!available && <p role="status" className="mt-2 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t("onlineMetadata.comparison.blocked")}</p>}
     <button type="button" disabled={!available || !choices.length} onClick={onTransfer}
-      className="mt-3 rounded-lg border border-[#555555] px-3 py-2 text-white hover:bg-[#303030] disabled:opacity-40">
+      className="mt-3 rounded-lg border border-[color:var(--theme-border-soft,#555555)] px-3 py-2 text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-hover,#303030)] disabled:opacity-40">
       {t("onlineMetadata.comparison.transfer")}
     </button>
   </section>;

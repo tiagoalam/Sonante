@@ -26,7 +26,7 @@ export function SettingsPages({ initialPage = "general", general, audio, local, 
   return (
     <div className="flex flex-col sm:flex-row flex-1 min-h-0 overflow-hidden text-xs">
       <div role="tablist" aria-label={t("settings.pages.navigation")}
-        className="shrink-0 flex flex-wrap sm:flex-col gap-1 p-3 sm:w-52 bg-[#141414] border-b sm:border-b-0 sm:border-r border-[#262626]">
+        className="shrink-0 flex flex-wrap sm:flex-col gap-1 p-3 sm:w-52 bg-[var(--theme-surface-base,#141414)] border-b sm:border-b-0 sm:border-r border-[color:var(--theme-border-soft,#262626)]">
         {pages.map((page, index) => (
           <button key={page.id} type="button" role="tab" id={`${id}-tab-${page.id}`}
             aria-selected={active === page.id} aria-controls={`${id}-panel-${page.id}`}
@@ -43,8 +43,8 @@ export function SettingsPages({ initialPage = "general", general, audio, local, 
               event.preventDefault();
               select(next, true);
             }}
-            className={`flex items-center gap-2 px-3 py-3 rounded-lg text-left font-semibold cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-[#E5A00D] ${active === page.id
-              ? "bg-[#221B0E] text-[#E5A00D]" : "text-[#999999] hover:bg-[#222222] hover:text-white"}`}>
+            className={`flex items-center gap-2 px-3 py-3 rounded-lg text-left font-semibold cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] ${active === page.id
+              ? "bg-[var(--theme-surface-accent,#221B0E)] text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#222222)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"}`}>
             <page.icon size={16} aria-hidden="true" className="shrink-0" />
             {page.label}
           </button>
@@ -54,8 +54,8 @@ export function SettingsPages({ initialPage = "general", general, audio, local, 
         {pages.map(page => (
           <section key={page.id} role="tabpanel" hidden={active !== page.id}
             id={`${id}-panel-${page.id}`} aria-labelledby={`${id}-tab-${page.id}`}
-            tabIndex={0} className="space-y-6 outline-none focus-visible:ring-2 focus-visible:ring-[#E5A00D] rounded-lg">
-            <h3 className="text-lg font-bold text-white">{page.label}</h3>
+            tabIndex={0} className="space-y-6 outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] rounded-lg">
+            <h3 className="text-lg font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{page.label}</h3>
             {page.content}
           </section>
         ))}

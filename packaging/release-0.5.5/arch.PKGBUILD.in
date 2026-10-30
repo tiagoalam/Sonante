@@ -1,0 +1,19 @@
+# Render with render-package-inputs.py after a verified final payload exists.
+pkgname=sonante
+pkgver=0.5.5
+pkgrel=1
+pkgdesc='Local and Plex music player with pinned audio runtimes'
+arch=('x86_64')
+license=('GPL-3.0-only' 'GPL-2.0-or-later' 'MPL-2.0')
+url='https://github.com/tiagoalam/Sonante'
+conflicts=('sonante-bin' 'sonante-private')
+replaces=('sonante-bin' 'sonante-private')
+optdepends=('wireplumber: optional Shared volume control through wpctl')
+options=('!debug' '!strip')
+depends=(alsa-lib alsa-utils aom audiofile avahi blas brotli bzip2 cairo chromaprint dbus expat faad2 fluidsynth fontconfig freetype2 fribidi 'gcc-libs>=12' glib2 'glibc>=2.35' gnutls gsm gtk3 krb5 lame lapack libao libass libbs2b libcdio-paranoia libdrm libgcc libgcrypt libgme libgomp libgpg-error libid3tag libidn2 libjack.so=0-64 libmad libmikmod libmms libmodplug libmpcdec libmpdclient libmysofa libnghttp2 libogg libopenmpt libpipewire-0.3.so=0-64 libpsl libpulse librsvg libsamplerate libshout libsndfile libsoxr libssh2 libstdc++ libva libvdpau libvorbis libwebp libx11 lilv mpg123 ocl-icd openal openjpeg2 openssl opus pcre2 pipewire snappy sndio speex sqlite systemd-libs twolame wavpack 'webkit2gtk-4.1>=2.40' wildmidi xdg-desktop-portal xdg-utils xvidcore xz zeromq zimg zlib zstd zvbi zziplib)
+source=('payload-ubuntu-arch.tar')
+noextract=('payload-ubuntu-arch.tar')
+sha256sums=('@PAYLOAD_SHA256@')
+package() {
+    tar -xf "$srcdir/payload-ubuntu-arch.tar" -C "$pkgdir"
+}

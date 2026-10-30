@@ -12,6 +12,52 @@ pub(crate) enum LocalMediaClass {
     Ignored,
 }
 
+// Compare the saved spelling with canonical manifest roots without touching the
+// filesystem. Only terminal separators are optional; aliases and dot components
+// must not acquire authority here. Callers still pin the original config bytes.
+pub(crate) fn configured_source_binding_matches(
+    configured: &[String],
+    sources: &BTreeMap<String, PathBuf>,
+) -> bool {
+    if configured.len() > 65_536 || configured.len() != sources.len() {
+        return false;
+    }
+    let mut roots = std::collections::BTreeSet::new();
+    for value in configured {
+        if value.len() > 4096 || !Path::new(value).is_absolute() {
+            return false;
+        }
+        let spelling = if value == "/" { "/" } else { value.trim_end_matches('/') };
+        if spelling.is_empty() || !roots.insert(spelling) {
+            return false;
+        }
+    }
+    let Some(registered) = sources.values().map(|path| path.to_str())
+        .collect::<Option<std::collections::BTreeSet<_>>>() else {
+        return false;
+    };
+    registered.len() == sources.len() && roots == registered
+}
+
+// Labels are presentation only. Never replace IDs in media URIs or reservations.
+pub(crate) fn source_display_labels(sources: &BTreeMap<String, PathBuf>) -> BTreeMap<String, String> {
+    let candidates: BTreeMap<_, _> = sources.iter().map(|(id, root)| {
+        let name = root.file_name().and_then(|name| name.to_str()).filter(|name| {
+            !name.trim().is_empty() && name.len() <= 255
+                && !name.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+        }).unwrap_or(id);
+        (id.clone(), name.to_string())
+    }).collect();
+    let mut counts = BTreeMap::new();
+    for name in candidates.values() { *counts.entry(name.as_str()).or_insert(0usize) += 1; }
+    candidates.iter().map(|(id, name)| {
+        // Keep distinct active names and avoid colliding with another source's
+        // fallback ID. A retired ID alone never changes the visible name.
+        let label = if counts[name.as_str()] > 1 || (name != id && sources.contains_key(name)) { id } else { name };
+        (id.clone(), label.clone())
+    }).collect()
+}
+
 pub(crate) fn classify_path(path: &Path) -> LocalMediaClass {
     let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
         return LocalMediaClass::Ignored;
@@ -152,7 +198,7 @@ pub(crate) fn resolve_local_sources(
         .iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    let canonical_roots = mirror::canonical_configured_roots(&configured_paths)
+    let canonical_roots = crate::diagnostics::startup_stage("roots.validate", mirror::canonical_configured_roots(&configured_paths))
         .map_err(LocalPathResolveError::Unavailable)?;
     let library_metadata = fs::symlink_metadata(library_dir).map_err(|error| {
         LocalPathResolveError::Unavailable(format!(
@@ -170,7 +216,7 @@ pub(crate) fn resolve_local_sources(
     let (topology, sources) = match fs::symlink_metadata(&marker) {
         Ok(_) => (
             LocalLibraryTopology::Managed,
-            mirror::import_managed_source_mapping(library_dir, &canonical_roots)
+            crate::diagnostics::startup_stage("managed.mapping", mirror::import_managed_source_mapping(library_dir, &canonical_roots))
                 .map_err(LocalPathResolveError::Unavailable)?,
         ),
         Err(error) if error.kind() == ErrorKind::NotFound => (
@@ -191,11 +237,13 @@ pub(crate) fn resolve_local_sources(
             .iter()
             .any(|root| !mapped_roots.contains(root))
     {
-        return Err(LocalPathResolveError::Unavailable(
+        return crate::diagnostics::startup_stage("mapping.root_set", Err(LocalPathResolveError::Unavailable(
             "A topologia da biblioteca diverge das pastas locais configuradas.".to_string(),
-        ));
+        )));
     }
 
+    crate::diagnostics::startup_stage("identity.verify", crate::source_identity::verify_if_initialized(library_dir, &sources))
+        .map_err(LocalPathResolveError::Unavailable)?;
     Ok(ResolvedLocalSources { topology, sources })
 }
 
@@ -245,6 +293,286 @@ pub(crate) fn resolve_local_path(
     })
 }
 
+
+// Source-scoped cover consumer only. No serialized capability or public path.
+// Canonicalization locates aliases; actual reads use retained, checked FDs.
+const COVER_CHANGED: &str = "LOCAL_COVER_CONTEXT_CHANGED";
+const COVER_UNAVAILABLE: &str = "LOCAL_COVER_SOURCE_UNAVAILABLE";
+const COVER_ESCAPE: &str = "LOCAL_COVER_OUTSIDE_SOURCE";
+const COVER_PATH_BYTES: usize = 4096;
+const COVER_PATH_DEPTH: usize = 128;
+
+#[derive(Clone, PartialEq, Eq)]
+struct CoverStamp { dev:u64, ino:u64, mode:u32, links:u64, uid:u32, gid:u32,
+    len:u64, mtime:(i64,i64), ctime:(i64,i64) }
+impl CoverStamp {
+    fn file(file:&fs::File)->Result<Self,String> {
+        use std::os::unix::fs::MetadataExt;
+        let m=file.metadata().map_err(|_|COVER_CHANGED)?;
+        Ok(Self {dev:m.dev(),ino:m.ino(),mode:m.mode(),links:m.nlink(),uid:m.uid(),gid:m.gid(),
+            len:m.len(),mtime:(m.mtime(),m.mtime_nsec()),ctime:(m.ctime(),m.ctime_nsec())})
+    }
+    fn named(parent:&fs::File,name:&std::ffi::OsStr)->Result<Self,String> {
+        use std::os::{fd::AsRawFd,unix::ffi::OsStrExt};
+        let name=std::ffi::CString::new(name.as_bytes()).map_err(|_|COVER_CHANGED)?;
+        let mut value=std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {libc::fstatat(parent.as_raw_fd(),name.as_ptr(),value.as_mut_ptr(),libc::AT_SYMLINK_NOFOLLOW)}!=0 {
+            return Err(COVER_CHANGED.into());
+        }
+        let m=unsafe {value.assume_init()};
+        Ok(Self {dev:m.st_dev as u64,ino:m.st_ino as u64,mode:m.st_mode as u32,
+            links:m.st_nlink as u64,uid:m.st_uid,gid:m.st_gid,len:m.st_size as u64,
+            mtime:(m.st_mtime as i64,m.st_mtime_nsec as i64),ctime:(m.st_ctime as i64,m.st_ctime_nsec as i64)})
+    }
+    fn directory(&self)->bool {self.mode & libc::S_IFMT as u32==libc::S_IFDIR as u32}
+    fn regular(&self)->bool {self.mode & libc::S_IFMT as u32==libc::S_IFREG as u32}
+}
+fn cover_path_bound(path:&Path)->Result<(),String> {
+    use std::os::unix::ffi::OsStrExt;
+    if path.as_os_str().as_bytes().len()>COVER_PATH_BYTES || path.components().count()>COVER_PATH_DEPTH {
+        return Err(COVER_UNAVAILABLE.into());
+    }
+    Ok(())
+}
+fn cover_open_at(parent:&fs::File,name:&std::ffi::OsStr,flags:i32)->Result<fs::File,String> {
+    use std::os::{fd::{AsRawFd,FromRawFd},unix::ffi::OsStrExt};
+    let name=std::ffi::CString::new(name.as_bytes()).map_err(|_|COVER_CHANGED)?;
+    let fd=unsafe {libc::openat(parent.as_raw_fd(),name.as_ptr(),flags|libc::O_NOFOLLOW|libc::O_CLOEXEC)};
+    if fd<0 {return Err(COVER_CHANGED.into());}
+    Ok(unsafe {fs::File::from_raw_fd(fd)})
+}
+struct CoverEntry { file:fs::File, name:std::ffi::OsString, stamp:CoverStamp }
+struct OpenedCoverPath {
+    requested:PathBuf, canonical:PathBuf, directories:Vec<CoverEntry>, leaf:Option<CoverEntry>,
+}
+impl OpenedCoverPath {
+    fn open(root:&Path,root_fd:&fs::File,requested:&Path,
+        missing_parent:Option<&fs::File>)->Result<Option<Self>,String> {
+        cover_path_bound(requested)?;
+        // std canonicalize retains the platform's finite symlink traversal limit;
+        // loops/errors are not retried. No custom unbounded symlink walker.
+        let canonical=match fs::canonicalize(requested) {
+            Ok(path)=>path,
+            Err(e) if matches!(e.kind(),ErrorKind::NotFound|ErrorKind::PermissionDenied)=>{
+                use std::os::{fd::AsRawFd,unix::ffi::OsStrExt};
+                // Only open_cover supplies this already retained directory FD
+                // for its single named candidate. Without that witness, refuse.
+                let parent=missing_parent.ok_or(COVER_UNAVAILABLE)?;
+                let name=requested.file_name().ok_or(COVER_UNAVAILABLE)?;
+                let name=std::ffi::CString::new(name.as_bytes()).map_err(|_|COVER_CHANGED)?;
+                let parent_stamp=CoverStamp::file(parent)?;
+                let mut nominal=std::mem::MaybeUninit::<libc::stat>::uninit();
+                let found=unsafe {libc::fstatat(parent.as_raw_fd(),name.as_ptr(),nominal.as_mut_ptr(),libc::AT_SYMLINK_NOFOLLOW)};
+                let missing=found!=0 && std::io::Error::last_os_error().kind()==ErrorKind::NotFound;
+                if CoverStamp::file(parent)?!=parent_stamp {return Err(COVER_CHANGED.into());}
+                // A present symlink (or any present unresolved entry) is NOT
+                // evidence of absence. Do not inspect its external destination.
+                // The caller also revalidates the original target/parent before
+                // accepting None. Regular read-permission handling stays below.
+                if e.kind()==ErrorKind::NotFound && missing {return Ok(None);}
+                return Err(COVER_UNAVAILABLE.into());
+            }
+            Err(_)=>return Err(COVER_UNAVAILABLE.into()),
+        };
+        cover_path_bound(&canonical)?;
+        let relative=canonical.strip_prefix(root).map_err(|_|COVER_ESCAPE)?;
+        let parts=relative.components().map(|part|match part {
+            Component::Normal(name)=>Ok(name.to_os_string()),_=>Err(COVER_ESCAPE.to_string())
+        }).collect::<Result<Vec<_>,_>>()?;
+        let mut result=Self {requested:requested.into(),canonical,directories:Vec::new(),leaf:None};
+        for (index,name) in parts.iter().enumerate() {
+            let parent=result.directories.last().map_or(root_fd,|entry|&entry.file);
+            let before=CoverStamp::named(parent,name)?;
+            // O_PATH retains a target identity without reading a music file or
+            // requiring directory listing permission. Linux application scope.
+            let file=cover_open_at(parent,name,libc::O_PATH)?;
+            let stamp=CoverStamp::file(&file)?;
+            if before!=stamp || CoverStamp::named(parent,name)?!=stamp {return Err(COVER_CHANGED.into());}
+            let directory=stamp.directory();
+            if !directory && index+1!=parts.len() {return Err(COVER_CHANGED.into());}
+            let entry=CoverEntry {file,name:name.clone(),stamp};
+            if directory {result.directories.push(entry);} else {result.leaf=Some(entry);}
+        }
+        result.validate(root_fd)?;
+        Ok(Some(result))
+    }
+    fn parent<'a>(&'a self,root:&'a fs::File)->&'a fs::File {
+        self.directories.last().map_or(root,|entry|&entry.file)
+    }
+    fn validate(&self,root:&fs::File)->Result<(),String> {
+        let mut parent=root;
+        for entry in &self.directories {
+            if CoverStamp::file(&entry.file)?!=entry.stamp || CoverStamp::named(parent,&entry.name)?!=entry.stamp {
+                return Err(COVER_CHANGED.into());
+            }
+            parent=&entry.file;
+        }
+        if let Some(entry)=&self.leaf {
+            if CoverStamp::file(&entry.file)?!=entry.stamp || CoverStamp::named(parent,&entry.name)?!=entry.stamp {
+                return Err(COVER_CHANGED.into());
+            }
+        }
+        // Recheck the alias spelling too. FD validation, not this pathname
+        // check alone, binds the actual object read by the consumer.
+        if fs::canonicalize(&self.requested).map_err(|_|COVER_CHANGED)?!=self.canonical {
+            return Err(COVER_CHANGED.into());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct SourceCoverTarget<'a> {
+    owner:&'a crate::profile_lease::Lease,
+    transaction:&'a crate::config_save_operation::Transaction<'a>,
+    coordinator:&'a crate::config_save_operation::Coordinator,
+    identity:&'a crate::source_identity::ReadonlyIdentitySnapshot,
+    mirror:&'a mirror::ReadonlyMirrorSnapshot,
+    root:PathBuf, root_fd:fs::File, root_stamp:CoverStamp, source_id:String,
+    opened:OpenedCoverPath,
+}
+pub(crate) struct SourceCoverFile<'a,'b> {
+    target:&'a SourceCoverTarget<'b>, opened:OpenedCoverPath, file:fs::File, stamp:CoverStamp,
+}
+impl SourceCoverFile<'_,'_> {
+    pub(crate) fn reader(&self)->&fs::File {&self.file}
+    pub(crate) fn len(&self)->u64 {self.stamp.len}
+    pub(crate) fn validate(&self)->Result<(),String> {
+        self.target.validate()?;
+        self.opened.validate(&self.target.root_fd)?;
+        if CoverStamp::file(&self.file)?!=self.stamp {return Err(COVER_CHANGED.into());}
+        Ok(())
+    }
+}
+impl SourceCoverTarget<'_> {
+    pub(crate) fn validate(&self)->Result<(),String> {
+        use std::os::unix::fs::MetadataExt;
+        if !self.transaction.belongs_to(self.coordinator) || self.coordinator.shutdown_requested() {
+            return Err(COVER_CHANGED.into());
+        }
+        self.owner.validate().map_err(|_|COVER_CHANGED)?;
+        self.identity.revalidate().map_err(|_|COVER_CHANGED)?;
+        // Per-step checks bind the retained marker and root; the complete
+        // original topology is revalidated after the callback, before return.
+        self.mirror.revalidate_binding().map_err(|_|COVER_CHANGED)?;
+        if self.identity.observe(&self.source_id).map_err(|_|COVER_CHANGED)?
+            !=crate::source_identity::ReadonlyOriginObservation::Available {
+            return Err(COVER_UNAVAILABLE.into());
+        }
+        let named=fs::symlink_metadata(&self.root).map_err(|_|COVER_CHANGED)?;
+        if !named.is_dir() || (named.dev(),named.ino())!=(self.root_stamp.dev,self.root_stamp.ino)
+            || fs::canonicalize(&self.root).map_err(|_|COVER_CHANGED)?!=self.root
+            || CoverStamp::file(&self.root_fd)?!=self.root_stamp {
+            return Err(COVER_CHANGED.into());
+        }
+        self.opened.validate(&self.root_fd)
+    }
+    pub(crate) fn open_cover(&self,name:&str)->Result<Option<SourceCoverFile<'_,'_>>,String> {
+        self.validate()?;
+        if !matches!((Path::new(name).components().next(),Path::new(name).components().count()),
+            (Some(Component::Normal(_)),1)) {return Err(COVER_CHANGED.into());}
+        let directory=if self.opened.leaf.is_some() {
+            self.opened.canonical.parent().ok_or(COVER_CHANGED)?
+        }else{self.opened.canonical.as_path()};
+        let Some(opened)=OpenedCoverPath::open(&self.root,&self.root_fd,&directory.join(name),
+            Some(self.opened.parent(&self.root_fd)))? else {
+            self.validate()?;return Ok(None);
+        };
+        let Some(leaf)=opened.leaf.as_ref() else {self.validate()?;return Ok(None)};
+        if !leaf.stamp.regular() {self.validate()?;return Ok(None);}
+        // Open read access relative to the verified parent FD, never the earlier
+        // absolute pathname. Existing hardlinked regular files remain allowed.
+        let file=match cover_open_at(opened.parent(&self.root_fd),&leaf.name,libc::O_RDONLY|libc::O_NONBLOCK) {
+            Ok(file)=>file,
+            Err(error)=>{
+                // Ordinary unreadability remains a missing candidate, provided
+                // the witnessed object and all retained bindings still match.
+                opened.validate(&self.root_fd)?;self.validate()?;
+                return if error==COVER_CHANGED {Ok(None)}else{Err(error)};
+            }
+        };
+        let stamp=CoverStamp::file(&file)?;
+        if stamp!=leaf.stamp || !stamp.regular() {return Err(COVER_CHANGED.into());}
+        let result=SourceCoverFile {target:self,opened,file,stamp};result.validate()?;Ok(Some(result))
+    }
+    pub(crate) fn validate_probe_uri(&self,uri:&str)->Result<(),String> {
+        let path=validate_local_uri(uri).map_err(|_|COVER_ESCAPE)?;cover_path_bound(&path)?;
+        if path.components().next()!=Some(Component::Normal(std::ffi::OsStr::new(&self.source_id))) {
+            return Err(COVER_ESCAPE.into());
+        }
+        self.validate()
+    }
+}
+
+// Called only inside the retained real source context. No source path escapes
+// this callback; the result is data/None, not a physical playback capability.
+pub(crate) fn with_source_cover_target<T>(
+    owner:&crate::profile_lease::Lease,
+    transaction:&crate::config_save_operation::Transaction<'_>,
+    coordinator:&crate::config_save_operation::Coordinator,
+    library:&Path,configured:&[String],uri:&str,
+    read:impl FnOnce(&SourceCoverTarget<'_>)->Result<T,String>,
+)->Result<T,String> {
+    if !transaction.belongs_to(coordinator) || coordinator.shutdown_requested() {return Err(COVER_CHANGED.into());}
+    owner.validate().map_err(|_|COVER_CHANGED)?;
+    if library.parent()!=Some(owner.root().path.as_path()) {return Err(COVER_CHANGED.into());}
+    let identity=crate::source_identity::ReadonlyIdentitySnapshot::open(library).map_err(|_|COVER_UNAVAILABLE)?;
+    let mirror=mirror::ReadonlyMirrorSnapshot::open(library).map_err(|_|COVER_UNAVAILABLE)?;
+    with_source_cover_target_in_snapshot(owner,transaction,coordinator,library,configured,uri,&identity,&mirror,|target| {
+        let value=read(target)?;
+        mirror.revalidate().map_err(|_|COVER_CHANGED)?;
+        Ok(value)
+    })
+}
+
+// The caller must retain and finally revalidate these same original snapshots
+// before publishing any result. Real Lease/transaction/D03/FD checks still run
+// for every target; sharing an inventory alone never admits a read.
+pub(crate) fn with_source_cover_target_in_snapshot<T>(
+    owner:&crate::profile_lease::Lease,
+    transaction:&crate::config_save_operation::Transaction<'_>,
+    coordinator:&crate::config_save_operation::Coordinator,
+    library:&Path,configured:&[String],uri:&str,
+    identity:&crate::source_identity::ReadonlyIdentitySnapshot,
+    mirror:&mirror::ReadonlyMirrorSnapshot,
+    read:impl FnOnce(&SourceCoverTarget<'_>)->Result<T,String>,
+)->Result<T,String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if !transaction.belongs_to(coordinator) || coordinator.shutdown_requested() {return Err(COVER_CHANGED.into());}
+    owner.validate().map_err(|_|COVER_CHANGED)?;
+    if library.parent()!=Some(owner.root().path.as_path()) {return Err(COVER_CHANGED.into());}
+    if !identity.matches_manifest(mirror.manifest.registry_id.as_deref().ok_or(COVER_CHANGED)?,&mirror.manifest.sources) {
+        return Err(COVER_CHANGED.into());
+    }
+    if !configured_source_binding_matches(configured,&mirror.manifest.sources) {
+        return Err(COVER_CHANGED.into());
+    }
+    let relative=validate_local_uri(uri).map_err(|_|COVER_ESCAPE)?;cover_path_bound(&relative)?;
+    let mut parts=relative.components();
+    let Some(Component::Normal(id))=parts.next() else {return Err(COVER_ESCAPE.into())};
+    let source_id=id.to_str().ok_or(COVER_ESCAPE)?.to_string();
+    let root=mirror.manifest.sources.get(&source_id).ok_or(COVER_UNAVAILABLE)?.clone();
+    if identity.observe(&source_id).map_err(|_|COVER_UNAVAILABLE)?
+        !=crate::source_identity::ReadonlyOriginObservation::Available {return Err(COVER_UNAVAILABLE.into());}
+    cover_path_bound(&root)?;
+    if fs::canonicalize(&root).map_err(|_|COVER_UNAVAILABLE)?!=root {return Err(COVER_CHANGED.into());}
+    let root_fd=fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_PATH|libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC)
+        .open(&root).map_err(|_|COVER_UNAVAILABLE)?;
+    let root_stamp=CoverStamp::file(&root_fd)?;
+    if !root_stamp.directory() {return Err(COVER_CHANGED.into());}
+    let requested=root.join(parts.collect::<PathBuf>());
+    let opened=OpenedCoverPath::open(&root,&root_fd,&requested,None)?.ok_or(COVER_UNAVAILABLE)?;
+    if opened.leaf.as_ref().is_some_and(|leaf|!leaf.stamp.regular()) {return Err(COVER_UNAVAILABLE.into());}
+    let target=SourceCoverTarget {owner,transaction,coordinator,identity:&identity,mirror:&mirror,
+        root,root_fd,root_stamp,source_id,opened};
+    target.validate()?;
+    let value=read(&target)?;
+    target.validate()?;
+    // Full original inventory validation belongs to the enclosing read scope.
+    // No worker publishes a partial pair before that scope succeeds.
+    Ok(value)
+}
+
 fn validate_local_uri(uri: &str) -> Result<PathBuf, LocalPathResolveError> {
     if uri.is_empty()
         || uri.bytes().any(|byte| matches!(byte, 0 | b'\r' | b'\n'))
@@ -274,15 +602,15 @@ pub(crate) mod mirror {
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::ffi::{CStr, CString, OsStr, OsString};
     use std::fs;
-    use std::io::{ErrorKind, Read};
+    use std::io::{ErrorKind, Read, Write};
     use std::mem::MaybeUninit;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    use std::os::unix::fs::{symlink, MetadataExt};
+    use std::os::unix::fs::{symlink, DirBuilderExt, MetadataExt, OpenOptionsExt};
     use std::path::{Component, Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    const MIRROR_SCHEMA_VERSION: u32 = 1;
+    const MIRROR_SCHEMA_VERSION: u32 = 2;
     pub(crate) const MANIFEST_NAME: &str = ".sonante-mirror.json";
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,6 +618,8 @@ pub(crate) mod mirror {
     pub(crate) struct MirrorManifest {
         pub schema_version: u32,
         pub generation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub registry_id: Option<String>,
         pub sources: BTreeMap<String, PathBuf>,
     }
 
@@ -298,10 +628,13 @@ pub(crate) mod mirror {
         pub staging_path: PathBuf,
         pub manifest: MirrorManifest,
         pub refresh_plan: ManagedRefreshPlan,
+        pub coverage: crate::index_coverage::Inventory,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum ManagedRefreshPlan {
+        /// Same source IDs and media entries; only the durable namespace marker changes.
+        MetadataOnly,
         Full,
         Targeted {
             directories: Vec<String>,
@@ -314,6 +647,30 @@ pub(crate) mod mirror {
         pub removed_ids: Vec<String>,
         pub remaining_ids: Vec<String>,
         pub refresh_plan: ManagedRefreshPlan,
+    }
+
+    /// Source IDs for an early consent question only. This is NOT a proven
+    /// refresh/publication plan; the complete removal planner runs afterwards.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct RemovalConsentSources {
+        pub removed_ids: Vec<String>,
+        pub remaining_ids: Vec<String>,
+    }
+
+    fn removal_consent_ids(previous: &BTreeMap<String, PathBuf>, next: &BTreeMap<String, PathBuf>) -> Option<RemovalConsentSources> {
+        if next.iter().any(|(id, root)| previous.get(id) != Some(root)) { return None; }
+        let removed_ids = previous.keys().filter(|id| !next.contains_key(*id)).cloned().collect::<Vec<_>>();
+        if removed_ids.is_empty() || removed_ids.len() > MAX_TARGETED_DIRECTORIES
+            || removed_ids.iter().any(|id| !is_safe_relative_mpd_uri(id)) { return None; }
+        Some(RemovalConsentSources { removed_ids, remaining_ids: next.keys().cloned().collect() })
+    }
+
+    pub(crate) fn source_removal_consent(previous: &BTreeMap<String, PathBuf>, proposed: &[PathBuf]) -> Result<Option<RemovalConsentSources>, String> {
+        let roots = canonical_configured_roots(proposed)?.into_iter().collect::<HashSet<_>>();
+        if roots.iter().any(|root| !previous.values().any(|old| old == root)) { return Ok(None); }
+        let next = previous.iter().filter(|(_, root)| roots.contains(*root))
+            .map(|(id, root)| (id.clone(), root.clone())).collect();
+        Ok(removal_consent_ids(previous, &next))
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,6 +778,23 @@ pub(crate) mod mirror {
             }
         }
 
+        fn validate_parent(&self, anchor: &OpenRoot) -> Result<(), String> {
+            let named = open_directory_path(self.live_path.parent().ok_or("Publicação sem parent")?)?;
+            let actual = stat_fd(named.as_raw_fd())?;
+            let opened = stat_fd(anchor.parent.as_raw_fd())?;
+            if actual.st_dev != opened.st_dev || actual.st_ino != opened.st_ino {
+                return Err("Parent da publicação foi substituído.".into());
+            }
+            Ok(())
+        }
+        pub(crate) fn cleanup_previous_durable(&self) -> Result<(), String> {
+            let anchor = OpenRoot::open(&self.live_path)?;
+            self.cleanup_previous()?;
+            self.validate_parent(&anchor)?;
+            sync_parent_fd(anchor.parent.as_raw_fd())?;
+            self.validate_parent(&anchor)
+        }
+
         pub(crate) fn cleanup_previous(&self) -> Result<(), String> {
             let PublicationRollback::Exchange { previous, .. } = self.rollback else {
                 return Ok(());
@@ -473,6 +847,7 @@ pub(crate) mod mirror {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct ManagedGenerationSnapshot {
+        registry_id: Option<String>,
         sources: BTreeMap<String, PathBuf>,
         entries: BTreeMap<PathBuf, PublishedEntry>,
     }
@@ -495,12 +870,269 @@ pub(crate) mod mirror {
         files: Vec<ScannedFile>,
         playable: HashSet<PathBuf>,
         cues: Vec<PathBuf>,
+        excluded: usize,
     }
 
     #[derive(Debug)]
     struct ScannedFile {
         physical: PathBuf,
         relative: PathBuf,
+    }
+
+    // FF06-I1a additive readonly snapshot; no read_manifest/check_manifest call,
+    // no physical source traversal, no reservation or cleanup side effects.
+    type ReadonlyTopology = BTreeMap<PathBuf, (crate::source_identity::ReadonlyStamp, Option<PathBuf>)>;
+    // One process-owned, nonblocking notification descriptor. No thread or
+    // polling task: each actual read checks the kernel queue before publishing.
+    struct MirrorChanges {
+        fd: OwnedFd,
+        dirty: std::sync::Mutex<bool>,
+        #[cfg(test)]
+        watches: Vec<i32>,
+    }
+    impl MirrorChanges {
+        fn open(snapshot:&ReadonlyMirrorSnapshot)->Result<Self,()> {
+            use std::os::unix::ffi::OsStrExt;
+            use crate::source_identity::ReadonlyDirectory;
+            let raw=unsafe {libc::inotify_init1(libc::IN_NONBLOCK|libc::IN_CLOEXEC)};
+            if raw<0 {return Err(());}
+            let fd=unsafe {OwnedFd::from_raw_fd(raw)};
+            let mut watches=Vec::new();
+            let mut add=|path:&Path,directory:bool|->Result<(),()> {
+                let name=CString::new(path.as_os_str().as_bytes()).map_err(|_|())?;
+                let mask=libc::IN_ATTRIB|libc::IN_MODIFY|libc::IN_CREATE|libc::IN_DELETE
+                    |libc::IN_MOVED_FROM|libc::IN_MOVED_TO|libc::IN_DELETE_SELF
+                    |libc::IN_MOVE_SELF|libc::IN_CLOSE_WRITE|libc::IN_MASK_ADD
+                    |if directory {libc::IN_ONLYDIR} else {libc::IN_DONT_FOLLOW};
+                let watch=unsafe {libc::inotify_add_watch(fd.as_raw_fd(),name.as_ptr(),mask)};
+                if watch<0 {return Err(());}
+                watches.push(watch);Ok(())
+            };
+            if !snapshot.directory.supports_local_change_events() {return Err(());}
+            add(&snapshot.directory.change_watch_path(),true)?;
+            for (relative,(_,target)) in &snapshot.topology {
+                let path=snapshot.directory.descendant(relative)?;
+                if target.is_none() {
+                    let directory=ReadonlyDirectory::open(&path)?;
+                    // Remote/FUSE/unknown filesystems retain full validation;
+                    // kernel notifications alone do not prove their changes.
+                    if !directory.supports_local_change_events() {return Err(());}
+                    add(&directory.change_watch_path(),true)?;
+                    directory.revalidate()?;
+                } else {
+                    // Watch the link inode too: an external hard link can
+                    // change its attributes without notifying this parent.
+                    add(&path,false)?;
+                }
+            }
+            Ok(Self {fd,dirty:std::sync::Mutex::new(false),#[cfg(test)] watches})
+        }
+        fn check(&self)->Result<(),()> {
+            let mut dirty=self.dirty.lock().map_err(|_|())?;
+            if *dirty {return Err(());}
+            let mut events=[0u8;4096];
+            let n=unsafe {libc::read(self.fd.as_raw_fd(),events.as_mut_ptr().cast(),events.len())};
+            if n<0 && std::io::Error::last_os_error().kind()==ErrorKind::WouldBlock {return Ok(());}
+            // Any subscribed event, overflow, unmount, removed watch or IO
+            // uncertainty permanently invalidates THIS proof, even after drain.
+            *dirty=true;Err(())
+        }
+        fn invalidate(&self) {if let Ok(mut dirty)=self.dirty.lock() {*dirty=true;}}
+    }
+    pub(crate) struct ReadonlyMirrorSnapshot {
+        directory: crate::source_identity::ReadonlyDirectory,
+        marker: crate::source_identity::ReadonlyBoundedFile,
+        pub(crate) manifest: MirrorManifest,
+        topology: ReadonlyTopology,
+        changes: Option<MirrorChanges>,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum ReadonlyMirrorOpenError { Unconfirmed, UnsupportedSchema }
+    impl From<()> for ReadonlyMirrorOpenError {
+        fn from(_: ()) -> Self { Self::Unconfirmed }
+    }
+    impl ReadonlyMirrorSnapshot {
+        pub(crate) fn topology_hash(&self) -> Result<String, String> {
+            use sha2::{Digest, Sha256};
+            use std::os::unix::ffi::OsStrExt;
+            self.revalidate().map_err(|_| crate::index_coverage::CHANGED)?;
+            let mut digest = Sha256::new();
+            for (path, (stamp, target)) in &self.topology {
+                let path = path.as_os_str().as_bytes();
+                digest.update((path.len() as u64).to_le_bytes());
+                digest.update(path);
+                let bytes = serde_json::to_vec(stamp).map_err(|_| crate::index_coverage::CHANGED)?;
+                digest.update((bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+                digest.update([u8::from(target.is_some())]);
+                if let Some(target) = target {
+                    let target = target.as_os_str().as_bytes();
+                    digest.update((target.len() as u64).to_le_bytes());
+                    digest.update(target);
+                }
+            }
+            self.revalidate().map_err(|_| crate::index_coverage::CHANGED)?;
+            Ok(format!("{:x}", digest.finalize()))
+        }
+        /// Re-observe only the selected links of this SAME published generation
+        /// after restart; never rebuild or import a physical source tree here.
+        pub(crate) fn coverage_inventory(&self) -> Result<crate::index_coverage::Inventory, String> {
+            self.revalidate().map_err(|_| crate::index_coverage::CHANGED)?;
+            let mut inventory = crate::index_coverage::Inventory::new(&self.manifest.generation_id, &self.manifest.sources, true)?;
+            for (relative, (_, target)) in &self.topology {
+                let Some(target) = target else { continue; };
+                let kind = match super::classify_path(relative) {
+                    super::LocalMediaClass::PlayableAudio => crate::index_coverage::Kind::Audio,
+                    super::LocalMediaClass::ControlSidecar => crate::index_coverage::Kind::Cue,
+                    _ => continue,
+                };
+                let mut parts = relative.components();
+                let id = parts.next().and_then(|v| v.as_os_str().to_str()).ok_or(crate::index_coverage::CHANGED)?;
+                let path = parts.as_path();
+                let root = self.manifest.sources.get(id).ok_or(crate::index_coverage::CHANGED)?;
+                if root.join(path) != *target { return Err(crate::index_coverage::CHANGED.into()); }
+                let metadata = fs::symlink_metadata(target).map_err(|_| crate::index_coverage::CHANGED)?;
+                inventory.observe(id, path, target, kind, &metadata)?;
+            }
+            self.revalidate().map_err(|_| crate::index_coverage::CHANGED)?;
+            inventory.verify()?;
+            Ok(inventory)
+        }
+        pub(crate) fn open(library: &Path) -> Result<Self, ReadonlyMirrorOpenError> {
+            use crate::source_identity::{ReadonlyBoundedFile, ReadonlyDirectory, readonly_unique_json};
+            let directory=ReadonlyDirectory::open(library)?;
+            let marker=ReadonlyBoundedFile::open(&directory, MANIFEST_NAME, 16*1024*1024, false)?;
+            let manifest:MirrorManifest=readonly_unique_json(marker.bytes())?;
+            // Explain only a parsed, unique unknown version bound to unchanged
+            // original bytes. This remains a refusal, never a readable snapshot.
+            if !matches!(manifest.schema_version, 1 | 2) {
+                marker.revalidate(&directory)?;
+                directory.revalidate()?;
+                return Err(ReadonlyMirrorOpenError::UnsupportedSchema);
+            }
+            validate_manifest(&manifest).map_err(|_| ())?;
+            if manifest.schema_version!=2 || manifest.sources.len()>65_536 {
+                return Err(ReadonlyMirrorOpenError::Unconfirmed);
+            }
+            let topology=Self::topology(&directory, &manifest)?;
+            let result=Self {directory,marker,manifest,topology,changes:None}; result.revalidate()?; Ok(result)
+        }
+        pub(crate) fn open_cached(library:&Path)->Result<Self,ReadonlyMirrorOpenError> {
+            let mut result=Self::open(library)?;
+            let changes=MirrorChanges::open(&result);
+            // Registration is not authority. Revalidate the complete ORIGINAL
+            // snapshot after registration, covering every installation race.
+            result.revalidate_full()?;
+            if let Ok(changes)=changes {changes.check()?;result.changes=Some(changes);}
+            // Unsupported watches keep the original full-scan algorithm.
+            Ok(result)
+        }
+        #[cfg(test)]
+        pub(crate) fn has_change_watch(&self)->bool {self.changes.is_some()}
+        #[cfg(test)]
+        pub(crate) fn remove_change_watch(&self) {
+            let changes=self.changes.as_ref().unwrap();
+            assert_eq!(unsafe {libc::inotify_rm_watch(changes.fd.as_raw_fd(),changes.watches[0])},0);
+        }
+        pub(crate) fn revalidate_binding(&self) -> Result<(), ()> {
+            self.marker.revalidate(&self.directory)
+        }
+        pub(crate) fn revalidate(&self) -> Result<(), ()> {
+            let Some(changes)=&self.changes else {return self.revalidate_full();};
+            let result=(|| {
+                changes.check()?;
+                self.marker.revalidate(&self.directory)?;
+                // Mount-over is not reported by inotify. Keep original stamps
+                // for EVERY directory, including dev/inode, between checks.
+                for (relative,(stamp,target)) in &self.topology {
+                    if target.is_none() && crate::source_identity::ReadonlyStamp::of(
+                        &fs::symlink_metadata(self.directory.descendant(relative)?).map_err(|_|())?)!=*stamp {
+                        return Err(());
+                    }
+                }
+                self.marker.revalidate(&self.directory)?;
+                changes.check()
+            })();
+            if result.is_err() {changes.invalidate();}
+            result
+        }
+        fn revalidate_full(&self) -> Result<(), ()> {
+            self.marker.revalidate(&self.directory)?;
+            // The retained snapshot already contains every published entry.
+            // Recheck all of their stamps and link targets without rebuilding,
+            // sorting and reopening the same tree for each cover. Additions and
+            // removals change the containing directory's retained ctime/mtime.
+            for (relative,(stamp,target)) in &self.topology {
+                let path=self.directory.descendant(relative)?;
+                if crate::source_identity::ReadonlyStamp::of(&fs::symlink_metadata(&path).map_err(|_| ())?)!=*stamp {
+                    return Err(());
+                }
+                if let Some(expected)=target {
+                    if fs::read_link(&path).map_err(|_| ())?.as_os_str()!=expected.as_os_str() {return Err(());}
+                }
+            }
+            // A directory changed during the entry reads must still refuse the
+            // result, even when the changed entry sorted before our last read.
+            for (relative,(stamp,target)) in &self.topology {
+                if target.is_none() && crate::source_identity::ReadonlyStamp::of(
+                    &fs::symlink_metadata(self.directory.descendant(relative)?).map_err(|_| ())?)!=*stamp {
+                    return Err(());
+                }
+            }
+            self.marker.revalidate(&self.directory)
+        }
+        #[cfg(test)]
+        pub(crate) fn revalidate_by_rebuilding_for_comparison(&self) -> Result<(), ()> {
+            self.marker.revalidate(&self.directory)?;
+            if Self::topology(&self.directory,&self.manifest)?!=self.topology {return Err(());}
+            self.marker.revalidate(&self.directory)
+        }
+        fn topology(root:&crate::source_identity::ReadonlyDirectory, manifest:&MirrorManifest) -> Result<ReadonlyTopology, ()> {
+            use crate::source_identity::{ReadonlyDirectory,ReadonlyStamp};
+            const LIMIT:usize=131_072;
+            fn walk(dir:&ReadonlyDirectory, relative:&Path, physical:&Path, depth:usize,
+                result:&mut ReadonlyTopology) -> Result<(), ()> {
+                if depth>128 { return Err(()); }
+                for name in dir.names(LIMIT)? {
+                    if result.len()>=LIMIT { return Err(()); }
+                    let path=dir.entry(&name)?;
+                    let m=fs::symlink_metadata(&path).map_err(|_| ())?;
+                    let rel=relative.join(&name);
+                    let target=if m.file_type().is_symlink() {
+                        let target=fs::read_link(&path).map_err(|_| ())?;
+                        // The existing publisher emits absolute root/relative links.
+                        // Exact target comparison is structural, NOT origin proof.
+                        if target.as_os_str()!=physical.join(&name).as_os_str() { return Err(()); }
+                        Some(target)
+                    } else if m.is_dir() { None } else { return Err(()); };
+                    let stamp=ReadonlyStamp::of(&m);
+                    result.insert(rel.clone(),(stamp.clone(),target));
+                    if m.is_dir() {
+                        let child=ReadonlyDirectory::open(&path)?;
+                        walk(&child,&rel,&physical.join(&name),depth+1,result)?;
+                        child.revalidate()?;
+                    }
+                    if ReadonlyStamp::of(&fs::symlink_metadata(&path).map_err(|_| ())?)!=stamp { return Err(()); }
+                }
+                dir.revalidate()
+            }
+            let mut result=BTreeMap::new();
+            for name in root.names(LIMIT)? {
+                if name==OsStr::new(MANIFEST_NAME) { continue; }
+                let id=name.to_str().ok_or(())?;
+                let physical=manifest.sources.get(id).ok_or(())?;
+                let path=root.entry(&name)?; let m=fs::symlink_metadata(&path).map_err(|_| ())?;
+                if !m.is_dir() { return Err(()); }
+                if result.len()>=LIMIT { return Err(()); }
+                result.insert(PathBuf::from(&name),(ReadonlyStamp::of(&m),None));
+                let child=ReadonlyDirectory::open(&path)?;
+                walk(&child,Path::new(&name),physical,1,&mut result)?;
+                child.revalidate()?;
+            }
+            // Empty published sources can legitimately have no mirror directory.
+            // Their IDs still remain in manifest.sources, never derived from entries.
+            root.revalidate()?; Ok(result)
+        }
     }
 
     pub(crate) fn build_filtered_staging(
@@ -538,14 +1170,20 @@ pub(crate) mod mirror {
         }
 
         let roots = canonical_configured_roots(configured_roots)?;
-        let existing = load_existing_source_mapping(live_library_path, &roots)?;
-        let sources = allocate_source_ids(&roots, &existing)?;
+        // Preserve the legacy/topology validation before reserving any new ID.
+        load_existing_source_mapping(live_library_path, &roots)?;
+        let (current, namespace) = identity_sources(live_library_path)?;
+        let (sources, registry_id) = crate::source_identity::reserve(
+            live_library_path, &roots, &current, namespace.as_deref(),
+        )?;
         let mut scanned = Vec::with_capacity(sources.len());
         for (source_id, root) in &sources {
             scanned.push((source_id.clone(), scan_source(root)?));
         }
 
-        fs::create_dir(staging_path).map_err(|error| {
+        // Generated mirror directories must satisfy the readonly admission
+        // regardless of the desktop session's umask (for example 0002).
+        fs::DirBuilder::new().mode(0o700).create(staging_path).map_err(|error| {
             format!(
                 "Falha ao criar staging da biblioteca ({}): {error}",
                 staging_path.display()
@@ -554,11 +1192,14 @@ pub(crate) mod mirror {
 
         let build_result = (|| -> Result<MirrorBuildResult, String> {
             before_publish()?;
+            crate::source_identity::verify_origins(staging_path, &sources)?;
+            let mut coverage = crate::index_coverage::Inventory::new(generation_id, &sources, true)?;
             for (source_id, source) in &scanned {
-                publish_source(staging_path, source_id, source)?;
+                publish_source(staging_path, source_id, source, &mut coverage)?;
             }
             let manifest = MirrorManifest {
                 schema_version: MIRROR_SCHEMA_VERSION,
+                registry_id: Some(registry_id),
                 generation_id: generation_id.to_string(),
                 sources,
             };
@@ -572,6 +1213,7 @@ pub(crate) mod mirror {
                 staging_path: staging_path.to_path_buf(),
                 manifest,
                 refresh_plan: ManagedRefreshPlan::Full,
+                coverage,
             })
         })();
 
@@ -617,12 +1259,64 @@ pub(crate) mod mirror {
         }
     }
 
+    /// All observable IDs, including removed or dangling legacy entries, are
+    /// reserved before the next generation is built. Never infer history from
+    /// personal references or restrict this list to the proposed roots.
+    pub(crate) fn identity_sources(
+        library_path: &Path,
+    ) -> Result<(BTreeMap<String, Option<PathBuf>>, Option<String>), String> {
+        match fs::symlink_metadata(library_path) {
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok((BTreeMap::new(), None)),
+            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+            _ => return Err("Biblioteca de identidades inválida.".into()),
+        }
+        match fs::symlink_metadata(library_path.join(MANIFEST_NAME)) {
+            Ok(_) => {
+                let manifest = read_manifest(library_path)?;
+                validate_cleanup_tree(library_path, &manifest)?;
+                return Ok((
+                    manifest
+                        .sources
+                        .into_iter()
+                        .map(|(id, root)| (id, Some(root)))
+                        .collect(),
+                    manifest.registry_id,
+                ));
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
+        let mut result = BTreeMap::new();
+        for entry in sorted_entries(library_path)? {
+            let id = entry
+                .file_name()
+                .to_str()
+                .and_then(valid_source_id)
+                .ok_or_else(|| "Identificador legado inválido.".to_string())?;
+            let root = if fs::symlink_metadata(entry.path())
+                .map_err(|e| e.to_string())?
+                .file_type()
+                .is_symlink()
+            {
+                match fs::canonicalize(entry.path()) {
+                    Ok(root) => Some(root),
+                    Err(e) if e.kind() == ErrorKind::NotFound => None,
+                    Err(e) => return Err(e.to_string()),
+                }
+            } else {
+                None
+            };
+            result.insert(id, root);
+        }
+        Ok((result, None))
+    }
+
     pub(crate) fn import_managed_source_mapping(
         library_path: &Path,
         canonical_roots: &[PathBuf],
     ) -> Result<BTreeMap<String, PathBuf>, String> {
-        let manifest = read_manifest(library_path)?;
-        validate_cleanup_tree(library_path, &manifest)
+        let manifest = crate::diagnostics::startup_stage("managed.read_manifest", read_manifest(library_path))?;
+        crate::diagnostics::startup_stage("managed.topology", validate_cleanup_tree(library_path, &manifest))
             .map_err(|error| format!("Geração gerenciada incompatível: {error}"))?;
         let configured = canonical_roots.iter().cloned().collect::<HashSet<_>>();
         let mut by_target = HashMap::new();
@@ -702,7 +1396,11 @@ pub(crate) mod mirror {
         validate_manifest(manifest)?;
         let bytes = serde_json::to_vec_pretty(manifest)
             .map_err(|error| format!("Falha ao serializar manifesto do mirror: {error}"))?;
-        fs::write(generation_path.join(MANIFEST_NAME), bytes)
+        // mode applies only on creation; never repair permissions of an
+        // existing generation while writing its already-admitted manifest.
+        fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600)
+            .open(generation_path.join(MANIFEST_NAME))
+            .and_then(|mut file| file.write_all(&bytes))
             .map_err(|error| format!("Falha ao gravar manifesto do mirror: {error}"))
     }
 
@@ -723,6 +1421,9 @@ pub(crate) mod mirror {
         let manifest: MirrorManifest = serde_json::from_slice(&bytes)
             .map_err(|error| format!("Manifesto do mirror inválido: {error}"))?;
         validate_manifest(&manifest)?;
+        if let Some(namespace) = &manifest.registry_id {
+            crate::source_identity::check_manifest(generation_path, namespace, &manifest.sources)?;
+        }
         Ok(manifest)
     }
 
@@ -751,10 +1452,90 @@ pub(crate) mod mirror {
         configured_roots: &[PathBuf],
         generation_id: &str,
     ) -> Result<ManagedGenerationPreparation, String> {
+        prepare_managed_generation_for_refresh(live_library_path, staging_path,
+            configured_roots, generation_id, false)
+    }
+
+    // Removing a source is not a request to discover changes in survivors.
+    // Copy only their already published, validated virtual entries. The same
+    // publication/removal/catalog/recovery guards still qualify the result.
+    fn prepare_source_removal_from_index(live: &Path, staging: &Path, configured: &[PathBuf], generation: &str)
+        -> Result<Option<MirrorBuildResult>, String> {
+        let manifest = read_manifest(live)?;
+        if manifest.registry_id.is_none() { return Ok(None); }
+        let Some(consent) = source_removal_consent(&manifest.sources, configured)? else { return Ok(None); };
+        validate_generation_id(generation)?;
+        validate_sibling_paths(staging, live)?;
+        if path_exists_without_following(staging)? { return Err("A staging da biblioteca já existe.".into()); }
+        let previous = managed_generation_snapshot_with_target_validation(live, PublishedTargetValidation::AllowMissingFromPreviousGeneration)?;
+        if previous.sources != manifest.sources || previous.registry_id != manifest.registry_id {
+            return Err("LOCAL_SOURCE_REMOVAL_PLAN_CHANGED".into());
+        }
+        let sources = manifest.sources.iter().filter(|(id, _)| consent.remaining_ids.contains(id))
+            .map(|(id,root)|(id.clone(),root.clone())).collect::<BTreeMap<_,_>>();
+        let entries = previous.entries.iter().filter(|(path,_)| path.components().next()
+            .and_then(|part|part.as_os_str().to_str()).is_some_and(|id|sources.contains_key(id)))
+            .map(|(path,entry)|(path.clone(),entry.clone())).collect::<BTreeMap<_,_>>();
+        let changed_files = previous.entries.iter().filter(|(path,entry)|matches!(entry,PublishedEntry::Symlink(_)) && !entries.contains_key(*path)).count();
+        let expected = ManagedGenerationSnapshot { registry_id:manifest.registry_id.clone(), sources:sources.clone(), entries:entries.clone() };
+        fs::DirBuilder::new().mode(0o700).create(staging).map_err(|e|format!("Falha ao preparar remoção local: {e}"))?;
+        let result = (|| {
+            crate::source_identity::verify_origins(staging, &sources)?;
+            // Paths scope: this observes published files, not a new full source
+            // enumeration. Existing omitted/excluded physical files are untouched.
+            let mut coverage = crate::index_coverage::Inventory::new(generation, &sources, false)?;
+            for (path,entry) in &entries {
+                match entry {
+                    PublishedEntry::Directory => { fs::DirBuilder::new().recursive(true).mode(0o700).create(staging.join(path))
+                        .map_err(|e|format!("Falha ao preparar diretório virtual: {e}"))?; }
+                    PublishedEntry::Symlink(physical) => {
+                        let mut parts=path.components();
+                        let id=parts.next().and_then(|c|c.as_os_str().to_str()).ok_or("LOCAL_SOURCE_REMOVAL_PLAN_CHANGED")?;
+                        let relative=parts.as_path().to_path_buf();
+                        let file=ScannedFile { physical:physical.clone(), relative:relative.clone() };
+                        let metadata=publish_link(staging,id,&file)?;
+                        let kind=match classify_path(physical) {
+                            LocalMediaClass::PlayableAudio=>Some(crate::index_coverage::Kind::Audio),
+                            LocalMediaClass::ControlSidecar=>Some(crate::index_coverage::Kind::Cue),
+                            _=>None,
+                        };
+                        if let Some(kind)=kind { coverage.observe(id,&relative,physical,kind,&metadata)?; }
+                    }
+                }
+            }
+            let next=MirrorManifest { schema_version:MIRROR_SCHEMA_VERSION, registry_id:manifest.registry_id.clone(), generation_id:generation.into(), sources };
+            write_manifest(staging,&next)?;
+            coverage.verify()?;
+            if read_manifest(staging)? != next || managed_generation_snapshot(staging)? != expected
+                || managed_generation_snapshot_with_target_validation(live,PublishedTargetValidation::AllowMissingFromPreviousGeneration)? != previous {
+                return Err("LOCAL_SOURCE_REMOVAL_PLAN_CHANGED".into());
+            }
+            Ok(MirrorBuildResult { staging_path:staging.into(), manifest:next,
+                refresh_plan:ManagedRefreshPlan::Targeted { directories:consent.removed_ids, changed_files }, coverage })
+        })();
+        match result {
+            Ok(prepared)=>Ok(Some(prepared)),
+            Err(error)=>Err(match remove_owned_staging(staging) { Ok(())=>error,Err(cleanup)=>format!("{error}; {cleanup}") }),
+        }
+    }
+
+    pub(crate) fn prepare_managed_generation_for_refresh(
+        live_library_path: &Path,
+        staging_path: &Path,
+        configured_roots: &[PathBuf],
+        generation_id: &str,
+        force_refresh: bool,
+    ) -> Result<ManagedGenerationPreparation, String> {
         let live_has_managed_marker = path_exists_without_following(
             &live_library_path.join(MANIFEST_NAME),
         )?;
         let preparation_started = Instant::now();
+        if live_has_managed_marker && !force_refresh {
+            if let Some(prepared) = prepare_source_removal_from_index(live_library_path, staging_path, configured_roots, generation_id)? {
+                log_preparation_timings(preparation_started.elapsed(), Duration::ZERO, "prepared", &prepared.refresh_plan);
+                return Ok(ManagedGenerationPreparation::Prepared(prepared));
+            }
+        }
         let prepared = build_filtered_staging(
             staging_path,
             live_library_path,
@@ -793,6 +1574,12 @@ pub(crate) mod mirror {
         let comparison_duration = comparison_started.elapsed();
         match comparison {
             Ok((MirrorComparison::Equivalent, _)) => {
+                // A user-requested rescan keeps a publication/previous generation
+                // until audit or typed cancellation, even with identical media.
+                if force_refresh {
+                    return Ok(ManagedGenerationPreparation::Prepared(prepared));
+                }
+
                 cleanup_managed_generation(staging_path)?;
                 log_preparation_timings(
                     preparation_duration,
@@ -841,10 +1628,57 @@ pub(crate) mod mirror {
         prepared: &MirrorBuildResult,
         before_exchange: impl FnOnce() -> Result<(), String>,
     ) -> Result<ManagedMirrorPublication, String> {
-        // Callers retain their existing transaction lock across both phases.
-        let validated = validate_prepared_managed_publication(live_library_path, prepared)?;
+        publish_prepared_with_sync(live_library_path, prepared, before_exchange, sync_parent_fd)
+    }
+
+    pub(crate) const PUBLICATION_UNCONFIRMED: &str = "LOCAL_MIRROR_PUBLICATION_UNCONFIRMED";
+    fn sync_parent_fd(fd: RawFd) -> Result<(), String> {
+        if unsafe { libc::fsync(fd) } != 0 {
+            return Err("Sincronização do diretório da publicação não confirmada.".into());
+        }
+        Ok(())
+    }
+    fn publish_prepared_with_sync(
+        live: &Path,
+        prepared: &MirrorBuildResult,
+        before_exchange: impl FnOnce() -> Result<(), String>,
+        sync: impl FnOnce(RawFd) -> Result<(), String>,
+    ) -> Result<ManagedMirrorPublication, String> {
+        let validated = validate_prepared_managed_publication(live, prepared)?;
+        let metadata = prepared.refresh_plan == ManagedRefreshPlan::MetadataOnly;
+        let anchor = if metadata {
+            if compare_previous_managed_generation_with_staging(live, &prepared.staging_path)?.1
+                != ManagedRefreshPlan::MetadataOnly
+            {
+                return Err("Plano de migração de identidade mudou.".into());
+            }
+            Some(OpenRoot::open(live)?)
+        } else {
+            None
+        };
         before_exchange()?;
-        publish_validated_managed_generation(validated)
+        if metadata
+            && compare_previous_managed_generation_with_staging(live, &prepared.staging_path)?.1
+                != ManagedRefreshPlan::MetadataOnly
+        {
+            return Err("Plano de migração de identidade mudou antes da publicação.".into());
+        }
+        if metadata {
+            if read_manifest(&prepared.staging_path)? != prepared.manifest {
+                return Err("Manifesto da migração mudou antes da publicação.".into());
+            }
+            crate::managed_save_intent::sync_mirror(&prepared.staging_path, 0).map_err(|_| {
+                "Sincronização da migração não confirmada; staging preservada.".to_string()
+            })?;
+        }
+        let publication = publish_validated_managed_generation(validated)?;
+        if let Some(anchor) = anchor {
+            publication.validate_parent(&anchor)
+                .and_then(|_| sync(anchor.parent.as_raw_fd()))
+                .and_then(|_| publication.validate_parent(&anchor))
+                .map_err(|_| format!("{PUBLICATION_UNCONFIRMED}: migração publicada sem confirmação durável; ambas as gerações preservadas."))?;
+        }
+        Ok(publication)
     }
 
     pub(crate) const TARGETED_ADDITION_PLAN_CHANGED: &str = "LOCAL_SOURCE_TARGETED_PLAN_CHANGED";
@@ -960,9 +1794,12 @@ pub(crate) mod mirror {
             published,
             previous,
         } = validated;
-        // No physical source targets are followed here. Identity checks and
-        // renameat2 still touch the mirror's own filesystem and can block if
-        // Sonante's configuration directory itself resides on NFS.
+        // Check root identities again after the caller's transaction guard.
+        // This opens only source directories, never their musical contents.
+        let manifest = read_manifest(&staging_path)?;
+        if manifest.registry_id.is_some() {
+            crate::source_identity::verify_origins(&staging_path, &manifest.sources)?;
+        }
         if let Some((previous, previous_kind)) = previous {
             require_identity(&staging_path, published, "staging preparada")?;
             require_identity(&live_path, previous, "library existente")?;
@@ -1052,6 +1889,33 @@ pub(crate) mod mirror {
             let refresh_plan = targeted_refresh_plan(&previous, &staging);
             Ok((MirrorComparison::Different, refresh_plan))
         }
+    }
+
+    /// Same confirmed sources; derive all changed subtrees from BOTH mirror
+    /// snapshots. CUE is local to its parent subtree by cue_targets' policy.
+    /// This never turns an event into an unqualified global rescan.
+    pub(crate) fn plan_filesystem_refresh(previous_path: &Path, prepared: &MirrorBuildResult) -> Result<ManagedRefreshPlan, String> {
+        let previous = managed_generation_snapshot_with_target_validation(previous_path, PublishedTargetValidation::AllowMissingFromPreviousGeneration)?;
+        let staging = managed_generation_snapshot(&prepared.staging_path)?;
+        if previous.sources != staging.sources || staging.sources != prepared.manifest.sources { return Err("LOCAL_WATCH_SOURCE_MAP_CHANGED".into()); }
+        let mut directories = std::collections::BTreeSet::new();
+        let mut changed_files = 0;
+        for path in previous.entries.keys().chain(staging.entries.keys()) {
+            if previous.entries.get(path) == staging.entries.get(path) { continue; }
+            let Some(source) = path.components().next().and_then(|c| c.as_os_str().to_str()) else { return Err("LOCAL_WATCH_UNSAFE_PATH".into()); };
+            if !staging.sources.contains_key(source) { return Err("LOCAL_WATCH_SOURCE_MAP_CHANGED".into()); }
+            let parent = targeted_parent(path, staging.entries.contains_key(path), &staging).unwrap_or_else(|| Path::new(source));
+            let parent = parent.to_str().ok_or("LOCAL_WATCH_UNSAFE_PATH")?;
+            if !is_safe_relative_mpd_uri(parent) { return Err("LOCAL_WATCH_UNSAFE_PATH".into()); }
+            directories.insert(parent.to_string()); changed_files += 1;
+            // Compress a large structural batch to its involved sources. This
+            // bounds commands without dropping work or scanning other sources.
+            if directories.len() > MAX_TARGETED_DIRECTORIES {
+                directories = directories.iter().map(|p| p.split('/').next().unwrap().to_owned()).collect();
+            }
+        }
+        let directories = directories.iter().filter(|path| !Path::new(path).ancestors().skip(1).any(|parent| parent.to_str().is_some_and(|p| directories.contains(p)))).cloned().collect();
+        Ok(ManagedRefreshPlan::Targeted { directories, changed_files })
     }
 
     pub(crate) fn plan_added_sources_refresh(
@@ -1148,16 +2012,8 @@ pub(crate) mod mirror {
         if staging.sources != prepared.manifest.sources {
             return Err("A staging mudou durante o planejamento da remoção.".to_string());
         }
-        if staging.sources.iter().any(|(id, root)| previous.sources.get(id) != Some(root)) {
-            return Ok(None);
-        }
-        let removed_ids = previous.sources.keys()
-            .filter(|id| !staging.sources.contains_key(*id)).cloned().collect::<Vec<_>>();
-        if removed_ids.is_empty() || removed_ids.len() > MAX_TARGETED_DIRECTORIES
-            || removed_ids.iter().any(|id| !is_safe_relative_mpd_uri(id))
-        {
-            return Ok(None);
-        }
+        let Some(consent) = removal_consent_ids(&previous.sources, &staging.sources) else { return Ok(None); };
+        let removed_ids = consent.removed_ids;
         let surviving_entries = previous.entries.iter().filter(|(path, _)| {
             path.components().next().and_then(|part| part.as_os_str().to_str())
                 .is_some_and(|id| staging.sources.contains_key(id))
@@ -1179,6 +2035,11 @@ pub(crate) mod mirror {
         previous: &ManagedGenerationSnapshot,
         staging: &ManagedGenerationSnapshot,
     ) -> ManagedRefreshPlan {
+        if previous.registry_id.is_none() && staging.registry_id.is_some()
+            && previous.sources == staging.sources && previous.entries == staging.entries
+        {
+            return ManagedRefreshPlan::MetadataOnly;
+        }
         if previous.sources != staging.sources {
             return ManagedRefreshPlan::Full;
         }
@@ -1271,6 +2132,7 @@ pub(crate) mod mirror {
     ) {
         let (strategy, changed_files, directories) = match refresh_plan {
             _ if outcome == "unchanged" => ("none", 0, 0),
+            ManagedRefreshPlan::MetadataOnly => ("metadata", 0, 0),
             ManagedRefreshPlan::Full => ("full", 0, 0),
             ManagedRefreshPlan::Targeted {
                 directories,
@@ -1295,6 +2157,9 @@ pub(crate) mod mirror {
         let root = OpenRoot::open(path)?;
         let manifest = read_manifest_at(root.directory.as_raw_fd())?;
         validate_manifest_roots(&manifest)?;
+        if let Some(namespace) = &manifest.registry_id {
+            crate::source_identity::check_manifest(path, namespace, &manifest.sources)?;
+        }
         let allowed_sources = manifest
             .sources
             .keys()
@@ -1326,6 +2191,7 @@ pub(crate) mod mirror {
             )?;
         }
         Ok(ManagedGenerationSnapshot {
+            registry_id: manifest.registry_id,
             sources: manifest.sources,
             entries,
         })
@@ -1803,54 +2669,13 @@ pub(crate) mod mirror {
         }
     }
 
-    fn allocate_source_ids(
-        roots: &[PathBuf],
-        existing: &BTreeMap<String, PathBuf>,
-    ) -> Result<BTreeMap<String, PathBuf>, String> {
-        for source_id in existing.keys() {
-            if valid_source_id(source_id).is_none() {
-                return Err(format!("Source ID existente inválido: {source_id}"));
-            }
-        }
-        let mut by_target = existing
-            .iter()
-            .map(|(id, root)| (root.clone(), id.clone()))
-            .collect::<HashMap<_, _>>();
-        let mut used = existing.keys().cloned().collect::<HashSet<_>>();
-        used.insert(MANIFEST_NAME.to_string());
-        let mut allocated = BTreeMap::new();
-        for root in roots {
-            let source_id = if let Some(existing) = by_target.get(root) {
-                existing.clone()
-            } else {
-                let base = root
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .unwrap_or("Musicas")
-                    .to_string();
-                let mut candidate = base.clone();
-                let mut suffix = 2;
-                while used.contains(&candidate) {
-                    candidate = format!("{base} ({suffix})");
-                    suffix += 1;
-                }
-                used.insert(candidate.clone());
-                by_target.insert(root.clone(), candidate.clone());
-                candidate
-            };
-            if allocated.insert(source_id.clone(), root.clone()).is_some() {
-                return Err(format!("Source ID duplicado durante alocação: {source_id}"));
-            }
-        }
-        Ok(allocated)
-    }
-
     fn scan_source(root: &Path) -> Result<ScannedSource, String> {
         let mut source = ScannedSource {
             root: root.to_path_buf(),
             files: Vec::new(),
             playable: HashSet::new(),
             cues: Vec::new(),
+            excluded: 0,
         };
         scan_directory(root, root, &mut source)?;
         Ok(source)
@@ -1878,6 +2703,7 @@ pub(crate) mod mirror {
             }
             let class = classify_path(&physical);
             if class == LocalMediaClass::Ignored {
+                source.excluded += 1;
                 continue;
             }
             let relative = physical
@@ -1903,9 +2729,14 @@ pub(crate) mod mirror {
         staging: &Path,
         source_id: &str,
         source: &ScannedSource,
+        coverage: &mut crate::index_coverage::Inventory,
     ) -> Result<(), String> {
+        coverage.exclude(source_id, source.excluded);
         for file in &source.files {
-            publish_link(staging, source_id, file)?;
+            let metadata = publish_link(staging, source_id, file)?;
+            if classify_path(&file.physical) == LocalMediaClass::PlayableAudio {
+                coverage.observe(source_id, &file.relative, &file.physical, crate::index_coverage::Kind::Audio, &metadata)?;
+            }
         }
         for cue in &source.cues {
             if cue_targets(cue, &source.root, &source.playable)? == CueDisposition::Publish {
@@ -1913,29 +2744,31 @@ pub(crate) mod mirror {
                     .strip_prefix(&source.root)
                     .map_err(|_| "CUE escapou da root durante publicação.".to_string())?
                     .to_path_buf();
-                publish_link(
+                let metadata = publish_link(
                     staging,
                     source_id,
                     &ScannedFile {
                         physical: cue.clone(),
-                        relative,
+                        relative: relative.clone(),
                     },
                 )?;
-            }
+                coverage.observe(source_id, &relative, cue, crate::index_coverage::Kind::Cue, &metadata)?;
+            } else { coverage.exclude(source_id, 1); }
         }
         Ok(())
     }
 
-    fn publish_link(staging: &Path, source_id: &str, file: &ScannedFile) -> Result<(), String> {
-        validate_publishable_file(&file.physical)?;
+    fn publish_link(staging: &Path, source_id: &str, file: &ScannedFile) -> Result<fs::Metadata, String> {
+        let metadata = publishable_file_metadata(&file.physical)?;
         let destination = staging.join(source_id).join(&file.relative);
         let parent = destination
             .parent()
             .ok_or_else(|| "Destino do mirror sem diretório pai.".to_string())?;
-        fs::create_dir_all(parent)
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)
             .map_err(|error| format!("Falha ao criar diretório virtual: {error}"))?;
         symlink(&file.physical, &destination)
-            .map_err(|error| format!("Falha ao publicar symlink filtrado: {error}"))
+            .map_err(|error| format!("Falha ao publicar symlink filtrado: {error}"))?;
+        Ok(metadata)
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2060,7 +2893,9 @@ pub(crate) mod mirror {
                 && matches!(bytes[2], b'/' | b'\\'))
     }
 
-    fn validate_publishable_file(path: &Path) -> Result<(), String> {
+    fn validate_publishable_file(path: &Path) -> Result<(), String> { publishable_file_metadata(path).map(|_| ()) }
+
+    fn publishable_file_metadata(path: &Path) -> Result<fs::Metadata, String> {
         let metadata = fs::symlink_metadata(path).map_err(|error| {
             format!(
                 "Arquivo selecionado indisponível ({}): {error}",
@@ -2073,7 +2908,7 @@ pub(crate) mod mirror {
                 path.display()
             ));
         }
-        Ok(())
+        Ok(metadata)
     }
 
     fn validate_published_links(
@@ -2118,8 +2953,13 @@ pub(crate) mod mirror {
         Ok(())
     }
 
-    fn validate_manifest(manifest: &MirrorManifest) -> Result<(), String> {
-        if manifest.schema_version != MIRROR_SCHEMA_VERSION {
+    pub(crate) fn validate_manifest(manifest: &MirrorManifest) -> Result<(), String> {
+        if !matches!(
+            (manifest.schema_version, manifest.registry_id.as_deref()),
+            (1, None) | (2, Some(_))
+        ) || manifest.registry_id.as_deref()
+            .is_some_and(|id| !crate::source_identity::valid_namespace(id))
+        {
             return Err(format!(
                 "Schema de mirror não suportado: {}",
                 manifest.schema_version
@@ -2195,7 +3035,7 @@ pub(crate) mod mirror {
         Ok(())
     }
 
-    fn valid_source_id(value: &str) -> Option<String> {
+    pub(crate) fn valid_source_id(value: &str) -> Option<String> {
         if value == MANIFEST_NAME {
             return None;
         }
@@ -3237,6 +4077,232 @@ pub(crate) mod mirror {
             );
         }
 
+
+        fn namespace_migration_fixture() -> (Fixture, PathBuf, PathBuf, MirrorBuildResult) {
+            let fixture = Fixture::new("metadata-only-upgrade");
+            let music = fixture.path("Music");
+            let live = fixture.path("library");
+            let next = fixture.path("library.next");
+            write(&music.join("Album/track.flac"), b"fixture");
+            fs::create_dir_all(live.join("Existing/Album")).unwrap();
+            symlink(
+                music.join("Album/track.flac"),
+                live.join("Existing/Album/track.flac"),
+            )
+            .unwrap();
+            write_manifest(
+                &live,
+                &MirrorManifest {
+                    schema_version: 1,
+                    generation_id: "old-v1".into(),
+                    registry_id: None,
+                    sources: BTreeMap::from([("Existing".into(), music.clone())]),
+                },
+            )
+            .unwrap();
+            let prepared = expect_prepared(prepare_managed_generation(
+                &live,
+                &next,
+                &[music.clone()],
+                "identity-upgrade",
+            ));
+            assert_eq!(prepared.refresh_plan, ManagedRefreshPlan::MetadataOnly);
+            (fixture, music, live, prepared)
+        }
+        #[test]
+        fn metadata_migration_is_confirmed_once_without_mpd_and_real_change_still_refreshes() {
+            let (fixture, music, live, prepared) = namespace_migration_fixture();
+            assert_eq!(
+                crate::library_refresh::refresh(
+                    "never-open-a-socket",
+                    &prepared.refresh_plan,
+                    true,
+                    || false
+                )
+                .unwrap(),
+                crate::library_refresh::Outcome::Completed
+            );
+            let publication = publish_prepared_managed_generation(&live, &prepared).unwrap();
+            publication.cleanup_previous_durable().unwrap();
+            assert_eq!(read_manifest(&live).unwrap().schema_version, 2);
+            assert_eq!(
+                prepare_managed_generation(
+                    &live,
+                    &fixture.path("library.next"),
+                    &[music.clone()],
+                    "again"
+                )
+                .unwrap(),
+                ManagedGenerationPreparation::Unchanged
+            );
+            write(&music.join("Album/added.flac"), b"added");
+            let changed = expect_prepared(prepare_managed_generation(
+                &live,
+                &fixture.path("library.next"),
+                &[music],
+                "media-changed",
+            ));
+            assert_ne!(changed.refresh_plan, ManagedRefreshPlan::MetadataOnly);
+        }
+
+        #[test]
+        fn explicit_rescan_keeps_a_generation_until_audit_or_cancel_even_when_equivalent() {
+            let (fixture, music, live, prepared) = namespace_migration_fixture();
+            publish_prepared_managed_generation(&live, &prepared)
+                .unwrap()
+                .cleanup_previous_durable()
+                .unwrap();
+            let forced = expect_prepared(prepare_managed_generation_for_refresh(
+                &live,
+                &fixture.path("library.next"),
+                &[music],
+                "manual-rescan",
+                true,
+            ));
+            assert_eq!(forced.refresh_plan, ManagedRefreshPlan::Full);
+            let publication = publish_prepared_managed_generation(&live, &forced).unwrap();
+            let result =
+                crate::library_refresh::finish(Ok(crate::library_refresh::Outcome::Cancelled), |_| {
+                    panic!("no implicit recovery")
+                });
+            assert!(result.is_err());
+            assert!(fixture.path("library.next").is_dir());
+            assert!(crate::managed_save_intent::check_startup(&fixture.root).is_err());
+            // Only the fixture explicitly proves/rolls back its own publication.
+            publication.rollback().unwrap();
+            publication.cleanup_rejected_after_rollback().unwrap();
+        }
+        #[test]
+        fn metadata_only_flag_cannot_hide_a_change_after_the_publication_guard() {
+            let (_fixture, music, live, prepared) = namespace_migration_fixture();
+            let before = fs::read(live.join(MANIFEST_NAME)).unwrap();
+            let result = publish_prepared_managed_generation_guarded(&live, &prepared, || {
+                write(&music.join("Album/new.flac"), b"new");
+                symlink(
+                    music.join("Album/new.flac"),
+                    prepared.staging_path.join("Existing/Album/new.flac"),
+                )
+                .unwrap();
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert_eq!(fs::read(live.join(MANIFEST_NAME)).unwrap(), before);
+            assert!(prepared.staging_path.is_dir());
+        }
+
+        #[test]
+        fn metadata_manifest_changed_by_guard_is_not_published_as_the_synced_manifest() {
+            let (_fixture,_music,live,prepared)=namespace_migration_fixture();
+            let result=publish_prepared_managed_generation_guarded(&live,&prepared,||{
+                let mut changed=read_manifest(&prepared.staging_path)?;
+                changed.generation_id="different-attempt".into();write_manifest(&prepared.staging_path,&changed)
+            });
+            assert!(result.is_err());assert_eq!(read_manifest(&live).unwrap().schema_version,1);
+        }
+        #[test]
+        fn metadata_parent_replacement_during_fsync_cannot_claim_durable_confirmation() {
+            let (fixture,_music,live,prepared)=namespace_migration_fixture();
+            let moved=fixture.root.with_extension("moved");assert!(!moved.exists());
+            let result=publish_prepared_with_sync(&live,&prepared,||Ok(()),|_|{
+                fs::rename(&fixture.root,&moved).unwrap();fs::create_dir(&fixture.root).unwrap();Ok(())
+            });
+            assert!(result.unwrap_err().starts_with(PUBLICATION_UNCONFIRMED));
+            fs::remove_dir(&fixture.root).unwrap();fs::rename(&moved,&fixture.root).unwrap();
+            assert_eq!(read_manifest(&live).unwrap().schema_version,2);assert_eq!(read_manifest(&prepared.staging_path).unwrap().schema_version,1);
+        }
+
+        #[test]
+        fn metadata_migration_faults_before_and_after_exchange_preserve_identity_history() {
+            for after_exchange in [false, true] {
+                let (fixture, _music, live, prepared) = namespace_migration_fixture();
+                let ledger = fixture.path("local-source-identities.json");
+                let history = fs::read(&ledger).unwrap();
+                let result = publish_prepared_with_sync(
+                    &live,
+                    &prepared,
+                    || {
+                        if after_exchange {
+                            Ok(())
+                        } else {
+                            Err("injected before exchange".into())
+                        }
+                    },
+                    |_| Err("injected parent fsync".into()),
+                );
+                let error = result.unwrap_err();
+                assert_eq!(error.starts_with(PUBLICATION_UNCONFIRMED), after_exchange);
+                assert_eq!(
+                    read_manifest(&live).unwrap().schema_version,
+                    if after_exchange { 2 } else { 1 }
+                );
+                assert_eq!(
+                    read_manifest(&prepared.staging_path)
+                        .unwrap()
+                        .schema_version,
+                    if after_exchange { 1 } else { 2 }
+                );
+                assert_eq!(fs::read(ledger).unwrap(), history);
+                if after_exchange {
+                    assert!(crate::managed_save_intent::check_startup(&fixture.root).is_err());
+                }
+            }
+        }
+        #[test]
+        fn metadata_cleanup_failure_does_not_rollback_confirmed_generation_or_release_ids() {
+            let (fixture, _music, live, prepared) = namespace_migration_fixture();
+            let history = fs::read(fixture.path("local-source-identities.json")).unwrap();
+            let publication = publish_prepared_managed_generation(&live, &prepared).unwrap();
+            write(&prepared.staging_path.join("foreign-file"), b"keep");
+            assert!(publication.cleanup_previous_durable().is_err());
+            assert_eq!(read_manifest(&live).unwrap().schema_version, 2);
+            assert!(prepared.staging_path.join("foreign-file").exists());
+            assert_eq!(
+                fs::read(fixture.path("local-source-identities.json")).unwrap(),
+                history
+            );
+        }
+
+        #[test]
+        fn indexed_source_removal_reuses_survivors_without_discovering_or_parsing_changes() {
+            let f=Fixture::new("indexed-removal");let keep=f.path("Keep");let remove=f.path("Remove");
+            write(&keep.join("Album/track.flac"),b"fixture");
+            write(&keep.join("Album/folder.jpg"),b"artwork");
+            write(&keep.join("Album/disc.cue"),b"FILE \"track.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n");
+            write(&remove.join("old.flac"),b"removed");
+            let live=build_generation(&f,"library",&f.path("absent"),&[keep.clone(),remove],"before");
+            let original=managed_generation_snapshot(&live).unwrap();
+            write(&keep.join("New Album/new.flac"),b"not requested");
+            // A removal does not reinterpret CUE content in a surviving source.
+            write(&keep.join("Album/disc.cue"),b"changed contents await an explicit manual check");
+            let next=f.path("library.next");
+            let ManagedGenerationPreparation::Prepared(prepared)=prepare_managed_generation(&live,&next,&[keep.clone()],"remove-source").unwrap() else {panic!("prepared")};
+            assert!(!next.join("Keep/New Album").exists());assert!(next.join("Keep/Album/disc.cue").is_symlink());
+            assert!(next.join("Keep/Album/folder.jpg").is_symlink());assert!(!next.join("Remove").exists());
+            assert_eq!(managed_generation_snapshot(&live).unwrap(),original);
+            assert_eq!(plan_removed_sources_refresh(&live,&prepared).unwrap().unwrap().removed_ids,vec!["Remove"]);
+            prepared.coverage.verify().unwrap();
+            let explicit=f.path("library.check");
+            let ManagedGenerationPreparation::Prepared(checked)=prepare_managed_generation_for_refresh(&live,&explicit,&[keep],"manual-check",true).unwrap() else {panic!("explicit check")};
+            assert!(explicit.join("Keep/New Album/new.flac").is_symlink());
+            assert!(!explicit.join("Keep/Album/disc.cue").exists());
+            cleanup_prepared_managed_generation(&prepared).unwrap();cleanup_prepared_managed_generation(&checked).unwrap();
+        }
+
+        #[test]
+        fn indexed_source_removal_rejects_changed_or_unsafe_mirror_and_preserves_existing_staging() {
+            let f=Fixture::new("indexed-removal-refusal");let keep=f.path("Keep");let remove=f.path("Remove");
+            write(&keep.join("track.flac"),b"fixture");write(&remove.join("old.flac"),b"removed");
+            let live=build_generation(&f,"library",&f.path("absent"),&[keep.clone(),remove],"before");
+            let next=f.path("library.next");
+            fs::create_dir(&next).unwrap();fs::write(next.join("preserved"),b"preserved").unwrap();
+            assert!(prepare_managed_generation(&live,&next,&[keep.clone()],"remove-source").is_err());
+            assert_eq!(fs::read(next.join("preserved")).unwrap(),b"preserved");fs::remove_dir_all(&next).unwrap();
+            fs::remove_file(live.join("Keep/track.flac")).unwrap();
+            symlink(f.path("outside.flac"),live.join("Keep/track.flac")).unwrap();
+            assert!(prepare_managed_generation(&live,&next,&[keep],"remove-source").is_err());
+            assert!(!next.exists());assert!(live.join("Remove/old.flac").is_symlink());
+        }
+
         #[test]
         fn managed_generation_preparation_discards_equivalent_staging() {
             let fixture = Fixture::new("prepare-equivalent");
@@ -3401,7 +4467,7 @@ pub(crate) mod mirror {
         }
 
         #[test]
-        fn settings_save_pure_removal_keeps_cue_entries_and_rejects_mixed_changes() {
+        fn settings_save_pure_removal_keeps_indexed_cues_and_leaves_physical_changes_for_manual_check() {
             let fixture = Fixture::new("save-pure-removal");
             let kept = fixture.path("Mantida Á");
             let removed = fixture.path("Removida B");
@@ -3431,11 +4497,20 @@ pub(crate) mod mirror {
             assert_eq!(fs::read(kept.join("Álbum/image.flac")).unwrap(), original);
             assert_eq!(fs::read(removed.join("old.flac")).unwrap(), b"removed");
 
-            // Removal plus any surviving-entry change must retain full refresh.
+            // An ordinary removal must not discover unrelated physical changes.
             write(&kept.join("new.flac"), b"new");
-            let mixed = expect_prepared(prepare_managed_generation(
-                &live, &fixture.path("mixed.next"), std::slice::from_ref(&kept), "mixed",
+            let removal = expect_prepared(prepare_managed_generation(
+                &live, &fixture.path("mixed.next"), std::slice::from_ref(&kept), "remove-only",
             ));
+            assert!(plan_removed_sources_refresh(&live, &removal).unwrap().is_some());
+            assert!(!removal.staging_path.join("Mantida Á/new.flac").exists());
+            cleanup_prepared_managed_generation(&removal).unwrap();
+            // A separately requested physical refresh retains the original full
+            // mixed-change classification and cannot masquerade as pure removal.
+            let mixed = expect_prepared(prepare_managed_generation_for_refresh(
+                &live, &fixture.path("mixed.next"), std::slice::from_ref(&kept), "explicit-check", true,
+            ));
+            assert!(mixed.staging_path.join("Mantida Á/new.flac").is_symlink());
             assert_eq!(plan_removed_sources_refresh(&live, &mixed).unwrap(), None);
             cleanup_prepared_managed_generation(&mixed).unwrap();
             fs::remove_file(kept.join("new.flac")).unwrap();
@@ -3738,6 +4813,38 @@ pub(crate) mod mirror {
             assert_eq!(prepared.refresh_plan, ManagedRefreshPlan::Full);
             assert!(is_managed_generation(&staging));
             assert_eq!(fs::read_link(live.join("Existing ID")).unwrap(), legacy_target);
+        }
+
+        #[test]
+        fn explicit_incremental_check_large_cue_batch_preserves_other_source_scope() {
+            let fixture=Fixture::new("explicit-check-scoped");
+            let music=fixture.path("Music");let other=fixture.path("Other");
+            write(&music.join("Album/existing.flac"),b"existing");
+            write(&other.join("untouched.flac"),b"untouched");
+            let roots=vec![music.clone(),other.clone()];
+            let live=build_generation(&fixture,"library",&fixture.path("missing-live"),&roots,"before");
+            for i in 0..40 {write(&music.join(format!("Album/new-{i}.flac")),b"new");}
+            write(&music.join("Album/image.cue"),b"FILE \"existing.flac\" WAVE\nTRACK 01 AUDIO\n");
+            let prepared=expect_prepared(prepare_managed_generation_for_refresh(&live,&fixture.path("library.next"),&roots,"check",true));
+            let id=prepared.manifest.sources.iter().find(|(_,root)|**root==music).unwrap().0;
+            let plan=crate::explicit_incremental_check_plan(plan_filesystem_refresh(&live,&prepared).unwrap(),&prepared.manifest.sources).unwrap();
+            assert!(matches!(plan,ManagedRefreshPlan::Targeted{directories,..} if directories==vec![format!("{id}/Album")]));
+            assert_eq!(fs::read(other.join("untouched.flac")).unwrap(),b"untouched");
+            cleanup_managed_generation(&prepared.staging_path).unwrap();
+        }
+
+        #[test]
+        fn explicit_incremental_check_same_paths_uses_source_updates_for_changed_tags() {
+            let fixture=Fixture::new("explicit-check-same-path");let music=fixture.path("Music");
+            write(&music.join("song.flac"),b"old");
+            let roots=vec![music.clone()];
+            let live=build_generation(&fixture,"library",&fixture.path("missing-live"),&roots,"before");
+            write(&music.join("song.flac"),b"changed tags at same path");
+            let prepared=expect_prepared(prepare_managed_generation_for_refresh(&live,&fixture.path("library.next"),&roots,"check",true));
+            let expected=prepared.manifest.sources.keys().cloned().collect::<Vec<_>>();
+            let plan=crate::explicit_incremental_check_plan(plan_filesystem_refresh(&live,&prepared).unwrap(),&prepared.manifest.sources).unwrap();
+            assert_eq!(plan,ManagedRefreshPlan::Targeted{directories:expected,changed_files:0});
+            cleanup_managed_generation(&prepared.staging_path).unwrap();
         }
 
         #[test]
@@ -4786,6 +5893,19 @@ pub(crate) mod mirror {
         }
 
         #[test]
+        fn removal_consent_ids_are_not_an_addition_rebind_or_oversized_plan() {
+            let before=BTreeMap::from([("Keep".into(),PathBuf::from("/fixture/Keep")),("Remove".into(),PathBuf::from("/fixture/Remove"))]);
+            let kept=BTreeMap::from([("Keep".into(),PathBuf::from("/fixture/Keep"))]);
+            assert_eq!(removal_consent_ids(&before,&kept),Some(RemovalConsentSources {removed_ids:vec!["Remove".into()],remaining_ids:vec!["Keep".into()]}));
+            assert!(removal_consent_ids(&before,&before).is_none());
+            let rebound=BTreeMap::from([("Keep".into(),PathBuf::from("/fixture/Replacement"))]);
+            assert!(removal_consent_ids(&before,&rebound).is_none());
+            assert!(removal_consent_ids(&kept,&before).is_none());
+            let many=(0..=MAX_TARGETED_DIRECTORIES).map(|n|(format!("Source{n}"),PathBuf::from(format!("/fixture/{n}")))).collect();
+            assert!(removal_consent_ids(&many,&BTreeMap::new()).is_none());
+        }
+
+        #[test]
         fn managed_generation_preserves_reordered_survivors_and_allocates_new_collisions() {
             let fixture = Fixture::new("managed-next");
             let first = fixture.path("one/Music");
@@ -4868,7 +5988,7 @@ pub(crate) mod mirror {
                 fs::canonicalize(&first).unwrap()
             );
             assert_eq!(
-                added.manifest.sources["Music (2)"],
+                added.manifest.sources["Music (3)"],
                 fs::canonicalize(&new_root).unwrap()
             );
         }
@@ -4937,7 +6057,7 @@ pub(crate) mod mirror {
             let duplicate_root = fixture.path("duplicate-root");
             fs::create_dir(&duplicate_root).unwrap();
             let duplicate_json = serde_json::json!({
-                "schema_version": MIRROR_SCHEMA_VERSION,
+                "schema_version": 1,
                 "generation_id": "duplicate-root",
                 "sources": {
                     "Music": canonical_music,
@@ -4959,7 +6079,8 @@ pub(crate) mod mirror {
             let incompatible = fixture.path("incompatible");
             fs::create_dir(&incompatible).unwrap();
             let manifest = MirrorManifest {
-                schema_version: MIRROR_SCHEMA_VERSION,
+                schema_version: 1,
+                registry_id: None,
                 generation_id: "incompatible".to_string(),
                 sources: BTreeMap::from([("Music".to_string(), canonical_music)]),
             };
@@ -5320,7 +6441,8 @@ pub(crate) mod mirror {
             fs::create_dir(&generation).unwrap();
             let physical = fs::canonicalize(&fixture.root).unwrap();
             let manifest = MirrorManifest {
-                schema_version: MIRROR_SCHEMA_VERSION,
+                schema_version: 1,
+                registry_id: None,
                 generation_id: "generation-1".to_string(),
                 sources: BTreeMap::from([("Music".to_string(), physical.clone())]),
             };
@@ -5369,7 +6491,8 @@ pub(crate) mod mirror {
             );
 
             let invalid_manifest = MirrorManifest {
-                schema_version: MIRROR_SCHEMA_VERSION,
+                schema_version: 1,
+                registry_id: None,
                 generation_id: "reserved-id".to_string(),
                 sources: BTreeMap::from([(
                     MANIFEST_NAME.to_string(),
@@ -5434,7 +6557,8 @@ pub(crate) mod mirror {
             )
             .unwrap();
             let manifest = MirrorManifest {
-                schema_version: MIRROR_SCHEMA_VERSION,
+                schema_version: 1,
+                registry_id: None,
                 generation_id: "cleanup-test".to_string(),
                 sources: BTreeMap::from([(
                     "Music".to_string(),
@@ -5464,7 +6588,8 @@ pub(crate) mod mirror {
             write_manifest(
                 &generation,
                 &MirrorManifest {
-                    schema_version: MIRROR_SCHEMA_VERSION,
+                    schema_version: 1,
+                registry_id: None,
                     generation_id: "manifest-last".to_string(),
                     sources: BTreeMap::from([(
                         "Music".to_string(),
@@ -5508,7 +6633,8 @@ pub(crate) mod mirror {
             write_manifest(
                 &generation,
                 &MirrorManifest {
-                    schema_version: MIRROR_SCHEMA_VERSION,
+                    schema_version: 1,
+                registry_id: None,
                     generation_id: "retry".to_string(),
                     sources: BTreeMap::from([(
                         "Music".to_string(),
@@ -5552,7 +6678,8 @@ pub(crate) mod mirror {
             write_manifest(
                 &generation,
                 &MirrorManifest {
-                    schema_version: MIRROR_SCHEMA_VERSION,
+                    schema_version: 1,
+                registry_id: None,
                     generation_id: "removal-swap".to_string(),
                     sources: BTreeMap::from([(
                         "Music".to_string(),
@@ -5593,7 +6720,8 @@ pub(crate) mod mirror {
             write_manifest(
                 &generation,
                 &MirrorManifest {
-                    schema_version: MIRROR_SCHEMA_VERSION,
+                    schema_version: 1,
+                registry_id: None,
                     generation_id: "unknown-before-unlink".to_string(),
                     sources: BTreeMap::from([(
                         "Music".to_string(),
@@ -5618,7 +6746,8 @@ pub(crate) mod mirror {
             write_manifest(
                 &generation,
                 &MirrorManifest {
-                    schema_version: MIRROR_SCHEMA_VERSION,
+                    schema_version: 1,
+                registry_id: None,
                     generation_id: "late-unknown".to_string(),
                     sources: BTreeMap::from([(
                         "Music".to_string(),
@@ -5665,7 +6794,8 @@ pub(crate) mod mirror {
             write_manifest(
                 &unexpected_regular,
                 &MirrorManifest {
-                    schema_version: MIRROR_SCHEMA_VERSION,
+                    schema_version: 1,
+                registry_id: None,
                     generation_id: "unexpected-regular".to_string(),
                     sources: BTreeMap::from([("Music".to_string(), physical_root.clone())]),
                 },
@@ -5682,7 +6812,8 @@ pub(crate) mod mirror {
             write_manifest(
                 &actual_generation,
                 &MirrorManifest {
-                    schema_version: MIRROR_SCHEMA_VERSION,
+                    schema_version: 1,
+                registry_id: None,
                     generation_id: "actual-generation".to_string(),
                     sources: BTreeMap::new(),
                 },
@@ -5710,7 +6841,8 @@ pub(crate) mod mirror {
             write_manifest(
                 &generation,
                 &MirrorManifest {
-                    schema_version: MIRROR_SCHEMA_VERSION,
+                    schema_version: 1,
+                registry_id: None,
                     generation_id: "race".to_string(),
                     sources: BTreeMap::from([(
                         "Music".to_string(),
@@ -5810,6 +6942,82 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn xrcd_path_binding_accepts_only_terminal_separators() {
+        let sources = BTreeMap::from([
+            ("XRCD".into(), PathBuf::from("/media/XRCD")),
+            ("Álbuns".into(), PathBuf::from("/media/Álbuns")),
+        ]);
+        for configured in [
+            vec!["/media/XRCD", "/media/Álbuns"],
+            vec!["/media/Álbuns/", "/media/XRCD/"],
+            vec!["/media/XRCD///", "/media/Álbuns"],
+        ] {
+            assert!(configured_source_binding_matches(
+                &configured.into_iter().map(String::from).collect::<Vec<_>>(), &sources));
+        }
+    }
+
+    #[test]
+    fn xrcd_path_binding_refuses_duplicate_and_changed_roots() {
+        let sources = BTreeMap::from([
+            ("XRCD".into(), PathBuf::from("/media/XRCD")),
+            ("Jazz".into(), PathBuf::from("/media/Jazz")),
+        ]);
+        for first in ["/media/Jazz/", "/other/XRCD/", "/alias/XRCD/",
+            "/media/./XRCD/", "/media/other/../XRCD/", "/media//XRCD/",
+            "//media/XRCD/", "media/XRCD/"] {
+            assert!(!configured_source_binding_matches(
+                &[first.into(), "/media/Jazz".into()], &sources), "{first}");
+        }
+        assert!(!configured_source_binding_matches(&["/media/XRCD/".into()], &sources));
+    }
+
+    #[test]
+    fn xrcd_path_binding_preserves_limits_and_root_semantics() {
+        let empty = BTreeMap::new();
+        assert!(configured_source_binding_matches(&[], &empty));
+        let root = BTreeMap::from([("root".into(), PathBuf::from("/"))]);
+        assert!(configured_source_binding_matches(&["/".into()], &root));
+        assert!(!configured_source_binding_matches(&["///".into()], &root));
+        let long = format!("/{}", "a".repeat(4096));
+        let sources = BTreeMap::from([("long".into(), PathBuf::from(&long))]);
+        assert!(!configured_source_binding_matches(&[long], &sources));
+        let configured: Vec<_> = (0..65_537).map(|i| format!("/root/{i}")).collect();
+        let sources = configured.iter().enumerate()
+            .map(|(i, p)| (i.to_string(), PathBuf::from(p))).collect();
+        assert!(!configured_source_binding_matches(&configured, &sources));
+    }
+
+    #[test]
+    fn source_labels_keep_reserved_ids_internal_and_preserve_real_suffixes() {
+        let sources = BTreeMap::from([
+            ("XRCD (3)".into(), PathBuf::from("/unmounted/music/XRCD")),
+            ("Real (2)".into(), PathBuf::from("/unmounted/music/Real (2)")),
+        ]);
+        let labels = source_display_labels(&sources);
+        assert_eq!(labels["XRCD (3)"], "XRCD");
+        assert_eq!(labels["Real (2)"], "Real (2)");
+        assert_eq!(sources["XRCD (3)"], PathBuf::from("/unmounted/music/XRCD"));
+        assert!(!serde_json::to_string(&labels).unwrap().contains("/unmounted"));
+    }
+
+    #[test]
+    fn source_labels_keep_distinct_active_roots_and_avoid_fallback_collisions() {
+        let sources = BTreeMap::from([
+            ("Music (2)".into(), PathBuf::from("/one/Music")),
+            ("Music (4)".into(), PathBuf::from("/two/Music")),
+            ("Other".into(), PathBuf::from("/three/Music (2)")),
+            ("Fallback".into(), PathBuf::from("/four/bad\nname")),
+        ]);
+        let labels = source_display_labels(&sources);
+        assert_eq!(labels["Music (2)"], "Music (2)");
+        assert_eq!(labels["Music (4)"], "Music (4)");
+        assert_eq!(labels["Other"], "Other");
+        assert_eq!(labels["Fallback"], "Fallback");
+        assert_eq!(labels.values().collect::<std::collections::BTreeSet<_>>().len(), sources.len());
+    }
 
     static NEXT_RESOLVER_ID: AtomicU64 = AtomicU64::new(0);
 

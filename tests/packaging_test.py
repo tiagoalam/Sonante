@@ -234,7 +234,7 @@ else: raise SystemExit(2)
                 entry.size = len(payload)
                 stream.addfile(entry, io.BytesIO(payload))
             fake_git = root / 'git'
-            fake_git.write_text(f'#!/bin/sh\nexec cat {shlex.quote(str(archive))}\n')
+            fake_git.write_text(f'#!/bin/sh\ncase \" $* \" in *\" status \"*) exit 0;; esac\nexec cat {shlex.quote(str(archive))}\n')
             fake_git.chmod(0o700)
             result = subprocess.run(['bash', 'scripts/prepare-arch-ci.sh', str(root / 'stage')],
                                     env={**os.environ, 'PATH': f'{root}:{os.environ["PATH"]}'}, capture_output=True, text=True)
@@ -242,25 +242,120 @@ else: raise SystemExit(2)
             self.assertIn('refusing mislabeled Arch package', result.stderr)
             self.assertFalse((root / 'stage' / 'PKGBUILD').exists())
 
+    def arch_checkout(self, root):
+        checkout = root / 'checkout'
+        checkout.mkdir()
+        for name, content in {
+            'package.json': '{"version":"0.5.4"}',
+            'src/source.rs': 'original source\n',
+            '.gitignore': '/dist/\n/target/\n',
+            'sonante-arch/PKGBUILD': Path('sonante-arch/PKGBUILD').read_text(),
+            'sonante-arch/sonante.desktop': Path('sonante-arch/sonante.desktop').read_text(),
+        }.items():
+            path = checkout / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        env = {**os.environ, 'GIT_CONFIG_SYSTEM': os.devnull,
+               'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_COUNT': '0',
+               'GIT_AUTHOR_NAME': 'Fixture', 'GIT_AUTHOR_EMAIL': 'fixture@example.invalid',
+               'GIT_COMMITTER_NAME': 'Fixture', 'GIT_COMMITTER_EMAIL': 'fixture@example.invalid'}
+        env.pop('GIT_CONFIG_PARAMETERS', None)
+        for args in [['init', '-q'], ['add', '.'],
+                     ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false',
+                      'commit', '-qm', 'Synthetic packaging fixture']]:
+            subprocess.run(['git', *args], cwd=checkout, env=env, check=True, capture_output=True)
+        return checkout, env
+
+    def test_arch_refuses_tracked_changes_without_version_bump(self):
+        script = Path('scripts/prepare-arch-ci.sh').resolve()
+        for change in ['unstaged', 'staged', 'deleted']:
+            with self.subTest(change=change), tempfile.TemporaryDirectory(prefix='sn-arch-dirty-') as directory:
+                root = Path(directory)
+                checkout, env = self.arch_checkout(root)
+                source = checkout / 'src/source.rs'
+                if change == 'deleted':
+                    source.unlink()
+                else:
+                    source.write_text('updated source\n')
+                if change == 'staged':
+                    subprocess.run(['git', 'add', 'src/source.rs'], cwd=checkout, env=env, check=True)
+                stage = root / 'stage'
+                result = subprocess.run(['bash', str(script), str(stage)], cwd=checkout,
+                                        env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('refusing incomplete Arch package source', result.stderr)
+                self.assertFalse(stage.exists())
+                self.assertEqual(json.loads((checkout / 'package.json').read_text())['version'], '0.5.4')
+
+    def test_arch_refuses_untracked_source_before_creating_inputs(self):
+        script = Path('scripts/prepare-arch-ci.sh').resolve()
+        with tempfile.TemporaryDirectory(prefix='sn-arch-new-') as directory:
+            root = Path(directory)
+            checkout, env = self.arch_checkout(root)
+            new_source = checkout / 'src/new-module/source.rs'
+            new_source.parent.mkdir()
+            new_source.write_text('new accepted source\n')
+            stage = root / 'stage'
+            result = subprocess.run(['bash', str(script), str(stage)], cwd=checkout,
+                                    env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('refusing incomplete Arch package source', result.stderr)
+            self.assertFalse(stage.exists())
+            self.assertEqual(new_source.read_text(), 'new accepted source\n')
+
+    def test_arch_accepts_clean_source_with_ignored_build_output(self):
+        script = Path('scripts/prepare-arch-ci.sh').resolve()
+        with tempfile.TemporaryDirectory(prefix='sn-arch-clean-') as directory:
+            root = Path(directory)
+            checkout, env = self.arch_checkout(root)
+            ignored = checkout / 'dist/index.html'
+            ignored.parent.mkdir()
+            ignored.write_text('generated assets are rebuilt by makepkg\n')
+            stage = root / 'stage'
+            subprocess.run(['bash', str(script), str(stage)], cwd=checkout, env=env,
+                           check=True, capture_output=True)
+            with tarfile.open(stage / 'sonante-source.tar') as archive:
+                self.assertEqual(archive.extractfile('sonante/src/source.rs').read(), b'original source\n')
+                self.assertNotIn('sonante/dist/index.html', archive.getnames())
+            self.assertEqual(ignored.read_text(), 'generated assets are rebuilt by makepkg\n')
+
+    def test_arch_git_status_failure_is_fatal_before_creating_inputs(self):
+        script = Path('scripts/prepare-arch-ci.sh').resolve()
+        with tempfile.TemporaryDirectory(prefix='sn-arch-status-') as directory:
+            root = Path(directory)
+            checkout, env = self.arch_checkout(root)
+            fake = root / 'fake-bin'
+            fake.mkdir()
+            git = fake / 'git'
+            git.write_text('#!/bin/sh\necho "Synthetic status failure" >&2\nexit 77\n')
+            git.chmod(0o700)
+            stage = root / 'stage'
+            result = subprocess.run(['bash', str(script), str(stage)], cwd=checkout,
+                                    env={**env, 'PATH': f'{fake}:{env["PATH"]}'}, capture_output=True)
+            self.assertEqual(result.returncode, 77)
+            self.assertFalse(stage.exists())
+
     def test_arch_archive_trust_is_scoped_to_exact_checkout(self):
         with tempfile.TemporaryDirectory(prefix='sn-arch-owner-') as directory:
             root = Path(directory)
+            checkout, fixture_env = self.arch_checkout(root)
+            script = Path('scripts/prepare-arch-ci.sh').resolve()
             config = root / 'gitconfig'
             config.write_text('')
-            env = {**os.environ, 'GIT_TEST_ASSUME_DIFFERENT_OWNER': '1',
+            env = {**fixture_env, 'GIT_TEST_ASSUME_DIFFERENT_OWNER': '1',
                    'GIT_CONFIG_GLOBAL': str(config), 'GIT_CONFIG_SYSTEM': os.devnull,
                    'GIT_CONFIG_COUNT': '0'}
             env.pop('GIT_CONFIG_PARAMETERS', None)
             archive_command = ['archive', '--format=tar', '--prefix=sonante/', 'HEAD']
-            refused = subprocess.run(['git', *archive_command], env=env, capture_output=True)
+            refused = subprocess.run(['git', *archive_command], cwd=checkout, env=env, capture_output=True)
             self.assertNotEqual(refused.returncode, 0)
             self.assertIn(b'dubious ownership', refused.stderr)
 
             stage = root / 'stage'
-            subprocess.run(['bash', 'scripts/prepare-arch-ci.sh', str(stage)],
-                           env=env, check=True, capture_output=True)
+            subprocess.run(['bash', str(script), str(stage)],
+                           cwd=checkout, env=env, check=True, capture_output=True)
             expected = subprocess.check_output(
-                ['git', '-c', f'safe.directory={Path.cwd().resolve()}', *archive_command], env=env)
+                ['git', '-c', f'safe.directory={checkout.resolve()}', *archive_command], cwd=checkout, env=env)
             source = stage / 'sonante-source.tar'
             self.assertEqual(source.read_bytes(), expected)
             self.assertEqual(stage.stat().st_mode & 0o777, 0o700)
@@ -272,7 +367,7 @@ else: raise SystemExit(2)
             hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in [source, desktop]]
             self.assertTrue(recipe.endswith(f'sha256sums=("{hashes[0]}" "{hashes[1]}")\n'))
 
-            still_refused = subprocess.run(['git', *archive_command], env=env, capture_output=True)
+            still_refused = subprocess.run(['git', *archive_command], cwd=checkout, env=env, capture_output=True)
             self.assertNotEqual(still_refused.returncode, 0)
             self.assertIn(b'dubious ownership', still_refused.stderr)
             self.assertEqual(config.read_text(), '')
@@ -292,11 +387,11 @@ else: raise SystemExit(2)
 
     def test_release_manual_dispatch_has_no_upload(self):
         release = Path('.github/workflows/release.yml').read_text()
-        self.assertIn("if: github.event_name == 'release'", release)
-        self.assertIn('needs: packages', release)
-        self.assertIn('GH_REPO:', release)
-        self.assertNotIn('gh release create', release)
-        self.assertNotIn('--clobber', release)
+        self.assertIn('workflow_dispatch:', release)
+        self.assertIn('uses: ./.github/workflows/ci.yml', release)
+        self.assertIn('contents: read', release)
+        for publishing_capability in ['release:', 'contents: write', 'gh release', 'GH_TOKEN:', 'GH_REPO:', '--clobber']:
+            self.assertNotIn(publishing_capability, release)
         ci = Path('.github/workflows/ci.yml').read_text()
         for check in ['npm run test:frontend', 'cargo test', 'cargo check', '--locked', 'inspect-elf.sh', 'inspect-packages.sh', 'makepkg', 'sha256sum -c']:
             self.assertIn(check, ci)

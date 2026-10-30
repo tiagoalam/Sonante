@@ -4,6 +4,7 @@ import {
   filterLocalAlbumsByScope,
   localLibraryScopeResetKey,
   localLibrarySourceOptions,
+  localLibraryPathLabel,
   localLibrarySelectorPresentation,
   validLocalLibrarySourceSelection,
 } from "./localLibraryScope.ts";
@@ -105,4 +106,27 @@ test("ten thousand albums filter as data while the mounted range stays small", (
   });
   assert.equal(filtered.length, 5_000);
   assert.ok((metrics.endRow - metrics.startRow) * metrics.columnCount <= 50);
+});
+
+test("reserved source IDs use supplied labels without changing scope or URI", () => {
+  const catalog = [{...album("1", "Album", "Artist", "XRCD (3)"), source_label: "XRCD"},
+    {...album("2", "Other", "Artist", "Jazz"), source_label: "Jazz"}];
+  const options = localLibrarySourceOptions(catalog);
+  assert.deepEqual(options, [{id:"Jazz",label:"Jazz"},{id:"XRCD (3)",label:"XRCD"}]);
+  assert.equal(validLocalLibrarySourceSelection("XRCD", options), null);
+  assert.equal(validLocalLibrarySourceSelection("XRCD (3)", options), "XRCD (3)");
+  assert.deepEqual(filterLocalAlbumsByScope(catalog,"XRCD (3)","").map(a=>a.id),["1"]);
+  assert.equal(localLibraryPathLabel("XRCD (3)/Album (2)",options),"XRCD/Album (2)");
+  assert.equal(catalog[0].folder_path,"XRCD (3)/1");
+});
+
+test("real suffixes, distinct active labels and unknown paths remain unchanged", () => {
+  const options=localLibrarySourceOptions([
+    {...album("1","A","Artist","Real (2)"),source_label:"Real (2)"},
+    {...album("2","B","Artist","Music"),source_label:"Music"},
+    {...album("3","C","Artist","Music (4)"),source_label:"Music (4)"},
+  ]);
+  assert.equal(localLibraryPathLabel("Real (2)",options),"Real (2)");
+  assert.equal(localLibraryPathLabel("Music (4)/Album",options),"Music (4)/Album");
+  assert.equal(localLibraryPathLabel("Unknown (8)/Album",options),"Unknown (8)/Album");
 });

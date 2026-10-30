@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   LocalAlbumCatalog,
+  confirmedCatalogPlaybackAllowed,
   emptyLocalAlbumCatalogState,
   localCatalogActivity,
+  localCatalogErrorKey,
   refreshCatalogAfterSuccessfulCheck,
   refreshCatalogAfterSuccessfulRescan,
 } from "./localAlbumCatalog.ts";
@@ -260,4 +262,103 @@ test("manual refresh during a load discards stale result and serializes the next
   pending[1]([album("fresh")]);
   await tick();
   assert.deepEqual(catalog.getSnapshot().albums.map((item) => item.id), ["fresh"]);
+});
+
+
+test("startup source admission busy waits for existing status without publishing an error", async () => {
+  let calls = 0;
+  const catalog = new LocalAlbumCatalog(async () => {
+    calls += 1;
+    if (calls === 1) throw "SOURCE_AVAILABILITY_BUSY";
+    return [album("ready")];
+  });
+  catalog.setUpdating(false, true);
+  await tick();
+  assert.equal(catalog.getSnapshot().error, null);
+  assert.equal(emptyLocalAlbumCatalogState(catalog.getSnapshot(), false), "indexing");
+  await tick();
+  assert.equal(calls, 1, "no timer, polling task or immediate retry added");
+  catalog.onMpdStatus(false);
+  await tick();
+  assert.equal(calls, 2);
+  assert.equal(catalog.getSnapshot().error, null);
+  assert.equal(catalog.getSnapshot().loaded, true);
+});
+
+test("source admission failures remain visible and never become a startup retry loop", async () => {
+  for (const code of ["SOURCE_AVAILABILITY_BLOCKED", "SOURCE_AVAILABILITY_CHANGED", "SOURCE_AVAILABILITY_UNCONFIRMED", "SOURCE_AVAILABILITY_UNSUPPORTED_FORMAT", "SOURCE_AVAILABILITY_BUSY extra"]) {
+    let calls = 0;
+    const catalog = new LocalAlbumCatalog(async () => { calls += 1; throw new Error(code); });
+    catalog.setUpdating(false, true);
+    await tick();
+    catalog.onMpdStatus(false);
+    await tick();
+    assert.equal(catalog.getSnapshot().error, code);
+    assert.equal(calls, 1);
+  }
+});
+
+
+test("a completed initial empty catalog follows later MPD indexing even outside the browser", async () => {
+  let calls = 0;
+  const catalog = new LocalAlbumCatalog(async () => { calls += 1; return calls === 1 ? [] : [album("indexed")]; });
+  catalog.ensureLoaded(false, true);
+  await tick();
+  assert.equal(catalog.getSnapshot().loaded, true);
+  assert.deepEqual(catalog.getSnapshot().albums, []);
+  catalog.onMpdStatus(true);
+  catalog.onMpdStatus(true);
+  assert.equal(calls, 1);
+  catalog.onMpdStatus(false);
+  await tick();
+  assert.equal(calls, 2, "the existing global status must refresh the completed index without a view remount");
+  assert.deepEqual(catalog.getSnapshot().albums.map(a => a.id), ["indexed"]);
+  catalog.onMpdStatus(false);
+  await tick();
+  assert.equal(calls, 2, "idle samples must not repeatedly reload the catalog");
+});
+
+test("unsupported saved format remains a fatal catalog error across idle status samples", async () => {
+  const code = "SOURCE_AVAILABILITY_UNSUPPORTED_FORMAT";
+  let calls = 0;
+  const catalog = new LocalAlbumCatalog(async () => { calls += 1; throw new Error(code); });
+  catalog.setUpdating(false, true);
+  await tick();
+  for (let i = 0; i < 3; i += 1) { catalog.onMpdStatus(false); await tick(); }
+  assert.equal(calls, 1);
+  assert.equal(catalog.getSnapshot().error, code);
+  assert.equal(catalog.getSnapshot().mpdBusy, false);
+  assert.equal(catalog.getSnapshot().loading, false);
+  assert.equal(emptyLocalAlbumCatalogState(catalog.getSnapshot(), false), "error");
+  assert.equal(localCatalogErrorKey(catalog.getSnapshot().error), "localBrowser.catalogUnsupportedFormat");
+});
+
+test("catalog UI never guesses unsupported format from other native refusal codes or text", () => {
+  for (const code of ["SOURCE_AVAILABILITY_BLOCKED", "SOURCE_AVAILABILITY_CHANGED", "SOURCE_AVAILABILITY_UNCONFIRMED", "LOCAL_SOURCE_AVAILABILITY_CHANGED"]) {
+    assert.equal(localCatalogErrorKey(code), "localBrowser.catalogReadUnavailable");
+  }
+  for (const code of ["SOURCE_AVAILABILITY_UNSUPPORTED_FORMAT extra", "LOCAL_SOURCE_AVAILABILITY_UNSUPPORTED_FORMAT", "schema99", "SOURCE_AVAILABILITY_BUSY extra", "MPD disconnected"]) {
+    assert.equal(localCatalogErrorKey(code), null);
+  }
+});
+
+
+test("addition permission exposes only the retained confirmed catalog and revokes without promoting pending data", async () => {
+  let reads = 0;
+  const catalog = new LocalAlbumCatalog(async () => { reads++; return [album("old")]; });
+  catalog.setConfirmedPlayback(true);
+  assert.equal(confirmedCatalogPlaybackAllowed(catalog.getSnapshot(), true), false);
+  catalog.ensureLoaded(false, true); await tick();
+  const before = catalog.getSnapshot().albums;
+  catalog.setSaveBlocked(true); catalog.onMpdStatus(true);
+  assert.equal(confirmedCatalogPlaybackAllowed(catalog.getSnapshot(), true), false);
+  catalog.setConfirmedPlayback(true);
+  assert.equal(confirmedCatalogPlaybackAllowed(catalog.getSnapshot(), true), true);
+  catalog.requestRefresh(); await tick();
+  assert.equal(reads, 1); assert.equal(catalog.getSnapshot().albums, before);
+  catalog.setConfirmedPlayback(false);
+  assert.equal(confirmedCatalogPlaybackAllowed(catalog.getSnapshot(), true), false);
+  catalog.setSaveBlocked(false); catalog.onMpdStatus(false); await tick();
+  assert.equal(reads, 2); assert.notEqual(catalog.getSnapshot().albums, before);
+  assert.equal(catalog.getSnapshot().confirmedPlayback, false);
 });

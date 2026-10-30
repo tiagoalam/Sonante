@@ -1,5 +1,8 @@
 #[path = "plex_discover.rs"]
 mod discover;
+#[path = "plex_source_info.rs"]
+mod source_info;
+pub use source_info::PlexFileInfo;
 pub use discover::{PlexDiscoverPage, PlexDiscoverRecent, PlexDiscoverHub, PlexDiscoverArtistContent, PlexLibraryMixPage, PlexMixYears, PlexMixStyles, PlexStyleSelection};
 use crate::audio::MediaLocator;
 use crate::config::AppConfig;
@@ -2255,6 +2258,27 @@ mod tests {
     }
 
     #[test]
+    fn initial_stream_permission_requires_selected_server_and_typed_plex_references() {
+        let config = manager_config("http://127.0.0.1:9", Some("server-1"));
+        let mut client = media_client_for_test(&config);
+        let make = |locator| crate::audio::TrackMetadata {
+            title: "Fixture".into(), artist: "Fixture".into(), album: "Fixture".into(),
+            thumb: None, plex_image: None, uri: "http://untrusted-front-end-uri".into(),
+            media_locator: locator, duration: None,
+        };
+        let valid = make(Some(plex_locator("server-1", "/library/parts/1/file.flac", None, None)));
+        assert!(client.initial_stream_references(&[valid.clone()]));
+        assert!(!client.initial_stream_references(&[]));
+        assert!(!client.initial_stream_references(&[make(None)]));
+        assert!(!client.initial_stream_references(&[make(Some(MediaLocator::Local { uri: "local/a.flac".into() }))]));
+        assert!(!client.initial_stream_references(&[make(Some(plex_locator("other-server", "/library/parts/1/file.flac", None, None)))]));
+        assert!(!client.initial_stream_references(&[make(Some(plex_locator("server-1", "https://untrusted", None, None)))]));
+        assert!(!client.initial_stream_references(&[valid.clone(), make(None)]));
+        client.playback_mode = "local".into();
+        assert!(!client.initial_stream_references(&[valid]));
+    }
+
+    #[test]
     fn same_media_reference_uses_current_route_and_current_token() {
         let mut config = manager_config("http://lan-route", Some("server-1"));
         config.plex_token = "TOKEN_A".to_string();
@@ -3062,6 +3086,10 @@ pub struct PlexLibrary {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlexAlbum {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_id: Option<String>,
     pub rating_key: String,
     pub title: String,
     pub artist: String,
@@ -3187,6 +3215,8 @@ impl AlbumCatalogPages {
                 return Err(invalid());
             }
             page.push(PlexAlbum {
+                server_id: Some(connection.server_id.clone()),
+                library_id: source_info::source_library(item),
                 rating_key: id.to_string(),
                 title: item["title"].as_str().unwrap_or("Desconhecido").to_string(),
                 artist: item["parentTitle"]
@@ -3289,6 +3319,7 @@ where
             .accept(&json, &connection)
             .map_err(|message| fail(pages.albums.len(), message))?;
         if complete {
+            for album in &mut pages.albums { album.library_id = Some(section_key.to_string()); }
             return Ok(PlexAlbumCatalog {
                 server_id: connection.server_id,
                 library_id: section_key.to_string(),
@@ -3323,6 +3354,8 @@ pub struct PlexTrack {
     pub track_index: u32,
     pub duration_ms: u64,
     pub media_locator: MediaLocator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_info: Option<PlexFileInfo>,
 }
 
 /// Navigation only: artwork is a safe server-relative reference, never a playback URL or file path.
@@ -3411,6 +3444,8 @@ fn parse_track_navigation(
     let artist_name = navigation_text(&track["grandparentTitle"])?;
     Ok(PlexTrackNavigation {
         album: PlexAlbum {
+            server_id: Some(connection.server_id.clone()),
+            library_id: source_info::source_library(track),
             rating_key: album_key.to_string(),
             title: navigation_text(&track["parentTitle"])?,
             artist: artist_name.clone(),
@@ -3863,6 +3898,8 @@ impl PlexClient {
                                     .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                                 albums.push(PlexAlbum {
+                    server_id: Some(connection.server_id.clone()),
+                    library_id: source_info::source_library(item),
                                     rating_key,
                                     title,
                                     artist,
@@ -3911,6 +3948,18 @@ impl PlexClient {
                 cfg.local_mount_path.clone(),
             );
         }
+    }
+
+    pub(crate) fn initial_stream_references(&self, tracks: &[crate::audio::TrackMetadata]) -> bool {
+        self.playback_mode != "local" && self.playback_references_match(tracks)
+    }
+    pub(crate) fn playback_references_match(&self, tracks: &[crate::audio::TrackMetadata]) -> bool {
+        if tracks.is_empty() { return false; }
+        let Ok(snapshot) = self.connection_manager.snapshot() else { return false; };
+        let Some(identity) = snapshot.identity.as_ref() else { return false; };
+        tracks.iter().all(|track| matches!(&track.media_locator,
+            Some(MediaLocator::Plex { server_id, part_key, .. })
+            if server_id == &identity.machine_identifier && is_valid_plex_path(part_key)))
     }
 
     pub async fn resolve_media_locator(
@@ -4016,6 +4065,7 @@ impl PlexClient {
         let part_key = part["key"].as_str().filter(|key| !key.is_empty())?;
 
         Some(PlexTrack {
+            audio_info: source_info::track_file_info(item, &rating_key, part_key),
             rating_key: rating_key.clone(),
             title,
             album_title,
@@ -4152,6 +4202,8 @@ impl PlexClient {
                     .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                 albums.push(PlexAlbum {
+                    server_id: Some(connection.server_id.clone()),
+                    library_id: source_info::source_library(item),
                     rating_key,
                     title,
                     artist,
@@ -4211,6 +4263,8 @@ impl PlexClient {
                     .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                 albums.push(PlexAlbum {
+                    server_id: Some(connection.server_id.clone()),
+                    library_id: source_info::source_library(item),
                     rating_key,
                     title,
                     artist,

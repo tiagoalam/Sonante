@@ -1,3 +1,4 @@
+import { bindCollectionReset } from "../../tests/helpers/collectionResetFixture.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -10,6 +11,7 @@ import { exploreGenreCardStyle } from "./exploreGenreCards.ts";
 import { localLibrarySourceOptions, validLocalLibrarySourceSelection, filterLocalAlbumsByScope } from "./localLibraryScope.ts";
 import { createLocalAlbumPlayback } from "./localAlbumPlayback.ts";
 import { LocalAlbumCatalog } from "./localAlbumCatalog.ts";
+import { localExplorePresentation } from "./localExploreState.ts";
 import { LocalArtworkResolver } from "./localArtwork.ts";
 import { visitPlayerTarget } from "./playerNavigation.ts";
 const local = (id, artist = id) => ({ id, title: "Same title", artist, folder_path: `Synthetic/${id}`, discs: [], track_count: 1 });
@@ -123,6 +125,19 @@ function shallowMarkup(tree) {
   return React.cloneElement(tree,{},shallowMarkup(tree.props.children));
 }
 
+test('retained Explore resumes without catalog queries or rebuilding picks; synthetic cold mount is characterized',async()=>{
+ globalThis.__exploreTranslation=translations.en;
+ const c={local:{state:'ready',albums:Array.from({length:3000},(_,i)=>({...local('S'+i,'Artist '+(i%300)),title:'Album '+i,year:1980+i%40,genre:i%2?'Rock':'Jazz'}))}};
+ const results=[];
+ for(const origin of ['equalizer','plex']){
+  let ensures=0,reads=0;const catalog=new LocalAlbumCatalog(async()=>{reads++;return c.local.albums});catalog.ensureLoaded(false,true);await flush();assert.equal(reads,1);const props={context:c,active:true,ensureLocal:()=>{ensures++;catalog.ensureLoaded(false,true)},isCurrent:()=>true,onOpen(){}};
+  const h=host(ExploreView,props);const start=performance.now();let tree=h.render();h.effects();const coldMs=performance.now()-start;const picks=nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key);
+  h.render({...props,active:false});h.effects();const startReturn=performance.now();tree=h.render(props);h.effects();const retainedMs=performance.now()-startReturn;assert.deepEqual(nodes(tree,n=>n.type===ExploreAlbumCard).map(n=>n.props.entry.key),picks);assert.equal(ensures,2);h.render(props);h.effects();assert.equal(ensures,2);
+  assert.equal(reads,1);results.push({origin,coldMs,retainedMs,ensureCalls:ensures,totalCatalogReads:reads,extraReadsOnReturn:reads-1,preservedPicks:true});h.close();
+ }
+ if(process.env.SONANTE_NAV_REPORT){const {writeFileSync}=await import('node:fs');writeFileSync(process.env.SONANTE_NAV_REPORT,JSON.stringify({albums:3000,scope:'real Explore component/session with hook host; synthetic metadata, ensure callback counted, no backend/DOM/hardware',results},null,2)+'\n');}
+});
+
 test("actual shelf card opens its exact entry, returns to the same selection, renews without queries and rejects stale handlers", () => {
   globalThis.__exploreTranslation=translations.en;const c=context(),opened=[];
   const props={context:c,active:true,libraryTitle:"Selected",ensureLocal(){},isCurrent:()=>true,onOpen:e=>opened.push(e)};
@@ -156,9 +171,10 @@ test("existing Plex album query publishes error or data once and drops disposed/
     const calls=[],pending=deferred(),status=[],published=[],identity={},generation={current:0},conn={};
     const setters=["setAlbums","setCollections","setHasCollections","setLoading","setActiveAlbum","setActiveCollection","setActiveArtist","setFallbackPlexArtist","setSelectedPlexDecade","setSelectedPlexYear","setSelectedPlexUnknownYear","setSelectedPlexGenre","setSearchQuery","setSearchResults","setPlexViewMode"];
     const values=setters.map(name=>name==="setAlbums"?v=>published.push(v):()=>{});
-    const run=new Function("centralSection","plexArea","selectedLibrary","plexLibrariesIdentity","plexConnectionIdentity","plexBrowserIdentity","plexLibraryRequestGenerationRef","setPlexAlbumLoad","plexService","plexCatalog","plexAlbumLoad","logError",...setters,`return (${effect("plexCatalog.loadLibrary(selectedLibrary")});`)(
+    const resetScope = {}, reset = bindCollectionReset(resetScope);
+    const run=new Function("clearCollection","centralSection","plexArea","selectedLibrary","plexLibrariesIdentity","plexConnectionIdentity","plexBrowserIdentity","plexLibraryRequestGenerationRef","setPlexAlbumLoad","plexService","plexCatalog","plexAlbumLoad","logError",...setters,`return (${effect("plexCatalog.loadLibrary(selectedLibrary")});`)(resetScope.clearCollection,
       "plex","library",{key:"exact-library"},conn,conn,identity,generation,v=>status.push(v),{getCollections:()=>Promise.resolve([])},{loadLibrary:(...a)=>{calls.push(a);return pending.promise;}},null,()=>{},...values);
-    const cleanup=run();assert.deepEqual(calls,[[{key:"exact-library"}]]);assert.equal(status[0].phase,"loading");
+    const cleanup=run();reset.assertReset();assert.deepEqual(calls,[[{key:"exact-library"}]]);assert.equal(status[0].phase,"loading");
     if(scenario==="disposed")cleanup();if(scenario==="generation")generation.current++;
     if(scenario==="error")pending.reject(Error("DO_NOT_EXPOSE"));else pending.resolve([plex("exact")]);await flush();
     assert.equal(calls.length,1);assert.equal(status.at(-1).phase,scenario==="success"?"ready":scenario==="error"?"error":"loading");
@@ -207,7 +223,7 @@ test("player visits preserve Explore as the return section without replacing its
   let visit=visitPlayerTarget(null,localTarget,"explore");s.syncContext(c,false);
   visit=visitPlayerTarget(visit,plexTarget,"plex");assert.equal(visit.returnSection,"explore");
   s.syncContext(c,true);assert.deepEqual(s.getSnapshot().selected,before);
-  assert.match(appSource,/const centralSection = playerReturnSection \?\? mediaSource/);
+  assert.match(appSource,/const centralSection = playerReturnSection \?\? \(mediaSource === "equalizer" \? eqReturnSectionRef.current : mediaSource\)/);
   assert.match(appSource,/else if \(playerTarget\) \{\s*closePlayerNavigation\(\);\s*\} else if \(exploreDetail\)/);
 });
 
@@ -545,6 +561,9 @@ test("three native shelves retain independent positions, reset only the renewed 
     refresh.props.onClick();render();assert.equal(tracks.get("explore-genre-shelf").scrollLeft,0);
     assert.equal(tracks.get("explore-decade-shelf").scrollLeft,positions.find(([id])=>id==="explore-decade-shelf")[1]);assert.equal(tracks.get("explore-album-shelf").scrollLeft,positions.find(([id])=>id==="explore-album-shelf")[1]);
     const kept=lefts();h.render({...current,active:false});h.effects();render();assert.deepEqual(lefts(),kept);
+    render({...props,context:{local:{...props.context.local,state:"loading"}}});
+    for(const node of tracks.values())node.scrollTo({left:0});
+    render(props);assert.deepEqual(lefts(),kept,"loading scroll events must not overwrite confirmed shelf positions");
     const s=h.slots[0].value;s.openSlice(s.getSnapshot().artists[0],s.getSnapshot().revision);render();assert.equal(nodes(tree,n=>n.props.role==="region").length,0);
     s.leaveSlice(s.getSnapshot().revision);render();assert.deepEqual(lefts(),kept);
     namedButton(tree,translations.en.t("explore.renew")).props.onClick();render();assert.ok([...tracks.values()].every(n=>n.scrollLeft===0));
@@ -712,7 +731,7 @@ test("album card has sibling native Play/navigation buttons, translated focus ov
     const [open,play]=buttons;
     assert.equal(play.props.type,"button");assert.equal(play.props.onKeyDown,undefined,"native Enter/Space activation, no duplicate key handler");
     assert.equal(play.props.title,translations[language].t("common.playAlbum"));assert.ok(play.props["aria-label"].includes(entry.album.title));
-    assert.ok(nodes(tree,n=>n.props?.className?.includes("bg-black/40")&&n.props.className.includes("group-focus-within:opacity-100")).length);
+    assert.ok(nodes(tree,n=>n.props?.className?.includes("--theme-surface-subtle,rgb(0_0_0_/_0.4)")&&n.props.className.includes("group-focus-within:opacity-100")).length);
     assert.ok(play.props.className.includes("w-12 h-12"));assert.equal(plays,0,"render/effects never play");
     for(const key of [" ","Enter"]){let stopped=0;tree.props.onKeyDown({key,stopPropagation(){stopped++;},preventDefault(){assert.fail("native activation must remain enabled");}});assert.equal(stopped,1);assert.equal(plays,0);}
     const pending=play.props.onClick();await play.props.onClick();assert.equal(plays,1);assert.equal(opens,0);assert.equal(valid(),true);
@@ -798,4 +817,104 @@ test("actual App playback callback revalidates live catalog, source scope, visib
     d.resolve([{disc:{number:1},tracks:[{path:"exact-source/disc.cue/track0001",name:"one"}]}]);await pending;
     assert.equal(plays,mode==="success"?1:0,mode);
   }
+});
+
+
+test("loading pauses retained suggestions and slice without exposing provisional albums or accepting actions", () => {
+  const s=createExploreSession(()=>.5), c=context(30); s.syncContext(c,true);
+  const before=s.getSnapshot(), artist=before.artists[0]; s.openSlice(artist,before.revision);
+  const slice=s.getSnapshot().slice, picks=s.getSnapshot().selected;
+  s.syncContext({local:{...c.local,state:"loading"}},true);
+  const paused=s.getSnapshot();
+  assert.equal(paused.selected,picks); assert.equal(paused.slice,slice);
+  assert.deepEqual(s.visibleEntries(),[]); assert.deepEqual(s.visibleArtists(),[]); assert.deepEqual(s.visibleGenres(),[]); assert.deepEqual(s.sliceEntries(),[]);
+  assert.equal(s.canUse(picks[0],before.revision),false); assert.equal(s.validDetail(picks[0]),false);
+  s.renew(); s.renewShelf("albums"); s.leaveSlice(paused.revision); s.setPage(0,paused.revision); s.openSlice(artist,paused.revision);
+  assert.equal(s.getSnapshot(),paused);
+  s.syncContext(c,true); assert.equal(s.getSnapshot().slice,slice);
+  assert.deepEqual(s.getSnapshot().selected.map(e=>e.key),picks.map(e=>e.key));
+  assert.equal(s.canUse(picks[0],before.revision),false);
+});
+
+
+// Execute the producer expression from App rather than reproducing its wiring.
+const appPresentation = new Function("localExplorePresentation", "localExploreConfigured", "mpdHealth", "isPlaybackAvailable", "playbackStatus", "localCatalog", "configSavePhase", "localSavePhase", "configSaveNotice",
+  source("../App.tsx").match(/const \{ state: localExploreState, activity: exploreLoadingActivity \} = localExplorePresentation\([\s\S]*?\);/)[0] + "return {state:localExploreState,activity:exploreLoadingActivity};");
+const present = (catalog, overrides={}) => {
+  const x={configured:true,starting:false,available:true,updating:false,savePhase:null,uncertain:false,statusUnavailable:false,...overrides};
+  return appPresentation(localExplorePresentation,x.configured,{state:x.starting?"starting":"ready"},x.available,{is_updating:x.updating},catalog,x.savePhase?"local":null,x.savePhase,{uncertain:x.uncertain,statusUnavailable:x.statusUnavailable});
+};
+
+test("App producer separates confirmed activity from real errors, offline and uncertain save blocks", () => {
+  const c={albums:[local("FLAC")],loaded:true,loading:false,error:null,mpdBusy:false,saveBlocked:false};
+  assert.deepEqual(present(c),{state:"ready",activity:null});
+  for(const x of [{updating:true},{savePhase:"preparing"},{savePhase:"removing"},{savePhase:"indexing"},{savePhase:"validating"}])
+    assert.deepEqual(present({...c,saveBlocked:!!x.savePhase},x),{state:"loading",activity:"indexing"});
+  assert.deepEqual(present({...c,mpdBusy:true}),{state:"loading",activity:"indexing"});
+  assert.deepEqual(present({...c,loading:true}),{state:"loading",activity:"organizing"});
+  for(const [changes,flags] of [[{error:"failed"},{updating:true}],[{}, {available:false,updating:true}],[{saveBlocked:true},{}],[{saveBlocked:true},{savePhase:"indexing",uncertain:true}],[{}, {savePhase:"indexing",statusUnavailable:true}],[{saveBlocked:true},{savePhase:"uncertain"}],[{saveBlocked:true},{savePhase:"failed"}]])
+    assert.equal(present({...c,...changes},flags).state,"unavailable");
+  assert.equal(present(c,{starting:true,available:false}).state,"loading");
+  assert.equal(present(c,{configured:false}).state,"not_configured");
+  assert.equal(present({...c,albums:[]}).state,"empty");
+});
+
+test("actual Explore component follows indexing/busy, organizing and confirmed scoped ready without extra reads", async () => {
+  for(const language of ["pt-BR","en"]) for(const initial of [false,true]) {
+    globalThis.__exploreTranslation=translations[language];
+    const old=Array.from({length:8},(_,i)=>({...local(`FLAC-${i}`),source_id:"flac"}));
+    const next=[...old.map(a=>({...a})),...Array.from({length:8},(_,i)=>({...local(`DSD-${i}`),source_id:"dsd"}))];
+    let request=deferred(),calls=0,updating=false,savePhase=null;
+    const catalog=new LocalAlbumCatalog(()=>{calls++;return request.promise;});
+    if(initial){catalog.ensureLoaded(false,true);await flush();request.resolve(old);await flush();}
+    let activeSource=initial?"flac":null;
+    const props=()=>{
+      const presentation=present(catalog.getSnapshot(),{updating,savePhase});
+      return {context:{local:{albums:filterLocalAlbumsByScope(catalog.getSnapshot().albums,activeSource,""),state:presentation.state,sourceId:activeSource}},
+        loadingActivity:presentation.activity,active:true,ensureLocal(){catalog.ensureLoaded(updating,true);},isCurrent:()=>true,onOpen(){throw Error("blocked");},onConfigure(){},retryLocal(){throw Error("retry during update");}};
+    };
+    const h=host(ExploreView,props());let tree=h.render();h.effects();
+    const session=h.slots[0].value,keys=session.getSnapshot().selected.map(e=>e.key);
+    updating=true;catalog.setUpdating(true);savePhase="indexing";catalog.setSaveBlocked(true);
+    const beforeReads=calls;
+    for(let i=0;i<3;i++){
+      tree=h.render(props());h.effects();const markup=renderToStaticMarkup(shallowMarkup(tree));
+      assert.ok(markup.includes(translations[language].t("settings.updatingLibrary")));
+      assert.ok(!markup.includes(translations[language].t("explore.collectionUnavailable")));
+      assert.equal(nodes(tree,n=>n.props.id==="explore-configure-collection").length,0);
+      assert.equal(nodes(tree,n=>n.type===ExploreAlbumCard).length,0);
+      assert.equal(nodes(tree,n=>n.type==="button"&&!n.props.disabled).length,0);
+      session.renew();session.renewShelf("albums");
+    }
+    await flush();assert.equal(calls,beforeReads);
+    assert.deepEqual(session.getSnapshot().selected.map(e=>e.key),keys);
+    // Once the save completes, busy MPD still means indexing and cannot be retried.
+    savePhase=null;catalog.setSaveBlocked(false);catalog.waitForMpd();
+    tree=h.render(props());h.effects();assert.equal(calls,beforeReads);
+    updating=false; request=deferred();catalog.setUpdating(false);await flush();
+    tree=h.render(props());h.effects();
+    assert.ok(renderToStaticMarkup(shallowMarkup(tree)).includes(translations[language].t("localBrowser.organizing")));
+    assert.equal(calls,beforeReads+1);
+    request.resolve(next);await flush();tree=h.render(props());h.effects();
+    assert.equal(present(catalog.getSnapshot()).state,"ready");
+    assert.ok(nodes(tree,n=>n.type===ExploreAlbumCard).length>0);
+    if(initial)assert.deepEqual(session.getSnapshot().selected.map(e=>e.key),keys);
+    assert.ok(session.visibleEntries().every(e=>next.includes(e.album)));
+    assert.ok(session.visibleEntries().every(e=>activeSource===null||e.album.source_id===activeSource));
+    // Switching after confirmation must expose DSD identity, never retained FLAC picks.
+    activeSource="dsd";tree=h.render(props());h.effects();
+    assert.ok(session.visibleEntries().every(e=>e.album.source_id==="dsd"&&exploreEntryIsCurrent({local:{...props().context.local,albums:e.version}},e)));
+    h.close();
+  }
+});
+
+test("provisional arrays never replace confirmed inventory; replacement confirmation invalidates stale slice and actions", () => {
+  const c=context(30), s=createExploreSession(()=>.5);c.local.sourceId="flac";c.local.albums=c.local.albums.map(a=>({...a,source_id:"flac"}));s.syncContext(c,true);
+  const before=s.getSnapshot(),entry=before.selected[0];s.openSlice(before.artists[0],before.revision);
+  const provisional={local:{...c.local,albums:[local("unconfirmed-DSD")],state:"loading"}};
+  s.syncContext(provisional,true);assert.equal(s.candidateCount(),0);assert.deepEqual(s.sliceEntries(),[]);
+  const confirmed={local:{...c.local,albums:c.local.albums.map(a=>({...a}))}};s.syncContext(confirmed,true);
+  assert.equal(s.getSnapshot().slice,null);assert.equal(s.getSnapshot().sliceInvalidated,true);
+  assert.equal(s.validDetail(entry),false);assert.ok(s.visibleEntries().every(e=>e.version===confirmed.local.albums));
+  assert.ok(!s.visibleEntries().some(e=>e.album.id==="unconfirmed-DSD"));
 });

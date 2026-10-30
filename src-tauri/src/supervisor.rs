@@ -1,4 +1,6 @@
-use crate::alsa_mixer::{self, MixerSelection};
+use crate::audio::AudioEngine;
+use crate::direct_volume::{Context as VolumeContext, Session as DirectVolumeSession};
+use std::sync::Arc;
 use crate::audio::VolumeBackend;
 use crate::config::AppConfig;
 use crate::shared_volume::SharedVolumeBackend;
@@ -9,10 +11,58 @@ use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
+
+// MPD creates its own database/log files with ordinary POSIX modes. Apply
+// privacy only after fork: changing the application's umask would race other
+// threads. Keep this hook allocation-free and async-signal-safe before exec.
+pub(crate) fn spawn_private_mpd(command: &mut Command) -> std::io::Result<Child> {
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o077);
+            Ok(())
+        });
+    }
+    command.spawn()
+}
+
+// Keep the config inode stable: retirement/recovery bind its identity. Create
+// privately and harden an owned legacy file through its descriptor before any
+// truncation. Never follow a symlink or write through a shared hard link.
+pub(crate) fn write_mpd_config_file(directory: &Path, content: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let root = crate::recovery_fs::Dir::open(directory)?;
+    let path = root.entry("mpd.conf")?;
+    let previous = root.file_identity("mpd.conf")?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    if previous.is_none() { options.create_new(true).mode(0o600); }
+    let mut file = options.open(&path).map_err(|_| "MPD_CONFIG_UNSAFE_FILESYSTEM")?;
+    let metadata = file.metadata().map_err(|_| "MPD_CONFIG_UNSAFE_FILESYSTEM")?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.nlink() != 1
+        || previous.as_ref().is_some_and(|id| (id.dev,id.ino)!=(metadata.dev(),metadata.ino())) {
+        return Err("MPD_CONFIG_UNSAFE_FILESYSTEM".into());
+    }
+    root.validate()?;
+    let current = fs::symlink_metadata(&path).map_err(|_| crate::recovery_fs::CHANGED)?;
+    if !current.is_file() || (current.dev(),current.ino()) != (metadata.dev(),metadata.ino()) {
+        return Err(crate::recovery_fs::CHANGED.into());
+    }
+    file.set_permissions(fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    file.set_len(0).and_then(|_| file.write_all(content)).and_then(|_| file.sync_all())
+        .map_err(|e| e.to_string())?;
+    let current = fs::symlink_metadata(&path).map_err(|_| crate::recovery_fs::CHANGED)?;
+    let written = file.metadata().map_err(|_| crate::recovery_fs::CHANGED)?;
+    if !current.is_file() || (current.dev(),current.ino()) != (metadata.dev(),metadata.ino())
+        || written.nlink() != 1 || written.mode() & 0o7777 != 0o600 {
+        return Err(crate::recovery_fs::CHANGED.into());
+    }
+    root.validate()
+}
 
 pub struct MpdSupervisor {
     process: Option<Child>,
@@ -23,6 +73,14 @@ pub struct MpdSupervisor {
     health: MpdHealth,
     shared_volume_backend: Option<SharedVolumeBackend>,
     volume_backend: VolumeBackend,
+    pub(crate) shared_mute: crate::shared_mute::Memory,
+    shared_mute_generation: u64,
+    direct_volume: Option<Arc<DirectVolumeSession>>,
+    playback_gate: Option<Arc<crate::direct_playback::Gate>>,
+    shared_software_volume: Option<u32>,
+    engine_evidence: Option<crate::mpd_engine::EngineEvidence>,
+    shared_eq_pipe: Option<PathBuf>,
+    output_only_restart: bool,
 }
 
 pub struct LibrarySyncResult {
@@ -85,6 +143,14 @@ impl MpdSupervisor {
             health: MpdHealth::Starting,
             shared_volume_backend: None,
             volume_backend: VolumeBackend::Unavailable,
+            shared_mute: Default::default(),
+            shared_mute_generation: 0,
+            direct_volume: None,
+            playback_gate: None,
+            shared_software_volume: None,
+            engine_evidence: None,
+            shared_eq_pipe: None,
+            output_only_restart: false,
         }
     }
 
@@ -99,6 +165,14 @@ impl MpdSupervisor {
             health: MpdHealth::Starting,
             shared_volume_backend: None,
             volume_backend: VolumeBackend::Unavailable,
+            shared_mute: Default::default(),
+            shared_mute_generation: 0,
+            direct_volume: None,
+            playback_gate: None,
+            shared_software_volume: None,
+            engine_evidence: None,
+            shared_eq_pipe: None,
+            output_only_restart: false,
         }
     }
 
@@ -114,12 +188,54 @@ impl MpdSupervisor {
         self.process.is_some()
     }
 
+    fn capture_shared_software_volume(&mut self, read: impl FnOnce() -> Result<Vec<String>, String>) -> Result<(), String> {
+        // If capture fails, a later rollback must not fall back to MPD's100%.
+        // This is memory only: the current process's volume is not changed.
+        self.shared_software_volume = Some(0);
+        self.shared_software_volume = Some(crate::direct_volume::observed_software_volume(read()?)?);
+        Ok(())
+    }
+
+    pub(crate) fn attach_playback_gate(&mut self,gate:Arc<crate::direct_playback::Gate>) {self.playback_gate=Some(gate);}
+
     pub(crate) fn shared_volume_backend(&self) -> Option<SharedVolumeBackend> {
         self.shared_volume_backend
     }
 
+    // Identity only: no probe, open, wait, signal or lifecycle transition.
+    pub(crate) fn observed_process_pid(&self) -> Option<u32> {
+        if self.health != MpdHealth::Available || !self.owns_runtime_files { return None; }
+        self.process.as_ref().map(Child::id)
+    }
+
+    pub(crate) fn shared_mute_context(&self) -> Option<String> {
+        let pid=self.observed_process_pid()?;
+        matches!(self.volume_backend,VolumeBackend::PipeWire|VolumeBackend::MpdSoftware)
+            .then(||format!("{}:{}:{:?}",self.shared_mute_generation,pid,self.volume_backend))
+    }
+
+    pub(crate) fn volume_context(&self) -> VolumeContext {
+        if self.observed_process_pid().is_none() { return VolumeContext::new(VolumeBackend::Unavailable, None); }
+        VolumeContext::new(self.volume_backend, self.direct_volume.clone())
+    }
+
+    pub(crate) fn set_direct_mute(&self, muted: bool, token: &str, cancelled: impl Fn() -> bool) -> Result<(), String> {
+        if !muted {self.playback_gate.as_ref().ok_or(crate::direct_volume::STALE)?.require_choice()?;}
+        let pid = self.observed_process_pid().ok_or(crate::direct_volume::STALE)?;
+        self.direct_volume.as_ref().ok_or(crate::direct_volume::STALE)?
+            .set_mute(muted, !muted, token, |cmd| {
+                if cancelled() { return Err(crate::config_save_operation::INTERRUPTED.into()); }
+                AudioEngine::send_owned_command_to_socket(&self.socket_path, pid, cmd)
+            })
+    }
+
     pub(crate) fn volume_backend(&self) -> VolumeBackend {
         self.volume_backend
+    }
+
+    pub(crate) fn engine_evidence_for_pid(&self, pid: u32) -> Option<crate::mpd_engine::EngineEvidence> {
+        if self.observed_process_pid()? != pid { return None; }
+        self.engine_evidence.clone()
     }
 
     pub fn sonante_config_dir() -> PathBuf {
@@ -175,6 +291,9 @@ impl MpdSupervisor {
                     Ok(PidFileIdentity::Matches)
                 );
                 self.process.take();
+                if let Some(session) = self.direct_volume.take() { session.invalidate(); }
+                if let Some(gate)=&self.playback_gate {gate.clear();}
+                self.volume_backend = VolumeBackend::Unavailable;
                 self.health = MpdHealth::Unavailable(MpdUnavailableReason::ProcessExited);
                 if let Err(error) =
                     self.cleanup_owned_runtime_files(Some(child_pid), pid_was_confirmed)
@@ -196,12 +315,14 @@ impl MpdSupervisor {
     pub(crate) fn mark_available(&mut self) -> MpdHealth {
         if self.process.is_some() {
             self.health = MpdHealth::Available;
+            if let Some(gate)=&self.playback_gate {gate.set_available(true);}
         }
         self.health.clone()
     }
 
     pub(crate) fn mark_unavailable(&mut self, reason: MpdUnavailableReason) -> MpdHealth {
         self.health = MpdHealth::Unavailable(reason);
+        if let Some(gate)=&self.playback_gate {gate.set_available(false);}
         self.health.clone()
     }
 
@@ -278,13 +399,16 @@ impl MpdSupervisor {
             Ok(_) => {
                 let resolved = crate::local_media::resolve_local_sources(lib_dir, folders)
                     .map_err(|error| error.to_string())?;
-                let manifest = crate::local_media::mirror::read_manifest(lib_dir)?;
+                let manifest = crate::diagnostics::startup_stage("managed.manifest", crate::local_media::mirror::read_manifest(lib_dir))?;
                 if &manifest.sources != resolved.sources() {
                     return Err(
                         "A geração managed diverge das pastas locais configuradas."
                             .to_string(),
                     );
                 }
+                let (current, namespace) = crate::diagnostics::startup_stage("managed.identity_sources", crate::local_media::mirror::identity_sources(lib_dir))?;
+                let roots = manifest.sources.values().cloned().collect::<Vec<_>>();
+                crate::diagnostics::startup_stage("managed.identity_reserve", crate::source_identity::reserve(lib_dir, &roots, &current, namespace.as_deref()))?;
                 return Ok(LibrarySyncResult {
                     library_dir: lib_dir.to_path_buf(),
                     changed: false,
@@ -299,19 +423,13 @@ impl MpdSupervisor {
                 ))
             }
         }
-        let mut unique_folders = Vec::new();
-        let mut desired_targets = HashSet::new();
-        for f in folders {
-            let p = Path::new(f);
-            if p.exists() && p.is_dir() {
-                let canonical = fs::canonicalize(p).map_err(|e| {
-                    format!("Falha ao resolver pasta local ({}): {}", p.display(), e)
-                })?;
-                if desired_targets.insert(canonical.clone()) {
-                    unique_folders.push(canonical);
-                }
-            }
-        }
+        // A configured source going offline is not an authorized removal.
+        // Validate all roots before reserving identities or deleting any link,
+        // using the same availability policy as the managed path. An explicit
+        // new list (including empty) still removes sources deliberately.
+        let configured = folders.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let unique_folders = crate::local_media::mirror::canonical_configured_roots(&configured)?;
+        let desired_targets = unique_folders.iter().cloned().collect::<HashSet<_>>();
 
         let mut entries = fs::read_dir(lib_dir)
             .map_err(|e| {
@@ -325,7 +443,15 @@ impl MpdSupervisor {
             .map_err(|e| format!("Falha ao ler item da biblioteca virtual: {}", e))?;
         entries.sort_by_key(|entry| entry.file_name());
 
-        let mut used_names = HashSet::new();
+        let (mut current, namespace) = crate::local_media::mirror::identity_sources(lib_dir)?;
+        // Legacy reconciliation already keeps the first alias for a target.
+        // Reserve the remaining names as retired, retaining that behavior.
+        let mut seen = HashSet::new();
+        for root in current.values_mut() {
+            if root.as_ref().is_some_and(|p| !seen.insert(p.clone())) { *root = None; }
+        }
+        let (desired, _) = crate::source_identity::reserve(lib_dir, &unique_folders, &current, namespace.as_deref())?;
+        crate::source_identity::verify_origins(lib_dir, &desired)?;
         let mut preserved_targets = HashSet::new();
         let mut changed = false;
         for entry in entries {
@@ -338,7 +464,6 @@ impl MpdSupervisor {
                 )
             })?;
             if !metadata.file_type().is_symlink() {
-                used_names.insert(entry.file_name());
                 continue;
             }
             let keep = match fs::canonicalize(&path) {
@@ -352,9 +477,7 @@ impl MpdSupervisor {
                     ))
                 }
             };
-            if keep {
-                used_names.insert(entry.file_name());
-            } else {
+            if !keep {
                 fs::remove_file(&path).map_err(|e| {
                     format!(
                         "Falha ao remover symlink antigo ({}): {}",
@@ -366,24 +489,8 @@ impl MpdSupervisor {
             }
         }
 
-        for target_path in unique_folders {
-            if preserved_targets.contains(&target_path) {
-                continue;
-            }
-            let base_name = target_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Musicas")
-                .to_string();
-
-            let mut final_name = base_name.clone();
-            let mut counter = 2;
-            while used_names.contains(&std::ffi::OsString::from(final_name.as_str())) {
-                final_name = format!("{} ({})", base_name, counter);
-                counter += 1;
-            }
-            used_names.insert(std::ffi::OsString::from(final_name.as_str()));
-
+        for (final_name, target_path) in desired {
+            if preserved_targets.contains(&target_path) { continue; }
             let symlink_path = lib_dir.join(&final_name);
             symlink(&target_path, &symlink_path).map_err(|e| {
                 format!(
@@ -405,10 +512,19 @@ impl MpdSupervisor {
         &self,
         cfg: &AppConfig,
         shared_volume_backend: Option<SharedVolumeBackend>,
+        engine: &crate::mpd_engine::MpdEngine,
+        existing: Option<&crate::InitialManagedGeneration<'_>>,
     ) -> Result<(PathBuf, VolumeBackend, LibrarySyncResult), String> {
-        let dir = crate::persistence::ensure_sonante_config_dir()?;
+        let dir = crate::diagnostics::startup_stage("config.profile", crate::persistence::ensure_sonante_config_dir())?;
 
-        let library_sync = Self::sync_library_symlinks(&cfg.local_folders)?;
+        let library_sync = if let Some(admission)=existing {
+            admission.validate(cfg)?;
+            LibrarySyncResult { library_dir: Self::library_dir(), changed: false }
+        } else if self.output_only_restart {
+            // The caller validated the existing generation before stopping.
+            // EQ changes output only; it must not publish mirrors or rescan.
+            LibrarySyncResult { library_dir: Self::library_dir(), changed: false }
+        } else { crate::diagnostics::startup_stage("library.reconcile", Self::sync_library_symlinks(&cfg.local_folders))? };
 
         let conf_path = dir.join("mpd.conf");
         let db_path = Self::database_path();
@@ -433,23 +549,21 @@ impl MpdSupervisor {
             || cfg.audio_output_type == "shared"
             || cfg.alsa_device == "default";
 
-        let mixer_selection = if is_shared {
-            MixerSelection::Software
-        } else {
-            alsa_mixer::detect_for_pcm(&cfg.alsa_device)
-        };
+        // Direct never probes or writes the physical mixer. Its owned software
+        // gain is controlled exclusively by the session's unity/mute protocol.
         let volume_backend = Self::public_volume_backend(
             is_shared,
-            &mixer_selection,
             shared_volume_backend,
         );
-        let audio_output_section = Self::audio_output_section(
+        let audio_output_section = if let Some(pipe) = &self.shared_eq_pipe {
+            Self::shared_eq_output_section(is_shared, pipe, shared_volume_backend)?
+        } else { Self::audio_output_section(
             is_shared,
             &alsa_device_value,
             dop_flag,
-            &mixer_selection,
             shared_volume_backend,
-        )?;
+        )? };
+        let audio_output_section = engine.configure_output(audio_output_section, is_shared)?;
 
         // Sem state_file: o MPD inicia em modo neutro/stop sem tocar sozinho
         let audio_buffer_size = cfg.audio_buffer_size_kb.to_string();
@@ -465,8 +579,56 @@ impl MpdSupervisor {
             &analyzer_output_section,
         );
 
-        fs::write(&conf_path, conf_content).map_err(|e| e.to_string())?;
+        write_mpd_config_file(&dir, conf_content.as_bytes())?;
         Ok((conf_path, volume_backend, library_sync))
+    }
+
+    pub(crate) fn shared_eq_pipe(&self) -> Option<PathBuf> { self.shared_eq_pipe.clone() }
+
+    pub(crate) fn clear_shared_eq_pipe(&mut self) { self.shared_eq_pipe = None; }
+
+    pub(crate) fn start_shared_eq_output(&mut self, cfg: &AppConfig, pipe: Option<PathBuf>) -> Result<LibrarySyncResult, String> {
+        if !crate::is_shared_output(cfg) { return Err("EQ_SHARED_ONLY".into()); }
+        crate::managed_save_intent::check_startup(&Self::sonante_config_dir())?;
+        crate::local_media::resolve_local_sources(&Self::library_dir(), &cfg.local_folders).map_err(|_| "EQ_LIBRARY_UNAVAILABLE")?;
+        if let Some(path) = &pipe { Self::validate_eq_pipe(path)?; }
+        self.shared_eq_pipe = pipe;
+        self.output_only_restart = true;
+        let result = self.start(cfg);
+        self.output_only_restart = false;
+        result
+    }
+
+    fn validate_eq_pipe(path: &Path) -> Result<(), String> {
+        let parent = path.parent().ok_or("EQ_PIPE_UNSAFE")?;
+        let m = fs::symlink_metadata(path).map_err(|_| "EQ_PIPE_UNAVAILABLE")?;
+        let dir = fs::symlink_metadata(parent).map_err(|_| "EQ_PIPE_UNAVAILABLE")?;
+        if !path.is_absolute() || path.file_name().and_then(|s|s.to_str()) != Some("pcm.s32le")
+            || parent.parent() != Some(Self::runtime_dir().as_path())
+            || !parent.file_name().and_then(|s|s.to_str()).is_some_and(|s|s.starts_with("shared-eq-") && s.len()==42)
+            || !m.file_type().is_fifo() || m.uid()!=unsafe{libc::getuid()} || m.nlink()!=1 || m.mode()&0o777!=0o600
+            || !dir.is_dir() || dir.file_type().is_symlink() || dir.uid()!=m.uid() || dir.mode()&0o777!=0o700 {
+            return Err("EQ_PIPE_UNSAFE".into());
+        }
+        Ok(())
+    }
+
+    fn shared_eq_output_section(is_shared: bool, path: &Path, backend: Option<SharedVolumeBackend>) -> Result<String,String> {
+        if !is_shared { return Err("EQ_SHARED_ONLY".into()); }
+        Self::validate_eq_pipe(path)?;
+        let marker = Self::escape_config_value(&path.with_file_name("continuity.state").to_string_lossy())?;
+        let path = Self::escape_config_value(&path.to_string_lossy())?;
+        let mixer = if backend == Some(SharedVolumeBackend::PipeWire) { "none" } else { "software" };
+        Ok(format!(r#"audio_output {{
+    type "fifo"
+    name "Sonante Shared EQ"
+    sonante_strict_eq "yes"
+    sonante_continuity "{marker}"
+    path "{path}"
+    format "48000:32:2"
+    mixer_type "{mixer}"
+    always_on "yes"
+}}"#))
     }
 
     fn render_config(
@@ -518,7 +680,6 @@ decoder {{
 
     fn public_volume_backend(
         is_shared: bool,
-        mixer_selection: &MixerSelection,
         shared_volume_backend: Option<SharedVolumeBackend>,
     ) -> VolumeBackend {
         if is_shared {
@@ -528,10 +689,7 @@ decoder {{
             };
         }
 
-        match mixer_selection {
-            MixerSelection::Hardware { .. } => VolumeBackend::AlsaHardware,
-            MixerSelection::Software => VolumeBackend::MpdSoftware,
-        }
+        VolumeBackend::DirectEquipment
     }
 
     fn database_section(database_path: &Path) -> Result<String, String> {
@@ -550,7 +708,6 @@ decoder {{
         is_shared: bool,
         alsa_device_value: &str,
         dop_flag: &str,
-        mixer_selection: &MixerSelection,
         shared_volume_backend: Option<SharedVolumeBackend>,
     ) -> Result<String, String> {
         if is_shared {
@@ -566,35 +723,15 @@ decoder {{
 }}"#, mixer_type));
         }
 
-        let mixer_config = match mixer_selection {
-            MixerSelection::Software => "    mixer_type \"software\"".to_string(),
-            MixerSelection::Hardware {
-                mixer_device,
-                control,
-            } => {
-                let mixer_device = Self::escape_config_value(mixer_device)?;
-                let mixer_control = Self::escape_config_value(&control.name)?;
-                let mixer_index = if control.index == 0 {
-                    String::new()
-                } else {
-                    format!("\n    mixer_index \"{}\"", control.index)
-                };
-                format!(
-                    "    mixer_type \"hardware\"\n    mixer_device \"{}\"\n    mixer_control \"{}\"{}",
-                    mixer_device, mixer_control, mixer_index
-                )
-            }
-        };
-
         Ok(format!(
             r#"audio_output {{
     type "alsa"
     name "Sonante Output"
     device "{}"
     dop "{}"
-{}
+    mixer_type "software"
 }}"#,
-            alsa_device_value, dop_flag, mixer_config
+            alsa_device_value, dop_flag
         ))
     }
 
@@ -624,7 +761,14 @@ decoder {{
     }
 
     pub fn start(&mut self, cfg: &AppConfig) -> Result<LibrarySyncResult, String> {
-        let result = self.start_inner(cfg);
+        self.start_admitted(cfg,None)
+    }
+    pub(crate) fn start_initial_existing(&mut self,cfg:&AppConfig,admission:&crate::InitialManagedGeneration<'_>)->Result<LibrarySyncResult,String> {
+        if self.process.is_some() || self.output_only_restart {return Err("SOURCE_STARTUP_UNCONFIRMED".into());}
+        self.start_admitted(cfg,Some(admission))
+    }
+    fn start_admitted(&mut self,cfg:&AppConfig,existing:Option<&crate::InitialManagedGeneration<'_>>)->Result<LibrarySyncResult,String> {
+        let result = self.start_inner(cfg,existing);
         match result {
             Ok(library_sync) => {
                 self.health = MpdHealth::Available;
@@ -637,7 +781,13 @@ decoder {{
         }
     }
 
-    fn start_inner(&mut self, cfg: &AppConfig) -> Result<LibrarySyncResult, String> {
+    fn start_inner(&mut self, cfg: &AppConfig, existing:Option<&crate::InitialManagedGeneration<'_>>) -> Result<LibrarySyncResult, String> {
+        if let Some(admission)=existing {admission.validate(cfg)?;}
+        // Resolve/validate an explicit development engine before stopping
+        // the current owned MPD. No override keeps the established path.
+        let engine = crate::diagnostics::startup_stage("engine.resolve", if self.shared_eq_pipe.is_some() { crate::mpd_engine::MpdEngine::resolve_eq() } else { crate::mpd_engine::MpdEngine::resolve() })?;
+        if self.shared_eq_pipe.is_some() && !crate::is_shared_output(cfg) { return Err("EQ_SHARED_ONLY".into()); }
+
         let is_shared = cfg.audio_output_type == "pipewire"
             || cfg.audio_output_type == "shared"
             || cfg.alsa_device == "default";
@@ -647,11 +797,20 @@ decoder {{
             SharedVolumeBackend::detect(is_shared, configured_as_pipewire)
         });
 
-        self.stop()
+        if self.volume_backend == VolumeBackend::MpdSoftware && self.health == MpdHealth::Available {
+            let pid = self.observed_process_pid().ok_or(crate::direct_volume::STALE)?;
+            let socket = self.socket_path.clone();
+            self.capture_shared_software_volume(|| AudioEngine::send_owned_command_to_socket(&socket, pid, "status"))?;
+        } else if self.volume_backend == VolumeBackend::DirectEquipment && self.shared_software_volume.is_none() {
+            // No previous Shared value is known: enter it silently rather than
+            // copying Direct's unity gain or assuming a previous listening level.
+            self.shared_software_volume = Some(0);
+        }
+        crate::diagnostics::startup_stage("previous.stop", self.stop())
             .map_err(|e| format!("Falha ao encerrar a instância anterior do MPD: {}", e))?;
         self.health = MpdHealth::Starting;
 
-        crate::persistence::ensure_sonante_config_dir()?;
+        crate::diagnostics::startup_stage("profile.ensure", crate::persistence::ensure_sonante_config_dir())?;
 
         let dir = Self::sonante_config_dir();
         // Remove arquivos de estado residuais para assegurar inicialização silenciosa
@@ -667,8 +826,12 @@ decoder {{
         }
 
         let (conf_path, volume_backend, library_sync) =
-            self.ensure_config_file(cfg, shared_volume_backend)?;
-        self.prepare_runtime_files()?;
+            crate::diagnostics::startup_stage("config.ensure", self.ensure_config_file(cfg, shared_volume_backend, &engine, existing))?;
+        crate::diagnostics::startup_stage("runtime.prepare", self.prepare_runtime_files())?;
+
+        if let Some(admission)=existing {
+            if let Err(error)=admission.validate(cfg){return Err(self.cleanup_after_start_failure(error));}
+        }
 
         println!(
             "[Supervisor] Starting MPD: route={}, buffer={} KB",
@@ -680,11 +843,9 @@ decoder {{
             cfg.audio_buffer_size_kb
         );
 
-        let child = match Command::new("mpd")
-            .arg("--no-daemon")
-            .arg(&conf_path)
-            .spawn()
-        {
+        let mut command = Command::new(engine.program());
+        command.arg("--no-daemon").arg(&conf_path);
+        let child = match spawn_private_mpd(&mut command) {
             Ok(child) => child,
             Err(error) => {
                 let failure = format!("Falha ao executar o processo do MPD: {}", error);
@@ -695,7 +856,11 @@ decoder {{
             }
         };
 
+        let engine_identity = engine.verify_child(&child);
         self.process = Some(child);
+        if let Err(error) = engine_identity {
+            return Err(self.cleanup_after_start_failure(error));
+        }
 
         self.wait_for_startup(50, Duration::from_millis(50))?;
         if let Err(error) = crate::analyzer::set_output_enabled(
@@ -708,8 +873,37 @@ decoder {{
                 crate::diagnostics::error_summary(&error)
             );
         }
+        let pid = self.process.as_ref().ok_or(crate::direct_volume::STALE)?.id();
+        if volume_backend == VolumeBackend::DirectEquipment {
+            match DirectVolumeSession::initialize(|cmd| AudioEngine::send_owned_command_to_socket(&self.socket_path, pid, cmd)) {
+                Ok(session) => {
+                    if cfg.direct_muted {
+                        if let Err(error)=session.set_mute(true,false,&session.token(),|cmd|AudioEngine::send_owned_command_to_socket(&self.socket_path,pid,cmd)) {
+                            return Err(self.cleanup_after_start_failure(error));
+                        }
+                    }
+                    self.direct_volume = Some(session);
+                },
+                Err(error) => return Err(self.cleanup_after_start_failure(error)),
+            }
+        } else if volume_backend == VolumeBackend::MpdSoftware {
+            if let Some(value) = self.shared_software_volume {
+                // Only a value observed in our previous Shared software session.
+                // The new MPD is stopped; Direct gain is never copied here.
+                if let Err(error) = crate::direct_volume::restore_shared_software(value, |cmd| AudioEngine::send_owned_command_to_socket(&self.socket_path, pid, cmd)) {
+                    return Err(self.cleanup_after_start_failure(error));
+                }
+            }
+        }
         self.shared_volume_backend = shared_volume_backend;
         self.volume_backend = volume_backend;
+        self.shared_mute_generation = self.shared_mute_generation.wrapping_add(1);
+        self.shared_mute = Default::default();
+        self.engine_evidence = engine.evidence(is_shared);
+        if let Some(admission)=existing {
+            if let Err(error)=admission.validate(cfg){return Err(self.cleanup_after_start_failure(error));}
+        }
+        if let Some(gate)=&self.playback_gate {gate.bind(cfg,pid,self.direct_volume.clone());}
         Ok(library_sync)
     }
 
@@ -1100,6 +1294,9 @@ decoder {{
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
+        if let Some(session) = self.direct_volume.take() { session.invalidate(); }
+        if let Some(gate)=&self.playback_gate {gate.clear();}
+        self.engine_evidence = None;
         self.health = MpdHealth::Stopping;
         self.volume_backend = VolumeBackend::Unavailable;
         if let Some(mut child) = self.process.take() {
@@ -1177,6 +1374,8 @@ mod tests {
             .join("supervisor-tests")
             .join(format!("{}-{}-{}", std::process::id(), test_name, id));
         fs::create_dir_all(&dir).expect("deve criar diretório temporário do teste");
+        // Fixture identity must survive a symlinked Cargo target/cache directory.
+        let dir = fs::canonicalize(dir).unwrap();
         let socket_path = dir.join("mpd.socket");
         let pid_path = dir.join("mpd.pid");
         (dir, socket_path, pid_path)
@@ -1187,6 +1386,55 @@ mod tests {
         let library = root.join("library");
         fs::create_dir(&library).unwrap();
         (root, library)
+    }
+
+    #[test]
+    fn mpd_config_private_writer_repairs_664_and_preserves_inode_and_exact_rendering() {
+        let (root, _, _) = test_runtime_paths("mpd-config-legacy-permissions");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("mpd.conf");
+        fs::write(&path, b"old configuration with a longer tail").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let profile = crate::recovery_fs::Dir::open(&root).unwrap();
+        assert_eq!(profile.read("mpd.conf", 4096, &||false), Err(crate::recovery_fs::UNSAFE.into()));
+        let content = b"music_directory \"fixture\"\n";
+        write_mpd_config_file(&root, content).unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!((after.dev(),after.ino()), (before.dev(),before.ino()));
+        assert_eq!(after.mode() & 0o7777, 0o600);
+        assert_eq!(profile.read("mpd.conf", 4096, &||false).unwrap().unwrap(), content);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn mpd_config_private_writer_creates_private_file_without_a_global_umask_change() {
+        let (root, _, _) = test_runtime_paths("mpd-config-new-permissions");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        write_mpd_config_file(&root, b"fixture").unwrap();
+        let profile = crate::recovery_fs::Dir::open(&root).unwrap();
+        assert_eq!(fs::metadata(root.join("mpd.conf")).unwrap().mode() & 0o7777, 0o600);
+        assert_eq!(profile.read("mpd.conf", 4096, &||false).unwrap(), Some(b"fixture".to_vec()));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn mpd_config_private_writer_refuses_symlink_hardlink_and_directory_without_touching_target() {
+        let (root, _, _) = test_runtime_paths("mpd-config-unsafe-destination");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = root.join("preserved"); let path = root.join("mpd.conf");
+        fs::write(&target, b"preserved bytes").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o664)).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(write_mpd_config_file(&root,b"refused").is_err());
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        fs::remove_file(&path).unwrap();fs::hard_link(&target,&path).unwrap();
+        assert!(write_mpd_config_file(&root,b"refused").is_err());
+        assert_eq!(fs::metadata(&target).unwrap().nlink(),2);
+        assert_eq!(fs::read(&target).unwrap(),b"preserved bytes");
+        assert_eq!(fs::metadata(&target).unwrap().mode()&0o777,0o664);
+        fs::remove_file(&path).unwrap();fs::create_dir(&path).unwrap();
+        assert!(write_mpd_config_file(&root,b"refused").is_err());assert!(path.is_dir());
+        assert_eq!(fs::read(&target).unwrap(),b"preserved bytes");
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn configured_folder(path: &Path) -> String {
@@ -1260,6 +1508,120 @@ mod tests {
         .unwrap();
         fs::remove_dir(library).unwrap();
         fs::rename(staging, library).unwrap();
+    }
+
+    #[test]
+    fn legacy_offline_root_keeps_alias_ledger_and_references_until_restored_or_explicitly_removed()
+    {
+        let (root, library) = library_test_paths("legacy-offline-preservation");
+        let music = root.join("Music");
+        fs::create_dir_all(music.join("Album")).unwrap();
+        fs::write(music.join("Album/track.flac"), b"synthetic-path-fixture").unwrap();
+        let folders = vec![configured_folder(&music)];
+        MpdSupervisor::reconcile_library_symlinks(&library, &folders).unwrap();
+        let before = tree_snapshot(&library);
+        let ledger = fs::read(root.join("local-source-identities.json")).unwrap();
+        for file in ["favorites.json", "playlists.json", "queue_cache.json"] {
+            fs::write(root.join(file), br#"{"uri":"Music/Album/track.flac"}"#).unwrap();
+        }
+        let offline = root.join("Music.offline");
+        fs::rename(&music, &offline).unwrap();
+        let result = MpdSupervisor::reconcile_library_symlinks(&library, &folders);
+        eprintln!(
+            "[SupervisorTest] legacy offline: result={:?}, alias_retained={}",
+            result.as_ref().map(|v| v.changed),
+            library.join("Music").is_symlink()
+        );
+        assert!(
+            result.is_err(),
+            "Unavailable configured source is not an authorized removal"
+        );
+        assert_eq!(tree_snapshot(&library), before);
+        assert_eq!(
+            fs::read(root.join("local-source-identities.json")).unwrap(),
+            ledger
+        );
+        assert!(crate::local_media::resolve_local_sources(&library, &folders).is_err());
+        for file in ["favorites.json", "playlists.json", "queue_cache.json"] {
+            assert_eq!(
+                fs::read(root.join(file)).unwrap(),
+                br#"{"uri":"Music/Album/track.flac"}"#
+            );
+        }
+        fs::rename(&offline, &music).unwrap();
+        assert!(
+            !MpdSupervisor::reconcile_library_symlinks(&library, &folders)
+                .unwrap()
+                .changed
+        );
+        assert_eq!(tree_snapshot(&library), before);
+        assert_eq!(
+            fs::read(root.join("local-source-identities.json")).unwrap(),
+            ledger
+        );
+        assert!(crate::local_media::resolve_local_path(
+            &library,
+            "Music/Album/track.flac",
+            &folders
+        )
+        .is_ok());
+        // Explicit Preferences removal is represented by a new desired list.
+        assert!(
+            MpdSupervisor::reconcile_library_symlinks(&library, &[])
+                .unwrap()
+                .changed
+        );
+        assert!(!library.join("Music").is_symlink());
+        assert!(music.join("Album/track.flac").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_offline_one_root_blocks_partial_reconciliation_but_explicit_removal_still_works() {
+        let (root, library) = library_test_paths("legacy-offline-two-sources");
+        let a = root.join("A");
+        let b = root.join("B");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        let folders = vec![configured_folder(&a), configured_folder(&b)];
+        MpdSupervisor::reconcile_library_symlinks(&library, &folders).unwrap();
+        let before = tree_snapshot(&library);
+        let ledger = fs::read(root.join("local-source-identities.json")).unwrap();
+        fs::rename(&b, root.join("B.offline")).unwrap();
+        assert!(MpdSupervisor::reconcile_library_symlinks(&library, &folders).is_err());
+        assert_eq!(tree_snapshot(&library), before);
+        assert_eq!(
+            fs::read(root.join("local-source-identities.json")).unwrap(),
+            ledger
+        );
+        assert!(
+            MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&a)])
+                .unwrap()
+                .changed
+        );
+        assert!(library.join("A").is_symlink());
+        assert!(!library.join("B").is_symlink());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_offline_replaced_by_regular_file_is_not_a_removal() {
+        let (root, library) = library_test_paths("legacy-offline-not-directory");
+        let music = root.join("Music");
+        fs::create_dir(&music).unwrap();
+        let folders = vec![configured_folder(&music)];
+        MpdSupervisor::reconcile_library_symlinks(&library, &folders).unwrap();
+        let before = tree_snapshot(&library);
+        let ledger = fs::read(root.join("local-source-identities.json")).unwrap();
+        fs::rename(&music, root.join("Music.offline")).unwrap();
+        fs::write(&music, b"not a directory").unwrap();
+        assert!(MpdSupervisor::reconcile_library_symlinks(&library, &folders).is_err());
+        assert_eq!(tree_snapshot(&library), before);
+        assert_eq!(
+            fs::read(root.join("local-source-identities.json")).unwrap(),
+            ledger
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1659,6 +2021,28 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn engine_evidence_requires_the_owned_available_pid_and_is_cleared_on_stop() {
+        let (dir,socket,pidfile)=test_runtime_paths("engine-evidence");
+        let mut supervisor=MpdSupervisor::new_with_runtime_paths(&socket,&pidfile);
+        let child=spawn_sleeping_child();let pid=child.id();
+        supervisor.set_process_for_test(child,true);
+        supervisor.engine_evidence=Some(crate::mpd_engine::EngineEvidence::Identified {
+            evidence_id:"mpd-pcm-eof-20261017",scope:"pcm24_96000_stereo_gapless",pcm_eof_flush:true,
+        });
+        supervisor.health=MpdHealth::Starting;
+        assert!(supervisor.engine_evidence_for_pid(pid).is_none());
+        supervisor.mark_available();
+        assert!(supervisor.engine_evidence_for_pid(pid).is_some());
+        assert!(supervisor.engine_evidence_for_pid(pid+1).is_none());
+        supervisor.owns_runtime_files=false;
+        assert!(supervisor.engine_evidence_for_pid(pid).is_none());
+        supervisor.stop().unwrap();
+        assert!(supervisor.engine_evidence.is_none());
+        assert!(supervisor.engine_evidence_for_pid(pid).is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     fn spawn_sleeping_child() -> Child {
         Command::new("sleep")
             .arg("30")
@@ -1934,22 +2318,10 @@ mod tests {
 
     #[test]
     fn shared_output_with_software_backend_keeps_software_mixer() {
-        let hardware = MixerSelection::Hardware {
-            mixer_device: "hw:CARD=Ignored".to_string(),
-            control: crate::alsa_mixer::PlaybackVolumeControl {
-                name: "Ignored".to_string(),
-                index: 0,
-                channels: vec!["Front Left".to_string()],
-                min: 0,
-                max: 100,
-            },
-        };
-
         let section = MpdSupervisor::audio_output_section(
             true,
             "ignored",
             "yes",
-            &hardware,
             Some(SharedVolumeBackend::MpdSoftware),
         )
         .unwrap();
@@ -1961,12 +2333,22 @@ mod tests {
     }
 
     #[test]
+    fn eq_rejects_direct_before_paths_process_or_format_changes() {
+        let mut sup=MpdSupervisor::new("/no-such-eq-test/mpd.sock");
+        let mut cfg=AppConfig::default();cfg.audio_output_type="alsa".into();cfg.alsa_device="hw:CARD=Fixture,DEV=0".into();
+        for dop in [false,true] {cfg.dop_enabled=dop;
+            assert_eq!(sup.start_shared_eq_output(&cfg,Some(PathBuf::from("/not-a-fifo"))).err().as_deref(),Some("EQ_SHARED_ONLY"));
+            assert!(sup.shared_eq_pipe().is_none());assert!(!sup.output_only_restart);
+        }
+        assert_eq!(MpdSupervisor::shared_eq_output_section(false,Path::new("/no-path"),None),Err("EQ_SHARED_ONLY".into()));
+    }
+
+    #[test]
     fn shared_output_with_pipewire_backend_disables_mpd_mixer() {
         let section = MpdSupervisor::audio_output_section(
             true,
             "ignored",
             "no",
-            &MixerSelection::Software,
             Some(SharedVolumeBackend::PipeWire),
         )
         .unwrap();
@@ -1978,109 +2360,39 @@ mod tests {
     }
 
     #[test]
-    fn direct_output_without_safe_control_keeps_software_mixer() {
-        let section = MpdSupervisor::audio_output_section(
-            false,
-            "hw:CARD=NoMixer,DEV=0",
-            "no",
-            &MixerSelection::Software,
-            None,
-        )
-        .unwrap();
-
-        assert!(section.contains("device \"hw:CARD=NoMixer,DEV=0\""));
-        assert!(section.contains("dop \"no\""));
-        assert!(section.contains("mixer_type \"software\""));
-        assert!(!section.contains("mixer_control"));
+    fn direct_pcm_and_dop_always_use_software_mixer_without_hardware_controls() {
+        for device in ["hw:CARD=SoundBar,DEV=0", "hw:2,0"] {
+            for dop in ["no", "yes"] {
+                let section = MpdSupervisor::audio_output_section(false, device, dop, None).unwrap();
+                assert!(section.contains(&format!("device \"{}\"", device)));
+                assert!(section.contains(&format!("dop \"{}\"", dop)));
+                assert!(section.contains("mixer_type \"software\""));
+                for hardware in ["mixer_device", "mixer_control", "mixer_index", "mixer_type \"hardware\""] {
+                    assert!(!section.contains(hardware));
+                }
+            }
+        }
     }
 
     #[test]
-    fn direct_output_with_safe_control_generates_hardware_mixer_config() {
-        let selection = MixerSelection::Hardware {
-            mixer_device: "hw:CARD=SoundBar".to_string(),
-            control: crate::alsa_mixer::PlaybackVolumeControl {
-                name: "USB Playback".to_string(),
-                index: 2,
-                channels: vec!["Front Left".to_string(), "Front Right".to_string()],
-                min: 0,
-                max: 127,
-            },
-        };
-
-        let section = MpdSupervisor::audio_output_section(
-            false,
-            "hw:CARD=SoundBar,DEV=0",
-            "yes",
-            &selection,
-            None,
-        )
-        .unwrap();
-
-        assert!(section.contains("mixer_type \"hardware\""));
-        assert!(section.contains("mixer_device \"hw:CARD=SoundBar\""));
-        assert!(section.contains("mixer_control \"USB Playback\""));
-        assert!(section.contains("mixer_index \"2\""));
-        assert!(!section.contains("mixer_type \"software\""));
+    fn shared_volume_capture_failure_keeps_rollback_silent_instead_of_assuming_unity() {
+        let mut supervisor=MpdSupervisor::new("/unused/owned-shared-volume.socket");
+        supervisor.capture_shared_software_volume(||Ok(vec!["volume: 43".into(),"state: play".into()])).unwrap();
+        assert_eq!(supervisor.shared_software_volume,Some(43));
+        assert!(supervisor.capture_shared_software_volume(||Err("timeout".into())).is_err());
+        assert_eq!(supervisor.shared_software_volume,Some(0));
+        assert!(supervisor.capture_shared_software_volume(||Ok(vec!["state: stop".into()])).is_err());
+        assert_eq!(supervisor.shared_software_volume,Some(0));
     }
 
     #[test]
-    fn public_volume_backend_matches_the_effective_mixer() {
-        let hardware = MixerSelection::Hardware {
-            mixer_device: "hw:CARD=SoundBar".to_string(),
-            control: crate::alsa_mixer::PlaybackVolumeControl {
-                name: "USB Playback".to_string(),
-                index: 0,
-                channels: vec!["Front Left".to_string(), "Front Right".to_string()],
-                min: 0,
-                max: 127,
-            },
-        };
-
-        assert_eq!(
-            MpdSupervisor::public_volume_backend(false, &hardware, None),
-            VolumeBackend::AlsaHardware
-        );
-        assert_eq!(
-            MpdSupervisor::public_volume_backend(false, &MixerSelection::Software, None),
-            VolumeBackend::MpdSoftware
-        );
-        assert_eq!(
-            MpdSupervisor::public_volume_backend(
-                true,
-                &MixerSelection::Software,
-                Some(SharedVolumeBackend::PipeWire),
-            ),
-            VolumeBackend::PipeWire
-        );
-        assert_eq!(
-            MpdSupervisor::public_volume_backend(
-                true,
-                &MixerSelection::Software,
-                Some(SharedVolumeBackend::MpdSoftware),
-            ),
-            VolumeBackend::MpdSoftware
-        );
-    }
-
-    #[test]
-    fn hardware_mixer_default_index_is_not_written_to_mpd_config() {
-        let selection = MixerSelection::Hardware {
-            mixer_device: "hw:2".to_string(),
-            control: crate::alsa_mixer::PlaybackVolumeControl {
-                name: "Playback".to_string(),
-                index: 0,
-                channels: vec!["Mono".to_string()],
-                min: 0,
-                max: 10,
-            },
-        };
-
-        let section =
-            MpdSupervisor::audio_output_section(false, "hw:2,0", "no", &selection, None)
-                .unwrap();
-
-        assert!(section.contains("mixer_control \"Playback\""));
-        assert!(!section.contains("mixer_index"));
+    fn public_volume_backend_matches_direct_policy_and_shared_backend() {
+        for shared in [None, Some(SharedVolumeBackend::PipeWire), Some(SharedVolumeBackend::MpdSoftware)] {
+            assert_eq!(MpdSupervisor::public_volume_backend(false, shared), VolumeBackend::DirectEquipment);
+        }
+        assert_eq!(MpdSupervisor::public_volume_backend(true, None), VolumeBackend::MpdSoftware);
+        assert_eq!(MpdSupervisor::public_volume_backend(true, Some(SharedVolumeBackend::PipeWire)), VolumeBackend::PipeWire);
+        assert_eq!(MpdSupervisor::public_volume_backend(true, Some(SharedVolumeBackend::MpdSoftware)), VolumeBackend::MpdSoftware);
     }
 
     #[test]
@@ -2226,4 +2538,22 @@ mod tests {
         assert!(!fifo_path.exists());
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn legacy_retired_ids_are_not_reused_after_empty_startup_reconciliation() {
+        let (root, library) = library_test_paths("legacy-durable-identities");
+        let a = root.join("old/Music");
+        let b = root.join("new/Music");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&a)]).unwrap();
+        MpdSupervisor::reconcile_library_symlinks(&library, &[]).unwrap();
+        MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&b)]).unwrap();
+        assert!(!library.join("Music").exists());
+        assert_eq!(fs::canonicalize(library.join("Music (2)")).unwrap(), b);
+        let sources =
+            MpdSupervisor::local_library_sources_in(&library, &[configured_folder(&b)]).unwrap();
+        assert_eq!(sources[0].id, "Music (2)");
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }

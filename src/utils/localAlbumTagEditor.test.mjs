@@ -678,13 +678,14 @@ test("existing catalog callback waits for accepted jobs and otherwise requests o
   notify(catalog, failed); assert.deepEqual(calls.splice(0), ["refresh"]);
   notify(catalog, null); assert.deepEqual(calls.splice(0), ["refresh"]);
   assert.doesNotMatch(body, /rescan|restart|title|artist/);
-  const navigation = browser.match(/if \(!playerTarget\) return;([\s\S]*?)\n  \}, \[playerTarget, playerAlbum, tagEditorAlbum\]\)/)?.[1]; assert.ok(navigation);
+  const navigation = browser.match(/if \(!playerTarget\) return;([\s\S]*?)\n  \}, \[playerTarget, playerAlbum, tagEditorAlbum, fileInfoTrack\]\)/)?.[1]; assert.ok(navigation);
   let back = 0;
-  const navigate = new Function("playerAlbum", "tagEditorAlbum", "onPlayerNavigationBack", "tagEditorTrack", "doctorAlbum", "metadataMode", navigation);
+  const navigate = new Function("playerAlbum", "tagEditorAlbum", "onPlayerNavigationBack", "tagEditorTrack", "doctorAlbum", "metadataMode", "fileInfoTrack", navigation);
   navigate(null, { id: "old" }, () => { back++; }, null, null, false); assert.equal(back, 0);
   navigate(null, null, () => { back++; }, null, null, false); assert.equal(back, 1);
   navigate(null, null, () => { back++; }, null, null, true); assert.equal(back, 1);
   navigate(null, null, () => { back++; }, null, { id: "old" }, false); assert.equal(back, 1);
+  navigate(null, null, () => { back++; }, null, null, false, { track: "file" }); assert.equal(back, 1);
 });
 
 test("write states and refresh errors are localized and accepted is explicitly pending", () => {

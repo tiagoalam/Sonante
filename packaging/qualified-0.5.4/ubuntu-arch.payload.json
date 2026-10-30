@@ -1,0 +1,857 @@
+{
+  "usr/bin/sonante": {
+    "sha256": "7baab05a17d88f364068afbcbef3d0463297e603d0dac925cc4f48a4497bae6a",
+    "mode": 493,
+    "bytes": 15119120
+  },
+  "usr/lib/sonante/runtimes/v1/camilladsp": {
+    "sha256": "820dc36491dfffb6ccf02afe1b804add6968095bf5e649918c5d523fdabfeb85",
+    "mode": 493,
+    "bytes": 8443256
+  },
+  "usr/lib/sonante/runtimes/v1/lib/camilla/libpipewire-0.3.so.0": {
+    "sha256": "5edf63052afd820af0c50e7299839fc908b2f51ea647b69a42f52095879365ea",
+    "mode": 420,
+    "bytes": 1147480
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libFLAC.so.8": {
+    "sha256": "7f350d720a6ae1e0bab2a3f612d1fd49cefe266c1adc9d260da367e8132406e3",
+    "mode": 420,
+    "bytes": 239712
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libavcodec.so.58": {
+    "sha256": "8b5d96665b9f0ec93bc45c6832f869fcd7701f7223801444d1da6cab13c001fb",
+    "mode": 420,
+    "bytes": 14886880
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libavfilter.so.7": {
+    "sha256": "8c8ce89171db1c28d39a654fb977512fb7580a3a246469f9e79b2d27f6dbbcfe",
+    "mode": 420,
+    "bytes": 4806640
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libavformat.so.58": {
+    "sha256": "0c0a859a8a3c48e0d379e2f01a6d38c439a7961f8c71e9f96ea86495f4085e1e",
+    "mode": 420,
+    "bytes": 2720600
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libavutil.so.56": {
+    "sha256": "578d0772a3bd7a6d2bfcc44e989eb51044bff540e5ffa6cc2d074507dfb257e4",
+    "mode": 420,
+    "bytes": 691088
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libbluray.so.2": {
+    "sha256": "c8166773e1c837a7ed7a51bea84d6e400a1800948ff1d4b117fb99044831f239",
+    "mode": 420,
+    "bytes": 351208
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libcdio.so.19": {
+    "sha256": "5f646e192342b4e731ac9ac07658ce07c9b609f61f174450a41b2f09acb54e5c",
+    "mode": 420,
+    "bytes": 153992
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libcodec2.so.1.0": {
+    "sha256": "7cba4ab12eddeead515d16729380ff1f9f1e59c30c69697277b74031c98e00c5",
+    "mode": 420,
+    "bytes": 15359024
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libcurl.so.4": {
+    "sha256": "2844a21088f6fd23fcdf37cb581444b01cd0de49f73272362e5e1e9faa68d472",
+    "mode": 420,
+    "bytes": 1010344
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libdav1d.so.5": {
+    "sha256": "eb4b11f13938b11a4dd8f0d3581e551e90025df5f0a2130614cb23bd6583fb9b",
+    "mode": 420,
+    "bytes": 1316784
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libflite.so.1": {
+    "sha256": "fb35e67157692814db1d6014a97476a28dfb9cc5d81b9ce01318da1c844bd85d",
+    "mode": 420,
+    "bytes": 235688
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libflite_cmu_us_awb.so.1": {
+    "sha256": "34bd371de4bec32cf8f6ca8a9cc2877f6914a36b2e288bfaf16295230434e136",
+    "mode": 420,
+    "bytes": 4151432
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libflite_cmu_us_kal.so.1": {
+    "sha256": "826ec578b3623870c8db161286167454d7b2913c016387ded9c1e18ef3ac3bf3",
+    "mode": 420,
+    "bytes": 1460400
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libflite_cmu_us_kal16.so.1": {
+    "sha256": "69a5f02a87124c3303825e43155d91e51798f5830e17b71785a7a4f76872f97d",
+    "mode": 420,
+    "bytes": 4032688
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libflite_cmu_us_rms.so.1": {
+    "sha256": "a0d2ad36b4237f984cf4da856ed70a0a862e474bc035ec5e01a8e7324ae50702",
+    "mode": 420,
+    "bytes": 4819080
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libflite_cmu_us_slt.so.1": {
+    "sha256": "7a9bdd4a888e1d8c2058ef35ac87f27d81ed0486947e70d633582cd8c785aed6",
+    "mode": 420,
+    "bytes": 4155528
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libflite_cmulex.so.1": {
+    "sha256": "dfbdbb46cd54fd2127eba39db2100d374ecd3bd6ba9b2fe8d1138b17b59cfd94",
+    "mode": 420,
+    "bytes": 616680
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libflite_usenglish.so.1": {
+    "sha256": "1839dfc7ba316d1be11307b12adcfa8bfa27220308935b9194cda3882683e6b5",
+    "mode": 420,
+    "bytes": 170216
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libicudata.so.70": {
+    "sha256": "c1404396288e178c8db2f30203cb8150e4d2c14cacee9a2883e0092f45399cc8",
+    "mode": 420,
+    "bytes": 29476472
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libicui18n.so.70": {
+    "sha256": "24fa78caa9b66c10c90711c51089f45273b643f132031172d54a3e98d711d48e",
+    "mode": 420,
+    "bytes": 3328472
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libicuuc.so.70": {
+    "sha256": "4683f3623dc47a92e862dc3c8770caff81c9f4c7e116bb672fc439737b06d88a",
+    "mode": 420,
+    "bytes": 2062664
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libiso9660.so.11": {
+    "sha256": "01fe5f3e203d60741fcaee525427e96ad994ea167ee6469d86c08286c54f299c",
+    "mode": 420,
+    "bytes": 55376
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libixml.so.10": {
+    "sha256": "02f300ddb75bb15a1cfee4b05165ec448c7c6144d8347151ed73ba693768cf12",
+    "mode": 420,
+    "bytes": 52400
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libmfx.so.1": {
+    "sha256": "03deba2af2174c4edf5f51d131da738aa03a42c561f84b1cdf4345e5bfb242a7",
+    "mode": 420,
+    "bytes": 51592
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libnettle.so.8": {
+    "sha256": "2d3bda6cfa2d477cd91b8178843d19e081b911a124f04b4be06b6e32c9fabc73",
+    "mode": 420,
+    "bytes": 281000
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libnfs.so.13": {
+    "sha256": "3db07b4877600ee4903b5099de063421a6052738e9ca56bebd64704661013d78",
+    "mode": 420,
+    "bytes": 317968
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libnuma.so.1": {
+    "sha256": "3582bce922d99959ee3eb6b7d686c0b99e14c2135616ad4d9d608b2118a7e78c",
+    "mode": 420,
+    "bytes": 48152
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libpipewire-module-protocol-native.so": {
+    "sha256": "e330160b2d989147f5a9b9b21847c4c26afc7e78bf0d0b00cf77d494c730aad0",
+    "mode": 420,
+    "bytes": 392760
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libpocketsphinx.so.3": {
+    "sha256": "c7948b44a42d88f6cb13fddff6117fb70bc2d55e72769e5c8a18c6278841e53d",
+    "mode": 420,
+    "bytes": 297824
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libpostproc.so.55": {
+    "sha256": "a721eace908d3054b5178ec8c8484dee97493b7eeb610cbaf3013bf9fdf167d0",
+    "mode": 420,
+    "bytes": 137368
+  },
+  "usr/lib/sonante/runtimes/v1/lib/librabbitmq.so.4": {
+    "sha256": "9ecc41e5c7ade74fbf6f41eb1505c8f53ad82204d6373e0c04532cd143ca99b2",
+    "mode": 420,
+    "bytes": 92232
+  },
+  "usr/lib/sonante/runtimes/v1/lib/librubberband.so.2": {
+    "sha256": "ad027488e96c820b34a6f8a4963fa9ebdd816a6d8e8b58109b632f0c33ba74a8",
+    "mode": 420,
+    "bytes": 223400
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libshine.so.3": {
+    "sha256": "8ca727c3e0339a05e89b5f6dd60fa0bec85eb86cd7aaf27c3df8e7cdf7026ae4",
+    "mode": 420,
+    "bytes": 43104
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libsidplayfp.so.6": {
+    "sha256": "d5e7062d4c373edf5e32ffc2ab8ac48936276c1c42a672230f78798e073cb2cf",
+    "mode": 420,
+    "bytes": 422520
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libsphinxbase.so.3": {
+    "sha256": "ac938d5ec8ff18c4343aa1fea3cf6da46f3a7390b288ede82d8b6bf4f67a8645",
+    "mode": 420,
+    "bytes": 260432
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libsrt-gnutls.so.1.4": {
+    "sha256": "9eab20d983e490b210fc19a4911b986b4d35f2a72037873877b2364c0bee1fb1",
+    "mode": 420,
+    "bytes": 760760
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libssh-gcrypt.so.4": {
+    "sha256": "3aeafc4e315e0898dad29c67716181f9f1063036315178fa209997da0bc84c15",
+    "mode": 420,
+    "bytes": 568792
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libswresample.so.3": {
+    "sha256": "698b6fe8f8d9551be7a0ded3ae22ccfabcd79a7f1895d0ee81f54e2b99268a21",
+    "mode": 420,
+    "bytes": 133112
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libswscale.so.5": {
+    "sha256": "0e2bbc55fa51257005d5fb81120967481d5a045c6fa66ab541e4b0b7a946c4c8",
+    "mode": 420,
+    "bytes": 608248
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libtheoradec.so.1": {
+    "sha256": "ed8da0853c9c402464f548ee53f3cb60fb6f4b627f1bcca7997dd9a2cd63b86f",
+    "mode": 420,
+    "bytes": 117040
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libtheoraenc.so.1": {
+    "sha256": "44fca6dcdbd4ab86814ea1289b671f3e55823fdab8ac16b37a8f49f4f147fb67",
+    "mode": 420,
+    "bytes": 223536
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libudfread.so.0": {
+    "sha256": "2103279ba2b7e1e365938d657259e0b9c194d8e266729cfd83722782cf40c19c",
+    "mode": 420,
+    "bytes": 38904
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libupnp.so.13": {
+    "sha256": "8e8f0fc04e8f5fa18e56e80a5c6c5be1714e7e26520d73c7745bfcdf7b20b36c",
+    "mode": 420,
+    "bytes": 228832
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libvidstab.so.1.1": {
+    "sha256": "865db564f4a41448660a8040dbb5ed8dc1fe7032a400d8c59c151ee92591c91f",
+    "mode": 420,
+    "bytes": 76080
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libvpx.so.7": {
+    "sha256": "46ded032f9e2bd60f08f16802f5804897e3945e36e418606da173a786075b4ab",
+    "mode": 420,
+    "bytes": 3176976
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libx264.so.163": {
+    "sha256": "74263a09bc162e1ef7268e3d93b0b7839977292f5d702104830ca0998d85b27c",
+    "mode": 420,
+    "bytes": 1863256
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libx265.so.199": {
+    "sha256": "a72e1820c6ff8e58e9238b378abf6e0ac3a688e6552cb5d71f7c88f7b32721fa",
+    "mode": 420,
+    "bytes": 16071296
+  },
+  "usr/lib/sonante/runtimes/v1/lib/libxml2.so.2": {
+    "sha256": "8c2a993fe42a16e94f9054f1b9cbeccea50b6ed377359e9d3da04cbb2470f225",
+    "mode": 420,
+    "bytes": 1967384
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-access.so": {
+    "sha256": "1959447a8b770f541217f3e0cd235939bcdadb9a07616c16519f28252a85bed9",
+    "mode": 420,
+    "bytes": 30568
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-adapter.so": {
+    "sha256": "5a96a0b1d8685515c3ff3a33ecfa54f7e2aba0fb3b529dfab33874d5ad6db570",
+    "mode": 420,
+    "bytes": 180720
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-avb.so": {
+    "sha256": "2418eddf9298604f1ab3365c079794797f9fda107c4ba54bd42da76630649c22",
+    "mode": 420,
+    "bytes": 125344
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-client-device.so": {
+    "sha256": "ace95fa605c696e12120089bace81bd8f7fe55f1fab0bca01d52d7af4adb1592",
+    "mode": 420,
+    "bytes": 62224
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-client-node.so": {
+    "sha256": "13238d4183133f467ebfcfb85b7e2c1f5afa11954bc5aa9c9e36d731b775bcc4",
+    "mode": 420,
+    "bytes": 388704
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-echo-cancel.so": {
+    "sha256": "178740e1220fcc9c9eaeaec933ad1a873b109826e7beaa76a62ac23e28412cb4",
+    "mode": 420,
+    "bytes": 77632
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-fallback-sink.so": {
+    "sha256": "4618d5e0c7dfab4e8ea413733a2f567835a075c08b0b78e06190472a23601664",
+    "mode": 420,
+    "bytes": 22040
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-filter-chain.so": {
+    "sha256": "efa52d1e1519491d8b1f22e83055c528bd422f5540e2f40a2fe159c4828784be",
+    "mode": 420,
+    "bytes": 249464
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-link-factory.so": {
+    "sha256": "1d6ca4f55b2b385a7f70dfbadeefd2b7b5c1ca990fdd78c56fb1583c8c39c1c9",
+    "mode": 420,
+    "bytes": 28120
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-loopback.so": {
+    "sha256": "b758887963d91575121706fd005f764a3f017292a8d7ae45c4d21989abde1f77",
+    "mode": 420,
+    "bytes": 60864
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-metadata.so": {
+    "sha256": "cf30204519ae2eb8cfb7986d49c8d68b16934c63fe0883b07bb7c883b7a550a6",
+    "mode": 420,
+    "bytes": 55840
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-pipe-tunnel.so": {
+    "sha256": "cfd8a82c80a9002d64b16b339286a62c4fb42019d178b7061287638f0075cc16",
+    "mode": 420,
+    "bytes": 102888
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-portal.so": {
+    "sha256": "edd769a1944911d475b00afdc8ac897def0cd0d31fc0c34738e02aaf6f29da6d",
+    "mode": 420,
+    "bytes": 26752
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-profiler.so": {
+    "sha256": "6d666b951a022c4ea0b8ed8f653e119c105be613024d05c29faace831666c135",
+    "mode": 420,
+    "bytes": 60208
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-protocol-native.so": {
+    "sha256": "e330160b2d989147f5a9b9b21847c4c26afc7e78bf0d0b00cf77d494c730aad0",
+    "mode": 420,
+    "bytes": 392760
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-protocol-pulse.so": {
+    "sha256": "9c17fb1df69080f8391958b1a090c26ca6307d4728ecec78e9c5932e37384f9d",
+    "mode": 420,
+    "bytes": 538160
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-protocol-simple.so": {
+    "sha256": "d3ecde0c4044d0486976dda9d0f4d817de714ee609fd09ae4d0770c215b4b8a9",
+    "mode": 420,
+    "bytes": 69104
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-pulse-tunnel.so": {
+    "sha256": "a72c5b2dcd1d3e43ded7701ff41194ce633ef34c38e41af001f7b5846665f5d5",
+    "mode": 420,
+    "bytes": 122776
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-raop-discover.so": {
+    "sha256": "993cc9fd290ccc21134ccb998a54184924560b28cfa887bd6c003c8172373148",
+    "mode": 420,
+    "bytes": 26976
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-raop-sink.so": {
+    "sha256": "5c5286aeedc43744ecf5270c3a0ad57bb0821be9fa28ad8030034e7ca9fe609a",
+    "mode": 420,
+    "bytes": 98136
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-rt.so": {
+    "sha256": "022ed706918de42692148c8f98fe39b37a7b819df3c52fdf855447cfca10e321",
+    "mode": 420,
+    "bytes": 36800
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-rtkit.so": {
+    "sha256": "3bfcd99a494eb10521b86ae2d91b3f7d105d0c5be454b3c87dce01d5b81ec0fa",
+    "mode": 420,
+    "bytes": 36800
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-rtp-sink.so": {
+    "sha256": "29e8cba6f60a4ca4ca88f7a522e5cb072742f93a67e2f59c485dfaf4bebec870",
+    "mode": 420,
+    "bytes": 64904
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-rtp-source.so": {
+    "sha256": "1a038bc1a75f1f5ef3b6789c257435c6c1db1c58c69396b0541e1ba333789013",
+    "mode": 420,
+    "bytes": 52816
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-session-manager.so": {
+    "sha256": "c6f1fc48fcd901aeed78ac2f3870bbf9f61dd3ba67cafd83583e776d31c474b9",
+    "mode": 420,
+    "bytes": 298328
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-spa-device-factory.so": {
+    "sha256": "f22419aeefd508221de97ba48a2a7fa746a53b4b6ec29cb333b56f06725c1945",
+    "mode": 420,
+    "bytes": 27048
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-spa-device.so": {
+    "sha256": "24ea5135907c493f0b2a37a0c2d7c3032181607d1974a385bf0199fd96352b5c",
+    "mode": 420,
+    "bytes": 17344
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-spa-node-factory.so": {
+    "sha256": "494b53bed1d859c72a3e676bba3e166b9a0ef2ec4aa7ae921e296647a3ccbe1a",
+    "mode": 420,
+    "bytes": 87344
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-spa-node.so": {
+    "sha256": "61ec6340b5d8c34b4e5f4887dffdccd7d040e7f1ca33d685aacd1f5ce425a5b5",
+    "mode": 420,
+    "bytes": 77696
+  },
+  "usr/lib/sonante/runtimes/v1/lib/pipewire-0.3/libpipewire-module-zeroconf-discover.so": {
+    "sha256": "fceec8539f39e411ecb655586be25de45ccfc139c3772b9317f6d0a16adb1ffc",
+    "mode": 420,
+    "bytes": 78680
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/aec/libspa-aec-null.so": {
+    "sha256": "cc55ac02c5aca695852a160e199b75df867e154a2185f966e8e22c69b6d2f168",
+    "mode": 420,
+    "bytes": 16440
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/alsa/libspa-alsa.so": {
+    "sha256": "619cd9575a80c3a4a1d36410955e75d182edc01651587f889002f6136e8d26dd",
+    "mode": 420,
+    "bytes": 976528
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/audioconvert/libspa-audioconvert.so": {
+    "sha256": "700dd09d9d9e605355af9f4e1938e4a5a93d3daee2d189cfe920288652cdb261",
+    "mode": 420,
+    "bytes": 519864
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/audiomixer/libspa-audiomixer.so": {
+    "sha256": "5881f21b51881cadfb27ae9a3ef9199ce20bde81b05459140cb1d2cf396bc741",
+    "mode": 420,
+    "bytes": 119592
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/audiotestsrc/libspa-audiotestsrc.so": {
+    "sha256": "065d398c7a41941693bb579aac25c7a09882d5761bb60c3b9ee7019c7592c24e",
+    "mode": 420,
+    "bytes": 76392
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/avb/libspa-avb.so": {
+    "sha256": "fdbc3bfa3b30c0b6bd3fabdc78035493d5588fbb41a8a64644f1ef44d93328d4",
+    "mode": 420,
+    "bytes": 258280
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/control/libspa-control.so": {
+    "sha256": "79c624b6213f2e85f652313b284eb169f874025c1b3d4984267907ebb6614e65",
+    "mode": 420,
+    "bytes": 59176
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/jack/libspa-jack.so": {
+    "sha256": "dd2ec985b3e5ca34ec72e54ac91e64ac853fde26addd85bdefbe921ec1bf9544",
+    "mode": 420,
+    "bytes": 229344
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/support/libspa-dbus.so": {
+    "sha256": "4901ef524a925b00ffe86a7b7523d8d4075610db16edc0ba5629b703214067a9",
+    "mode": 420,
+    "bytes": 27680
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/support/libspa-journal.so": {
+    "sha256": "34223ca3531530e9a56cce655574f097ddd68c38d989f99ce874e4cb96443b7c",
+    "mode": 420,
+    "bytes": 25640
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/support/libspa-support.so": {
+    "sha256": "c12422ec8207a28d35026ce15b27ab73c1a401f8168d5e0c2fa902267cf5f61f",
+    "mode": 420,
+    "bytes": 149784
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/v4l2/libspa-v4l2.so": {
+    "sha256": "005cedc34d0ef2fb23c18884a031e2885cc7b9cea2a9b9d202a2cd90039d1131",
+    "mode": 420,
+    "bytes": 126328
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/videoconvert/libspa-videoconvert.so": {
+    "sha256": "3e6f5ae1a4258f64ff0edcade8c721e5928f86a5f2e3047f1b936d1ad33e3ba4",
+    "mode": 420,
+    "bytes": 149832
+  },
+  "usr/lib/sonante/runtimes/v1/lib/spa-0.2/videotestsrc/libspa-videotestsrc.so": {
+    "sha256": "5dc5e7b233aa83549e07079609c3defb82f5863727486801ba2a6e3d63ed1c6d",
+    "mode": 420,
+    "bytes": 72048
+  },
+  "usr/lib/sonante/runtimes/v1/manifest.json": {
+    "sha256": "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769",
+    "mode": 420,
+    "bytes": 17641
+  },
+  "usr/lib/sonante/runtimes/v1/mpd-direct": {
+    "sha256": "7bf2a6c96fad672ee6a056335c1b8054a71107975c637b76f549751b43d0d4b1",
+    "mode": 493,
+    "bytes": 60186832
+  },
+  "usr/lib/sonante/runtimes/v1/mpd-eq": {
+    "sha256": "6b9cb9820c1704175af312377fae6f20ad80486f69ee17cd190bc6390bc1d5ff",
+    "mode": 493,
+    "bytes": 60199544
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/client-rt.conf": {
+    "sha256": "12227b48c1b1ea68e4d133deeeb9e67a55b88d89521f12dc74e77c8301823fd3",
+    "mode": 420,
+    "bytes": 3360
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/client.conf": {
+    "sha256": "43d851dc5e502f22a869f55ee6aedb5e7a1fb6b0c6645e6b7ca10911ea86ced5",
+    "mode": 420,
+    "bytes": 2670
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain/demonic.conf": {
+    "sha256": "a2c112d4d49868743dcdf6152841aeea67272770cdd9fdfece6b1dd9ebd31a4f",
+    "mode": 420,
+    "bytes": 2197
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain/sink-dolby-surround.conf": {
+    "sha256": "6475b7ec94c9626d6b1c6e402b5c06509e69532ac29120fdb2779871906420e3",
+    "mode": 420,
+    "bytes": 1577
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain/sink-eq6.conf": {
+    "sha256": "8aa0fca8adb257bd805945abc7772988b4454bfa1eef294d8e0ae5cd82791585",
+    "mode": 420,
+    "bytes": 2604
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain/sink-make-LFE.conf": {
+    "sha256": "bcb75ad6d4d92c317eddb0730dc045c8922505ba3ab7e0448e036f729fb25edc",
+    "mode": 420,
+    "bytes": 2114
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain/sink-matrix-spatialiser.conf": {
+    "sha256": "e092e8daf614ebcb952b214cd965165e95da5ad7ef8c2297a7908a5f4964c4fe",
+    "mode": 420,
+    "bytes": 1305
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain/sink-mix-FL-FR.conf": {
+    "sha256": "6ae81b313f04959dacdb1add64789c6ce5a0c9d95cc8d2bd5abb461f720f4350",
+    "mode": 420,
+    "bytes": 1318
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain/sink-virtual-surround-5.1-kemar.conf": {
+    "sha256": "d5a581c50466a2d02b3364d43ba4e4d86ccf51b5349ae5e895b799ddcd0e270c",
+    "mode": 420,
+    "bytes": 6794
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain/sink-virtual-surround-7.1-hesuvi.conf": {
+    "sha256": "9f94ee65b99d8592d7b2e15bc506ad3e55783a42a3fe0f7aeb2ddc3a3c2aca72",
+    "mode": 420,
+    "bytes": 6409
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain/source-duplicate-FL.conf": {
+    "sha256": "aa89d9d6cd43b6da2f489fbadc75c05e72780dc8211580c42a2c845425aa7667",
+    "mode": 420,
+    "bytes": 1780
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain/source-rnnoise.conf": {
+    "sha256": "45b283f1f0d0ed3cf85d2b95f50646c43b18dac90533e1abcb311cc8ea5b9350",
+    "mode": 420,
+    "bytes": 1078
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/filter-chain.conf": {
+    "sha256": "0001a214d7bcf024dfd7abbcaa07a1276b2097e6e6669b9e0f48313f1535e2e9",
+    "mode": 420,
+    "bytes": 1895
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/jack.conf": {
+    "sha256": "4d0406c00b5a03ae23fc0307e52788fdac469ac8736c322b1e5ee1f9298ebe05",
+    "mode": 420,
+    "bytes": 4017
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/minimal.conf": {
+    "sha256": "872b3b2e28439e06c1f292e7fa5c20bbc52d851832be85edea620ff63a4a99ac",
+    "mode": 420,
+    "bytes": 12993
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/pipewire-avb.conf": {
+    "sha256": "a63d8cfcd93d081b32f456abe8c26e02d70a727c86af9cddd0d64a3cc0459094",
+    "mode": 420,
+    "bytes": 2089
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/pipewire-pulse.conf": {
+    "sha256": "391f769e15ac84d4522ecbb34f277b3efb873a1f3b52ffd678af054fc4dbad13",
+    "mode": 420,
+    "bytes": 5693
+  },
+  "usr/lib/sonante/runtimes/v1/share/pipewire/pipewire.conf": {
+    "sha256": "7756c486b965bdf354f1c98ac254e329caf769cb2d94ea6a5be95c0ab3713783",
+    "mode": 420,
+    "bytes": 9681
+  },
+  "usr/share/applications/sonante.desktop": {
+    "sha256": "2211879ecfa5af3ae64b1c311025b6c03fa945ae5e3624a88424aa2632e5aed1",
+    "mode": 420,
+    "bytes": 212
+  },
+  "usr/share/doc/sonante/AUTHORS": {
+    "sha256": "7611796b40f0de10de09709488ab0d165c6203d6abd82a32fb888350675f495e",
+    "mode": 420,
+    "bytes": 94
+  },
+  "usr/share/doc/sonante/PRIVATE_RUNTIME_SOURCES.txt": {
+    "sha256": "1c0885ccc5c97dde31b3499d5cf58bc5e2632ac1d2ce46dc05f0a42c675f0596",
+    "mode": 420,
+    "bytes": 1998
+  },
+  "usr/share/doc/sonante/PRIVATE_TEST_BUILD.txt": {
+    "sha256": "9be76859b8f7b541bccf7a6ff20eba1a79026213d47e81e6158787d2edee2950",
+    "mode": 420,
+    "bytes": 189
+  },
+  "usr/share/doc/sonante/THIRD_PARTY_NOTICES": {
+    "sha256": "2eff4ed61c88abb281e5bde2c9719e31607c23389a9fb0c5a42a4d4ebbc3992e",
+    "mode": 420,
+    "bytes": 11833
+  },
+  "usr/share/doc/sonante/runtime-inventory.json": {
+    "sha256": "547af463c21c34d52ba744eb4cb0d242f8931ee804ae61955e575f6149b5b5da",
+    "mode": 420,
+    "bytes": 4467
+  },
+  "usr/share/icons/hicolor/128x128/apps/sonante.png": {
+    "sha256": "f1b7ef439447b970089a9872c972b73f86faa5f205b35fecef2dcbc9d0686930",
+    "mode": 420,
+    "bytes": 6702
+  },
+  "usr/share/icons/hicolor/256x256/apps/sonante.png": {
+    "sha256": "60df2e1a0a2564f27a310b313b0d8b55ef128de015df9ea36618f6811c8c6bb6",
+    "mode": 420,
+    "bytes": 13797
+  },
+  "usr/share/icons/hicolor/32x32/apps/sonante.png": {
+    "sha256": "18440f1b57ef530249f98e5899fdd81a64db00e89d8409c8c55bbb7df275e5a9",
+    "mode": 420,
+    "bytes": 1433
+  },
+  "usr/share/icons/hicolor/512x512/apps/sonante.png": {
+    "sha256": "814539b2d84d23195d7d3d1fca6df2779563f0d3315eba1be3601beef62624e4",
+    "mode": 420,
+    "bytes": 28628
+  },
+  "usr/share/licenses/sonante/LICENSE": {
+    "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "mode": 420,
+    "bytes": 35149
+  },
+  "usr/share/licenses/sonante/runtimes/camilladsp/LICENSE_GLPv3.txt": {
+    "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "mode": 420,
+    "bytes": 35149
+  },
+  "usr/share/licenses/sonante/runtimes/camilladsp/LICENSE_MPL2.0.txt": {
+    "sha256": "86cf9656479f1edb82245b985f4a2cc0d503b945766ebeda4269c60b307699ae",
+    "mode": 420,
+    "bytes": 16725
+  },
+  "usr/share/licenses/sonante/runtimes/curl/COPYING": {
+    "sha256": "e18f1989333b70044b2adfb7dc2f905d0119dbdcac3bc9f4bc9d540e3a29de5b",
+    "mode": 420,
+    "bytes": 1088
+  },
+  "usr/share/licenses/sonante/runtimes/fmt/LICENSE": {
+    "sha256": "07580f2a3b35709ce703d523f447b242f6dfec7582a8c0df102c7fa2849375f8",
+    "mode": 420,
+    "bytes": 1431
+  },
+  "usr/share/licenses/sonante/runtimes/libavcodec58/copyright": {
+    "sha256": "ac095d4273d9245bb1ecbcb4d9c18d60504f07736e31ab3a0162a2adb2ba7915",
+    "mode": 420,
+    "bytes": 43601
+  },
+  "usr/share/licenses/sonante/runtimes/libavfilter7/copyright": {
+    "sha256": "ac095d4273d9245bb1ecbcb4d9c18d60504f07736e31ab3a0162a2adb2ba7915",
+    "mode": 420,
+    "bytes": 43601
+  },
+  "usr/share/licenses/sonante/runtimes/libavformat58/copyright": {
+    "sha256": "ac095d4273d9245bb1ecbcb4d9c18d60504f07736e31ab3a0162a2adb2ba7915",
+    "mode": 420,
+    "bytes": 43601
+  },
+  "usr/share/licenses/sonante/runtimes/libavutil56/copyright": {
+    "sha256": "ac095d4273d9245bb1ecbcb4d9c18d60504f07736e31ab3a0162a2adb2ba7915",
+    "mode": 420,
+    "bytes": 43601
+  },
+  "usr/share/licenses/sonante/runtimes/libbluray2/copyright": {
+    "sha256": "4e890ce8aa03539f2a76b929552e1c4791a4a1619317c9379d0c506a2faedf0d",
+    "mode": 420,
+    "bytes": 24166
+  },
+  "usr/share/licenses/sonante/runtimes/libcdio19/copyright": {
+    "sha256": "69dfb63c2f5be3e7c93b3336f8be4d0814a15381b6c6296ccb874c0db1bfd470",
+    "mode": 420,
+    "bytes": 4580
+  },
+  "usr/share/licenses/sonante/runtimes/libcodec2-1.0/copyright": {
+    "sha256": "595c0cc4055f40ab0c3f4af85ad34843f7c29faacc07b3eb679942eb425a80c8",
+    "mode": 420,
+    "bytes": 5763
+  },
+  "usr/share/licenses/sonante/runtimes/libdav1d5/copyright": {
+    "sha256": "9b82ed3cc5a80ebde9e7f52a19a2fe0af33b8ba2d5ce2d5a293fe294b28a236c",
+    "mode": 420,
+    "bytes": 9722
+  },
+  "usr/share/licenses/sonante/runtimes/libflac8/copyright": {
+    "sha256": "388966ff54c5ae54111132b6d4066e95c1b16d32909a5d932be80e58fc1666ad",
+    "mode": 420,
+    "bytes": 8857
+  },
+  "usr/share/licenses/sonante/runtimes/libflite1/copyright": {
+    "sha256": "83afbf11591aa82a9d0c82dbf882c9f5adc9f13fc45cf2ae32b1e1bb9242b0e2",
+    "mode": 420,
+    "bytes": 16381
+  },
+  "usr/share/licenses/sonante/runtimes/libicu70/copyright": {
+    "sha256": "170fd65a4a836530290d4b3f7572cafcf1c4d66e7357ae42d76861bbbecd4767",
+    "mode": 420,
+    "bytes": 2221
+  },
+  "usr/share/licenses/sonante/runtimes/libiso9660-11/copyright": {
+    "sha256": "69dfb63c2f5be3e7c93b3336f8be4d0814a15381b6c6296ccb874c0db1bfd470",
+    "mode": 420,
+    "bytes": 4580
+  },
+  "usr/share/licenses/sonante/runtimes/libixml10/copyright": {
+    "sha256": "f19bdb20b99ffedd66506b263a66e8bb783b6efabf86956bc4b220e71b50b8c3",
+    "mode": 420,
+    "bytes": 8493
+  },
+  "usr/share/licenses/sonante/runtimes/libmfx1/copyright": {
+    "sha256": "133fb9923530fed1f03be76a10eb76feeb1496e79ab4fc2e8e5c0f4602f5e9b1",
+    "mode": 420,
+    "bytes": 4717
+  },
+  "usr/share/licenses/sonante/runtimes/libnettle8/copyright": {
+    "sha256": "d8b51ce04d337e49df2f6258a5c8558f3080ff2cf629deb9f07c0361d1757e7b",
+    "mode": 420,
+    "bytes": 20902
+  },
+  "usr/share/licenses/sonante/runtimes/libnfs13/copyright": {
+    "sha256": "3238311b901f49618c41d6bbb4b2d5c5835071ec036b876cc9640d2901b9a352",
+    "mode": 420,
+    "bytes": 7351
+  },
+  "usr/share/licenses/sonante/runtimes/libnuma1/copyright": {
+    "sha256": "179c34f5e56cd0b6b73dd7970a97357ee784e2236e8293826656c7ebb3bface7",
+    "mode": 420,
+    "bytes": 1357
+  },
+  "usr/share/licenses/sonante/runtimes/libpocketsphinx3/copyright": {
+    "sha256": "91659750a0e32efdc83de917f3012cff154e1fefabacf48228bb4993becda8d7",
+    "mode": 420,
+    "bytes": 4577
+  },
+  "usr/share/licenses/sonante/runtimes/libpostproc55/copyright": {
+    "sha256": "ac095d4273d9245bb1ecbcb4d9c18d60504f07736e31ab3a0162a2adb2ba7915",
+    "mode": 420,
+    "bytes": 43601
+  },
+  "usr/share/licenses/sonante/runtimes/librabbitmq4/copyright": {
+    "sha256": "56af5086b0c40e4ac338a27538bfd78ac5d52163ea680b8596ae4a23432b63a5",
+    "mode": 420,
+    "bytes": 3040
+  },
+  "usr/share/licenses/sonante/runtimes/librubberband2/copyright": {
+    "sha256": "992e99b767a77fda9e7680181676701248dd4192d32af6585bcd0dc14f91a152",
+    "mode": 420,
+    "bytes": 7725
+  },
+  "usr/share/licenses/sonante/runtimes/libshine3/copyright": {
+    "sha256": "b631215db51471d41765f415b55a76fabc553f4a33760c7740c9e31d33a4aba8",
+    "mode": 420,
+    "bytes": 2277
+  },
+  "usr/share/licenses/sonante/runtimes/libsidplayfp6/copyright": {
+    "sha256": "31e364bf14f21e5e8933a8710b11c96d59563001ece0b9364ca005f9de2b2982",
+    "mode": 420,
+    "bytes": 2278
+  },
+  "usr/share/licenses/sonante/runtimes/libsphinxbase3/copyright": {
+    "sha256": "123dec2e4488513eaf0a8c104188807fac5591feb14bdd12aae49cd8edd62311",
+    "mode": 420,
+    "bytes": 10361
+  },
+  "usr/share/licenses/sonante/runtimes/libsrt1.4-gnutls/copyright": {
+    "sha256": "19a171090dcc1ec97a7f74e0db49cc769359333fde3ca5c5d8c0cf9fd1b3092d",
+    "mode": 420,
+    "bytes": 22812
+  },
+  "usr/share/licenses/sonante/runtimes/libssh-gcrypt-4/copyright": {
+    "sha256": "7e8414e138a9170e3a463e80020a8a7e168a6e736bac37a4f38fdb1ce4180d65",
+    "mode": 420,
+    "bytes": 12383
+  },
+  "usr/share/licenses/sonante/runtimes/libswresample3/copyright": {
+    "sha256": "ac095d4273d9245bb1ecbcb4d9c18d60504f07736e31ab3a0162a2adb2ba7915",
+    "mode": 420,
+    "bytes": 43601
+  },
+  "usr/share/licenses/sonante/runtimes/libswscale5/copyright": {
+    "sha256": "ac095d4273d9245bb1ecbcb4d9c18d60504f07736e31ab3a0162a2adb2ba7915",
+    "mode": 420,
+    "bytes": 43601
+  },
+  "usr/share/licenses/sonante/runtimes/libtheora0/copyright": {
+    "sha256": "588d3573ea86aa752a8b64ba8d5a8006dc56a60a7d78b5339101bebad28933d6",
+    "mode": 420,
+    "bytes": 2054
+  },
+  "usr/share/licenses/sonante/runtimes/libudfread0/copyright": {
+    "sha256": "2e591d4448d6a5d38a3b2c1a2412651bd015f798ef5ac0a4bcba2b1a9a227297",
+    "mode": 420,
+    "bytes": 3155
+  },
+  "usr/share/licenses/sonante/runtimes/libupnp13/copyright": {
+    "sha256": "f19bdb20b99ffedd66506b263a66e8bb783b6efabf86956bc4b220e71b50b8c3",
+    "mode": 420,
+    "bytes": 8493
+  },
+  "usr/share/licenses/sonante/runtimes/liburing/LICENSE": {
+    "sha256": "2ec12f7934cdfce25ff72b0557738989d79fc7a496d1cf9b2d3f9464fd61edbe",
+    "mode": 420,
+    "bytes": 1050
+  },
+  "usr/share/licenses/sonante/runtimes/libvidstab1.1/copyright": {
+    "sha256": "c784a3d8760a64cb193f13425f8d667a4a183ff678d7cf0c151bb1dd0e30f3cc",
+    "mode": 420,
+    "bytes": 1204
+  },
+  "usr/share/licenses/sonante/runtimes/libvpx7/copyright": {
+    "sha256": "6d412c752e531c579fa590b80e0568a3e847a186bfdfa352ae22adcde5f55ec7",
+    "mode": 420,
+    "bytes": 5108
+  },
+  "usr/share/licenses/sonante/runtimes/libx264-163/copyright": {
+    "sha256": "2571dd1c549feb9c73c68a1fc9370d72f5369febee2856d84e4e935844733eac",
+    "mode": 420,
+    "bytes": 7690
+  },
+  "usr/share/licenses/sonante/runtimes/libx265-199/copyright": {
+    "sha256": "993d16fbf3d32b7eeeae4081167e4a4b1d05bdb0e20b79b576113c0697c5f729",
+    "mode": 420,
+    "bytes": 4546
+  },
+  "usr/share/licenses/sonante/runtimes/libxml2/copyright": {
+    "sha256": "ee746b96cfa5be73c3ea3e4cfb1285e9b315d4c9267f99b2ee9c5d911d9fe3f4",
+    "mode": 420,
+    "bytes": 3067
+  },
+  "usr/share/licenses/sonante/runtimes/mpd-direct/COPYING": {
+    "sha256": "ab15fd526bd8dd18a9e77ebc139656bf4d33e97fc7238cd11bf60e2b9b8666c6",
+    "mode": 420,
+    "bytes": 17987
+  },
+  "usr/share/licenses/sonante/runtimes/mpd-eq/COPYING": {
+    "sha256": "ab15fd526bd8dd18a9e77ebc139656bf4d33e97fc7238cd11bf60e2b9b8666c6",
+    "mode": 420,
+    "bytes": 17987
+  },
+  "usr/share/licenses/sonante/runtimes/pipewire/COPYING": {
+    "sha256": "8909c319a7e27dbb33a15b9035f89ab3b7b2f6a12f8bcddc755206a8db1ada44",
+    "mode": 420,
+    "bytes": 1218
+  }
+}

@@ -12,11 +12,11 @@ export function MixChoiceCard({ identity, label, subtitle, kind, disabled, onCli
   disabled: boolean; onClick: () => void; "data-decade"?: number; "data-style"?: string;
 }) {
   const Icon = kind === "decade" ? CalendarDays : Music2;
-  return <button type="button" {...data} disabled={disabled} onClick={onClick}
+  return <button data-theme-surface="contrast" type="button" {...data} disabled={disabled} onClick={onClick}
     style={{ backgroundColor: mixChoiceColor(identity), backgroundImage: "linear-gradient(135deg, rgba(255,255,255,.07), transparent 75%)" }}
-    className="flex min-h-36 min-w-0 flex-col items-start gap-4 rounded-2xl border border-white/10 p-5 text-left text-white transition hover:-translate-y-0.5 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212] disabled:opacity-50 disabled:hover:translate-y-0">
-    <Icon size={26} aria-hidden="true" className="shrink-0 text-white/80" />
+    className="flex min-h-36 min-w-0 flex-col items-start gap-4 rounded-2xl border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.1))] p-5 text-left text-[color:var(--theme-fg-primary,#ffffff)] transition hover:-translate-y-0.5 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-soft,#ffffff)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212] disabled:opacity-50 disabled:hover:translate-y-0">
+    <Icon size={26} aria-hidden="true" className="shrink-0 text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.8))]" />
     <span className="min-w-0 text-xl font-bold leading-snug [overflow-wrap:anywhere]">{label}</span>
-    {subtitle && <span className="-mt-2 text-xs font-medium text-white/80">{subtitle}</span>}
+    {subtitle && <span className="-mt-2 text-xs font-medium text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.8))]">{subtitle}</span>}
   </button>;
 }

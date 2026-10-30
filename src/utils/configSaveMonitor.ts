@@ -1,7 +1,7 @@
 import type { ConfigSaveOperation } from "../types/config.ts";
 
 export const configSavePending = (operation: ConfigSaveOperation): boolean =>
-  ["preparing", "indexing", "validating"].includes(operation.phase);
+  ["preparing", "removing", "indexing", "validating"].includes(operation.phase);
 
 // One observer belongs to App, not the modal or the invoke promise. It survives
 // modal close and reattaches to a running backend operation after renderer reload.
@@ -25,7 +25,7 @@ export function monitorConfigSave(
       (!latest || operation.id !== latest.id)) return;
     if (latest) {
       if (BigInt(operation.id) < BigInt(latest.id)) return;
-      const order = ["preparing", "indexing", "validating", "completed", "failed", "uncertain"];
+      const order = ["preparing", "removing", "indexing", "validating", "completed", "failed", "uncertain"];
       if (operation.id === latest.id && (!configSavePending(latest) ||
         order.indexOf(operation.phase) < order.indexOf(latest.phase))) return;
     }

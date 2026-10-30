@@ -435,6 +435,7 @@ struct SonanteMpris {
 
 impl SonanteMpris {
     async fn control(&self, action: BasicMediaAction) -> fdo::Result<()> {
+        if let Some(state)=self.app.try_state::<AudioState>() {state.note_transport_intervention();}
         let app = self.app.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let is_shared = if matches!(
@@ -458,10 +459,8 @@ impl SonanteMpris {
             let state = app
                 .try_state::<AudioState>()
                 .ok_or_else(|| "Estado de áudio indisponível para o controle MPRIS.".to_string())?;
-            let mut audio = state.0.lock().map_err(|error| {
-                format!("Falha ao acessar o estado de áudio via MPRIS: {error}")
-            })?;
-            apply_basic_action(&mut *audio, action, is_shared)
+            let transactions = app.state::<crate::ConfigTransactionState>();
+            crate::with_playback_control(&state.0, &transactions, |audio| apply_basic_action(audio, action, is_shared))
         })
         .await
         .map_err(|error| fdo::Error::Failed(format!("Falha na tarefa MPRIS: {error}")))?
@@ -563,6 +562,7 @@ impl PlayerInterface for SonanteMpris {
     }
 
     async fn stop(&self) -> fdo::Result<()> {
+        if let Some(state)=self.app.try_state::<AudioState>() {state.note_transport_intervention();}
         Err(fdo::Error::NotSupported("Stop não é suportado.".into()))
     }
 
@@ -1183,12 +1183,7 @@ pub fn start(app: AppHandle) {
             .try_state::<MprisState>()
             .and_then(|state| state.0.lock().ok()?.finish_start(server));
         if let Some(server) = unused_server {
-            if let Err(error) = server.release_bus_name().await {
-                eprintln!(
-                    "[MPRIS] Failed to release D-Bus name: {}",
-                    crate::diagnostics::error_summary(&error)
-                );
-            }
+            release_server_name(&server).await;
             return;
         }
 
@@ -1260,14 +1255,23 @@ pub fn shutdown(app: &AppHandle) {
     }
 
     if let Some(server) = server {
-        if let Err(error) = tauri::async_runtime::block_on(server.release_bus_name()) {
-            eprintln!(
-                "[MPRIS] Failed to stop service: {}",
-                crate::diagnostics::error_summary(&error)
-            );
-        }
+        tauri::async_runtime::block_on(release_server_name(&server));
     }
 }
+
+async fn release_server_name(server: &Server<SonanteMpris>) {
+    match crate::mpris_shutdown::bounded_release(server.release_bus_name()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => eprintln!(
+            "[MPRIS] Failed to release D-Bus name: {}",
+            crate::diagnostics::error_summary(&error)
+        ),
+        Err(_) => eprintln!(
+            "[MPRIS] D-Bus name release timed out after 1s; continuing controlled cleanup."
+        ),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1383,6 +1387,8 @@ mod tests {
 
     fn audio_status(state: &str, current_media: Option<CurrentMedia>) -> AudioPlaybackStatus {
         AudioPlaybackStatus {
+            snapshot_consistent: true,
+            processing: None,
             options: None,
             state: state.into(),
             elapsed: 12.5,
@@ -1400,6 +1406,8 @@ mod tests {
                 writable: false,
                 available: false,
                 backend: VolumeBackend::Unavailable,
+                direct_gain: None, direct_token: None,
+                shared_token: None,
             },
             is_updating: false,
             playback_error: None,

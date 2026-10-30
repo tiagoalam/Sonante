@@ -7,7 +7,7 @@ export function AlbumGenreGrid({ genres, onSelect, albumCountLabel }: {
   albumCountLabel: (count: number) => string;
 }) {
   const { t } = useTranslation();
-  if (genres.length === 0) return <div className="h-60 flex items-center justify-center text-xs text-[#666666]">{t("common.emptyGenres")}</div>;
+  if (genres.length === 0) return <div className="h-60 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">{t("common.emptyGenres")}</div>;
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-4">
       {genres.map(genre => (
@@ -15,10 +15,10 @@ export function AlbumGenreGrid({ genres, onSelect, albumCountLabel }: {
           key={genre.value}
           type="button"
           onClick={() => onSelect(genre.value)}
-          className="rounded-xl border border-[#2B2B2B] bg-[#181818] p-5 text-left transition-colors hover:border-[#E5A00D] hover:bg-[#1E1E1E] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#E5A00D]"
+          className="rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] p-5 text-left transition-colors hover:border-[color:var(--theme-border-accent,#E5A00D)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
         >
-          <span className="block text-xl font-bold text-white break-words">{genre.label}</span>
-          <span className="mt-1 block text-xs text-[#777777]">{albumCountLabel(genre.albumCount)}</span>
+          <span className="block text-xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] break-words">{genre.label}</span>
+          <span className="mt-1 block text-xs text-[color:var(--theme-fg-muted,#777777)]">{albumCountLabel(genre.albumCount)}</span>
         </button>
       ))}
     </div>

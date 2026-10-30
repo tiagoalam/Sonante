@@ -1,0 +1,29 @@
+Private Sonante runtime materials — Linux x86_64
+
+The installed runtime-inventory.json identifies the separate corresponding-source
+archive by filename, size and SHA256. Keep that archive alongside the private
+binary package. It is not installed into /usr and is not an installable package.
+It contains exact MPD Direct/EQ trees, all four private patches, CamillaDSP source,
+Cargo.lock and 358 vendored crate sources/notices, source archives and patches
+for the copied compatibility libraries, Rust standard-library sources/notices,
+and logical build commands with exact dependency/toolchain inputs.
+
+MPD 0.24.15, b1c87eb85e9b211369e42433526b55469bf1b6c9:
+https://github.com/MusicPlayerDaemon/MPD — GPL-2.0-or-later.
+CamillaDSP 4.1.3, 05e9cfcdf43c0dfe078ed3feb8af4c8bd701fd74:
+https://github.com/HEnquist/camilladsp — GPL-3.0-only OR MPL-2.0.
+Default websocket plus pipewire-backend remain enabled with the exact lock/vendor.
+Private curl 8.12.1, fmt 12.0.0, liburing 2.14 and PipeWire client/SPA 0.3.65
+are built from the recorded inputs; Ubuntu package descriptors/original tarballs
+and distribution patches cover the compatibility libraries. Installed licenses
+include distribution copyright files; further original notices remain in sources.
+
+These are newly built identities, compiled in Ubuntu 22.04 with GCC 11.4 and
+Rust 1.90 using path remapping. GLIBC <=2.35, GLIBCXX <=3.4.30,
+CXXABI <=1.3.13; application WebKitGTK 4.1 API requires version >=2.40.
+Original development motors and their pins remain unchanged. Source equality
+and targeted probes do not transfer any USB/DAC capture claim to these builds.
+No claim of byte-reproducible binaries, legal certification, or clean-install
+acceptance is made. No runtime downloads or runtime environment overrides.
+
+Consumer-clock Shared EQ candidate (2026-10-20): apply packaging/mpd-eq-consumer-clock.patch to the exact MPD EQ tree above. Original engines remain preserved externally; this candidate changes only strict-EQ FIFO pacing, not Direct. Candidate build/source/ABI records remain private; regenerate corresponding-source inventory before any future binary package. No new package is produced here.

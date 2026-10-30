@@ -25,6 +25,7 @@ pub(crate) enum PreviewError {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Scope {
+    pub initial: bool,
     pub socket: String,
     pub sources: Vec<String>,
     pub job: Option<u64>,
@@ -33,6 +34,17 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
+    pub(crate) fn initial(socket: &str, sources: &[String]) -> Result<Self, PreviewError> {
+        if sources.is_empty() || sources.len() > 65_536 { return Err(PreviewError::LimitExceeded); }
+        let mut filters = Vec::new();
+        let mut unique = BTreeSet::new();
+        for chunk in sources.chunks(8) {
+            let scope = Self::new(socket, chunk)?;
+            for source in chunk { if !unique.insert(source) { return Err(PreviewError::InvalidResponse); } }
+            filters.extend(scope.filters);
+        }
+        Ok(Self { initial: true, socket: socket.into(), sources: sources.to_vec(), job: None, filters, artwork: None })
+    }
     pub(crate) fn new(socket: &str, sources: &[String]) -> Result<Self, PreviewError> {
         if sources.is_empty() || sources.len() > 8 {
             return Err(PreviewError::LimitExceeded);
@@ -56,6 +68,7 @@ impl Scope {
             return Err(PreviewError::LimitExceeded);
         }
         Ok(Self {
+            initial: false,
             socket: socket.into(),
             sources: sources.to_vec(),
             job: None,
@@ -70,6 +83,7 @@ pub(crate) struct AlbumDiscovery {
     /// Opaque, operation-scoped grouping identity; never a confirmed album ID.
     pub provisional_group_key: String,
     pub image: Option<String>,
+    pub artwork_ref: Option<String>,
     pub source_id: String,
     pub album: Option<String>,
     pub artist: Option<String>,
@@ -80,6 +94,7 @@ pub(crate) struct AlbumDiscovery {
 #[derive(Debug, Serialize)]
 pub(crate) struct Discovery {
     pub operation_id: String,
+    pub initial: bool,
     pub provisional: bool,
     pub playable: bool,
     /// Always false: a short mutable page cannot prove catalog completeness.
@@ -95,7 +110,7 @@ pub(crate) fn read(id: &str, lease: &PreviewLease) -> Result<Discovery, PreviewE
     })
 }
 
-fn read_with(
+pub(crate) fn read_with(
     id: &str,
     lease: &PreviewLease,
     mut query: impl FnMut(&str, Instant) -> Result<Vec<String>, PreviewError>,
@@ -104,21 +119,28 @@ fn read_with(
     let deadline = Instant::now() + Duration::from_secs(2);
     let job = lease.scope.job.ok_or(PreviewError::Unavailable)?;
     let offsets = lease.offsets()?;
-    let mut next_offsets = Vec::with_capacity(offsets.len());
-    check_job(&query("status", deadline)?, job)?;
+    let mut next_offsets = offsets.clone();
+    let status = query("status", deadline)?;
+    // MPD may be working on its automatic first scan while our rescan is
+    // queued. Only this initial, operation-owned generation admits that job;
+    // both ends of a sample must still observe the exact SAME active job.
+    let job = if lease.scope.initial {
+        active_job(&status).ok_or(PreviewError::Unavailable)?
+    } else { job };
+    check_job(&status, job)?;
     // At most eight small windows restricted to individual new sources. No
     // count or stable continuation cursor: every request replaces the sample.
-    let per_source = TRACK_LIMIT / lease.scope.sources.len();
+    let source_start = lease.source_start()?;
+    let source_count = lease.scope.sources.len().min(8);
+    let per_source = TRACK_LIMIT / source_count;
     let mut albums = Vec::new();
     let mut sampled_tracks = 0;
     let mut artwork_budget = 2;
-    for ((source, filter), start) in lease
-        .scope
-        .sources
-        .iter()
-        .zip(&lease.scope.filters)
-        .zip(&offsets)
-    {
+    for n in 0..source_count {
+        let index = (source_start + n) % lease.scope.sources.len();
+        let source = &lease.scope.sources[index];
+        let filter = &lease.scope.filters[index];
+        let start = offsets[index];
         lease.ensure_active()?;
         let end = start
             .checked_add(per_source)
@@ -127,6 +149,7 @@ fn read_with(
         let (rows, count) =
             discoveries_with_artwork(id, lines, std::slice::from_ref(source), &mut |folder| {
                 lease.ensure_active().ok()?;
+                if lease.scope.initial { return None; }
                 let artwork = lease.scope.artwork.as_ref()?;
                 if artwork_budget == 0 || Instant::now() >= deadline {
                     return None;
@@ -141,12 +164,13 @@ fn read_with(
         albums.extend(rows);
         // Revisit the beginning after reaching the currently observable end.
         // Shrinkage/CUE replacement can invalidate offsets at any time.
-        next_offsets.push(if count < per_source { 0 } else { end });
+        next_offsets[index] = if count < per_source { 0 } else { end };
     }
     check_job(&query("status", deadline)?, job)?;
     lease.commit_offsets(&offsets, next_offsets)?;
     Ok(Discovery {
         operation_id: id.into(),
+        initial: lease.scope.initial,
         provisional: true,
         playable: false,
         complete: false,
@@ -157,15 +181,15 @@ fn read_with(
 }
 
 fn check_job(lines: &[String], job: u64) -> Result<(), PreviewError> {
+    if active_job(lines) == Some(job) { Ok(()) } else { Err(PreviewError::Unavailable) }
+}
+
+fn active_job(lines: &[String]) -> Option<u64> {
     let mut jobs = lines
         .iter()
         .filter_map(|line| line.strip_prefix("updating_db: "));
     let current = jobs.next().and_then(|value| value.parse::<u64>().ok());
-    if current != Some(job) || jobs.next().is_some() {
-        Err(PreviewError::Unavailable)
-    } else {
-        Ok(())
-    }
+    if current == Some(0) || jobs.next().is_some() { None } else { current }
 }
 
 // Dedicated stricter read budget; ordinary audio commands keep their existing
@@ -242,6 +266,38 @@ fn display(value: &str) -> Option<String> {
     } else {
         Some(value.into())
     }
+}
+
+// A presentation-only logical reference, not a physical path or playback ID.
+// No per-album native registry: the existing operation/source anchors authorize
+// only the cover reader's finite, verified image-name allowlist.
+fn artwork_reference(operation: &str, folder: &Path) -> Option<String> {
+    let folder = folder.to_str()?;
+    if folder.len() > 4096 || !local_media::is_safe_relative_mpd_uri(folder) { return None; }
+    let encoded = folder.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
+    Some(format!("cover-v1:{operation}:{encoded}"))
+}
+
+pub(crate) fn read_artwork(id: &str, reference: &str, lease: &PreviewLease) -> Result<Option<String>, PreviewError> {
+    lease.ensure_active()?;
+    if lease.scope.job.is_none() { return Err(PreviewError::Unavailable); }
+    let prefix = format!("cover-v1:{id}:");
+    let encoded = reference.strip_prefix(&prefix).ok_or(PreviewError::InvalidResponse)?;
+    if encoded.is_empty() || encoded.len() > 8192 || encoded.len() % 2 != 0
+        || !encoded.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(PreviewError::InvalidResponse);
+    }
+    let bytes = encoded.as_bytes().chunks_exact(2).map(|pair| {
+        u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
+    }).collect::<Vec<_>>();
+    let folder = std::str::from_utf8(&bytes).map_err(|_| PreviewError::InvalidResponse)?;
+    let source = folder.split('/').next().ok_or(PreviewError::InvalidResponse)?;
+    if !local_media::is_safe_relative_mpd_uri(folder) || !lease.scope.sources.iter().any(|s| s == source) {
+        return Err(PreviewError::InvalidResponse);
+    }
+    let image = lease.scope.artwork.as_ref().and_then(|artwork| artwork.read(Path::new(folder)));
+    lease.ensure_active()?;
+    Ok(image)
 }
 
 fn provisional_group_key(
@@ -346,6 +402,7 @@ fn discoveries_with_artwork(
                     artist.as_deref(),
                 ),
                 image: artwork(folder),
+                artwork_ref: artwork_reference(operation, folder),
                 source_id: source,
                 album,
                 artist,

@@ -1,0 +1,1666 @@
+{
+  ".github/workflows/ci.yml": {
+    "mode": 420,
+    "sha256": "279edc4cf495fd0cd7be8bf1bfb72389b4ab543e75f95a18dee4400512392153"
+  },
+  ".github/workflows/release.yml": {
+    "mode": 420,
+    "sha256": "25b3354692893561c6e791dc4fd6f91892f3910fa0e27ee784b321cc72df6755"
+  },
+  ".gitignore": {
+    "mode": 420,
+    "sha256": "ca89cd7452f19a7c06a891c38fb11a168ce06a8de0b1c74dd7aae012997c7d94"
+  },
+  "AUTHORS": {
+    "mode": 420,
+    "sha256": "7611796b40f0de10de09709488ab0d165c6203d6abd82a32fb888350675f495e"
+  },
+  "LICENSE": {
+    "mode": 420,
+    "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+  },
+  "README.md": {
+    "mode": 420,
+    "sha256": "3a435172ce81980736b294ffc58b762baa7dc5df64dbd6e6bf1455b95817d30a"
+  },
+  "THIRD_PARTY_NOTICES": {
+    "mode": 420,
+    "sha256": "2eff4ed61c88abb281e5bde2c9719e31607c23389a9fb0c5a42a4d4ebbc3992e"
+  },
+  "app-icon.svg": {
+    "mode": 420,
+    "sha256": "0f016f510d88813d0a5b6c158cad865484181ec89f90bdaba5614e039c90dfea"
+  },
+  "index.html": {
+    "mode": 420,
+    "sha256": "ef31522da36289d7fbb5a437d048a828b08a0b837e95df3e5aca58deaa91e95a"
+  },
+  "package-lock.json": {
+    "mode": 420,
+    "sha256": "77504cfbf19c51a0e60a596acd08a1a5d5242358cd558394fd4632cd1150ee08"
+  },
+  "package.json": {
+    "mode": 420,
+    "sha256": "0355199eb9a062fd69eed6d93dd46adfeab4a9a7803a5edebdef0438bb5250cc"
+  },
+  "packaging/PRIVATE_RUNTIME_SOURCES.txt": {
+    "mode": 420,
+    "sha256": "d4178044cf1fc9a1bdbe044d9a039fc64538e6fc3f6c7555aa62a02bf88c47ec"
+  },
+  "packaging/debian-copyright": {
+    "mode": 420,
+    "sha256": "cbc81c3c4e106007f0b2bd3b0a36e1f29437b49218f9e75d6f00c464bf365f2c"
+  },
+  "packaging/mpd-eq-consumer-clock.patch": {
+    "mode": 420,
+    "sha256": "c9267b264f70ce279f074ee56185aa54757e419c9f4b4b569114a00416cb0162"
+  },
+  "packaging/private-runtimes.json": {
+    "mode": 420,
+    "sha256": "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769"
+  },
+  "scripts/check-private-runtime-host.py": {
+    "mode": 420,
+    "sha256": "76f9dfa524f6920b28eba921bf0b771d049e0e85a0d56ee55d506cd4d10570c5"
+  },
+  "scripts/inspect-elf.sh": {
+    "mode": 420,
+    "sha256": "9c47b0a12d898f4afd066018595c628d78acbe83eb0f32c42ba5a31861342a65"
+  },
+  "scripts/inspect-packages.sh": {
+    "mode": 420,
+    "sha256": "2a3d06afcbf6e73b907d463f13abefdf503a541838823c64cca962ece888b210"
+  },
+  "scripts/inspect-rpm-requires.py": {
+    "mode": 420,
+    "sha256": "58a74c4ed56e99144a61d96705bb6d8e18a06e9111954c4340c6e5d5f114ba16"
+  },
+  "scripts/prepare-arch-ci.sh": {
+    "mode": 420,
+    "sha256": "fe544c92df1b4e2a0dc795c67a071d5610fa1930af04b22d44c2f176ea36d161"
+  },
+  "scripts/prepare-private-arch.py": {
+    "mode": 420,
+    "sha256": "452ed27cc09bbf366d9051ddb30c4cf47623bcc5658789e7b9a29f886dcf741c"
+  },
+  "scripts/rpm-elf-deps.py": {
+    "mode": 420,
+    "sha256": "e1df03064f92e6511c1403c041aa55a5a6010a2a312f687aa822425e83c9cfaa"
+  },
+  "scripts/stage-private-runtimes.py": {
+    "mode": 420,
+    "sha256": "a60d6907fa4ca899643c630f2a2c4499d48e89fef315f3c4b5bd7da07b79343d"
+  },
+  "scripts/verify-packaging.mjs": {
+    "mode": 420,
+    "sha256": "4084d28b84220f479cf0248de82d69fd6ec6147fdd119fe6631dba9d87150eb9"
+  },
+  "scripts/verify-private-runtime-stage.py": {
+    "mode": 420,
+    "sha256": "f2e183ec555160065f074dbae85e064d0b325a265a1ad4e797ef636b375d2cf4"
+  },
+  "sonante-arch/PKGBUILD": {
+    "mode": 420,
+    "sha256": "50416c1ad00ac050866cf737e0bc2a15f05b24469133c1f8bdd117bce8d61e98"
+  },
+  "sonante-arch/PKGBUILD.private.in": {
+    "mode": 420,
+    "sha256": "39e9e585b453ee9ec3ebd1d17a0eb62f4b99a8c7e44ed910aea4b93c7983e33b"
+  },
+  "sonante-arch/sonante.desktop": {
+    "mode": 420,
+    "sha256": "cce035916bf8c0ed3adf41095d0f4f77b9043fdbd8cbbdd96c58a44b3fb997bb"
+  },
+  "src-tauri/.gitignore": {
+    "mode": 420,
+    "sha256": "88707cda7ba4226eda3ffa91d8284f1a0d12b827f06fb9bc48425cc0d4af04af"
+  },
+  "src-tauri/Cargo.lock": {
+    "mode": 420,
+    "sha256": "939aec0a7ccb56b7f399756e0d83076469c84cac50394cce73fa8c3979a15b8e"
+  },
+  "src-tauri/Cargo.toml": {
+    "mode": 420,
+    "sha256": "5a4403f267d90728ba4649304f12a15969b87ee9c38ed7042547202306e3339e"
+  },
+  "src-tauri/build.rs": {
+    "mode": 420,
+    "sha256": "487059eaf8a947b80f20a9aacac038a5047b2ad69d2401b827376c67d6fe847f"
+  },
+  "src-tauri/capabilities/default.json": {
+    "mode": 420,
+    "sha256": "04cc0c44b2f053b09ec26e3dc0e40cdaf9ff125b975460ff7e9842809e8630ae"
+  },
+  "src-tauri/examples/runtime_resources_probe.rs": {
+    "mode": 420,
+    "sha256": "cfa07ccee836d0c37654fd3185d2976c86a75462fc88a0cb8b6dedc5c1629694"
+  },
+  "src-tauri/icons/128x128.png": {
+    "mode": 420,
+    "sha256": "f1b7ef439447b970089a9872c972b73f86faa5f205b35fecef2dcbc9d0686930"
+  },
+  "src-tauri/icons/128x128@2x.png": {
+    "mode": 420,
+    "sha256": "60df2e1a0a2564f27a310b313b0d8b55ef128de015df9ea36618f6811c8c6bb6"
+  },
+  "src-tauri/icons/32x32.png": {
+    "mode": 420,
+    "sha256": "18440f1b57ef530249f98e5899fdd81a64db00e89d8409c8c55bbb7df275e5a9"
+  },
+  "src-tauri/icons/64x64.png": {
+    "mode": 420,
+    "sha256": "9e58714fd8cfea38fd3219a2a7778d15562b41540178a9595c34b35a379a2c20"
+  },
+  "src-tauri/icons/Square107x107Logo.png": {
+    "mode": 420,
+    "sha256": "908da45f4a15ac721c902247dfe115acfa5cd1da5debc6b2b30fb68c0158a1db"
+  },
+  "src-tauri/icons/Square142x142Logo.png": {
+    "mode": 420,
+    "sha256": "6c1e678bc79732ebd04371636d68eb6838c06fffeef2006b41fa8a3608002b19"
+  },
+  "src-tauri/icons/Square150x150Logo.png": {
+    "mode": 420,
+    "sha256": "34d16c4b1cca35f96276cd52b15b8cec44416c1c42792290a0e393f9a4649205"
+  },
+  "src-tauri/icons/Square284x284Logo.png": {
+    "mode": 420,
+    "sha256": "d6387aefbef1ae8a791ddcec1c1bc98a73249e42fd45477370d8b85a5b53c3a1"
+  },
+  "src-tauri/icons/Square30x30Logo.png": {
+    "mode": 420,
+    "sha256": "536b8899e2979d9b3dd72486f7808dcf0f22ab279574ff1b65e9970c574df3ac"
+  },
+  "src-tauri/icons/Square310x310Logo.png": {
+    "mode": 420,
+    "sha256": "518fef3513cf2314b000de8577378b46d0c62b44ed80cbb9b46cb321d44427cc"
+  },
+  "src-tauri/icons/Square44x44Logo.png": {
+    "mode": 420,
+    "sha256": "ac7c08df8861c925cb843259053fe32b55378291a9a0b0a8fa1c8b99bad7482e"
+  },
+  "src-tauri/icons/Square71x71Logo.png": {
+    "mode": 420,
+    "sha256": "7e1b3cca6481aed391e962b80a8b40df8dcd593e928d35ef94d89c6edd8e9c0d"
+  },
+  "src-tauri/icons/Square89x89Logo.png": {
+    "mode": 420,
+    "sha256": "051ad66dcf8b0caf5a4ac1085f24e205a65f3492be8ed7500f19bb1e3cbffa64"
+  },
+  "src-tauri/icons/StoreLogo.png": {
+    "mode": 420,
+    "sha256": "f8f937833747025ab8fc225a5b4c715fb520b2000b637d6ed12099de65cc7847"
+  },
+  "src-tauri/icons/icon.icns": {
+    "mode": 420,
+    "sha256": "07dfc511f27f254da72b19b81776a7db392139ace7f8acf9b1c74228f6f49be0"
+  },
+  "src-tauri/icons/icon.ico": {
+    "mode": 420,
+    "sha256": "58b5ea610038c31d2bac8019de734ef1f19d6abd4f3c1c5ecdfb42815da2278a"
+  },
+  "src-tauri/icons/icon.png": {
+    "mode": 420,
+    "sha256": "814539b2d84d23195d7d3d1fca6df2779563f0d3315eba1be3601beef62624e4"
+  },
+  "src-tauri/src/alsa_observation.rs": {
+    "mode": 420,
+    "sha256": "8cc4a92edd877af44c11a82135dcf4dfa47292c1ff3906b86b5c9522eb45f7fb"
+  },
+  "src-tauri/src/alsa_observation/tests.rs": {
+    "mode": 420,
+    "sha256": "163a7730aa8802e7a15b51069a785c62da661305147270aefa362dd8912353fd"
+  },
+  "src-tauri/src/alsa_preflight.rs": {
+    "mode": 420,
+    "sha256": "3141adbf9f976f86e77b02e25154389f9a75f7176a0a535f4c49e1c0626b8af5"
+  },
+  "src-tauri/src/analyzer.rs": {
+    "mode": 420,
+    "sha256": "7bf432feaed4399b287ad7509c7f0f8cbdd26185de8ac6aac66118772726e8da"
+  },
+  "src-tauri/src/artwork_progress.rs": {
+    "mode": 420,
+    "sha256": "065b248bd79b9b6059085089bb2385a1df3aabeb04f61d83d75342e0a859eaff"
+  },
+  "src-tauri/src/audio.rs": {
+    "mode": 420,
+    "sha256": "04e5db73069294ef7b8175241a30408b5c3065f5c09e8fae7a290346a6c6781a"
+  },
+  "src-tauri/src/audio_reliability_tests.rs": {
+    "mode": 420,
+    "sha256": "b2c5ccf785a7286bec6b4623095e26434da9cecafc5979c4d2a9a094359366d7"
+  },
+  "src-tauri/src/audio_strict_tests.rs": {
+    "mode": 420,
+    "sha256": "305ad3c67a0999e73991759150f4f9d00186810273cf570f652d17b9d0dfb334"
+  },
+  "src-tauri/src/bounded_artwork_io.rs": {
+    "mode": 420,
+    "sha256": "41f905c00f919c6414aba17a778c219645553601bb75524df53dcef65b1f80ca"
+  },
+  "src-tauri/src/catalog_genres.rs": {
+    "mode": 420,
+    "sha256": "c9313438ac21a6cc1997693687f26c19f14306240e97415407c18b4124596614"
+  },
+  "src-tauri/src/config.rs": {
+    "mode": 420,
+    "sha256": "4ec95cf580a8b6f371f2f5205aae5459a4288fc22a35ef57310a09c41e319431"
+  },
+  "src-tauri/src/config_save_operation.rs": {
+    "mode": 420,
+    "sha256": "78bce76e4012d0ed420762dbd1071080772ea0e991cd551f23259db1cdfddc71"
+  },
+  "src-tauri/src/container_file_info.rs": {
+    "mode": 420,
+    "sha256": "89b2850bf490441824ca5785a97c25a20a03c52fc80237fdedfda70902eb4665"
+  },
+  "src-tauri/src/container_file_info_tests.rs": {
+    "mode": 420,
+    "sha256": "6b5a83e7904320950d177d45f53ae5e5d15bce42f5775488dfcb30a4a079a96e"
+  },
+  "src-tauri/src/diagnostics.rs": {
+    "mode": 420,
+    "sha256": "cf9d6396395f968a29405c2fe801dd6b4f40425acea82677f4a9212fa5248583"
+  },
+  "src-tauri/src/direct_playback.rs": {
+    "mode": 420,
+    "sha256": "cc028e560eb7b7c304158c186a38792c2ed62e20f7bcff77f783d2e747f72288"
+  },
+  "src-tauri/src/direct_volume.rs": {
+    "mode": 420,
+    "sha256": "89b120c028f7b00ad2b268fb2ead22bc277ba252f94c6d95171a40dd3771f1b9"
+  },
+  "src-tauri/src/direct_volume_real_tests.rs": {
+    "mode": 420,
+    "sha256": "d373109505bf4ca4eeb4258e959b03e61a6ac055825b5e4bc3e3002f1875c4fd"
+  },
+  "src-tauri/src/dsd_file_info.rs": {
+    "mode": 420,
+    "sha256": "ad01f4a4299abbd0719db5af141ccef59501265a89ee3b43c25a80e94cecc325"
+  },
+  "src-tauri/src/equalizer.rs": {
+    "mode": 420,
+    "sha256": "4f2ceb74ee327dee43e66c55fc319f7cc85174cb371c9c607fa474cdd615fb68"
+  },
+  "src-tauri/src/equalizer_commands.rs": {
+    "mode": 420,
+    "sha256": "5fc526781fbb11abef677d553a5c6c2f99015402f591851a9e1e10bdea718229"
+  },
+  "src-tauri/src/equalizer_portable.rs": {
+    "mode": 420,
+    "sha256": "9fad1512065ca70b1c8408f22a2cbd43785988d794fe434bec4bd54bf96ce1be"
+  },
+  "src-tauri/src/favorites.rs": {
+    "mode": 420,
+    "sha256": "8ef1b5d43e7297615772ff65bae86987549277f40e13e6581e3739d098de9093"
+  },
+  "src-tauri/src/index_coverage.rs": {
+    "mode": 420,
+    "sha256": "445ce172e016957e8498adacf3e9449639c96ccc54f5b2a88a72ba1a572813cc"
+  },
+  "src-tauri/src/index_coverage/tests.rs": {
+    "mode": 420,
+    "sha256": "b42a8a2a1070784aae52fadd8f3a3cec29cd40c159c552c044e4c663e16823bb"
+  },
+  "src-tauri/src/installed_runtimes.rs": {
+    "mode": 420,
+    "sha256": "8b5a5754a9f71d76fb04fa7f9b424d886657848d2733a3c251c4aa16beafdb67"
+  },
+  "src-tauri/src/lib.rs": {
+    "mode": 420,
+    "sha256": "fc468101914dbf8087e1ccd24d0a3a56a731e7a4a850ed4557d0a41638a9ac22"
+  },
+  "src-tauri/src/library_doctor.rs": {
+    "mode": 420,
+    "sha256": "10ceea65e202c4ada08748a5e907a284076e2386dfc76e9e56beb9260fecfcaa"
+  },
+  "src-tauri/src/library_recovery.rs": {
+    "mode": 420,
+    "sha256": "33730548d83e4b5010460dac514af31cb2b31fe7a7b2b1aaabd3a6d0608b3e12"
+  },
+  "src-tauri/src/library_refresh.rs": {
+    "mode": 420,
+    "sha256": "0ee85d0f362ab4890810f31c241663d2fd4185058f0c8202af9caf25ab9a4ccc"
+  },
+  "src-tauri/src/local_changes.rs": {
+    "mode": 420,
+    "sha256": "3c71f7394433edd03cec16137e6e3e1be2f594da169023d1ac771b98ea274663"
+  },
+  "src-tauri/src/local_file_info.rs": {
+    "mode": 420,
+    "sha256": "a3e7f52d73a73b0204458dc35db506bb16fa16c5662208757b8d0304c94a5851"
+  },
+  "src-tauri/src/local_import_artwork.rs": {
+    "mode": 420,
+    "sha256": "ca0dcc2a0feb1164ff9d9ac61d2a4ae5c1fe39f7d061d9f5d6751ddd82b43a37"
+  },
+  "src-tauri/src/local_import_preview.rs": {
+    "mode": 420,
+    "sha256": "4e14d1e7c4d3a2e974d4f6cffcb2e111819772affa9ee9b742d469b40bdc3322"
+  },
+  "src-tauri/src/local_media.rs": {
+    "mode": 420,
+    "sha256": "7978fc4c435cdd040b31978f7c1b4a5070b459575866be4cc68b77d02997c9dc"
+  },
+  "src-tauri/src/local_own_writes.rs": {
+    "mode": 420,
+    "sha256": "f763f782e52c0a5dfa56ef74553101024e64e7ed7fc4e96e12303393eddb6001"
+  },
+  "src-tauri/src/local_updates_tests.rs": {
+    "mode": 420,
+    "sha256": "5598e59abbb941c8eb7f8f45aae272646b20bcb5e31e09105390fd85a0100a88"
+  },
+  "src-tauri/src/local_watcher.rs": {
+    "mode": 420,
+    "sha256": "2fb100a9c9a0f4ad6b8c914db95a6a9308bb70dd27d3d137e3aa2b681a10b9bb"
+  },
+  "src-tauri/src/local_watcher_updates_tests.rs": {
+    "mode": 420,
+    "sha256": "e8a674c307613d9caf059785e32d17a44f36325c50f9632c1b2a36e56fbb6d10"
+  },
+  "src-tauri/src/main.rs": {
+    "mode": 420,
+    "sha256": "83279a70340b35aba68d4463eeb0f4a8e48c1bd19f9fd30c83d24a954756dbcc"
+  },
+  "src-tauri/src/managed_preparation.rs": {
+    "mode": 420,
+    "sha256": "deb4fdd8355efbb8eca094f468c7381064b03173e0597cef47c412f03f10e44f"
+  },
+  "src-tauri/src/managed_save_intent.rs": {
+    "mode": 420,
+    "sha256": "ed997e23e347c8b1ed4c6ee76ce9337f03adb56d369ba8cd919353c93521aa71"
+  },
+  "src-tauri/src/managed_save_intent/recovery_tests.rs": {
+    "mode": 420,
+    "sha256": "467f793ccd90ae5fc5da27b8eff15291a949176dd023655272185d4d3dd040eb"
+  },
+  "src-tauri/src/mp3_file_info.rs": {
+    "mode": 420,
+    "sha256": "680cfff125f6338d8b90d5bd0f96ebb2a8938e9eea6727dcedbb07b68c97a466"
+  },
+  "src-tauri/src/mp4_file_info.rs": {
+    "mode": 420,
+    "sha256": "f524dd18ec5871e141b0a1c8faafa4fa3415cd77c757c3856adca2095342543b"
+  },
+  "src-tauri/src/mpd_engine.rs": {
+    "mode": 420,
+    "sha256": "732f982beca39121cac7d41b1ee3947fd7d6d29aab8fffe0257d43910847cbcb"
+  },
+  "src-tauri/src/mpris.rs": {
+    "mode": 420,
+    "sha256": "565a7212e1315a8378b8a3a3712b7b60af10320baf5790a31ec4b49ce9f01df8"
+  },
+  "src-tauri/src/normal_direct_tests.rs": {
+    "mode": 420,
+    "sha256": "8e0848ea9c17db96a551a2be4b9518efcddd7b74707885771d0a450bdacce43e"
+  },
+  "src-tauri/src/online_artwork.rs": {
+    "mode": 420,
+    "sha256": "0dc9120ef785cd49c42dd49ff3ff35d75f4972bcd20ae6bdc51a5ebac17ea391"
+  },
+  "src-tauri/src/online_metadata.rs": {
+    "mode": 420,
+    "sha256": "c28ff54df82e0b7064f6ff570935e563e83719f1641ef3ec351daba687764907"
+  },
+  "src-tauri/src/packet_file_info.rs": {
+    "mode": 420,
+    "sha256": "aae7fba71a9a74cca1fefee8bd1a91d10b09de552b33d52f4253be067fe9b707"
+  },
+  "src-tauri/src/persistence.rs": {
+    "mode": 420,
+    "sha256": "64ad25e2331e7166ec02c336bc86341ca5a58a83b2dcbfd7cc0b914182a697ee"
+  },
+  "src-tauri/src/playback_options.rs": {
+    "mode": 420,
+    "sha256": "a8a0dea8ed8b3ff1ba0564afa09587e130aa751158f1840a0df22e5b8a9fab8a"
+  },
+  "src-tauri/src/player_source_info.rs": {
+    "mode": 420,
+    "sha256": "dcfbbb5627b1f7e8900aee3536c964cf7c58349e6dcd3b407bbbc3280507f599"
+  },
+  "src-tauri/src/playlists.rs": {
+    "mode": 420,
+    "sha256": "8dd00072cbc320b59d826c1b2d3afc39296733288a6348575dfcc4fd9089d05e"
+  },
+  "src-tauri/src/plex.rs": {
+    "mode": 420,
+    "sha256": "ad4b2de2e26e335bd086773234f602685746b8b342b76bc4f6ff76f6e477aaf3"
+  },
+  "src-tauri/src/plex_discover.rs": {
+    "mode": 420,
+    "sha256": "0fe4965954b8f02fedb855258ae1cc3c0bfb1c8e3fbcbbb16097862e20cbbc51"
+  },
+  "src-tauri/src/plex_source_info.rs": {
+    "mode": 420,
+    "sha256": "a06427faa4894de81259bbd74a5f031603d0374180f8cb367c71f6736dfe24b7"
+  },
+  "src-tauri/src/profile_lease.rs": {
+    "mode": 420,
+    "sha256": "174e07f90da888097d0d5c1f5b7a9a2bc38c6935462009427ad1f310a1d7a4c0"
+  },
+  "src-tauri/src/recovery_catalog.rs": {
+    "mode": 420,
+    "sha256": "b5e11a9ba1aa7d7d7fb5635dfd32370e8cd11e7ce2c9ccd0b9454ac2b897af42"
+  },
+  "src-tauri/src/recovery_fs.rs": {
+    "mode": 420,
+    "sha256": "b4f13051183048571ad50dcb3d82dbd3551a362a2d9c57bd8e5323df51637dec"
+  },
+  "src-tauri/src/recovery_sandbox.rs": {
+    "mode": 420,
+    "sha256": "1984d6368f5afdc954ca1fba5c612570a0d6b87b4c5b1011190750f7505f70bc"
+  },
+  "src-tauri/src/recovery_set.rs": {
+    "mode": 420,
+    "sha256": "a95f913c7b80fe414ca27029c6a05b5fce61c3ed4bfa820c70d2eac3268d3079"
+  },
+  "src-tauri/src/route_save_real_tests.rs": {
+    "mode": 420,
+    "sha256": "0decf61e943ac65af833a8b1df598db3c5682c151688994e03ece1102a4af5ce"
+  },
+  "src-tauri/src/shared_dsp/binary.rs": {
+    "mode": 420,
+    "sha256": "7a004b7d7b9389a87b5a09264f88f594003b16ba5f51e68a003020f3d7f79ad8"
+  },
+  "src-tauri/src/shared_dsp/comparison.rs": {
+    "mode": 420,
+    "sha256": "5a8ee019ccbcfbeb9796eaad3cc2359a75781f9cf05c466732af1cf21a514eda"
+  },
+  "src-tauri/src/shared_dsp/continuity.rs": {
+    "mode": 420,
+    "sha256": "45acf0f6b890b037c221df60081d3fba267659bf78607f90c9f2393167a548f4"
+  },
+  "src-tauri/src/shared_dsp/io.rs": {
+    "mode": 420,
+    "sha256": "a833dbfaa2ffe4ee054cae48fc056e69a4559db27d6103d134d84b0e486a3697"
+  },
+  "src-tauri/src/shared_dsp/mod.rs": {
+    "mode": 420,
+    "sha256": "5b186aef24160b495106611704ec79e462a67a21ef7040e882212077d571b552"
+  },
+  "src-tauri/src/shared_dsp/peq.rs": {
+    "mode": 420,
+    "sha256": "48fe00a21d8361fed18edffe9b0a15a56970b3e04a0b3019383ab291721b9457"
+  },
+  "src-tauri/src/shared_dsp/probe_tests.rs": {
+    "mode": 420,
+    "sha256": "7711412539525f20aeb8e5f85963e2527e0ad52372088d147e89bd1993f6da89"
+  },
+  "src-tauri/src/shared_dsp/runtime.rs": {
+    "mode": 420,
+    "sha256": "e4c97e962620afa43952b7132b7175a166300662ddf9beb8a2ff72335843c85f"
+  },
+  "src-tauri/src/shared_dsp/safety.rs": {
+    "mode": 420,
+    "sha256": "18911c6ef4b4e7b4eeebfa2f3695692e6a994085d9f5149126ddef7b03afc3e5"
+  },
+  "src-tauri/src/shared_mute.rs": {
+    "mode": 420,
+    "sha256": "c4046a6ae804b5098882f9d8907f488420c532153b580016c1f739af41169f18"
+  },
+  "src-tauri/src/shared_volume.rs": {
+    "mode": 420,
+    "sha256": "1be7a153515458d1c4d76650b6a04b32f5d8a4d66e3501e5fb57967cd23b07b1"
+  },
+  "src-tauri/src/signal_processing.rs": {
+    "mode": 420,
+    "sha256": "dd46b52d0839c3707018130cadb11dfd55c9b17215d16959e8457e3b7e2ce9c7"
+  },
+  "src-tauri/src/signal_processing/tests.rs": {
+    "mode": 420,
+    "sha256": "43e52f398c144b41602fcef454557f1bceddade4022312031b90546192500ac3"
+  },
+  "src-tauri/src/source_identity.rs": {
+    "mode": 420,
+    "sha256": "8d124803a750e335c86d6a41d86f9a6dcabe725a59ef7d0785d47d3f06e87ed0"
+  },
+  "src-tauri/src/supervisor.rs": {
+    "mode": 420,
+    "sha256": "69e5777b44122270bd7680b6716ec3cfdc1b8e1aa0464541dd6fc5a3a32ef892"
+  },
+  "src-tauri/src/system_tray.rs": {
+    "mode": 420,
+    "sha256": "6c21bde57b72ca337c841e0e0f1f3f27749fcb22305690761be116294840359c"
+  },
+  "src-tauri/src/tags.rs": {
+    "mode": 420,
+    "sha256": "572e15fcd26f3817642dc4eb409267bdcb066618b1fc4fe845fb5438252e94fd"
+  },
+  "src-tauri/tauri.conf.json": {
+    "mode": 420,
+    "sha256": "4210aa26d7bbf5fa92ed721f18527b71abdb8bf4e04e469df526284140d1dcc9"
+  },
+  "src-tauri/tests/fixtures/plex_resources_local_first.json": {
+    "mode": 420,
+    "sha256": "44f66de158e255b3c0ffb27b7ad9ee268c45c41415bd4023d7bce750660e9962"
+  },
+  "src-tauri/tests/fixtures/plex_resources_remote_first.json": {
+    "mode": 420,
+    "sha256": "64c44a91ae9b65edcef972110ecfbbffeaa17508a957c54c169df08a71af651e"
+  },
+  "src-tauri/tests/fixtures/plex_source_album_numeric_section.json": {
+    "mode": 420,
+    "sha256": "fabb7352f20c031fb85a220bf6e2e46920f854fc1ec4c339a765525daee07ab5"
+  },
+  "src/App.css": {
+    "mode": 420,
+    "sha256": "eb5874b63446b353c05c5a204fbd3978b88d476d3a99f9df7386dc189282e00c"
+  },
+  "src/App.tsx": {
+    "mode": 420,
+    "sha256": "4bb6df0939ef05bc7ef5459d94a9b386a4d9a811c87ed77768d87a1c22c9c72f"
+  },
+  "src/components/AboutModal.tsx": {
+    "mode": 420,
+    "sha256": "fb2c0d85f2bec6a0d737db2d20b6609527fdeb7d30807c7baff999fb1cddffd8"
+  },
+  "src/components/AlbumArtworkPlaceholder.tsx": {
+    "mode": 420,
+    "sha256": "eaf96c2ab9734c2e1d8aa16b5659c41c8155e41b0655765b0f62d776782719b1"
+  },
+  "src/components/AlbumDetailModal.tsx": {
+    "mode": 420,
+    "sha256": "21f560ee93b969932d7862d6528aa40730f224724f4fd158b05ad3719b1d6692"
+  },
+  "src/components/AlbumGenreGrid.tsx": {
+    "mode": 420,
+    "sha256": "f268ea63fde502db5fcdb07d1eac8f7efbf1e97364431ff7bf2f3e61abb1b654"
+  },
+  "src/components/AlbumView.tsx": {
+    "mode": 420,
+    "sha256": "b2fd457ac691090a7a9e2040160eeb8e9e8548bc1225caf91a60081f41d42a85"
+  },
+  "src/components/AppearanceSetting.tsx": {
+    "mode": 420,
+    "sha256": "7fe0791996c6c986a72a50718bd4cb80e431efbefd290c1f134f4108cf2236d9"
+  },
+  "src/components/ArtistView.tsx": {
+    "mode": 420,
+    "sha256": "0205fc0c25e6957d1c2f0c61ccb6d3a0ff50a2a450ca9741b6389e802eddf97b"
+  },
+  "src/components/AudioSignalDiagram.tsx": {
+    "mode": 420,
+    "sha256": "6d274f66860bfd72b146ed022694164850aec85f93495d6c805d161d8ba131b3"
+  },
+  "src/components/EqComparison.tsx": {
+    "mode": 420,
+    "sha256": "a673384cc4594c3746e36da39f6099559bbbbdbfa001d3a938150c2ed19f1fc3"
+  },
+  "src/components/EqGraph.tsx": {
+    "mode": 420,
+    "sha256": "71d458361af0dbe358a0804fc75822af37acead92e0669c06b2f2820d637459e"
+  },
+  "src/components/EqHelp.tsx": {
+    "mode": 420,
+    "sha256": "ff3bc05efc435a6215b140342968b282ed1036fd068e576e9e4c57fdfc020e37"
+  },
+  "src/components/EqLibrary.tsx": {
+    "mode": 420,
+    "sha256": "84a5570c84ab829731165501b537dbe06c7773acca51baba198d012f8ea05436"
+  },
+  "src/components/EqNumberInput.tsx": {
+    "mode": 420,
+    "sha256": "4875f3f403bd24506a6af5e3d916fca07cdab509c65c650a132741126c4c9746"
+  },
+  "src/components/EqualizerView.tsx": {
+    "mode": 420,
+    "sha256": "601cde83fcf257bf9bb737cd4b5bdb6de8db3132cca43441580012ba77a0fda6"
+  },
+  "src/components/ExploreGenreSlice.tsx": {
+    "mode": 420,
+    "sha256": "e088bb14c7c18811434e82184087f5d2da2a4ae2915b0009ae0405e9e8ff9dbc"
+  },
+  "src/components/ExploreView.tsx": {
+    "mode": 420,
+    "sha256": "4b43d0132e882c5b97a00fbff3b89376eac0e387b42eaa85e1ec1c785f368222"
+  },
+  "src/components/FavoritesView.tsx": {
+    "mode": 420,
+    "sha256": "61e655440ad77d2e92e07ad9c44a34894f5757bc6459bc4b79ea25d3d2a662f8"
+  },
+  "src/components/LibraryDoctorModal.tsx": {
+    "mode": 420,
+    "sha256": "d216b9a18e89e5b8fe4b67dfafc31873e7e55181ee7ea05cf7fbf64319822d6e"
+  },
+  "src/components/LibraryRecoveryPanel.tsx": {
+    "mode": 420,
+    "sha256": "4133a6223595955ef476db72a900267939339e7dc772a2d0e4a73f1805117859"
+  },
+  "src/components/LocalAlbumTagEditorModal.tsx": {
+    "mode": 420,
+    "sha256": "610bd2f396db316dcca0a8bba492d9aefe3a1c8b185913f09ebcb8d4a95086ed"
+  },
+  "src/components/LocalBrowserView.tsx": {
+    "mode": 420,
+    "sha256": "25f8c35e8e2a70c964b457bf0786699c922f1e36309b7300ecdc6edf00ac0f99"
+  },
+  "src/components/LocalFileInfoModal.tsx": {
+    "mode": 420,
+    "sha256": "5f117912b0f57dfacd4302d9d05698e776853ee89caf615dc57613f8313a2af4"
+  },
+  "src/components/LocalImportPreviewSection.tsx": {
+    "mode": 420,
+    "sha256": "9c62f2a3cd5374ef5ef7a19ad308f17ce8b5956d76f0c78612c310ab3f835159"
+  },
+  "src/components/LocalIndexCoverage.tsx": {
+    "mode": 420,
+    "sha256": "6fd02dd9db8a431e142b4d98cca3a4c1a8418ddf3286901ed74c67e962045388"
+  },
+  "src/components/LocalMetadataView.tsx": {
+    "mode": 420,
+    "sha256": "713a889e787939fb412665f841524bb8f0cbb5080522431a7e79be116c650f8d"
+  },
+  "src/components/LocalTagEditorModal.tsx": {
+    "mode": 420,
+    "sha256": "6463649ed0fe3cd37b142efc4794cdbe093e3198d6cb88e67c2069f65e5b2fa5"
+  },
+  "src/components/LocalWatchNotice.tsx": {
+    "mode": 420,
+    "sha256": "7be6fd3c2731b308710e060388c3b5df935389734e427f7f05a5af065b355cd9"
+  },
+  "src/components/MixChoiceCard.tsx": {
+    "mode": 420,
+    "sha256": "fa5f3fe426f5878051a99f56bfd2b173d6be2f8d2cb154017b4966d08bd6558e"
+  },
+  "src/components/NowPlayingHost.tsx": {
+    "mode": 420,
+    "sha256": "5667621f44a694d82273034e7ca6a202da825ce61a97817c829733c0d02267f8"
+  },
+  "src/components/NowPlayingPresentation.tsx": {
+    "mode": 420,
+    "sha256": "6bea10856f903025243ecfc9a7202d386c5d40129da8ab9055ae080151417a3f"
+  },
+  "src/components/NowPlayingQueue.tsx": {
+    "mode": 420,
+    "sha256": "1116ddb176c9172c8def617c5a39ea89548c958aff780fa6fcca7b3e8edd32e0"
+  },
+  "src/components/NowPlayingWindow.tsx": {
+    "mode": 420,
+    "sha256": "fe04a0fb458f182b7dc38d0a5957fe87cd1bed586d62a55b429f1688c0b46f26"
+  },
+  "src/components/OnlineAlbumMetadataPanel.tsx": {
+    "mode": 420,
+    "sha256": "801655456a4c6b467b6273ee22b2135e01a1a3d6dddc50cf605ccb0cfba47a53"
+  },
+  "src/components/OnlineMetadataComparison.tsx": {
+    "mode": 420,
+    "sha256": "e2aa6fee73b8ee53411b2cc1680bfcfbd0c46b384bbbd23a055c4c22185ce46d"
+  },
+  "src/components/PlaybackOptionsControls.tsx": {
+    "mode": 420,
+    "sha256": "e8f9fb3c88828f15df82d4b5d467c4f446225cba3afc45b3c5d0b78898c58ada"
+  },
+  "src/components/PlaybackRequestNotice.tsx": {
+    "mode": 420,
+    "sha256": "1a930e056f28f479afc165a298661654b7a83e597f5e56d04b7059331ebca851"
+  },
+  "src/components/PlayerBar.tsx": {
+    "mode": 420,
+    "sha256": "c31ea707172dfb7a14e6ebc9c8685c1279c3b24657c884e775edf4f53504c16c"
+  },
+  "src/components/PlaylistPickerModal.tsx": {
+    "mode": 420,
+    "sha256": "0cf1cf30400d4df5306eada387cc3633f7c85309b2c46307407fa2dcd4038379"
+  },
+  "src/components/PlaylistsView.tsx": {
+    "mode": 420,
+    "sha256": "7b4198205a722200b42c89956ec3c17b43cf0b706a2d92dc97621fa43fff18ca"
+  },
+  "src/components/PlexDiscoverView.tsx": {
+    "mode": 420,
+    "sha256": "915e6316bfacbe8d9d06e1a0ad08cf3e516a22554ecfb37aba56f43a258e213d"
+  },
+  "src/components/PlexFileInfoModal.tsx": {
+    "mode": 420,
+    "sha256": "0cb5b75e449dcd8cbaf53786fba4e6f0a20db26c54aa326223ba2896172f0062"
+  },
+  "src/components/PlexImage.tsx": {
+    "mode": 420,
+    "sha256": "331b12d32d1837ec8aee730d0fe4eb11d4e2d773bd4a8be38d34b0cbe6b3c608"
+  },
+  "src/components/QueueDrawer.tsx": {
+    "mode": 420,
+    "sha256": "ca4070d8c30a0be13ce3e2d90890491f06c3bcd672484e05bdb5b1afdafae6bc"
+  },
+  "src/components/SettingsModal.tsx": {
+    "mode": 420,
+    "sha256": "087f0207df053f81cacd610c9831c9f1598ba15b06fe3433853379ad42bcff96"
+  },
+  "src/components/SettingsPages.tsx": {
+    "mode": 420,
+    "sha256": "058504621dbe01266b7f5cbe9b38db46ced867cc2c606a6cdfb6984eabdcd773"
+  },
+  "src/components/SidebarNavItem.tsx": {
+    "mode": 420,
+    "sha256": "9405b27610d6dcb68791596316348a6bcb7fa253f810e67edac236eabd8e0891"
+  },
+  "src/components/SignalPath.tsx": {
+    "mode": 420,
+    "sha256": "e5aa4484b730abeb2abf24a8edb0702c213f2bbfbd57a9d7c133cdb26841288b"
+  },
+  "src/components/SourceAudioBadges.tsx": {
+    "mode": 420,
+    "sha256": "190d24050937eaa80ba9006ea3118a90674e4cd14d85ad787daa8548c9cd86ec"
+  },
+  "src/components/ToolbarSelect.tsx": {
+    "mode": 420,
+    "sha256": "78bf50102ccb1336f4ae8600095ec56e5691cfc96f28d18b1939b8d6f8c847ee"
+  },
+  "src/components/TrackArtwork.tsx": {
+    "mode": 420,
+    "sha256": "1c102f8146fa356ee4104427ef099f248de53cd4adc4eaff074c4aa6a2123e44"
+  },
+  "src/components/VirtualAlbumGrid.tsx": {
+    "mode": 420,
+    "sha256": "f95caf58b773e11c3c070d30cface6e53034d9ee8180a101e5a5689bd0a50cd2"
+  },
+  "src/components/VirtualList.tsx": {
+    "mode": 420,
+    "sha256": "2dceaa263c946220fa5c75e8d87e7c895443be629164c7e54f3347d2b8c03e30"
+  },
+  "src/components/WelcomeWizard.tsx": {
+    "mode": 420,
+    "sha256": "242b2d10118392cc028179004a5d936a9e51107080a62aab2508e1ef1fffbe66"
+  },
+  "src/components/eqNumbers.ts": {
+    "mode": 420,
+    "sha256": "668d7d1a50c5b5419b58f61a613cc5df0c1d9c5803ffdd2cc29e09df293825f3"
+  },
+  "src/components/equalizer.css": {
+    "mode": 420,
+    "sha256": "40fdd28bc9b0e5ee73b07577e4e69039efdf84596b2893ef88cb5830da1991f1"
+  },
+  "src/components/nowPlaying.css": {
+    "mode": 420,
+    "sha256": "7841f0539e78cd921238cab863e0dc042ecee7ad5162fb3ee5737325ee0a9b6e"
+  },
+  "src/components/visualizer/AnalogVu.tsx": {
+    "mode": 420,
+    "sha256": "a21bcab86c4b38b018fa2dbab7a9eab21e97abad48aa5eead84fd4e0c012ad29"
+  },
+  "src/components/visualizer/SpectrumCanvas.tsx": {
+    "mode": 420,
+    "sha256": "773b42bddadc41d20f7fe01ee23d1393ba1b46eb6ed2429ab10c2219d2cb2a0b"
+  },
+  "src/components/visualizer/SpectrumNeon.tsx": {
+    "mode": 420,
+    "sha256": "c9af591a7c05972f1eeb76b120f76c1e6a782c086c3fb63bd94be7c739907759"
+  },
+  "src/components/visualizer/SpectrumSegmented.tsx": {
+    "mode": 420,
+    "sha256": "39e494390a0bc5aeee98cc126a142fbb48f051190686d99bd7f625663373f380"
+  },
+  "src/components/visualizer/VisualizerPanel.tsx": {
+    "mode": 420,
+    "sha256": "71f96dc6104356711d3e2af6da5941e9a4ff15c201238ee576ce4538d013ddd2"
+  },
+  "src/components/visualizer/VuHorizontal.tsx": {
+    "mode": 420,
+    "sha256": "6ec44adeb696f11097ab355de9942a0a4e743eaf8495574602dc116ea7a4e24d"
+  },
+  "src/i18n.ts": {
+    "mode": 420,
+    "sha256": "a33deca5ad13045b5fb3ab0fede7b4b0c837a7ae098122bdf903153bb5ba5bf7"
+  },
+  "src/index.css": {
+    "mode": 420,
+    "sha256": "cd80aecf7f94a86d0105ce73a37ffd84a7478c13f432c8effd63daa22cc0c426"
+  },
+  "src/locales/en.json": {
+    "mode": 420,
+    "sha256": "42d1a0e18ed7ae32de304638158898f91b5460294084ee28c3d9894c2a41fc36"
+  },
+  "src/locales/pt-BR.json": {
+    "mode": 420,
+    "sha256": "4bd493e072757424c6728de749dce3ec605828f87d7c24dfb7dd12dba666fcd0"
+  },
+  "src/main.tsx": {
+    "mode": 420,
+    "sha256": "0f514d868169e19ff4391470be521f8095bf91c0ac3deb7d6c2b50ba90b331a5"
+  },
+  "src/services/appearance.ts": {
+    "mode": 420,
+    "sha256": "81eb239d4dedf1bd070ccaf99d1a88d08368ebb2723b0b9c0966cdb41da3a998"
+  },
+  "src/services/artworkProgress.ts": {
+    "mode": 420,
+    "sha256": "b3634ad6b85214cb8be3a732256576697afe3e259845a84813d44c031f6dc6de"
+  },
+  "src/services/audio.ts": {
+    "mode": 420,
+    "sha256": "8e5cabccee5ee459b15dc26d1a25399bc5b80c442f6a0800d8f014fd90444180"
+  },
+  "src/services/config.ts": {
+    "mode": 420,
+    "sha256": "e20bf9c341c0f36cc1552ff9ba5b6f7e73a60bfc9f407d6a284275ceb8a25852"
+  },
+  "src/services/equalizer.ts": {
+    "mode": 420,
+    "sha256": "8e3348484a28c21928915b86ea636f493784a53b5108a2418431bca1aeb053fd"
+  },
+  "src/services/favorites.ts": {
+    "mode": 420,
+    "sha256": "831fd14aecfca2f0d68ac20a4ab6212fe5d111032dc3f7864c398f414c7ca8db"
+  },
+  "src/services/indexCoverage.ts": {
+    "mode": 420,
+    "sha256": "76dab8d97aecac9023b6447088409ee6095dbf2445b121b2b3cc22b9e0c4757f"
+  },
+  "src/services/libraryDoctor.ts": {
+    "mode": 420,
+    "sha256": "5e6b6f15885f621f70a70cf5a4667c4fb5aecd81e8a831f5e305292266b2978c"
+  },
+  "src/services/libraryRecovery.ts": {
+    "mode": 420,
+    "sha256": "edbf3ddea2166a6e9d52698bc79698fdfaf01227b44aee41e4a598938ef41d2a"
+  },
+  "src/services/localFileInfo.ts": {
+    "mode": 420,
+    "sha256": "3eee9861497a81126bafa6f99c42bb2c733379325629d814f53a1aefc8df9029"
+  },
+  "src/services/localTags.ts": {
+    "mode": 420,
+    "sha256": "8cd18e36a4efe28e47cdcc7a6bb7f92f00de3c7f8e43cd7a75034da5fa5cc02a"
+  },
+  "src/services/nowPlayingWindow.ts": {
+    "mode": 420,
+    "sha256": "da7ef50a79758957f6e60601cd3fbe85464906f8de6c8f525c3bc87cac4bb8ec"
+  },
+  "src/services/onlineMetadata.ts": {
+    "mode": 420,
+    "sha256": "3c11d884961833f60fdf7eb46624195910ae2cd27c4a7e5f0e543c49fd0ccd39"
+  },
+  "src/services/playlists.ts": {
+    "mode": 420,
+    "sha256": "1dc927059fd9876b25623abf175ac10285d4bab59ef9af6e6920b15ba5c70c81"
+  },
+  "src/services/plex.ts": {
+    "mode": 420,
+    "sha256": "29d0dabe9b364abbb9307263224f0b6b11a64a87985651eb921feafbc4f217b0"
+  },
+  "src/services/plexArtworkCache.ts": {
+    "mode": 420,
+    "sha256": "98fe513887afd9024cfac5ff28ed93614de5d74fb468ec806bfd9c89285611fa"
+  },
+  "src/services/sourceAudio.ts": {
+    "mode": 420,
+    "sha256": "53c6ffac56f4d8baeb05125d4d41396b51b9ddae80480d23e6d1aa377fc42e26"
+  },
+  "src/types/audio.ts": {
+    "mode": 420,
+    "sha256": "f10bdb640291424e797b0083ecc03d55510ea3f2bc8122acd6c5f861a7c9d506"
+  },
+  "src/types/config.ts": {
+    "mode": 420,
+    "sha256": "db1a77f054c3defebacb6388a4a2eade2ba192f6741d4bd779705d44a9e2773c"
+  },
+  "src/types/equalizer.ts": {
+    "mode": 420,
+    "sha256": "a372c89d322c88c875ffe7e92256635140cc19c1c4c6d516835dd392b2be59e0"
+  },
+  "src/types/favorite.ts": {
+    "mode": 420,
+    "sha256": "c4664ec69d576149c9279533c09d465bf6bd4ff83498b2a9fd9f3d4b08376136"
+  },
+  "src/types/libraryDoctor.ts": {
+    "mode": 420,
+    "sha256": "8c15de1a3ca1eac10a2919172227b8c45b91b2bb9722d69bbe662da80e85c61c"
+  },
+  "src/types/libraryRecovery.ts": {
+    "mode": 420,
+    "sha256": "2541aecbb4479a254b896e5bbd10d0b9dfb006c5c6db829724bf5bb25652d598"
+  },
+  "src/types/local.ts": {
+    "mode": 420,
+    "sha256": "84b839b2c787de7867df25e48b93a730dc2b56b3c0cea7db49a1d87c23fb56a4"
+  },
+  "src/types/localFileInfo.ts": {
+    "mode": 420,
+    "sha256": "c8cd40ddc0b5411e138ccb842864bc7a71fa1ecf84de6dbe5c0fca3e7b89f35c"
+  },
+  "src/types/localImportPreview.ts": {
+    "mode": 420,
+    "sha256": "4a8f235b5cf69e0ff226571ef3450b52f3ec741e6e07ad3082af662ac8333034"
+  },
+  "src/types/localTags.ts": {
+    "mode": 420,
+    "sha256": "71ef1534d696e43d4667802f9ad1d63e9a07540c3543747269e2f1b8a408c273"
+  },
+  "src/types/onlineMetadata.ts": {
+    "mode": 420,
+    "sha256": "36ec3fc0441784000392fd4ce1733f985d306b94eac1cf24914d9d8a7f403451"
+  },
+  "src/types/playlist.ts": {
+    "mode": 420,
+    "sha256": "0265e43e9b61637186c1e2892648cd048edb64bb9f5ed2cf0f4288e8145fe94a"
+  },
+  "src/types/plex.ts": {
+    "mode": 420,
+    "sha256": "62cbec062021b1569917e7822da3a7ba13a7a815bcd04f5f15730a8095be9d46"
+  },
+  "src/types/sourceAudio.ts": {
+    "mode": 420,
+    "sha256": "11d97fbf127bd652f45e84a300bfd48453e2eb50007f19730fb3f0e49915deb9"
+  },
+  "src/utils/albumGenres.test.mjs": {
+    "mode": 420,
+    "sha256": "2419f63bb1b110fd7f833fa94ae6c11c5eae9ea89aff75b970da57bfd5f8a361"
+  },
+  "src/utils/albumGenres.ts": {
+    "mode": 420,
+    "sha256": "7f17919f540bba92ef7ff79477c43757fac448a778fdcb2ca5d4c6ef51ad6196"
+  },
+  "src/utils/appBootstrap.test.mjs": {
+    "mode": 420,
+    "sha256": "6cb752024d41ce7b062b93ccfecd11549ac60d2b6acc799252d4a1412f9dedc5"
+  },
+  "src/utils/appBootstrap.ts": {
+    "mode": 420,
+    "sha256": "384b45fa375cf4f6990b1f7f5430b9da4868c3f784700bd3ac551b8412c1a63b"
+  },
+  "src/utils/appearance.test.mjs": {
+    "mode": 420,
+    "sha256": "74e4aa714c18cc857d1a607cc28c631e4943ab94a22e1dd2a2cea47a3c47b95c"
+  },
+  "src/utils/appearance.ts": {
+    "mode": 420,
+    "sha256": "f39030b644f8e80f1dd30a060b9af9e3d0f1b075d4770a816af244932485905c"
+  },
+  "src/utils/artistInitials.ts": {
+    "mode": 420,
+    "sha256": "4358ccd065a14ebf1c964524c98d5d27c5361c3074b6b91819959400bbf9cd39"
+  },
+  "src/utils/audioConfigChange.test.mjs": {
+    "mode": 420,
+    "sha256": "ca02309b2a6153bbd1b05efa5948aee1d37f8977be2c39b54fdb76f9e7a3c6c9"
+  },
+  "src/utils/audioConfigChange.ts": {
+    "mode": 420,
+    "sha256": "12691824ad9d982ff3e1ede515db37a0478ad13b72470681c775aaadb34dc980"
+  },
+  "src/utils/configSaveMonitor.test.mjs": {
+    "mode": 420,
+    "sha256": "20f2512144779769f12ba52332aa8cb5e608d5afbd8ca806e16bf5372be6c103"
+  },
+  "src/utils/configSaveMonitor.ts": {
+    "mode": 420,
+    "sha256": "eea8e3ad4a164fad1cc165186097e0ecab5af204b8ae790ede19c1cdf651f7c1"
+  },
+  "src/utils/configSaveNotice.test.mjs": {
+    "mode": 420,
+    "sha256": "096f9588d3aa58f3a3816c0851ce6ed932d8f3e3e11f6c46ae860c8cbb09167b"
+  },
+  "src/utils/deviceAvailability.test.mjs": {
+    "mode": 420,
+    "sha256": "b7aa6f9a83c2616b862c9577827f5b585f9646034e43391a2b688d01d993d6ea"
+  },
+  "src/utils/deviceAvailability.ts": {
+    "mode": 420,
+    "sha256": "00625b525c8fb0821155fbecfb6a12d32670a9b3fd245f46870b65defb8a2d27"
+  },
+  "src/utils/directVolume.test.mjs": {
+    "mode": 420,
+    "sha256": "ad5050ac1e045b6b2c1220852500cf545a70de56dc923176223c951d1b5b3ec6"
+  },
+  "src/utils/directVolumeChoice.test.mjs": {
+    "mode": 420,
+    "sha256": "c6563c0e18bffd5fff333952733de2a31d1c2ac8a6a146fee1934926d25784ae"
+  },
+  "src/utils/directVolumeChoice.ts": {
+    "mode": 420,
+    "sha256": "af42b1eab0ae430f1a01d6d39d0591a0e6c62d3a6b1026f30cc17f1d01d433ec"
+  },
+  "src/utils/discoverNavigation.ts": {
+    "mode": 420,
+    "sha256": "b47c1e751ff803008fe148bd401f06fd665ae784f0963cb8071d95a88d36b137"
+  },
+  "src/utils/equalizer.ts": {
+    "mode": 420,
+    "sha256": "ecc6e5e5901c6e613a93648ac88cca727c796577ed0012bc5a2c5242a7a4c5e5"
+  },
+  "src/utils/explore.test.mjs": {
+    "mode": 420,
+    "sha256": "5f83207bffdb6ffdb6f745cb24088b964cce27cdfd18ad81ccac8865340c498c"
+  },
+  "src/utils/explore.ts": {
+    "mode": 420,
+    "sha256": "1ead4449d81377e5306c59fabe0382da931d563e16e1c1610e67dd7f5dcf59fb"
+  },
+  "src/utils/exploreAlbumShelf.test.mjs": {
+    "mode": 420,
+    "sha256": "1283701edcfce726619f8b4048feb58fb5ee4ed676c84b2f8af02bcf0fe98b84"
+  },
+  "src/utils/exploreAlbumShelf.ts": {
+    "mode": 420,
+    "sha256": "2ce01cd5a1fc50785f96e8d3145ee399e357b2073770fb4189f022b564b02ca2"
+  },
+  "src/utils/exploreGenreCards.test.mjs": {
+    "mode": 420,
+    "sha256": "64f48a7fd5d53abc69dd0704c432217ab62e00bd47c09c6a496d2c0fca86c9eb"
+  },
+  "src/utils/exploreGenreCards.ts": {
+    "mode": 420,
+    "sha256": "a474acc4def4096cdfe5bd7142530f295cf3dabd53e2f889ceaa90e4df50f9d6"
+  },
+  "src/utils/exploreGenreSlice.test.mjs": {
+    "mode": 420,
+    "sha256": "d2b1342a645f921f7156c34df36ebd04746b627123ee0ce0c148423117d16d79"
+  },
+  "src/utils/exploreGenres.test.mjs": {
+    "mode": 420,
+    "sha256": "0518f5b32d06ce9152886f1afddcccb88d71a04d49809f8c63afc736798403c0"
+  },
+  "src/utils/exploreGenres.ts": {
+    "mode": 420,
+    "sha256": "7d2b8a0912d48df60d83b489cf8b7b1a573940b71ba185ba3a6299414a6a9209"
+  },
+  "src/utils/explorePresentation.test.mjs": {
+    "mode": 420,
+    "sha256": "863719edceb32b23249f03ee734d56ca7971adb20b63b5d532a37514600802f4"
+  },
+  "src/utils/explorePresentation.ts": {
+    "mode": 420,
+    "sha256": "c3e48f05969bbb39bd00bb4b7b071a3b265bd999c67e8f386d3c08ec764a583f"
+  },
+  "src/utils/exploreThemes.test.mjs": {
+    "mode": 420,
+    "sha256": "18454cbcde4bf5d6762027bef04650f8f6785f446de2e60e1a04fca1f571d6fb"
+  },
+  "src/utils/exploreThemes.ts": {
+    "mode": 420,
+    "sha256": "7580768ad2f09d7d5a1ba910c4fb078636379226b96db60236ab8f7a8acd072c"
+  },
+  "src/utils/favoriteTracks.ts": {
+    "mode": 420,
+    "sha256": "0e69d930e4a4d268dce5661a9cc6e7be11ec2bc94f7400cd09482fe2b4d47795"
+  },
+  "src/utils/frontendDiagnostics.test.mjs": {
+    "mode": 420,
+    "sha256": "b1c2ff842d253159bd9af793b6672a3fa948e1f3ff241ce0b69ce7742b804b2e"
+  },
+  "src/utils/frontendDiagnostics.ts": {
+    "mode": 420,
+    "sha256": "d46db1a73bb55dbf66476fe6d069cb1db4d84a7af124cd7df101bd15fe21b474"
+  },
+  "src/utils/frontendI18n.test.mjs": {
+    "mode": 420,
+    "sha256": "9918e652107a272790ec11eb58a86cd1b62b415f234d06b7555b314a68c20689"
+  },
+  "src/utils/indexCoverage.test.mjs": {
+    "mode": 420,
+    "sha256": "edbf7bd943f2e9d89fac8e0caa8320ed0601d67c17fa5cf3104d9c7d6ca60287"
+  },
+  "src/utils/indexCoverage.ts": {
+    "mode": 420,
+    "sha256": "9e0bf8b583b891e89ab8c038e73ef8015f3401ae753aac58fe9f0752d1deceae"
+  },
+  "src/utils/libraryDoctor.test.mjs": {
+    "mode": 420,
+    "sha256": "3ba01d77ddeb7dc25a6a4e0188187bf9855f4d119f54aa9cfcafc6b8b5208d6d"
+  },
+  "src/utils/libraryDoctor.ts": {
+    "mode": 420,
+    "sha256": "10ac02b6fbb5a25ec489a4a62326fc02429039ec7ad392044a82f04d1b10725f"
+  },
+  "src/utils/libraryDoctorReview.test.mjs": {
+    "mode": 420,
+    "sha256": "78c010398cdefa6d67a692f7d809527a59df156b4eba5cbd805d81e5e9b5336b"
+  },
+  "src/utils/libraryDoctorReview.ts": {
+    "mode": 420,
+    "sha256": "ee56c8747b7dce09dd7e25849fa8bf0b948d306b752a4ced62f4a932cc34ad3a"
+  },
+  "src/utils/localAlbumCatalog.test.mjs": {
+    "mode": 420,
+    "sha256": "155d645f9a8f12de646c464efe9662aa7f0b6b00ccff280d9c1b7253342ee175"
+  },
+  "src/utils/localAlbumCatalog.ts": {
+    "mode": 420,
+    "sha256": "51e49324e0db667e33c9c0db15ed44d36d2ccbd2098855436342ea9b262018dd"
+  },
+  "src/utils/localAlbumCatalogSession.ts": {
+    "mode": 420,
+    "sha256": "6ae6ccf041a965e0613c6a12f64724a4e25b1f537ee63ee0190a1522434b457a"
+  },
+  "src/utils/localAlbumDiscs.test.mjs": {
+    "mode": 420,
+    "sha256": "921d71e3fcf0bd89a173d62d31facd3310051e4a6fc48439276ee319888634fc"
+  },
+  "src/utils/localAlbumDiscs.ts": {
+    "mode": 420,
+    "sha256": "fd6f5df3f49eaa419ee9165e096dd0c4afb9a8c34652a9a7d3be140ae2c35a82"
+  },
+  "src/utils/localAlbumLocations.test.mjs": {
+    "mode": 420,
+    "sha256": "7d6484daf92cac97ac4912a1309016a6b1ee10aaa0b108bd729c1f0fe1b41388"
+  },
+  "src/utils/localAlbumLocations.ts": {
+    "mode": 420,
+    "sha256": "ed3a380f5e96262dd104ae661fd81bc802b73832a9cb67d6728321ce536a2a58"
+  },
+  "src/utils/localAlbumNavigation.test.mjs": {
+    "mode": 420,
+    "sha256": "390228e7d018a30aaf12cf9f1b671ffe5dbdd0c2d9c3a171b8a98d82970b98bf"
+  },
+  "src/utils/localAlbumNavigation.ts": {
+    "mode": 420,
+    "sha256": "627d85a218738204e3b0e2f24d2032472b24fa95494b1352dcfa971266bf3e91"
+  },
+  "src/utils/localAlbumPlayback.test.mjs": {
+    "mode": 420,
+    "sha256": "da8e9bcd416a4bdf90cf6e61765dab30f0891c9593c5d852a1d42c33d1dd6801"
+  },
+  "src/utils/localAlbumPlayback.ts": {
+    "mode": 420,
+    "sha256": "1f1547e30cbe4c01a0866b080ca418447a691654da7a29a01592fe31a6735e4e"
+  },
+  "src/utils/localAlbumTagEditor.test.mjs": {
+    "mode": 420,
+    "sha256": "9b9354aff7c3bb8566cfcdc6d76bdd3ba17c09895433f6856cd8acb5948a92e9"
+  },
+  "src/utils/localAlbumTagEditor.ts": {
+    "mode": 420,
+    "sha256": "513f77412808dd5be558b0025c20e05ce5ef72be9c6c327c7fb9917cb45bff6b"
+  },
+  "src/utils/localAlbumTracks.test.mjs": {
+    "mode": 420,
+    "sha256": "a9c52fd7693680decad74dbd2ad9eaf2e0e5cb05c3645f99258e927dc2370304"
+  },
+  "src/utils/localAlbumTracks.ts": {
+    "mode": 420,
+    "sha256": "e54fc094bc1e09d7246bb038d6a506e2e4a2a103bb59b157b2826982256534fd"
+  },
+  "src/utils/localArtistNavigation.test.mjs": {
+    "mode": 420,
+    "sha256": "d2882ce45ff7c2139d6e35900ae37c4780c734d79c6423f3b6b5c29cca8c7378"
+  },
+  "src/utils/localArtistNavigation.ts": {
+    "mode": 420,
+    "sha256": "8b65f4c70c7facbbf7815445c6a482337966bb7cb3d524fabbd4191ee8837cc5"
+  },
+  "src/utils/localArtwork.test.mjs": {
+    "mode": 420,
+    "sha256": "66197dc841a65e3cd58a2b7557e92c96a596c7c3b978b10f1f81fe38a35e6e37"
+  },
+  "src/utils/localArtwork.ts": {
+    "mode": 420,
+    "sha256": "c9cb5e615f8aba1e6158885ce546635271eec74ea6db856427201f24a48270bb"
+  },
+  "src/utils/localArtworkEnrichment.test.mjs": {
+    "mode": 420,
+    "sha256": "42ab5c04e152dc1593344adfbb50dd80df07ea1d4fc3ae4b4c250a887e5befc6"
+  },
+  "src/utils/localArtworkEnrichment.ts": {
+    "mode": 420,
+    "sha256": "83747bd936f66158a8bd3d0c1faddfe739833589b4793d485bb1b87e76a8149e"
+  },
+  "src/utils/localArtworkSession.ts": {
+    "mode": 420,
+    "sha256": "f92647c45844d714c57f5967044a822ad267ec4f5503a3790aeec726d8c2432c"
+  },
+  "src/utils/localExploreState.ts": {
+    "mode": 420,
+    "sha256": "0f4bb84681dd2c4a462850257a4a7c6a522d7dce495f111007889af22a8cf1fe"
+  },
+  "src/utils/localFileInfo.test.mjs": {
+    "mode": 420,
+    "sha256": "ce12b8a2c673f2b886ad0d04b76771b985948901cbedd0fbb7b899d4d70fcb44"
+  },
+  "src/utils/localFileInfo.ts": {
+    "mode": 420,
+    "sha256": "76d3078d61ca71e870642aa88ffd6d8809fcb1740ea3a0c47b784d9b62b765fc"
+  },
+  "src/utils/localFileInfoModal.test.mjs": {
+    "mode": 420,
+    "sha256": "307d0535d2d17c849783e6207c4511299a0670aabfa4765f09d03af153ce90c1"
+  },
+  "src/utils/localFolderOverlap.test.mjs": {
+    "mode": 420,
+    "sha256": "00af7d6607c960c31cc0128f0780692cbcc4cad03026a9066a67c2e1f1ac283a"
+  },
+  "src/utils/localGenreFamilies.test.mjs": {
+    "mode": 420,
+    "sha256": "ec6745aae7959b10f5a51922a41c6c7c427e4cb875f85453ca317e68e6128f14"
+  },
+  "src/utils/localGenreFamilies.ts": {
+    "mode": 420,
+    "sha256": "d83c53d9fb866c6b445eb1b3c519288f88a2912748b82476dfe8349cb137f4b0"
+  },
+  "src/utils/localImportPreview.test.mjs": {
+    "mode": 420,
+    "sha256": "40c0c9a58406b4387f78584c8722121197c00479d4b1d85396de7fc981426fb9"
+  },
+  "src/utils/localImportPreview.ts": {
+    "mode": 420,
+    "sha256": "8dfd2db8264ed0bc6ddd2594f3ea45dd90fa1a697e827dda23b07c0f44fd1819"
+  },
+  "src/utils/localLibraryScope.test.mjs": {
+    "mode": 420,
+    "sha256": "206c13fcaebb55d3127c79f357fba71629dca51ca5e52336ce8e96b7ad528c65"
+  },
+  "src/utils/localLibraryScope.ts": {
+    "mode": 420,
+    "sha256": "9da3f8353fd3475bf8de35f03d3d633d2f79e68e0e54bb44261e24f3708cc8ed"
+  },
+  "src/utils/localMetadata.test.mjs": {
+    "mode": 420,
+    "sha256": "3ed207d0b2824e8e4541fd8ef5a836c51a0cb2cb5de166667903da5a5a4b6210"
+  },
+  "src/utils/localMetadataPresence.ts": {
+    "mode": 420,
+    "sha256": "8682dd42e6c231c14ad5cd3b200b49e2b0c29c994388a64a3b32e6e8f12b3308"
+  },
+  "src/utils/localPlaybackArtwork.test.mjs": {
+    "mode": 420,
+    "sha256": "4a7614f8363ce81f6b0c5190f82ee556a51b5ea3c8b38feaaf1c2894de261d78"
+  },
+  "src/utils/localPlaybackFeedback.test.mjs": {
+    "mode": 420,
+    "sha256": "97f5c4b4f2a726bea10d2cd179655e172487d730accfbcfebb3c84adc92d5486"
+  },
+  "src/utils/localQueueArtwork.test.mjs": {
+    "mode": 420,
+    "sha256": "f95a7d1f206475174a672b81c15be84775d85ef6dc7efb0b87a95b4fa93ef72b"
+  },
+  "src/utils/localTagEditor.test.mjs": {
+    "mode": 420,
+    "sha256": "5e86c0a653218660ad98c36ab02bd3788abf2a5f6194e20d10daf1060ea211ef"
+  },
+  "src/utils/localTagEditor.ts": {
+    "mode": 420,
+    "sha256": "cb9fabb7a8e72ad6b1e99f8f2f737ce75f607c6a9ba8f29f7915081094289c3d"
+  },
+  "src/utils/localWatchNotice.test.mjs": {
+    "mode": 420,
+    "sha256": "3ab7ee46fec838e617349bfb1d75b49ad7a24be115f02d95c6ff04a6ff16ff6e"
+  },
+  "src/utils/localYearNavigation.test.mjs": {
+    "mode": 420,
+    "sha256": "a3f834fdd8a4f37d09113ac06c44bc9008fea728fb922ea3f585758168fae24a"
+  },
+  "src/utils/localYearNavigation.ts": {
+    "mode": 420,
+    "sha256": "9eb02fb27110f7051fd998a2c91391e38c9822149d27be2319f95f4dbc5122d6"
+  },
+  "src/utils/nowPlayingHosting.test.mjs": {
+    "mode": 420,
+    "sha256": "52b739e0b990190fc3ee6937caf8e8c4c11585bc6689eed8abd53d4c68527d11"
+  },
+  "src/utils/nowPlayingHosting.ts": {
+    "mode": 420,
+    "sha256": "d3550b25b1821c0680f08523c41b0e5a571529fffb747b9ffd41691e582dff28"
+  },
+  "src/utils/nowPlayingPresentation.test.mjs": {
+    "mode": 420,
+    "sha256": "62981d9b35decd94b562c4c87678f382752aa869f2aded17e71ace5fc11efce3"
+  },
+  "src/utils/nowPlayingPresentation.ts": {
+    "mode": 420,
+    "sha256": "7043bea75a3d245bf53ffedc4ec3261223263423f65be68385af3f455644d28f"
+  },
+  "src/utils/onlineMetadata.test.mjs": {
+    "mode": 420,
+    "sha256": "3965d6bd7820dd657455cce472802f818605a27f3a92b937178c6ab62e89e46a"
+  },
+  "src/utils/onlineMetadata.ts": {
+    "mode": 420,
+    "sha256": "1b76f52108c7d05ca98622a3af2ff6ae15cc30f0151b3bf15a3f985a3bbbeade"
+  },
+  "src/utils/onlineMetadataComparison.test.mjs": {
+    "mode": 420,
+    "sha256": "39a62b5dbd697ae78cb0347cb341f3c2317008bd06a687db10a25a57cd85daaf"
+  },
+  "src/utils/onlineMetadataTransfer.ts": {
+    "mode": 420,
+    "sha256": "490bd8da35f73897423b2bbd8e5a71043b04335a8ca546b11fa3601bc895e12f"
+  },
+  "src/utils/playbackIntent.ts": {
+    "mode": 420,
+    "sha256": "93ad5e70d9a7dfb5a6eae9631265b579a40cb992c80b7f6e2fba6bfd34e5e684"
+  },
+  "src/utils/playbackReliability.test.mjs": {
+    "mode": 420,
+    "sha256": "2c54df8193e15c3852628416c3984bf4c6f472eec727b770a6375914d3c34e7e"
+  },
+  "src/utils/playerBarLayout.test.mjs": {
+    "mode": 420,
+    "sha256": "fd816278f27200a53a8f3e1744357f6df11f75d6e693288a86a13f716ddcd1c1"
+  },
+  "src/utils/playerNavigation.test.mjs": {
+    "mode": 420,
+    "sha256": "0724afc39d6adef508dfccd45ebf62a4cd62245f626803844159f3278a8eb630"
+  },
+  "src/utils/playerNavigation.ts": {
+    "mode": 420,
+    "sha256": "6f3941133ebe4d1ef8e485619dec10071dca0839e4909dc5fbb761c52585698b"
+  },
+  "src/utils/playerSourceContext.test.mjs": {
+    "mode": 420,
+    "sha256": "efa6cc1e280396343eb8e061dfb9a2a8d5c79b3b6d5424912afce3df030c7565"
+  },
+  "src/utils/plexAlbumNavigation.test.mjs": {
+    "mode": 420,
+    "sha256": "512bc46274d1bb96b63d8dfb5f29b33422f2e99b7a5820db4c81c17264f51179"
+  },
+  "src/utils/plexAlbumNavigation.ts": {
+    "mode": 420,
+    "sha256": "8338b896c9235558cc27ffeb472f71cfdb444dd055ecb319d2ef121cf118b641"
+  },
+  "src/utils/plexAlbumPlayback.test.mjs": {
+    "mode": 420,
+    "sha256": "5b5bff186ce90c43896234d70ab4859cd47752cefdcd0f3f530ff9b4c194855b"
+  },
+  "src/utils/plexAlbumPlayback.ts": {
+    "mode": 420,
+    "sha256": "90f0287619ee2b5f20d68239ebd1530ce850caeee5cd657370e062d2969a82a7"
+  },
+  "src/utils/plexArtistNavigation.test.mjs": {
+    "mode": 420,
+    "sha256": "9e88f9c9afc82cd75099c78c78cff51620e0478091f323a424a8c17a08bef321"
+  },
+  "src/utils/plexArtistNavigation.ts": {
+    "mode": 420,
+    "sha256": "b9b8378080bcdc18e9578d2cab1292ce84b3869f537cb0b4d0c45ca798772ed6"
+  },
+  "src/utils/plexArtistPortraits.test.mjs": {
+    "mode": 420,
+    "sha256": "25604611110bd5c37c19e393e88311c2764df4ca1d0dadb3dab7edeb4d5ae252"
+  },
+  "src/utils/plexArtistPortraits.ts": {
+    "mode": 420,
+    "sha256": "bab39a899b50017e8127bc5df3a55cc2f34e800659c6127bc5f7687d68c0cb3d"
+  },
+  "src/utils/plexCatalog.test.mjs": {
+    "mode": 420,
+    "sha256": "482e69166fea46c62064c5ddf425fe2caef095b334a9c6b2fcd43c8761a92dcd"
+  },
+  "src/utils/plexCatalog.ts": {
+    "mode": 420,
+    "sha256": "a6f4029023f9a3f7f050dfa77380c9b974ce27b670629c6bd76d1570d777f058"
+  },
+  "src/utils/plexCatalogCoordinator.test.mjs": {
+    "mode": 420,
+    "sha256": "2aa4f59b635af616a08999b42eb07b14dc0dfe7a0a6c7c3595c92ac1ad9113ac"
+  },
+  "src/utils/plexCatalogCoordinator.ts": {
+    "mode": 420,
+    "sha256": "cb733dddc3bfac7b5890ccfc8adae793b74947b0cecd34540dda01f8fed9f7ef"
+  },
+  "src/utils/plexDecadeMix.test.mjs": {
+    "mode": 420,
+    "sha256": "e0f12c189870a3d4546c2808b4510a62663778b8517932fa31a779c0a3c2deab"
+  },
+  "src/utils/plexDiscover.test.mjs": {
+    "mode": 420,
+    "sha256": "170a243f117c53656d5977a013f915d0ede0050b22ad5520f830bf3ad6191cae"
+  },
+  "src/utils/plexDiscover.ts": {
+    "mode": 420,
+    "sha256": "0064d6511dc9e4218e0305666cfe1ca160415772c844da4a290b459941bdb614"
+  },
+  "src/utils/plexDiscoverHero.test.mjs": {
+    "mode": 420,
+    "sha256": "819d10882fc6f473a26dd35dfa74e089e043e827caaf0fa751497c97ba4efcef"
+  },
+  "src/utils/plexDiscoverPresentation.ts": {
+    "mode": 420,
+    "sha256": "e701eb70c02b9a49047d5453905db19d52814ee0afc7df2a4637b4301eb91b5c"
+  },
+  "src/utils/plexFileInfo.test.mjs": {
+    "mode": 420,
+    "sha256": "f227154fa734255a8f14cd37ca52e8c76bbd5c6084006b8b4eb4207c4803fa5e"
+  },
+  "src/utils/plexLibraryMix.test.mjs": {
+    "mode": 420,
+    "sha256": "91cd216b2504677a10eb0c9980a8f7e87b52be2e6c85ee728bbaa019589d8714"
+  },
+  "src/utils/plexLibraryMix.ts": {
+    "mode": 420,
+    "sha256": "4b0db9396ab93ef1a4c413da89c97203b602c76180d7f4d7538f05788e0e4c6b"
+  },
+  "src/utils/plexStyleMix.test.mjs": {
+    "mode": 420,
+    "sha256": "83a69da23fcbe88aad207c29f7e1a2351302736721175e3d957e88a715db17b3"
+  },
+  "src/utils/plexTrackMetadata.ts": {
+    "mode": 420,
+    "sha256": "5a6e5d57f91baca6f93f54dd4a10fbb62daaae0b065590fa89f6d7a819949c5d"
+  },
+  "src/utils/plexYearNavigation.test.mjs": {
+    "mode": 420,
+    "sha256": "3db718c289e24972f0fb7fc43a356f4744ddb4a66cc64cedd4650ecb56d78822"
+  },
+  "src/utils/plexYearNavigation.ts": {
+    "mode": 420,
+    "sha256": "77833b57031c41460ccf98689a46e408f65902e39831c1c20daf8b26180264bc"
+  },
+  "src/utils/queueClearConfirmation.test.mjs": {
+    "mode": 420,
+    "sha256": "cb308b15949e8f5dbe0e24b40fa3f3242d478b32b940e60a680d2bea0e815fed"
+  },
+  "src/utils/queueClearConfirmation.ts": {
+    "mode": 420,
+    "sha256": "8f47010b8375592af53e013af943cc33727f71a0f1d179f251cbba14485d1e9b"
+  },
+  "src/utils/routeConditions.test.mjs": {
+    "mode": 420,
+    "sha256": "3db8eab8fea1561d568ce3f329e490543774f47e9ae0b3556410de676202aba2"
+  },
+  "src/utils/routeConditions.ts": {
+    "mode": 420,
+    "sha256": "8245eac7a31ad5fa212b470a3df574fd29b6abb26ce8ee945db4d7daf97f7e34"
+  },
+  "src/utils/routeEvidenceProfiles.ts": {
+    "mode": 420,
+    "sha256": "94997c37fa04e5222f8fce28967ca97c4acc5a19d408009f4d06681b709e3992"
+  },
+  "src/utils/settingsErrorI18n.test.mjs": {
+    "mode": 420,
+    "sha256": "e29b1eda663c6a79f7aed9637e482f6ebdd23c7d6fb0658f294d24673dbb68f0"
+  },
+  "src/utils/settingsPreferences.test.mjs": {
+    "mode": 420,
+    "sha256": "d531c6907f01d68edddb0d3c6b09552a2dc6234e49cf5bcff71bc6eb2544e0a2"
+  },
+  "src/utils/settingsSaveFeedback.test.mjs": {
+    "mode": 420,
+    "sha256": "132657436561281edf1480082cafd403697c9942732a85307d8322293520f757"
+  },
+  "src/utils/sharePendingRequest.test.mjs": {
+    "mode": 420,
+    "sha256": "394358ac197b577b2ba7e8426ec9841a6773e78c0637c99de082ea2de103f167"
+  },
+  "src/utils/sharePendingRequest.ts": {
+    "mode": 420,
+    "sha256": "4ec78a5f41bedc76e728e6571aa70eb9d5fded0b0e0376fda2dcbaaa4f0c7d4e"
+  },
+  "src/utils/signalPath.test.mjs": {
+    "mode": 420,
+    "sha256": "964aeb7480a9df4711c1e70275a29ec2a5a734ecb16bcfefcf226551adfa4e45"
+  },
+  "src/utils/signalPath.ts": {
+    "mode": 420,
+    "sha256": "584681ca6fa6f62348082da3bb9fff289aaf930fef7dd477a328ea41c3767ee7"
+  },
+  "src/utils/sourceAudio.test.mjs": {
+    "mode": 420,
+    "sha256": "b4c993eb35f433011084d530631942ac5af672c907dc82000e511129db4739f6"
+  },
+  "src/utils/sourceAudio.ts": {
+    "mode": 420,
+    "sha256": "ac5e574f4fbfc4d6e4a21eb7d78364fc992b8ed733d1f002b79122cda0425ca9"
+  },
+  "src/utils/sourceReadGate.ts": {
+    "mode": 420,
+    "sha256": "05a493109f12911391756ce20386e4980b3075088c070d1b91bdfa71931a8a87"
+  },
+  "src/utils/strictAudioUi.test.mjs": {
+    "mode": 420,
+    "sha256": "6efdde8906cea54ee303eed4d6cb519eb598cdb2842910f79af953888beb899b"
+  },
+  "src/utils/useLocalPlaybackArtwork.ts": {
+    "mode": 420,
+    "sha256": "6a40b2b86db49f554c21337a015f80056e489493bc8bff027a02809935e1eec7"
+  },
+  "src/utils/useLocalQueueArtwork.ts": {
+    "mode": 420,
+    "sha256": "13efe62d7f9a454ceacdbbaf8d9fd0a34dd44bd17379cc881476cdd13e895a1e"
+  },
+  "src/utils/usePlaybackAttempt.ts": {
+    "mode": 420,
+    "sha256": "1b5ce82fe47df0799ca96dd71f25fbbd15a9f085c768af92cc4129c235105879"
+  },
+  "src/utils/usePlayerSourceInfo.ts": {
+    "mode": 420,
+    "sha256": "51fb7c5d95a510a8ec79aba4b0f955da9fe1d5b6b05a2799c7a708b011b220f8"
+  },
+  "src/utils/virtualGrid.test.mjs": {
+    "mode": 420,
+    "sha256": "f47c70bc1b756dee3f9a2c317ff15a78089527cee0aead2e976ce8f9462f64e0"
+  },
+  "src/utils/virtualGrid.ts": {
+    "mode": 420,
+    "sha256": "a84660bb81897253c66fd20ed2002e1b2fe82d30718e32c896f5a332c97f9fff"
+  },
+  "src/utils/virtualList.test.mjs": {
+    "mode": 420,
+    "sha256": "87336ad0c03443ea52bc4b83915d2832897d25e04227529fec3d633f22e03928"
+  },
+  "src/utils/virtualList.ts": {
+    "mode": 420,
+    "sha256": "f151bdeaf880959ad07fac1aa10959f8a2b5bea6ecf00f25aff70abb4c30d2fc"
+  },
+  "src/utils/visibleQueueArtwork.ts": {
+    "mode": 420,
+    "sha256": "7cddc7259ea848cf8ff98192f6619ad797d5fe55546beee42d55a77904c133e1"
+  },
+  "src/utils/welcomeWizard.test.mjs": {
+    "mode": 420,
+    "sha256": "96352821a3323b12859a021dbbc6374e73e9800199ed049630f31c613fe4e945"
+  },
+  "src/utils/welcomeWizard.ts": {
+    "mode": 420,
+    "sha256": "59aa3e0782a37f9fb5fe58d6f7c3226d5c008a9b38268a18b6532889832c4a74"
+  },
+  "src/vite-env.d.ts": {
+    "mode": 420,
+    "sha256": "65996936fbb042915f7b74a200fcdde7e410f32a669b1ab9597cfaa4b0faddb5"
+  },
+  "tests/appearanceColors.test.mjs": {
+    "mode": 420,
+    "sha256": "29bb4970e6aa8bca7a0858e05dbb429f56f14a2b654e0bacecad7fa1b190e846"
+  },
+  "tests/appearanceSetting.test.mjs": {
+    "mode": 420,
+    "sha256": "45f056a6f29807556ccd488a8d7ffe4ea858bc789bb9d194b63774bbd16d2c79"
+  },
+  "tests/artistViewNavigation.test.mjs": {
+    "mode": 420,
+    "sha256": "fcd813184b0704a827e491654b7453b0b5e3ffe42b52345c6f0fc69aac1bc921"
+  },
+  "tests/auditFixes.test.mjs": {
+    "mode": 420,
+    "sha256": "c68a694dbfe85859c33adca4d905d689fd41460b2a9ec814497bbc11cddb9f48"
+  },
+  "tests/equalizer.test.mjs": {
+    "mode": 420,
+    "sha256": "2abd383f75404216d9ff38a63eede70586e7ac76ffd720bef3b1b5f9f1c3e823"
+  },
+  "tests/equalizerDaily.test.mjs": {
+    "mode": 420,
+    "sha256": "9e53f30cc89093a5486dafeb8f5edaa60e656a8dc3b5d98d2111c8b0d461d0fa"
+  },
+  "tests/equalizerNavigation.test.mjs": {
+    "mode": 420,
+    "sha256": "a7eaf662b69a018ae876ee4f6eb1920063a1c22dc6a64a59b1d2bd3c20a7b62b"
+  },
+  "tests/equalizerNumbers.test.mjs": {
+    "mode": 420,
+    "sha256": "4e9d310c023bfadeea019f012942e2cf573a93474ae437029291ed83c64ef786"
+  },
+  "tests/equalizerRefinement.test.mjs": {
+    "mode": 420,
+    "sha256": "48339e1af889f87e9f2a776cf353b6c80840627dc7ae1f56e34a93ad19d34dd6"
+  },
+  "tests/fixtures/audio-snapshot-consistency.json": {
+    "mode": 420,
+    "sha256": "5c0fee32797dcb123b411a124aec53907474233857a4d567d5c2dd5778c69f97"
+  },
+  "tests/fixtures/equalizer-coefficients.json": {
+    "mode": 420,
+    "sha256": "b703fe4ed00c38a1458cea464a945d1e6f1f6046b98792b58885b2b1b3f928fb"
+  },
+  "tests/fixtures/equalizer-collection.json": {
+    "mode": 420,
+    "sha256": "f7f5c803215163d57d2f01d927378bec32c5bf842f3d789dbf6e380401183aec"
+  },
+  "tests/fixtures/equalizer-legacy-builtins.json": {
+    "mode": 420,
+    "sha256": "85b98362db3e069637c8ae645c84823437231627c2624ba8b31bffd2013fce8c"
+  },
+  "tests/fixtures/plex-discover-artist-recommendations.json": {
+    "mode": 420,
+    "sha256": "c40acab3c385366fbcbd9dd5d95f5f603bb78bfac5437862faa4c4811e60d8bf"
+  },
+  "tests/fixtures/plex-discover-recent-played-artists.json": {
+    "mode": 420,
+    "sha256": "9e6fbcc2ef2f92962680ba26c7b3cb7731befb531ebca742fd838f2b27de2c1b"
+  },
+  "tests/helpers/collectionResetFixture.mjs": {
+    "mode": 420,
+    "sha256": "bcb5d49c2462d25f804bcf17a8f76f653948268fff92e1fb08a1b64c37755c80"
+  },
+  "tests/indexCoverageUI.test.mjs": {
+    "mode": 420,
+    "sha256": "7bf80f172fe9f55c9dc0255f8f39a74a4a6e844351baeb7422bd25976c011624"
+  },
+  "tests/libraryRecoveryUI.test.mjs": {
+    "mode": 420,
+    "sha256": "00301baf0e7e321c7c6f0f98d878760ef47012333854edd4ed21bffcda498e97"
+  },
+  "tests/nowPlayingPresentation.test.mjs": {
+    "mode": 420,
+    "sha256": "251bdae67e2e1b1bc91e65ac79a68d20b79f4533e35eeebf4b230b2c1272d255"
+  },
+  "tests/packaging_test.py": {
+    "mode": 420,
+    "sha256": "ca0090bd322dc18da4e4ff0278e9bbbbe0282e6330abcc6111048e58ef3bf9ae"
+  },
+  "tests/pickDirectory.test.mjs": {
+    "mode": 420,
+    "sha256": "833f988feb86217ac4496085a24a57aa02d01b8760aa0d64dc02a8d06e53a06c"
+  },
+  "tests/plexArtworkCache.test.mjs": {
+    "mode": 420,
+    "sha256": "2b5ea1083eeedffa253ee0c0845aa8ded1e35b610095710bd76ae223aa3220ca"
+  },
+  "tests/plexDiscoverView.test.mjs": {
+    "mode": 420,
+    "sha256": "b9bbd4efc9f7fa71710d52c4f5c05e375f95ec792afd4cc93b7b4fa1cc66c3e7"
+  },
+  "tests/privateRuntimePreparation.test.py": {
+    "mode": 420,
+    "sha256": "b125f51f0ffc734cd3c4aaa4e40b178fa7abd5bd9c7ad2b112580119637c5216"
+  },
+  "tests/rpm_solver_check.py": {
+    "mode": 420,
+    "sha256": "9df98db00825171c324956c9dacdb459f121f6c155dc93b7b6f2ef296cf5f081"
+  },
+  "tests/uiAsyncStability.test.mjs": {
+    "mode": 420,
+    "sha256": "8b1cf32dd40eb942c256d1752e7787076eab239efe6bb911b1e123b44528e080"
+  },
+  "tsconfig.json": {
+    "mode": 420,
+    "sha256": "65c82e3009d033dba271b9ce83a712bb4b934aeded98cb9d3e33472dd4d5f49c"
+  },
+  "tsconfig.node.json": {
+    "mode": 420,
+    "sha256": "9e2abb169ea87b7190613a1d4da57ca608463a453bd4231fa3aeee5e308370dd"
+  },
+  "vite.config.ts": {
+    "mode": 420,
+    "sha256": "2e6844ded3a042311db8859bbe9df6e2aaea1af68b5e91c54564c347bb72d0c9"
+  }
+}

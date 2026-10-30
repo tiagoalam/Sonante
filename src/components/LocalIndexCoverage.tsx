@@ -1,0 +1,34 @@
+import { useTranslation } from 'react-i18next';
+import { useIndexCoverage } from '../services/indexCoverage';
+import type { IndexCoverageReport } from '../utils/indexCoverage';
+
+export function IndexCoverageDetails({ report }: { report: IndexCoverageReport }) {
+  const { t } = useTranslation();
+  return <details className="mt-2 text-xs">
+    <summary className="cursor-pointer underline">{t('indexCoverage.details')}</summary>
+    <p className="my-2">{t(report.scope === 'paths' ? 'indexCoverage.paths' : 'indexCoverage.full')}</p>
+    <ul className="max-h-52 overflow-y-auto space-y-2">
+      {report.sources.map(c => <li key={c.source}>
+        <p>{t('indexCoverage.source', { name: c.source })}: {t('indexCoverage.counts', {
+          audio: c.audio_files, cues: c.cue_groups, cataloged: c.cataloged_audio,
+          virtual: c.virtual_tracks, omitted: c.omitted, excluded: c.policy_excluded,
+        })}</p>
+        <p>{c.audio_unconfirmed === undefined
+          ? t('indexCoverage.unclassified', { count: c.omitted })
+          : t('indexCoverage.categories', {
+            audio: c.audio_unconfirmed, cues: c.cue_groups_unobserved, paths: c.unaddressable,
+          })}</p>
+      </li>)}
+    </ul>
+    <p className="mt-2">{t('indexCoverage.limits')}</p>
+  </details>;
+}
+
+export function LocalIndexCoverageStatus() {
+  const { t } = useTranslation();
+  const { report } = useIndexCoverage();
+  return <section role="status" className="rounded-xl border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-panel,#181818)] p-3 text-xs">
+    <p>{t(!report ? 'indexCoverage.unknown' : report.outcome === 'partial' ? 'indexCoverage.partial' : 'indexCoverage.confirmed')}</p>
+    {report && <IndexCoverageDetails report={report} />}
+  </section>;
+}

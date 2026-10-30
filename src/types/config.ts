@@ -1,6 +1,8 @@
 export interface AppConfig {
   first_run: boolean;
   alsa_device: string;
+  direct_volume_choice?: { version: number; endpoint: string; dop_enabled: boolean } | null;
+  direct_muted?: boolean;
   audio_output_type: "alsa" | "pipewire";
   local_folders: string[];
   online_artwork_enabled: boolean;
@@ -17,13 +19,16 @@ export interface AppConfig {
   replay_gain: "off" | "track" | "album";
 }
 
-export type ConfigSavePhase = "preparing" | "indexing" | "validating" | "completed" | "failed" | "uncertain";
+export type ConfigSavePhase = "preparing" | "removing" | "indexing" | "validating" | "completed" | "failed" | "uncertain";
 export interface ConfigSaveOperation {
   id: string;
   phase: ConfigSavePhase;
   error: string | null;
+  coverage?: import("../utils/indexCoverage").IndexCoverageReport;
+  confirmed_playback?: boolean;
 }
-export type ConfigSaveResponse = { status: "completed" } | { status: "accepted"; operation: ConfigSaveOperation };
+export type ConfigSaveWarning = "position_not_restored";
+export type ConfigSaveResponse = { status: "completed"; warning?: ConfigSaveWarning } | { status: "accepted"; operation: ConfigSaveOperation };
 
 export interface QueueClearAuthorization {
   confirmed: true;

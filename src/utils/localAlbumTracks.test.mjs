@@ -73,7 +73,7 @@ test("busy recovery remains blocked by managed Save and discards in-flight catal
 
 test("UI gates playback, selects only surviving albums and translates waiting/loading", () => {
   const view = readFileSync(new URL("../components/LocalBrowserView.tsx", import.meta.url), "utf8");
-  assert.match(view, /catalog\.loaded[^;]*!catalog\.saveBlocked[^;]*!isLibraryUpdating/);
+  assert.match(view, /confirmedCatalogPlaybackAllowed\(catalog, isLibraryUpdating\)/);
   assert.match(view, /tracksLoader\.select\(exists \? selectedAlbum\.id : null, catalogConfirmed, albums\)/);
   assert.match(view, /const tracksReady = catalogConfirmed && trackState\.catalogVersion === albums/);
   assert.match(view, /disabled=\{!isPlaybackAvailable \|\| !tracksReady\}/);

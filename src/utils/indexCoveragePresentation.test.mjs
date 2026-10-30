@@ -1,0 +1,23 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+import * as jsx from 'react/jsx-runtime';
+import { renderToStaticMarkup } from 'react-dom/server';
+import i18next from 'i18next';
+const source=readFileSync(new URL('../components/LocalIndexCoverage.tsx',import.meta.url),'utf8');
+const counts={source:'Fixture',audio_files:1033,cataloged_audio:1033,cue_groups:16,virtual_tracks:122,omitted:1,policy_excluded:322,audio_unconfirmed:0,cue_groups_unobserved:1,unaddressable:0};
+for(const lang of ['pt-BR','en'])test(`Preferences details stay closed and distinguish CUE, audio, excluded and legacy unknown (${lang})`,async()=>{
+ const language=i18next.createInstance();await language.init({lng:lang,resources:{[lang]:{translation:JSON.parse(readFileSync(new URL(`../locales/${lang}.json`,import.meta.url),'utf8'))}}});
+ const report={outcome:'partial',scope:'full',generation:'fixture',sources:[counts]};
+ const deps={'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:language.t.bind(language)})},'../services/indexCoverage':{useIndexCoverage:()=>({report})}};
+ const exports={};new Function('require','exports',ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText)(name=>{assert.ok(name in deps,name);return deps[name]},exports);
+ const html=renderToStaticMarkup(exports.LocalIndexCoverageStatus());
+ assert.match(html,/<details class=/);assert.doesNotMatch(html,/<details[^>]*\bopen(?:=|>)/);
+ assert.ok(html.includes(language.t('indexCoverage.categories',{audio:0,cues:1,paths:0})));
+ assert.ok(html.includes(language.t('indexCoverage.counts',{audio:1033,cataloged:1033,cues:16,virtual:122,omitted:1,excluded:322})));
+ const legacy={...counts};delete legacy.audio_unconfirmed;delete legacy.cue_groups_unobserved;delete legacy.unaddressable;
+ const older=renderToStaticMarkup(exports.IndexCoverageDetails({report:{...report,sources:[legacy]}}));
+ assert.ok(older.includes(language.t('indexCoverage.unclassified',{count:1})));
+ assert.ok(!older.includes(language.t('indexCoverage.categories',{audio:0,cues:1,paths:0})));
+});

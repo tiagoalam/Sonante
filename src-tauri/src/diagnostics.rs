@@ -1,6 +1,23 @@
 //! Log-only error summaries. IPC errors retain their original contracts and messages.
 use std::fmt::Display;
 
+/// Opt-in DEV startup stages. Never logs the raw error, path or configuration.
+pub(crate) fn startup_stage<T, E: std::fmt::Display>(
+    stage: &'static str,
+    result: Result<T, E>,
+) -> Result<T, E> {
+    #[cfg(debug_assertions)]
+    if std::env::var("SONANTE_STARTUP_DIAGNOSTICS").as_deref() == Ok("1") {
+        if let Err(error) = &result {
+            eprintln!("[SupervisorStartup] stage={} {}", stage, error_summary(error));
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = stage;
+    result
+}
+
+
 pub(crate) fn error_summary(error: impl Display) -> String {
     let text = error.to_string();
     let lower = text.to_lowercase();
@@ -655,7 +672,6 @@ mod tests {
             include_str!("supervisor.rs"),
             include_str!("mpris.rs"),
             include_str!("analyzer.rs"),
-            include_str!("alsa_mixer.rs"),
             include_str!("local_watcher.rs"),
             include_str!("artwork_progress.rs"),
             include_str!("local_media.rs"),

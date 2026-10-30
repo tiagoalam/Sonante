@@ -1,3 +1,4 @@
+import type { DspSnapshot } from "./equalizer";
 import type { PlexImageRef } from "./plex";
 
 export type MediaLocator =
@@ -40,11 +41,14 @@ export interface VolumeStatus {
   muted: boolean;
   writable: boolean;
   available: boolean;
-  backend: "alsa_hardware" | "pipewire" | "mpd_software" | "unavailable";
+  direct_gain?: "pending" | "unity" | "muted" | "changed";
+  direct_token?: string;
+  shared_token?: string;
+  backend: "direct_equipment" | "alsa_hardware" | "pipewire" | "mpd_software" | "unavailable";
 }
 
 export interface PlaybackDiagnostic {
-  code: "output_busy" | "output_unavailable" | "playback_error";
+  code: "output_busy" | "output_unavailable" | "playback_error" | "queue_uncertain" | "persistence_failed" | "format_unsupported";
 }
 
 export interface PlaybackOptions {
@@ -54,7 +58,31 @@ export interface PlaybackOptions {
 }
 export type PlaybackOptionAction = "cycle_repeat" | "toggle_random";
 
+export type OutputObservation =
+  | { state: "unverified"; reason: "unavailable" | "not_playing" | "shared" | "unreadable" | "malformed" | "not_owned" | "ambiguous" | "changed" | "limit" | "busy" }
+  | { state: "observed"; configured_endpoint: string; card: number; device: number; subdevice: number; format: string; rate: number; channels: number; kernel_release?: string | null; usb_device?: { vendor_id: string; product_id: string; model: string } | null };
+
+export interface SignalProcessing {
+  transport?: { kind: "pcm" | "native_dsd" | "dop"; source_rate: number; output_rate: number; channels: number; epoch: number } | null;
+  mpd_volume: number | null;
+  crossfade_seconds: number | null;
+  mixramp: "off" | "possible" | "unknown";
+  replay_gain: { state: "off" | "track" | "album" | "auto" | "unknown" } | { state: "unavailable"; reason: "busy" | "unavailable" | "timeout" | "protocol" | "changed" };
+}
+
+export interface EngineEvidence {
+  state: "identified";
+  evidence_id: "mpd-pcm-eof-20261017" | "mpd-route-20261017" | "mpd-strict-route-20261017" | "mpd-strict-ubuntu2204-remap-20261018";
+  scope: "pcm24_96000_stereo_gapless" | "pcm_dsd_route" | "pcm_dsd_route_strict";
+  pcm_eof_flush: boolean;
+}
+
 export interface PlaybackStatus {
+  snapshot_consistent?: boolean;
+  processing?: SignalProcessing | null;
+  output_observation?: OutputObservation | null;
+  engine_evidence?: EngineEvidence | null;
+  shared_dsp?: DspSnapshot | null;
   options: PlaybackOptions | null;
   state: string;
   elapsed: number;
@@ -84,6 +112,9 @@ export type MpdHealth =
   | { state: "stopping" };
 
 export interface MpdStatusSnapshot {
+  output_observation?: OutputObservation | null;
+  engine_evidence?: EngineEvidence | null;
+  shared_dsp?: DspSnapshot | null;
   health: MpdHealth;
   playback: PlaybackStatus | null;
 }
@@ -101,6 +132,7 @@ export interface QueueArtworkContext {
 
 export interface NowPlayingSnapshot {
   queueArtwork?: QueueArtworkContext;
+  sourceInfo?: import("./sourceAudio").PlayerSourceInfo | null;
   route: ConfiguredSignalRoute | null;
   health: MpdHealth;
   playback: PlaybackStatus;

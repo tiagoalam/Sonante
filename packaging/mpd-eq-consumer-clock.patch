@@ -1,0 +1,11 @@
+--- a/src/output/plugins/FifoOutputPlugin.cxx
++++ b/src/output/plugins/FifoOutputPlugin.cxx
+@@ -207,6 +207,8 @@
+ std::chrono::steady_clock::duration
+ FifoOutput::Delay() const noexcept
+ {
++    // Prototype: strict Shared FIFO is paced by its consumer via bounded writes.
++    if (strict_eq) return std::chrono::steady_clock::duration::zero();
+ 	return timer->IsStarted()
+ 		? timer->GetDelay()
+ 		: std::chrono::steady_clock::duration::zero();

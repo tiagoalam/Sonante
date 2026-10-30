@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# This checks compilation bundles; it does not qualify a complete installer.
+echo "Compilation artifact inspection only; complete installers require scripts/qualified-package.py verify."
 version="$1"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 shopt -s nullglob

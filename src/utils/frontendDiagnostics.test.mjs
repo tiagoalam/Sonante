@@ -35,6 +35,43 @@ test("real Plex mix helper is DEV-only without opt-in, bounds scalars and tolera
   for (const [, payload] of calls) assert.deepEqual(Object.keys(JSON.parse(payload)), ["stage", "category", "reason", "observed"]);
 });
 
+test("thumbnail diagnostics stay DEV-only and allow only fixed reasons and numeric counters", async () => {
+  const source = readFileSync(new URL("./frontendDiagnostics.ts", import.meta.url), "utf8");
+  const previous = console.info, calls = [];
+  console.info = (...args) => calls.push(args);
+  try {
+    for (const env of [{ DEV: false }, { DEV: false, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "1" }, { DEV: true }, { DEV: true, VITE_SONANTE_EXPLORE_DIAGNOSTICS: "0" }]) {
+      const js = ts.transpileModule(source.replaceAll("import.meta.env", JSON.stringify(env)), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
+      const { logLocalThumbnailDiagnostic: log } = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
+      const value = { stage: "summary", restore: "restored", restored: 2, captured: 3, stored: 3, retained: 2, writes: 1, write_failures: 0,
+        on_load: 2, already_complete: 1, initial_cards: 2, initial_hits: 1, initial_misses: 1, evicted_count: 1, evicted_bytes: 500,
+        rejected: { admission: 1, canvas_failed: 2 } };
+      const before = calls.length;
+      log(value);
+      assert.equal(calls.length - before, env.DEV ? 1 : 0);
+      if (!env.DEV) continue;
+      assert.deepEqual(calls.at(-1), ["[Sonante] local.thumbnails", JSON.stringify(value)]);
+      for (const invalid of [secrets, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+        log({ ...value, captured: invalid, rejected: { ...value.rejected, admission: invalid, [secrets]: 9 }, path: secrets, image: secrets });
+        const payload = JSON.parse(calls.at(-1)[1]);
+        assert.equal(payload.captured, 0); assert.equal(payload.rejected.admission, 0);
+        assert.deepEqual(Object.keys(payload), Object.keys(value));
+        assert.deepEqual(Object.keys(payload.rejected), ["admission", "canvas_failed"]);
+      }
+      const count = calls.length;
+      for (const invalid of [null, undefined, { ...value, stage: secrets }, { ...value, restore: secrets },
+        { get stage() { throw Error(secrets); } }, new Proxy({}, { getOwnPropertyDescriptor() { throw Error(secrets); } })]) {
+        assert.doesNotThrow(() => log(invalid));
+      }
+      assert.equal(calls.length, count);
+      console.info = () => { throw Error(secrets); };
+      assert.doesNotThrow(() => log(value));
+      console.info = (...args) => calls.push(args);
+    }
+  } finally { console.info = previous; }
+  assert.doesNotMatch(JSON.stringify(calls), /secret|password|https:|private|X-Plex/);
+});
+
 test("Explore diagnostics require both development and explicit opt-in, build lazily and tolerate failure", async () => {
   const source = readFileSync(new URL("./frontendDiagnostics.ts", import.meta.url), "utf8");
   const old = console.info, calls = []; let built = 0;

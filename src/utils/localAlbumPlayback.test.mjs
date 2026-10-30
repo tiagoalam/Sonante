@@ -20,13 +20,12 @@ test("Local album playback uses the exact source album ID, backend disc/CUE orde
   assert.ok(plays[0][0].every(t=>t.thumb==="fixture-cover"));assert.equal(plays[0][0][0].duration,12);
 });
 
-test("one pending admission across cards includes load, artwork and playback acknowledgement",async()=>{
-  const load=deferred(),cover=deferred(),ack=deferred();let reads=0,covers=0,plays=0;
-  const p=createLocalAlbumPlayback(()=>{reads++;return load.promise;},()=>{covers++;return cover.promise;},()=>{plays++;return ack.promise;});
-  const run=p.play(album,()=>true);await p.play({...album,id:"other"},()=>true);assert.equal(reads,1);
-  load.resolve(groups);await flush();await p.play(album,()=>true);assert.equal(covers,1);assert.equal(reads,1);
-  cover.resolve(null);await flush();await p.play(album,()=>true);assert.equal(plays,1);assert.equal(reads,1);
-  ack.resolve();await run;await p.play(album,()=>true);assert.equal(plays,2);
+test("a newer Local album intent supersedes a slow old preparation",async()=>{
+  const first=deferred(),second=deferred(),played=[];let reads=0;
+  const p=createLocalAlbumPlayback(()=>++reads===1?first.promise:second.promise,async()=>null,async tracks=>played.push(tracks[0].title));
+  const a=p.play(album,()=>true),b=p.play({...album,id:"new"},()=>true);
+  second.resolve(groups);await b;first.resolve(groups);await a;
+  assert.equal(reads,2);assert.deepEqual(played,["First"]);
 });
 
 test("invalid context suppresses initial reads and each later stage; cancellation survives leaving and returning",async()=>{
@@ -34,7 +33,7 @@ test("invalid context suppresses initial reads and each later stage; cancellatio
     const d=deferred();let allowed=stage!=="initial",reads=0,covers=0,plays=0;
     const p=createLocalAlbumPlayback(()=>{reads++;return stage==="load"||stage==="cancel"?d.promise:Promise.resolve(groups);},()=>{covers++;return stage==="cover"?d.promise:Promise.resolve(null);},async()=>{plays++;});
     const run=p.play(album,()=>allowed);await flush();
-    if(stage==="cancel"){p.cancel();await p.play(album,()=>true);assert.equal(reads,1,"cancel does not release a pending read");}
+    if(stage==="cancel"){p.cancel();assert.equal(reads,1,"cancel does not replay or stop the active selection");}
     else allowed=false;
     d.resolve(stage==="cover"?null:groups);await run;
     assert.equal(plays,0);assert.equal(reads,stage==="initial"?0:1);assert.equal(covers,stage==="cover"?1:0);

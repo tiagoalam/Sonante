@@ -1,47 +1,16 @@
-name: Release Linux packages
+name: Build Linux compilation packages
 
 on:
   workflow_dispatch:
-  release:
-    types: [published]
 
 permissions:
   contents: read
 
 jobs:
-  # Manual dispatch builds candidates only. Publication is reachable solely
-  # from an already-published release, after every CI/packaging job succeeds.
+  # These CI packages are compilation artifacts. Public releases use the exact
+  # complete packages validated on the supported distributions, uploaded by the
+  # release operator together with their checksums and source materials.
   packages:
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
-
-  upload:
-    if: github.event_name == 'release'
-    needs: packages
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: sonante-*-package*
-          path: artifacts
-      - name: Verify and upload all package formats
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for directory in artifacts/*; do
-            (cd "$directory" && sha256sum -c SHA256SUMS-*.txt)
-          done
-          mapfile -t packages < <(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.pkg.tar.zst' \) | sort)
-          test "${#packages[@]}" = 3
-          find artifacts -name '*.deb' | grep -q .
-          find artifacts -name '*.rpm' | grep -q .
-          find artifacts -name '*.pkg.tar.zst' | grep -q .
-          mapfile -t checksums < <(find artifacts -name 'SHA256SUMS-*.txt' | sort)
-          gh release upload "$RELEASE_TAG" "${packages[@]}" "${checksums[@]}"

@@ -39,11 +39,27 @@ impl std::fmt::Display for ConfigSaveError {
 
 impl std::error::Error for ConfigSaveError {}
 
+// A declared volume policy for this configured route, never evidence of DAC
+// identity, physical volume, or a new process's observed software gain.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct DirectVolumeChoice {
+    pub version: u8,
+    pub endpoint: String,
+    pub dop_enabled: bool,
+}
+
+fn is_false(value: &bool) -> bool { !*value }
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     #[serde(default = "default_first_run")]
     pub first_run: bool,
     pub alsa_device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_volume_choice: Option<DirectVolumeChoice>,
+    // Preserve the serialized shape used by legacy durable recovery fingerprints.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub direct_muted: bool,
     
     // Múltiplas pastas locais
     #[serde(default)]
@@ -103,6 +119,7 @@ impl Default for AppConfig {
         Self {
             first_run: true,
             alsa_device: "default".to_string(),
+            direct_volume_choice: None, direct_muted:false,
             audio_output_type: "pipewire".to_string(),
             local_folders: Vec::new(),
             online_artwork_enabled: true,
@@ -121,6 +138,18 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    pub(crate) fn direct_context(&self) -> Option<DirectVolumeChoice> {
+        (self.audio_output_type != "pipewire" && self.audio_output_type != "shared" && self.alsa_device != "default")
+            .then(||DirectVolumeChoice {version:1,endpoint:self.alsa_device.clone(),dop_enabled:self.dop_enabled})
+    }
+    pub(crate) fn confirmed_direct_choice(&self) -> Option<DirectVolumeChoice> {
+        self.direct_context().filter(|context| self.direct_volume_choice.as_ref()==Some(context))
+    }
+    pub(crate) fn validate_direct_choice(&self) -> Result<(),String> {
+        if self.direct_volume_choice.is_some() && self.confirmed_direct_choice().is_none() {
+            Err("DIRECT_VOLUME_CONTEXT_CHANGED".into())
+        } else {Ok(())}
+    }
     fn config_path() -> PathBuf {
         crate::persistence::sonante_config_dir().join("config.json")
     }
@@ -193,6 +222,38 @@ mod tests {
         "audio_buffer_size_kb": 8192,
         "replay_gain": "off"
     }"#;
+
+    #[test]
+    fn legacy_recovery_fingerprint_omits_absent_direct_metadata() {
+        use sha2::{Digest, Sha256};
+        let mut cfg: AppConfig=serde_json::from_str(LEGACY_CONFIG).unwrap();
+        cfg.apply_legacy_migrations();
+        let serialized=serde_json::to_vec(&cfg).unwrap();
+        let text=std::str::from_utf8(&serialized).unwrap();
+        assert!(!text.contains("direct_volume_choice"));
+        assert!(!text.contains("direct_muted"));
+        let expected: [u8;32]=Sha256::digest(&serialized).into();
+        assert_eq!(crate::managed_save_intent::recovery_config_hash(LEGACY_CONFIG.as_bytes()).unwrap(),expected);
+        let explicit_false=LEGACY_CONFIG.replacen('{',"{\"direct_muted\":false,",1);
+        assert_eq!(crate::managed_save_intent::recovery_config_hash(explicit_false.as_bytes()).unwrap(),expected);
+        cfg.direct_muted=true;
+        let muted=serde_json::to_vec(&cfg).unwrap();
+        assert_ne!(crate::managed_save_intent::recovery_config_hash(&muted).unwrap(),expected);
+        assert!(serde_json::from_slice::<AppConfig>(&muted).unwrap().direct_muted);
+    }
+
+    #[test]
+    fn direct_choice_migration_is_context_bound_and_mute_survives_durable_reopen() {
+        let path=test_path();let mut cfg=AppConfig::default();cfg.first_run=false;cfg.audio_output_type="alsa".into();cfg.alsa_device="hw:CARD=Fixture,DEV=0".into();
+        assert!(cfg.confirmed_direct_choice().is_none());
+        cfg.direct_volume_choice=cfg.direct_context();cfg.direct_muted=true;cfg.validate_direct_choice().unwrap();cfg.save_to_path(&path).unwrap();
+        let loaded=AppConfig::load_from_path(&path).unwrap();assert_eq!(loaded.confirmed_direct_choice(),cfg.direct_context());assert!(loaded.direct_muted);
+        for changed in ["endpoint","dop","version","shared"] {
+            let mut other=loaded.clone();match changed {"endpoint"=>other.alsa_device="hw:CARD=Other,DEV=0".into(),"dop"=>other.dop_enabled=!other.dop_enabled,"version"=>other.direct_volume_choice.as_mut().unwrap().version=2,_=>other.audio_output_type="pipewire".into()}
+            assert!(other.confirmed_direct_choice().is_none());assert!(other.validate_direct_choice().is_err());
+        }
+        assert_eq!(AppConfig::load_from_path(&path).unwrap(),loaded);remove_test_path(&path);
+    }
 
     #[test]
     fn absent_file_loads_defaults() {

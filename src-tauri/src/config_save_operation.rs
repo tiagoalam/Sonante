@@ -6,12 +6,15 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub(crate) const BUSY: &str = "CONFIG_SAVE_BUSY";
+pub(crate) const ADDITION_INDEXING: &str = "LOCAL_ADDITION_INDEXING";
+pub(crate) const INITIAL_CATALOG_INDEXING: &str = "FIRST_RUN_CATALOG_INDEXING";
 pub(crate) const INTERRUPTED: &str = "LOCAL_FOLDERS_SAVE_INTERRUPTED_FOR_SHUTDOWN";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
     Preparing,
+    Removing,
     Indexing,
     Validating,
     Completed,
@@ -30,13 +33,37 @@ pub(crate) struct Snapshot {
     pub id: String,
     pub phase: Phase,
     pub error: Option<String>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub coverage: Option<crate::index_coverage::Report>,
+    pub confirmed_playback: bool,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum SaveResponse {
-    Completed,
+    Completed { #[serde(skip_serializing_if = "Option::is_none")] warning: Option<SaveWarning> },
     Accepted { operation: Snapshot },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SaveWarning { PositionNotRestored }
+
+impl SaveResponse {
+    pub(crate) fn completed(outcome: crate::audio::DeviceSwitchRestoreOutcome) -> Self {
+        Self::Completed { warning: match outcome {
+            crate::audio::DeviceSwitchRestoreOutcome::Complete => None,
+            crate::audio::DeviceSwitchRestoreOutcome::PositionNotRestored => Some(SaveWarning::PositionNotRestored),
+        }}
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+enum Purpose {
+    #[default]
+    Save,
+    InitialCatalog,
+    Addition,
 }
 
 #[derive(Default)]
@@ -45,11 +72,18 @@ struct Inner {
     shutdown: bool,
     next_id: u64,
     operation: Option<Snapshot>,
+    purpose: Purpose,
     preview: Option<Scope>,
     preview_offsets: Vec<usize>,
+    preview_source_start: usize,
     preview_busy: bool,
+    preview_artwork_busy: bool,
     preview_not_before: Option<Instant>,
+    preview_artwork_not_before: Option<Instant>,
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BackgroundAdmission { Busy, Blocked }
 
 pub(crate) struct Coordinator {
     inner: Mutex<Inner>,
@@ -79,6 +113,7 @@ pub(crate) struct PreviewLease {
     coordinator: Arc<Coordinator>,
     id: String,
     pub(crate) scope: Scope,
+    artwork: bool,
 }
 
 pub(crate) struct PreviewJob {
@@ -108,6 +143,11 @@ impl Drop for PreviewJob {
 }
 
 impl PreviewLease {
+    pub(crate) fn source_start(&self) -> Result<usize, PreviewError> {
+        let inner = self.coordinator.inner.lock().map_err(|_| PreviewError::Unavailable)?;
+        if !self.valid(&inner) { return Err(PreviewError::Unavailable); }
+        Ok(inner.preview_source_start)
+    }
     fn valid(&self, inner: &Inner) -> bool {
         !inner.shutdown
             && inner
@@ -160,21 +200,25 @@ impl PreviewLease {
             return Err(PreviewError::Unavailable);
         }
         inner.preview_offsets = next;
+        if self.scope.initial {
+            inner.preview_source_start = (inner.preview_source_start + 8) % self.scope.sources.len();
+        }
         Ok(())
     }
 }
 
 impl Drop for PreviewLease {
     fn drop(&mut self) {
-        self.coordinator
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .preview_busy = false;
+        let mut inner = self.coordinator.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.artwork { inner.preview_artwork_busy = false; } else { inner.preview_busy = false; }
     }
 }
 
 impl Coordinator {
+    pub(crate) fn shutdown_requested(&self)->bool {
+        self.inner.lock().map_or(true,|inner|inner.shutdown)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(Inner::default()),
@@ -194,6 +238,16 @@ impl Coordinator {
         } else {
             None
         }
+    }
+
+    /// Watcher admission is typed and never waits while holding its event
+    /// reader. Busy retains a bounded batch; Uncertain/shutdown never retries.
+    pub(crate) fn try_begin_background(&self) -> Result<Transaction<'_>, BackgroundAdmission> {
+        let mut inner = self.inner.lock().map_err(|_| BackgroundAdmission::Blocked)?;
+        if Self::admission_error(&inner).is_some() { return Err(BackgroundAdmission::Blocked); }
+        if inner.busy { return Err(BackgroundAdmission::Busy); }
+        inner.busy = true;
+        Ok(Transaction { coordinator: self })
     }
 
     pub(crate) fn begin(&self) -> Result<Transaction<'_>, String> {
@@ -243,6 +297,45 @@ impl Coordinator {
             id: inner.next_id.to_string(),
             phase: Phase::Preparing,
             error: None,
+            coverage: None,
+            confirmed_playback: false,
+        };
+        inner.operation = Some(snapshot.clone());
+        inner.purpose = Purpose::Save;
+        inner.preview = None;
+        inner.preview_offsets.clear();
+        inner.busy = true;
+        Ok((
+            snapshot.clone(),
+            Operation {
+                coordinator: Arc::clone(self),
+                id: snapshot.id,
+                finished: false,
+            },
+        ))
+    }
+
+    // Explicit startup recovery may resume its own uncertain operation. The
+    // admission capability is issued only for the current analyzed plan.
+    pub(crate) fn reserve_recovery(self: &Arc<Self>, _admission: crate::library_recovery::RecoveryAdmission) -> Result<(Snapshot, Operation), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "Controle de Save indisponível.")?;
+        if inner.shutdown { return Err(INTERRUPTED.into()); }
+        if inner.busy {
+            return Err(BUSY.into());
+        }
+        inner.next_id = inner
+            .next_id
+            .checked_add(1)
+            .ok_or("Identidade de Save esgotada.")?;
+        let snapshot = Snapshot {
+            id: inner.next_id.to_string(),
+            phase: Phase::Preparing,
+            error: None,
+            coverage: None,
+            confirmed_playback: false,
         };
         inner.operation = Some(snapshot.clone());
         inner.preview = None;
@@ -298,6 +391,41 @@ impl Coordinator {
             coordinator: Arc::clone(self),
             id: id.to_string(),
             scope,
+            artwork: false,
+        })
+    }
+    pub(crate) fn reserve_preview_artwork(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> Result<PreviewLease, PreviewError> {
+        let mut inner = self.inner.lock().map_err(|_| PreviewError::Unavailable)?;
+        if inner.shutdown
+            || !inner
+                .operation
+                .as_ref()
+                .is_some_and(|op| op.id == id && op.phase == Phase::Indexing)
+        {
+            return Err(PreviewError::Unavailable);
+        }
+        let scope = inner
+            .preview
+            .clone()
+            .filter(|scope| scope.job.is_some())
+            .ok_or(PreviewError::Unavailable)?;
+        if inner.preview_artwork_busy
+            || inner
+                .preview_artwork_not_before
+                .is_some_and(|at| Instant::now() < at)
+        {
+            return Err(PreviewError::Busy);
+        }
+        inner.preview_artwork_busy = true;
+        inner.preview_artwork_not_before = Some(Instant::now() + Duration::from_millis(500));
+        Ok(PreviewLease {
+            coordinator: Arc::clone(self),
+            id: id.to_string(),
+            scope,
+            artwork: true,
         })
     }
 
@@ -311,6 +439,23 @@ impl Coordinator {
     }
 
     pub(crate) fn reject_active(&self) -> Result<(), String> {
+        self.reject_active_with_feedback(false)
+    }
+
+    /// Same refusal, with actionable playback feedback only after saved
+    /// first-run preferences have handed ownership to the catalog worker.
+    pub(crate) fn initial_catalog_id(&self) -> Result<Option<String>, String> {
+        let inner = self.inner.lock().map_err(|_| "Playback unavailable")?;
+        if let Some(error) = Self::admission_error(&inner) { return Err(error); }
+        Ok(inner.operation.as_ref().filter(|op| !op.phase.terminal()
+            && matches!(inner.purpose, Purpose::InitialCatalog)).map(|op| op.id.clone()))
+    }
+
+    pub(crate) fn reject_playback(&self) -> Result<(), String> {
+        self.reject_active_with_feedback(true)
+    }
+
+    fn reject_active_with_feedback(&self, playback: bool) -> Result<(), String> {
         let inner = self
             .inner
             .lock()
@@ -323,7 +468,12 @@ impl Coordinator {
             .as_ref()
             .is_some_and(|op| !op.phase.terminal())
         {
-            Err(BUSY.into())
+            Err(if playback && matches!(inner.purpose, Purpose::InitialCatalog) {
+                INITIAL_CATALOG_INDEXING
+            } else if playback && matches!(inner.purpose, Purpose::Addition)
+                && inner.operation.as_ref().is_some_and(|op| op.phase == Phase::Indexing && op.confirmed_playback) {
+                ADDITION_INDEXING
+            } else { BUSY }.into())
         } else {
             Ok(())
         }
@@ -357,6 +507,12 @@ impl Coordinator {
     }
 }
 
+impl Transaction<'_> {
+    pub(crate) fn belongs_to(&self, coordinator: &Coordinator) -> bool {
+        std::ptr::eq(self.coordinator, coordinator)
+    }
+}
+
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         let mut inner = self
@@ -370,6 +526,37 @@ impl Drop for Transaction<'_> {
 }
 
 impl Operation {
+    pub(crate) fn addition_playback(&self, enabled: bool) -> Result<(), String> {
+        let mut inner = self.coordinator.inner.lock().map_err(|_| BUSY)?;
+        if inner.shutdown { return Err(INTERRUPTED.into()); }
+        let op = inner.operation.as_mut().filter(|op| op.id == self.id && !op.phase.terminal()).ok_or(BUSY)?;
+        op.confirmed_playback = enabled && op.phase == Phase::Indexing;
+        inner.purpose = Purpose::Addition;
+        Ok(())
+    }
+    pub(crate) fn id(&self) -> &str { &self.id }
+
+    pub(crate) fn initial_catalog_background(&self) {
+        let mut inner = self.coordinator.inner.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.operation.as_ref().is_some_and(|op| op.id == self.id && !op.phase.terminal()) {
+            inner.purpose = Purpose::InitialCatalog;
+        }
+    }
+
+    /// Only the owned initial-generation worker can enable this scope. Each
+    /// read still has at most eight source windows and 128 tracks total.
+    pub(crate) fn enable_initial_preview(&self, socket: &str, sources: &[String]) -> Result<(), PreviewError> {
+        let scope = Scope::initial(socket, sources)?;
+        let mut inner = self.coordinator.inner.lock().map_err(|_| PreviewError::Unavailable)?;
+        if inner.shutdown || !inner.operation.as_ref().is_some_and(|op| op.id == self.id && !op.phase.terminal()) {
+            return Err(PreviewError::Unavailable);
+        }
+        inner.preview = Some(scope);
+        inner.preview_offsets.clear();
+        inner.preview_source_start = 0;
+        Ok(())
+    }
     /// Called only after a proven targeted addition has been published.
     pub(crate) fn enable_addition_preview(
         &self,
@@ -392,6 +579,7 @@ impl Operation {
         }
         inner.preview = Some(scope);
         inner.preview_offsets.clear();
+        inner.preview_source_start = 0;
         Ok(())
     }
 
@@ -438,6 +626,12 @@ impl Operation {
         }
     }
 
+    pub(crate) fn coverage(&self, report: crate::index_coverage::Report) {
+        if let Ok(mut inner) = self.coordinator.inner.lock() {
+            if let Some(op) = inner.operation.as_mut().filter(|op| op.id == self.id && !op.phase.terminal()) { op.coverage = Some(report); }
+        }
+    }
+
     pub(crate) fn phase(&self, phase: Phase) {
         let mut inner = self
             .coordinator
@@ -447,6 +641,7 @@ impl Operation {
         if let Some(op) = inner.operation.as_mut().filter(|op| op.id == self.id) {
             if !op.phase.terminal() && !phase.terminal() {
                 op.phase = phase;
+                if phase != Phase::Indexing { op.confirmed_playback = false; }
                 if phase == Phase::Validating {
                     inner.preview = None;
                     inner.preview_offsets.clear();
@@ -482,6 +677,7 @@ impl Operation {
             } else {
                 Phase::Failed
             };
+            op.confirmed_playback = false;
             op.error = result.err();
             inner.preview = None;
             inner.preview_offsets.clear();
@@ -508,6 +704,47 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn addition_permission_is_explicit_and_ends_before_validation() {
+        let state = Arc::new(Coordinator::new());
+        let (_, op) = state.reserve().unwrap();
+        assert_eq!(state.reject_playback().unwrap_err(), BUSY);
+        op.phase(Phase::Indexing);
+        assert_eq!(state.reject_playback().unwrap_err(), BUSY);
+        op.addition_playback(true).unwrap();
+        assert_eq!(state.reject_playback().unwrap_err(), ADDITION_INDEXING);
+        assert!(state.snapshot().unwrap().unwrap().confirmed_playback);
+        assert!(state.reject_active().is_err()); assert!(state.reserve().is_err());
+        assert!(state.try_begin_background().is_err());
+        op.phase(Phase::Validating);
+        assert!(!state.snapshot().unwrap().unwrap().confirmed_playback);
+        assert_eq!(state.reject_playback().unwrap_err(), BUSY);
+        op.finish(Err("uncertain".into()), true);
+        assert_eq!(state.reject_playback().unwrap_err(), crate::managed_save_intent::BLOCKED);
+    }
+
+    #[test]
+    fn initial_catalog_feedback_preserves_all_admission_barriers() {
+        let state = Arc::new(Coordinator::new());
+        let (_, operation) = state.reserve().unwrap();
+        assert_eq!(state.reject_playback().unwrap_err(), BUSY);
+        operation.initial_catalog_background();
+        for phase in [Phase::Preparing, Phase::Indexing, Phase::Validating] {
+            operation.phase(phase);
+            assert_eq!(state.reject_playback().unwrap_err(), INITIAL_CATALOG_INDEXING);
+            assert_eq!(state.reject_active().unwrap_err(), BUSY);
+            assert!(state.try_begin_background().is_err());
+            assert!(state.reserve().is_err());
+        }
+        operation.finish(Ok(()), false);
+        assert!(state.reject_playback().is_ok());
+        let (_, operation) = state.reserve().unwrap();
+        assert_eq!(state.reject_playback().unwrap_err(), BUSY);
+        operation.initial_catalog_background();
+        operation.finish(Err("fixture".into()), true);
+        assert_eq!(state.reject_playback().unwrap_err(), crate::managed_save_intent::BLOCKED);
+    }
 
     #[test]
     fn preview_offsets_are_discarded_at_terminal_validation_and_shutdown_boundaries() {

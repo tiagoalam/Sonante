@@ -16,12 +16,16 @@ impl Reads {
     }
 
     pub(crate) fn try_acquire(&self) -> Option<Permit<'_>> {
-        self.active
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                (count < self.limit).then_some(count + 1)
-            })
-            .ok()
-            .map(|_| Permit(self))
+        let mut count = self.active.load(Ordering::SeqCst);
+        loop {
+            if count >= self.limit { return None; }
+            match self.active.compare_exchange_weak(
+                count, count + 1, Ordering::SeqCst, Ordering::SeqCst,
+            ) {
+                Ok(_) => return Some(Permit(self)),
+                Err(observed) => count = observed,
+            }
+        }
     }
 
     pub(crate) fn acquire(&self) -> Result<Permit<'_>, String> {

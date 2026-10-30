@@ -104,7 +104,7 @@ test("bounded retention evicts oldest groups so later discoveries remain visible
 });
 
 test("completion, failure, rollback, uncertain and replacement discard pending replies", async () => {
-  for (const next of [operation("validating"), operation("completed"), operation("failed"), operation("uncertain"), operation("indexing", "2")]) {
+  for (const next of [operation("completed"), operation("failed"), operation("uncertain"), operation("indexing", "2")]) {
     const f = fixture();
     f.preview.observe(operation());
     f.requests[0].resolve(sample([row(1)])); await flush();
@@ -196,8 +196,8 @@ test("embedded thumbnails stay decorative below the indexing mask; invalid image
   assert.ok(markup.includes(`src="${png}"`));
   assert.ok(markup.includes('alt=""'));
   assert.ok(markup.includes('draggable="false"'));
-  assert.ok(markup.indexOf("<img") < markup.indexOf("bg-black/40"));
-  assert.equal((markup.match(/text-\[#555555\]/g) ?? []).length, 3);
+  assert.ok(markup.indexOf("<img") < markup.indexOf("--theme-surface-subtle,rgb(0_0_0_/_0.4)"));
+  assert.equal((markup.match(/--theme-fg-faint,#555555/g) ?? []).length, 3);
   assert.doesNotMatch(markup, /<(button|a|input|audio)\b|tabindex=|href=|role="button"/i);
   assert.ok(componentSource.includes("onError={() => setFailed(true)}"));
   assert.ok(componentSource.includes("<PreviewImage key={image}"));
@@ -209,10 +209,10 @@ test("preview shares the existing grid/scroll and keeps placeholders without int
   assert.equal((markup.match(/data-item=/g) ?? []).length, 2);
   assert.equal(gridMock.calls.at(-1).scrollContainer, container);
   assert.ok(markup.includes("importPreviewIndexing"));
-  assert.ok(markup.includes("bg-black/40"));
+  assert.ok(markup.includes("--theme-surface-subtle,rgb(0_0_0_/_0.4)"));
   assert.ok(markup.includes("animate-spin"));
   assert.doesNotMatch(markup, /<(button|a|img|input|audio)\b|tabindex=|href=|role="button"/i);
-  assert.doesNotMatch(componentSource, /onClick|onKey|tabIndex|services\/|Artwork|LocalAlbumCard|\.uri|max-h-|overflow-y|grid-cols-|gap-4/);
+  assert.doesNotMatch(componentSource, /onClick|onKey|tabIndex|services\/|LocalAlbumCard|\.uri|max-h-|overflow-y|grid-cols-|gap-4/);
   assert.equal(renderToStaticMarkup(React.createElement(LocalImportPreviewSection, { albums: [], scrollContainer: container, t })), "");
 });
 
@@ -223,19 +223,22 @@ const start = browser.indexOf(branchStart, browser.indexOf('ref={setScrollContai
 const expression = browser.slice(start + branchStart.length, browser.indexOf(branchEnd, start));
 // Exercise the actual album-branch JSX, including the empty-state conditions.
 const layoutJs = ts.transpileModule(`function Layout(props) {
-  const {filteredAlbums, visibleImportPreview, emptyCatalogState, scrollContainer} = props;
+  const {filteredAlbums, visibleImportPreview, emptyCatalogState, scrollContainer, catalog} = props;
   const sortedAlbums = filteredAlbums, catalogActivity = "indexing", activeSourceId = null, albumSearch = "", albumSortMode = "album-asc";
+  const importArtworkCache = undefined;
   const albumGridRef = null, favoriteIds = new Set(), catalogConfirmed = false, isPlaybackAvailable = true, onlineArtworkEnabled = false, artworkBlocked = true, metadataMode = false;
   const handleToggleFavoriteLocal = () => {}, handleSelectAlbum = () => {}, handlePlayEntireAlbum = () => {};
   const localAlbumNavigationResetKey = () => "existing-navigation";
   const t = key => key;
   const Disc3 = () => null;
-  const LocalAlbumCard = ({album}) => React.createElement("div", {"data-confirmed": album.id}, album.title);
+  const LocalAlbumCard = ({album, readEnabled, isLibraryUpdating, isPlaybackAvailable}) => React.createElement("div", {"data-confirmed": album.id, "data-read-enabled": readEnabled, "data-artwork-blocked": isLibraryUpdating, "data-playback-enabled": isPlaybackAvailable}, album.title);
   return (${expression});
 }`, { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2020 } }).outputText;
 const Layout = new Function("React", "VirtualAlbumGrid", "LocalImportPreviewSection", `${layoutJs}; return Layout;`)(React, gridMock.VirtualAlbumGrid, LocalImportPreviewSection);
-const renderLayout = (confirmed, preview, state = "indexing", scrollContainer = {}) => renderToStaticMarkup(React.createElement(Layout, {
-  filteredAlbums: confirmed, visibleImportPreview: preview, emptyCatalogState: state, scrollContainer,
+const renderLayout = (confirmed, preview, state = "indexing", scrollContainer = {}, catalog = {
+  albums: confirmed, loaded: confirmed.length > 0, loading: false, error: null, mpdBusy: true, saveBlocked: true,
+}) => renderToStaticMarkup(React.createElement(Layout, {
+  filteredAlbums: confirmed, visibleImportPreview: preview, emptyCatalogState: state, scrollContainer, catalog,
 }));
 
 test("empty catalog displays provisional cards in the main scroll without an empty loading block", () => {
@@ -258,6 +261,14 @@ test("confirmed catalog retains its grid, navigation, order and shared scroll be
   assert.deepEqual(gridMock.calls.map(call => call.scrollContainer), [container, container]);
   assert.equal(gridMock.calls[0].resetKey, JSON.stringify(["existing-navigation"]));
   assert.deepEqual(confirmed, original);
+  assert.equal((markup.match(/data-read-enabled="true"/g) ?? []).length, 2);
+  assert.equal((markup.match(/data-artwork-blocked="true"/g) ?? []).length, 2);
+  assert.equal((markup.match(/data-playback-enabled="false"/g) ?? []).length, 2);
+  const restored = renderLayout(confirmed, [row(1)], "ready", container, {
+    albums: [], presentationAlbums: confirmed, loaded: false, loading: false, error: null, mpdBusy: true, saveBlocked: true,
+  });
+  assert.equal((restored.match(/data-read-enabled="false"/g) ?? []).length, 2);
+  assert.equal((restored.match(/data-playback-enabled="false"/g) ?? []).length, 2);
   assert.doesNotMatch(markup, /overflow-y|max-h-/);
 });
 
@@ -267,9 +278,29 @@ test("multiple preview rows and filter changes use the same responsive grid with
     const markup = renderLayout([], filterImportPreview(rows, source, search));
     assert.equal((markup.match(/data-item=/g) ?? []).length, count);
   }
-  assert.ok(browser.includes("filterImportPreview(importPreview, activeSourceId, albumSearch)"));
+  assert.ok(browser.includes("filterImportPreview(importPreviewForCatalog(importPreview, importPreviewRevision, confirmedPreviewRevision), activeSourceId, albumSearch)"));
   const grid = readFileSync(new URL("../components/VirtualAlbumGrid.tsx", import.meta.url), "utf8");
   assert.ok(grid.includes("const MINIMUM_CARD_WIDTH = 170"));
   assert.ok(grid.includes("const GRID_GAP = 24"));
   assert.ok(grid.includes("const CARD_TEXT_HEIGHT = 64"));
+});
+
+test("initial indexing displays successive batches before idle, keeps cards through validation and discards late reads", async () => {
+  const f = fixture();
+  f.preview.observe(operation()); f.requests[0].resolve(sample([row(10)])); await flush();
+  assert.match(renderLayout([], f.current()), /data-item=/);
+  f.preview.observe(operation()); f.requests[1].resolve(sample([row(11)])); await flush();
+  assert.deepEqual(f.current().map(a => a.provisional_group_key), [row(10).provisional_group_key, row(11).provisional_group_key]);
+  f.preview.observe(operation()); f.preview.observe(operation("validating"));
+  f.requests[2].resolve(sample([row(12)])); await flush();
+  assert.equal(f.current().length, 2);
+  f.preview.observe(operation("completed")); assert.deepEqual(f.current(), []);
+  f.preview.dispose();
+});
+
+test("normal library has no protocol availability panel and preserves real error alerts", () => {
+  assert.doesNotMatch(browser, /LocalSourceAvailabilityPanel|sourceAvailabilityContext|sourceAvailabilityConfig/);
+  assert.match(browser, /catalog\.error && \(/);
+  assert.match(browser, /playbackFailure && \(/);
+  assert.match(browser, /role="alert"/);
 });

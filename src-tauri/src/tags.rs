@@ -367,6 +367,63 @@ pub struct LocalTrackTagUpdate {
     pub disc_total: TagFieldUpdate<u32>,
 }
 
+pub(crate) fn source_revision_matches(library: &Path, uri: &str, folders: &[String], expected: &str) -> bool {
+    let Ok(resolved) = resolve_local_track_file(library, uri, folders) else { return false; };
+    revision_for_file(&resolved.file).is_ok_and(|revision| revision == expected)
+        && revalidate_original(library, uri, folders, &resolved, expected).is_ok()
+}
+
+pub(crate) fn inspect_local_file_info(
+    library_dir: &Path,
+    relative_path: &str,
+    local_folders: &[String],
+) -> Result<crate::local_file_info::LocalFileInfo, crate::local_file_info::InfoError> {
+    inspect_local_file_info_with(library_dir, relative_path, local_folders, |file| {
+        let len = file.metadata().map_err(|_| crate::local_file_info::InfoError::Unavailable)?.len();
+        crate::local_file_info::read_file_info(file, len)
+    })
+}
+
+fn inspect_local_file_info_with(
+    library_dir: &Path,
+    relative_path: &str,
+    local_folders: &[String],
+    inspect: impl FnOnce(
+        &mut File,
+    ) -> Result<
+        crate::local_file_info::LocalFileInfo,
+        crate::local_file_info::InfoError,
+    >,
+) -> Result<crate::local_file_info::LocalFileInfo, crate::local_file_info::InfoError> {
+    use crate::local_file_info::InfoError;
+    let map = |error: LocalTrackTagsError| match error.code {
+        LocalTrackTagsErrorCode::InvalidLocalPath => InfoError::InvalidLocalPath,
+        LocalTrackTagsErrorCode::OutsideConfiguredRoots => InfoError::OutsideConfiguredRoots,
+        LocalTrackTagsErrorCode::FileNotFound => InfoError::FileNotFound,
+        LocalTrackTagsErrorCode::PermissionDenied => InfoError::PermissionDenied,
+        LocalTrackTagsErrorCode::RevisionConflict => InfoError::Stale,
+        _ => InfoError::Unavailable,
+    };
+    if is_virtual_cue_track(relative_path) {
+        return Err(InfoError::CueVirtual);
+    }
+    let mut resolved =
+        resolve_local_track_file(library_dir, relative_path, local_folders).map_err(map)?;
+    let revision = revision_for_file(&resolved.file).map_err(map)?;
+    // No BufReader/read-ahead: FLAC reads 42 bytes; DSD has explicit header/seek budgets.
+    let mut result = inspect(&mut resolved.file)?;
+    revalidate_original(
+        library_dir,
+        relative_path,
+        local_folders,
+        &resolved,
+        &revision,
+    )
+    .map_err(map)?;
+    result.revision = revision;
+    Ok(result)
+}
+
 pub fn inspect_local_track_tags(
     library_dir: &Path,
     relative_path: &str,
@@ -924,7 +981,11 @@ fn resolve_local_track_file(
             )
         } else {
             LocalTrackTagsError::new(
-                LocalTrackTagsErrorCode::ReadFailed,
+                if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    LocalTrackTagsErrorCode::PermissionDenied
+                } else {
+                    LocalTrackTagsErrorCode::ReadFailed
+                },
                 "Não foi possível abrir o arquivo local para leitura.",
             )
         }
@@ -1689,7 +1750,7 @@ fn revision_for_file(file: &File) -> Result<String, LocalTrackTagsError> {
         .map_err(|_| transaction_error("Não foi possível calcular a revisão do arquivo local."))
 }
 
-fn revision_for_metadata(metadata: &Metadata) -> String {
+pub(crate) fn revision_for_metadata(metadata: &Metadata) -> String {
     let mut bytes = b"sonante-local-tags-v1\0".to_vec();
     for value in [
         metadata.dev(),
@@ -2064,6 +2125,310 @@ mod tests {
         }
     }
 
+    #[test]
+    fn file_info_is_read_only_and_uses_validated_local_identity() {
+        use crate::local_file_info::{tests::fixture as flac_header, InfoError};
+        let fixture = Fixture::new("Music");
+        let file = fixture.root.join("Unicode ü.flac");
+        let bytes = [flac_header(96000, 24, 2, 96000), vec![0xff; 1024 * 1024]].concat();
+        fs::write(&file, &bytes).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+        let before = revision_for_metadata(&fs::metadata(&file).unwrap());
+        let inspect =
+            |uri: &str| inspect_local_file_info(&fixture.library, uri, &fixture.folders());
+        let info = inspect("Music/Unicode ü.flac").unwrap();
+        assert_eq!(info.sample_rate, Some(96000));
+        assert_eq!(info.bit_depth, Some(24));
+        assert_eq!(info.provenance, "original_file_streaminfo");
+        assert_eq!(info.revision, before);
+        assert!(source_revision_matches(&fixture.library, "Music/Unicode ü.flac", &fixture.folders(), &info.revision));
+        assert!(!source_revision_matches(&fixture.library, "Music/Unicode ü.flac", &fixture.folders(), "old-revision"));
+        assert!(!source_revision_matches(&fixture.library, "Music/../escape.flac", &fixture.folders(), &info.revision));
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        assert_eq!(revision_for_metadata(&fs::metadata(&file).unwrap()), before);
+        assert_eq!(
+            inspect("/etc/passwd").unwrap_err(),
+            InfoError::InvalidLocalPath
+        );
+        assert_eq!(
+            inspect("Music/../escape.flac").unwrap_err(),
+            InfoError::InvalidLocalPath
+        );
+        assert_eq!(
+            inspect("Music/missing.flac").unwrap_err(),
+            InfoError::FileNotFound
+        );
+        assert_eq!(
+            inspect("Music/disc.cue/track0001").unwrap_err(),
+            InfoError::CueVirtual
+        );
+        let outside = fixture.base.join("outside.flac");
+        fs::write(&outside, flac_header(96000, 24, 2, 42)).unwrap();
+        symlink(&outside, fixture.root.join("escape.flac")).unwrap();
+        assert_eq!(
+            inspect("Music/escape.flac").unwrap_err(),
+            InfoError::OutsideConfiguredRoots
+        );
+        // RIFF is now recognized: four bytes alone are a truncated header.
+        fs::write(fixture.root.join("renamed.flac"), b"RIFF").unwrap();
+        assert_eq!(
+            inspect("Music/renamed.flac").unwrap_err(),
+            InfoError::CorruptHeader
+        );
+        fs::write(fixture.root.join("renamed.flac"), b"RF64").unwrap();
+        assert_eq!(
+            inspect("Music/renamed.flac").unwrap_err(),
+            InfoError::UnsupportedFormat
+        );
+        fixture.publish_managed();
+        assert_eq!(inspect("Music/Unicode ü.flac").unwrap().revision, before);
+    }
+
+    #[test]
+    fn file_info_dsd_uses_secure_descriptor_and_does_not_enable_tag_writes() {
+        use crate::local_file_info::{
+            dsd::tests::{dff, dsf},
+            read_file_info, InfoError,
+        };
+        for (name, bytes, format) in [
+            ("a.dsf", dsf(5644800, 8), "DSF"),
+            ("b.dff", dff(11289600), "DSDIFF"),
+        ] {
+            let fixture = Fixture::new("Music");
+            let path = fixture.root.join(name);
+            fs::write(&path, &bytes).unwrap();
+            let uri = format!("Music/{name}");
+            let before = revision_for_metadata(&fs::metadata(&path).unwrap());
+            let info = inspect_local_file_info(&fixture.library, &uri, &fixture.folders()).unwrap();
+            assert_eq!(info.format, format);
+            assert_eq!(info.codec, "DSD");
+            assert_eq!(info.bit_depth, None);
+            assert_eq!(info.revision, before);
+            let error = fixture
+                .update(
+                    &uri,
+                    &before,
+                    &LocalTrackTagUpdate {
+                        title: TagFieldUpdate::Set("Must not write".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.code, LocalTrackTagsErrorCode::UnsupportedFormat);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert!(temp_files_below(&fixture.root).is_empty());
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+            assert!(inspect_local_file_info(&fixture.library, &uri, &fixture.folders()).is_ok());
+            fs::write(fixture.root.join("renamed.flac"), &bytes).unwrap();
+            assert_eq!(
+                inspect_local_file_info(&fixture.library, "Music/renamed.flac", &fixture.folders())
+                    .unwrap()
+                    .format,
+                format
+            );
+            let outside = fixture.base.join(name);
+            fs::write(&outside, &bytes).unwrap();
+            symlink(&outside, fixture.root.join("escape.dsf")).unwrap();
+            assert_eq!(
+                inspect_local_file_info(&fixture.library, "Music/escape.dsf", &fixture.folders())
+                    .unwrap_err(),
+                InfoError::OutsideConfiguredRoots
+            );
+            let error =
+                inspect_local_file_info_with(&fixture.library, &uri, &fixture.folders(), |file| {
+                    let len = file.metadata().unwrap().len();
+                    let info = read_file_info(file, len)?;
+                    fs::rename(&path, fixture.root.join("old.dsf")).unwrap();
+                    fs::write(&path, &bytes).unwrap();
+                    Ok(info)
+                })
+                .unwrap_err();
+            assert_eq!(error, InfoError::Stale);
+        }
+    }
+
+    #[test]
+    fn file_info_mp3_is_content_based_read_only_and_revalidated() {
+        use crate::local_file_info::{mp3::tests::fixture as mp3, read_file_info, InfoError};
+        let fixture = Fixture::new("Music");
+        let bytes = mp3();
+        let path = fixture.root.join("renamed.flac");
+        fs::write(&path, &bytes).unwrap();
+        let uri = "Music/renamed.flac";
+        let before = revision_for_metadata(&fs::metadata(&path).unwrap());
+        let info = inspect_local_file_info(&fixture.library, uri, &fixture.folders()).unwrap();
+        assert_eq!(info.codec, "MP3");
+        assert!(info.lossy);
+        assert_eq!(info.bit_depth, None);
+        assert_eq!(info.frame_bitrate_kbps, Some(128));
+        assert_eq!(info.revision, before);
+        let error = fixture
+            .update(
+                uri,
+                &before,
+                &LocalTrackTagUpdate {
+                    title: TagFieldUpdate::Set("No MP3 writing".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, LocalTrackTagsErrorCode::UnsupportedFormat);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(inspect_local_file_info(&fixture.library, uri, &fixture.folders()).is_ok());
+        let outside = fixture.base.join("outside.mp3");
+        fs::write(&outside, &bytes).unwrap();
+        symlink(&outside, fixture.root.join("escape.mp3")).unwrap();
+        assert_eq!(
+            inspect_local_file_info(&fixture.library, "Music/escape.mp3", &fixture.folders())
+                .unwrap_err(),
+            InfoError::OutsideConfiguredRoots
+        );
+        let error =
+            inspect_local_file_info_with(&fixture.library, uri, &fixture.folders(), |file| {
+                let len = file.metadata().unwrap().len();
+                let result = read_file_info(file, len)?;
+                fs::rename(&path, fixture.root.join("old.mp3")).unwrap();
+                fs::write(&path, &bytes).unwrap();
+                Ok(result)
+            })
+            .unwrap_err();
+        assert_eq!(error, InfoError::Stale);
+        assert!(temp_files_below(&fixture.root).is_empty());
+    }
+
+    #[test]
+    fn file_info_container_corpus_uses_secure_read_only_descriptor_and_stale_guard() {
+        use crate::local_file_info::{read_file_info, InfoError};
+        let Some(dir) = std::env::var_os("SONANTE_FORMAT_FIXTURES") else {
+            return;
+        };
+        let fixture = Fixture::new("Music");
+        let path = fixture.root.join("renamed.flac");
+        for name in [
+            "pcm16.wav",
+            "float32.wav",
+            "integer.aiff",
+            "swapped.aifc",
+            "aac.adts",
+            "aac.m4a",
+            "alac.m4a",
+            "vorbis.ogg",
+            "opus.ogg",
+            "flac.ogg",
+            "integer.wv",
+            "hybrid.wv",
+            "float.wv",
+        ] {
+            let bytes = fs::read(std::path::Path::new(&dir).join(name)).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let before = revision_for_metadata(&fs::metadata(&path).unwrap());
+            let info =
+                inspect_local_file_info(&fixture.library, "Music/renamed.flac", &fixture.folders())
+                    .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(info.revision, before, "{name}");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            let error = fixture
+                .update(
+                    "Music/renamed.flac",
+                    &before,
+                    &LocalTrackTagUpdate {
+                        title: TagFieldUpdate::Set("No new writer".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.code, LocalTrackTagsErrorCode::UnsupportedFormat);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            let error = inspect_local_file_info_with(
+                &fixture.library,
+                "Music/renamed.flac",
+                &fixture.folders(),
+                |file| {
+                    let len = file.metadata().unwrap().len();
+                    let result = read_file_info(file, len)?;
+                    let mut changed = bytes.clone();
+                    changed.push(0);
+                    fs::write(&path, changed).unwrap();
+                    Ok(result)
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error, InfoError::Stale, "{name}");
+        }
+        assert!(temp_files_below(&fixture.root).is_empty());
+    }
+
+    #[test]
+    fn file_info_discards_replaced_or_modified_files_after_read() {
+        use crate::local_file_info::{read_streaminfo, tests::fixture as flac_header, InfoError};
+        use std::fs::FileTimes;
+        use std::time::{Duration, SystemTime};
+
+        let initial_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        for replace in [false, true] {
+            let fixture = Fixture::new("Music");
+            let path = fixture.root.join("a.flac");
+            fs::write(&path, flac_header(96000, 24, 2, 42)).unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(initial_modified))
+                .unwrap();
+            let before = fs::metadata(&path).unwrap();
+            let initial_revision = revision_for_metadata(&before);
+            let error = inspect_local_file_info_with(
+                &fixture.library,
+                "Music/a.flac",
+                &fixture.folders(),
+                |file| {
+                    let info = read_streaminfo(file)?;
+                    assert_eq!(revision_for_file(file).unwrap(), initial_revision);
+                    if replace {
+                        fs::rename(&path, fixture.root.join("old.flac")).unwrap();
+                    }
+                    fs::write(&path, flac_header(44100, 16, 2, 42)).unwrap();
+                    if !replace {
+                        // A same-length write need not advance filesystem timestamps.
+                        // Establish a different revision without waiting for a clock tick.
+                        File::options()
+                            .write(true)
+                            .open(&path)
+                            .unwrap()
+                            .set_times(
+                                FileTimes::new()
+                                    .set_modified(initial_modified + Duration::from_secs(2)),
+                            )
+                            .unwrap();
+                    }
+                    let after = fs::metadata(&path).unwrap();
+                    assert_eq!(after.len(), before.len());
+                    let original_identity = (before.dev(), before.ino());
+                    let current_identity = (after.dev(), after.ino());
+                    if replace {
+                        assert_ne!(current_identity, original_identity);
+                        assert_eq!(file.metadata().unwrap().ino(), before.ino());
+                    } else {
+                        assert_eq!(current_identity, original_identity);
+                        assert_ne!(after.modified().unwrap(), before.modified().unwrap());
+                    }
+                    assert_ne!(
+                        revision_for_metadata(&after),
+                        initial_revision,
+                        "replace={replace}"
+                    );
+                    Ok(info)
+                },
+            )
+            .expect_err(if replace {
+                "a new inode must invalidate the inspection"
+            } else {
+                "a changed metadata revision on the same inode must invalidate the inspection"
+            });
+            assert_eq!(error, InfoError::Stale, "replace={replace}");
+        }
+    }
     fn expected_physical(fixture: &Fixture, uri: &str) -> LocalAlbumTagBatchExpectedTrack {
         LocalAlbumTagBatchExpectedTrack {
             uri: uri.to_string(),

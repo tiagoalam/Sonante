@@ -71,7 +71,16 @@ jobs:
         run: npm run test:frontend
 
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+        run: |
+          # Each suite requires an exclusive private parent for synthetic scenes.
+          # Keep scenes on failure; never point these variables at user data.
+          umask 077
+          fixture_root="$(mktemp -d "$RUNNER_TEMP/sonante-rust-fixtures.XXXXXXXX")"
+          export FF04_I1A_OWN_FIXTURES="$fixture_root/recovery"
+          export FF04_OFFER_OWN_FIXTURES="$fixture_root/offers"
+          export FF06_I1A_OWN_FIXTURES="$fixture_root/availability"
+          mkdir -m 700 "$FF04_I1A_OWN_FIXTURES" "$FF04_OFFER_OWN_FIXTURES" "$FF06_I1A_OWN_FIXTURES"
+          cargo test --manifest-path src-tauri/Cargo.toml --locked
 
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked
@@ -82,7 +91,7 @@ jobs:
         run: node scripts/verify-packaging.mjs
 
       - name: Test packaging contracts
-        run: python3 -m unittest discover -s tests -p 'packaging_test.py'
+        run: python3 -m unittest discover -s tests -p '*packaging_test.py'
 
       - name: Build native executable
         run: npm run tauri -- build --no-bundle -- --locked
@@ -115,6 +124,30 @@ jobs:
         with:
           name: sonante-ubuntu-22.04-packages
           path: artifacts/*
+          if-no-files-found: error
+
+      - name: Build Fedora runtime profile executable
+        run: |
+          # The installed manifest must match the bytes compiled into the app.
+          # Preserve the Ubuntu candidates uploaded above before this overlay.
+          echo "c93f1ac2dc06a8dcee5101858381efc265c3907e50dc2a334a11d293a21cf02f  packaging/qualified-0.5.4/fedora.runtime.json" | sha256sum -c -
+          cp packaging/qualified-0.5.4/fedora.runtime.json packaging/private-runtimes.json
+          npm run tauri -- build --no-bundle -- --locked
+          mkdir fedora-native
+          cp src-tauri/target/release/sonante fedora-native/sonante
+          cp packaging/private-runtimes.json fedora-native/manifest.json
+          bash scripts/inspect-elf.sh fedora-native/sonante 2.35 | tee fedora-native/native-abi.txt
+          python3 -c 'from pathlib import Path; p = Path("fedora-native"); assert (p / "manifest.json").read_bytes() in (p / "sonante").read_bytes()'
+          git rev-parse HEAD > fedora-native/source-commit.txt
+          cd fedora-native
+          sha256sum sonante manifest.json native-abi.txt source-commit.txt > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Upload Fedora runtime profile executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonante-fedora-profile-native
+          path: fedora-native/*
           if-no-files-found: error
 
   arch:

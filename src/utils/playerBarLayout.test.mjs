@@ -1,3 +1,4 @@
+import * as directVolumeHelpers from "./signalPath.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -7,11 +8,14 @@ import * as icons from "lucide-react";
 import ts from "typescript";
 import i18next from "i18next";
 import { renderToStaticMarkup } from "react-dom/server";
-import { signalPathInformation } from "./signalPath.ts";
+import { routeConditions } from "./routeConditions.ts";
+import { signalPathInformation, requiresDeviceVolumeControl } from "./signalPath.ts";
+import { currentMediaKey } from "./playerNavigation.ts";
+import { sourceAudioBadge, albumAudioBadge } from "./sourceAudio.ts";
 
 const resource = language => JSON.parse(readFileSync(new URL(`../locales/${language}.json`, import.meta.url)));
 const source = name => readFileSync(new URL(`../components/${name}.tsx`, import.meta.url), "utf8");
-const status = { state: "play", title: "A very long track title ".repeat(12), artist: "An artist ".repeat(10), album: "An album ".repeat(10), audio_format: "192000:24:2", current_media: { kind: "local" }, options: { repeat: false, single: "off", random: false }, elapsed: 12, duration: 180, volume: { backend: "mpd_software", available: true, writable: true, value: 50, muted: false } };
+const status = { state: "play", title: "A very long track title ".repeat(12), artist: "An artist ".repeat(10), album: "An album ".repeat(10), audio_format: "192000:24:2", current_media: { kind: "local" }, options: { repeat: false, single: "off", random: false }, elapsed: 12, duration: 180, volume: { backend: "mpd_software", available: true, writable: true, value: 50, muted: false, shared_token: "layout-context-A" } };
 const iconSizeOf = button => React.Children.toArray(button.props.children)[0].props.size;
 const nodes = element => React.isValidElement(element) ? [element, ...nodes(element.props.children)] : Array.isArray(element) ? element.flatMap(nodes) : [];
 function compile(name, dependencies) {
@@ -20,24 +24,26 @@ function compile(name, dependencies) {
   new Function("require", "exports", js)(id => { assert.ok(id in dependencies, id); return dependencies[id]; }, exports);
   return exports[name];
 }
-async function fixture(language = "en") {
+async function fixture(language = "en", sharedMuteError = null) {
   const i18n = i18next.createInstance();
   await i18n.init({ lng: language, resources: { [language]: { translation: resource(language) } }, interpolation: { escapeValue: false } });
-  const t = i18n.t.bind(i18n), calls = [];
-  const dependencies = { react: { ...React, default: React, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons, "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": { signalPathInformation } };
+  const t = i18n.t.bind(i18n), calls = [], diagnostics = [];
+  const dependencies = { react: { ...React, default: React, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons, "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": {...directVolumeHelpers, signalPathInformation, requiresDeviceVolumeControl }, "../utils/routeConditions": { routeConditions } };
   const SignalPath = compile("SignalPath", dependencies);
+  const SourceAudioBadges = compile("SourceAudioBadges", { ...dependencies, "../utils/sourceAudio": { sourceAudioBadge, albumAudioBadge } });
   const hooks = { ...React, useState: initial => [initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
   const controlled = { ...dependencies,
     react: { ...hooks, default: hooks, __esModule: true },
     "./SignalPath": { SignalPath }, "./PlexImage": { PlexImage: () => null },
-    "../utils/frontendDiagnostics": { logError() { assert.fail("Unexpected diagnostic"); } },
-    "../services/audio": { audioService: Object.fromEntries(["togglePlay", "next", "previous", "seek", "setVolume", "changePlaybackOption"].map(name => [name, async (...args) => { calls.push([name, ...args]); }])) },
+    "./SourceAudioBadges": { SourceAudioBadges }, "../utils/playerNavigation": { currentMediaKey },
+    "../utils/frontendDiagnostics": { logError(...args) { if (!sharedMuteError) assert.fail("Unexpected diagnostic"); diagnostics.push(args); } },
+    "../services/audio": { audioService: Object.fromEntries(["togglePlay", "next", "previous", "seek", "setVolume", "setDirectMute", "setSharedMute", "changePlaybackOption"].map(name => [name, async (...args) => { calls.push([name, ...args]); if (name === "setSharedMute" && sharedMuteError) throw sharedMuteError; }])) },
   };
   const PlaybackOptionsControls = compile("PlaybackOptionsControls", controlled);
   const PlayerBar = compile("PlayerBar", { ...controlled, "./PlaybackOptionsControls": { PlaybackOptionsControls } });
   const props = { status, health: { state: "available" }, route: { mode: "direct", endpoint: "hw:Fixture,0" }, isQueueOpen: false,
     onNavigateToAlbum: () => calls.push(["album"]), onNavigateToArtist: () => calls.push(["artist"]), onToggleQueue: () => calls.push(["queue"]), onOpenNowPlaying: () => calls.push(["now-playing"]) };
-  return { t, calls, props, SignalPath, PlaybackOptionsControls, render: changes => PlayerBar({ ...props, ...changes }) };
+  return { t, calls, diagnostics, props, SignalPath, PlaybackOptionsControls, render: changes => PlayerBar({ ...props, ...changes }) };
 }
 
 // Simulates the CSS tracks emitted by the actual component at the default
@@ -161,35 +167,21 @@ test("queue drawer and Save feedback clear the new 112px player without shifting
   assert.doesNotMatch(queue, /bottom-24/);
 });
 
-test("discreet two-line signal shows mode, relevant format and accessible full information", async () => {
-  for (const language of ["en", "pt-BR"]) {
-    const { render, t } = await fixture(language);
-    for (const mode of ["shared", "direct"]) for (const kind of ["local", "plex"]) {
-      const html = renderToStaticMarkup(render({ route: { mode, endpoint: mode === "shared" ? "default" : "hw:Fixture,0" }, status: { ...status, current_media: { kind } } }));
-      assert.ok(html.includes(t("signalPath.title")));
-      assert.ok(html.includes(t(`signalPath.${mode}`))); assert.ok(html.includes(t(`player.source.${kind}`)));
-      assert.match(html, /192 kHz/); assert.match(html, /24-bit/);
-      assert.ok(html.includes(t("signalPath.help")));
-      assert.match(html, /aria-description=/); assert.match(html, /group-focus-within\/compact-signal:block/);
-      assert.match(html, /flex min-w-0 flex-col gap-1/);
-      assert.ok(html.includes(t("signalPath.pcm", { rate: 192, bits: 24, channels: 2 })));
-      const tree = render({ route: { mode, endpoint: mode === "shared" ? "default" : "hw:Fixture,0" }, status: { ...status, current_media: { kind } } });
-      const signalNode = nodes(tree).find(node => node.props.compact);
-      const { SignalPath } = await fixture(language);
-      const compact = SignalPath(signalNode.props);
-      const visible = React.Children.toArray(compact.props.children).filter(node => node.props.role !== "tooltip");
-      assert.equal(visible.length, 2);
-      assert.equal(visible[0].props.children, t(`signalPath.${mode}`));
-      assert.equal(visible[1].props.children, t("signalPath.pcmCompact", { rate: 192, bits: 24 }));
-      assert.doesNotMatch(compact.props.className, /bg-|border|rounded|py-/);
-
-    }
+test("player routing area restores audio format and keeps detailed route conditions in the dialog",async()=>{
+ for(const language of ["en","pt-BR"]){
+  const {render,t}=await fixture(language);
+  for(const mode of ["shared","direct"])for(const kind of ["local","plex"]){
+   const html=renderToStaticMarkup(render({route:{mode,endpoint:mode==='shared'?'default':'hw:Fixture,0'},status:{...status,current_media:{kind}}}));
+   assert.ok(html.includes(t("signalPath.title")));assert.match(html,/data-signal-summary|aria-haspopup="dialog"/);
+   assert.match(html,/192 kHz/); assert.match(html,/24-bit/);
+   assert.doesNotMatch(html,/hw:Fixture|data-route-conditions|<dialog/);
   }
+ }
 });
 
 test("navigation, playback, seek, volume and actions retain their handlers", async () => {
   const { render, calls, t } = await fixture();
-  const tree = render(), all = nodes(tree);
+  const tree = render({route:{mode:"shared",endpoint:"default"}}), all = nodes(tree);
   const click = async title => { const button = all.find(node => node.type === "button" && node.props.title === title); assert.ok(button); await button.props.onClick(); };
   await click(status.title); await click(status.album); await click(status.artist);
   await click(t("player.previous")); await click(t("player.pause")); await click(t("player.next"));
@@ -198,7 +190,7 @@ test("navigation, playback, seek, volume and actions retain their handlers", asy
   await ranges[0].props.onMouseUp({ target: { value: "42.5" } });
   await ranges[1].props.onChange({ target: { value: "25" } });
   await click(t("player.mute")); await click(t("player.openNowPlaying")); await click(t("player.queue"));
-  assert.deepEqual(calls, [["album"], ["album"], ["artist"], ["previous"], ["togglePlay"], ["next"], ["seek", 42.5], ["setVolume", 25], ["setVolume", 0], ["now-playing"], ["queue"]]);
+  assert.deepEqual(calls, [["album"], ["album"], ["artist"], ["previous"], ["togglePlay"], ["next"], ["seek", 42.5], ["setVolume", 25], ["setSharedMute", { muted: true, token: status.volume.shared_token }], ["now-playing"], ["queue"]]);
 });
 
 test("real repeat/random controls preserve accessible MPD state, submit actions and block unavailable playback", async () => {
@@ -261,10 +253,58 @@ test("unmute, unknown format and missing route remain conservative", async () =>
   const { render, calls, t } = await fixture();
   const tree = render({ route: null, status: { ...status, audio_format: "unrecognized private input", volume: { ...status.volume, value: 0, muted: true } } });
   const html = renderToStaticMarkup(tree);
-  assert.ok(html.includes(t("signalPath.unknownRoute")));
-  assert.ok(html.includes(t("signalPath.unknownFormat")));
+  assert.ok(html.includes(t("signalPath.assessment.partial")));assert.match(html,/aria-haspopup="dialog"/);
   assert.doesNotMatch(html, /unrecognized private input/);
   const unmute = nodes(tree).find(node => node.type === "button" && node.props.title === t("player.unmute"));
   assert.ok(unmute); await unmute.props.onClick();
-  assert.deepEqual(calls, [["setVolume", 100]]);
+  assert.deepEqual(calls, [["setSharedMute", { muted: false, token: status.volume.shared_token }]]);
+
+  // No context means no request. A valid zero-volume context does submit an
+  // unmute request; only the backend can prove a previous level in that context.
+  calls.length = 0;
+  const noContext = render({ route: null, status: { ...status, volume: { ...status.volume, value: 0, muted: true, shared_token: undefined } } });
+  await nodes(noContext).find(node => node.type === "button" && node.props.title === t("player.unmute")).props.onClick();
+  assert.deepEqual(calls, []);
+  for (const backend of ["mpd_software", "pipewire"]) {
+    for (const [value, muted] of [[37, false], [0, true], [37, true]]) {
+      calls.length = 0;
+      const observed = { ...status, volume: { ...status.volume, backend, value, muted, shared_token: `${backend}-current-context` } };
+      const title = t(muted || value === 0 ? "player.unmute" : "player.mute");
+      await nodes(render({ route: { mode: "shared", endpoint: "default" }, status: observed })).find(node => node.type === "button" && node.props.title === title).props.onClick();
+      assert.deepEqual(calls, [["setSharedMute", { muted: !(muted || value === 0), token: observed.volume.shared_token }]]);
+    }
+  }
+  const unavailable = Error("SHARED_MUTE_LEVEL_UNKNOWN");
+  const refused = await fixture("en", unavailable), alerts = [];
+  const previousWindow = globalThis.window;
+  globalThis.window = { alert: message => alerts.push(message) };
+  try {
+    const observed = { ...status, volume: { ...status.volume, value: 0, muted: true, shared_token: "zero-without-session-history" } };
+    const before = JSON.stringify(observed);
+    const button = nodes(refused.render({ route: { mode: "shared", endpoint: "default" }, status: observed })).find(node => node.type === "button" && node.props.title === refused.t("player.unmute"));
+    await button.props.onClick();
+    assert.deepEqual(refused.calls, [["setSharedMute", { muted: false, token: "zero-without-session-history" }]]);
+    assert.deepEqual(refused.diagnostics, [["player.volume", unavailable]]);
+    assert.deepEqual(alerts, [refused.t("player.sharedMuteFailed")]);
+    assert.equal(JSON.stringify(observed), before);
+    assert.ok(!refused.calls.some(([name]) => name === "setVolume" || name === "setDirectMute"));
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow;
+  }
+});
+
+test("All Direct transports use equipment volume and dedicated mute; Shared stays adjustable",async()=>{
+ for(const lng of ['en','pt-BR']){
+  const {render,t,calls}=await fixture(lng);
+  for(const [mode,audio_format,backend,slider] of [
+   ['direct','96000:24:2','direct_equipment',false],['direct','dsd64:2','direct_equipment',false],
+   ['direct','352800:dsd:2','direct_equipment',false],['direct','dsd128:2','direct_equipment',false],
+   ['shared','dsd64:2','pipewire',true],['shared','96000:24:2','pipewire',true]]){
+   const tree=render({route:{mode,endpoint:mode==='direct'?'hw:Fixture,0':'default'},status:{...status,audio_format,volume:{...status.volume,backend,...(mode==='direct'?{value:100,writable:false,direct_gain:'unity',direct_token:'1:65'}:{})}}});
+   const ranges=nodes(tree).filter(n=>n.type==='input'&&n.props.type==='range');
+   assert.equal(ranges.length,slider?2:1,JSON.stringify({mode,audio_format,backend}));
+   const mute=nodes(tree).find(n=>n.type==='button'&&n.props.title===t('player.mute'));assert.ok(mute);assert.equal(mute.props.disabled,false);
+   if(!slider){await mute.props.onClick();assert.deepEqual(calls.pop(),['setDirectMute',{muted:true,token:'1:65'}]);const html=renderToStaticMarkup(tree);assert.ok(html.includes(t('player.volumeOnDevice')));}
+  }
+ }
 });

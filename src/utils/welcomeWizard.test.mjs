@@ -9,6 +9,7 @@ import * as icons from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createDeviceAvailabilityQuery, shouldCheckContextualDevice } from "./deviceAvailability.ts";
 import { wizardPlexConnectionReady, wizardSaveErrorKey } from "./welcomeWizard.ts";
+import { createAppearance, APPEARANCE_KEY } from "./appearance.ts";
 
 const source = readFileSync(new URL("../components/WelcomeWizard.tsx", import.meta.url), "utf8");
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
@@ -37,7 +38,14 @@ test.afterEach(() => { fixtures.splice(0).reverse().forEach(f => f.dispose()); }
 function wizard(overrides = {}) {
   const slots = [], effects = [], timers = new Map();
   let cursor = 0, sequence = 0, timerSequence = 0;
-  const calls = { reads: [], saves: [], finished: [], pins: 0, pinChecks: 0, servers: 0, browser: [], pickers: 0 };
+  const calls = { reads: [], saves: [], finished: [], pins: 0, pinChecks: 0, servers: 0, browser: [], pickers: 0, focused: [], palettes: [], appearanceWrites: 0 };
+  let appearanceRaw = overrides.appearanceRaw ?? null;
+  const appearance = createAppearance({origin:"wizard-fixture",storage:()=>({getItem:()=>appearanceRaw,setItem:(key,value)=>{assert.equal(key,APPEARANCE_KEY);appearanceRaw=value;calls.appearanceWrites++;}}),apply:value=>calls.palettes.push(value),onStorage:()=>()=>{}});
+  const stopAppearance = appearance.start();
+  const appearanceCode = ts.transpileModule(readFileSync(new URL("../components/AppearanceSetting.tsx",import.meta.url),"utf8"),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+  const appearanceExports = {};
+  const appearanceDeps = {react:{...React,useId:()=>"wizard-appearance-fixture",useSyncExternalStore:(_subscribe,get)=>get()},"react/jsx-runtime":jsx,"react-i18next":{useTranslation:()=>({t})},"../services/appearance":{appearance}};
+  new Function("require","exports",appearanceCode)(id=>{assert.ok(id in appearanceDeps,id);return appearanceDeps[id];},appearanceExports);
   const previousWindow = globalThis.window, previousClear = globalThis.clearInterval;
   globalThis.window = { setInterval(callback, delay) { assert.equal(delay, 1500); timers.set(++timerSequence, callback); return timerSequence; } };
   globalThis.clearInterval = id => timers.delete(id);
@@ -52,6 +60,7 @@ function wizard(overrides = {}) {
     "../utils/frontendDiagnostics": frontendDiagnostics, "lucide-react": icons,
     "react-i18next": { useTranslation: () => ({ t, i18n: { language: "en", changeLanguage() {} } }) },
     "./AudioSignalDiagram": { AudioSignalDiagram: function AudioSignalDiagram() {} },
+    "./AppearanceSetting": appearanceExports,
     "../utils/deviceAvailability": { createDeviceAvailabilityQuery, shouldCheckContextualDevice },
     "../utils/welcomeWizard": { wizardPlexConnectionReady, wizardSaveErrorKey },
     "../services/audio": { audioService: { async pickDirectory() { calls.pickers++; return "/fixture/local"; } } },
@@ -70,10 +79,10 @@ function wizard(overrides = {}) {
   const exports = {};
   new Function("require", "exports", js)(id => { assert.ok(id in dependencies, `Unexpected import ${id}`); return dependencies[id]; }, exports);
   let disposed = false;
-  const f = { calls, timers, tree: null,
-    render() { cursor = 0; f.tree = exports.WelcomeWizard({ initialConfig: overrides.config ?? base, devices: overrides.devices ?? devices, onCancel: overrides.onCancel, onSaveAccepted: overrides.onSaveAccepted, onFinish(config) { calls.finished.push(config); } }); effects.splice(0).forEach(run => run()); return f.tree; },
+  const f = { calls, timers, appearance, appearanceRaw:()=>appearanceRaw, tree: null,
+    render() { cursor = 0; f.tree = exports.WelcomeWizard({ initialConfig: overrides.config ?? base, devices: overrides.devices ?? devices, onCancel: overrides.onCancel, onSaveAccepted: overrides.onSaveAccepted, onFinish(config) { calls.finished.push(config); } }); for(const node of nodes(f.tree))if(node.type==="h2"&&node.props.ref){node.props.ref.current={focus(){calls.focused.push(text(node));}};} effects.splice(0).forEach(run => run()); return f.tree; },
     async tick() { const callback = [...timers.values()][0]; assert.ok(callback, "existing PIN timer is active"); await callback(); await flush(); f.render(); },
-    dispose() { if (disposed) return; disposed = true; slots.forEach(slot => slot?.cleanup?.()); globalThis.window = previousWindow; globalThis.clearInterval = previousClear; },
+    dispose() { if (disposed) return; disposed = true; stopAppearance(); slots.forEach(slot => slot?.cleanup?.()); globalThis.window = previousWindow; globalThis.clearInterval = previousClear; },
   };
   fixtures.push(f); f.render(); return f;
 }
@@ -90,9 +99,11 @@ const enterPlex = (f, local = false) => { selectSources(f, local, true); if (loc
 const auth = async f => { await button(f, "settings.connectPlex").props.onClick(); f.render(); await f.tick(); };
 const statusText = f => nodes(f.tree).filter(node => node.props.role === "status").map(text).join(" ");
 
+const audioWizard = (overrides={}) => {const f=wizard(overrides);if(!overrides.onCancel)next(f);return f;};
+
 test("opening preserves saved/default/missing DACs without probes, enumeration or silent replacement", () => {
   for (const id of ["default", "", "hw:CARD=Missing,DEV=0", devices[0].id]) {
-    const f = wizard({ config: { ...base, audio_output_type: "alsa", alsa_device: id } });
+    const f = audioWizard({ config: { ...base, audio_output_type: "alsa", alsa_device: id } });
     assert.equal(selector(f, "-device").props.value, id); assert.equal(f.calls.reads.length, 0); assert.equal(f.calls.servers, 0);
     const values = nodes(selector(f, "-device")).filter(node => node.type === "option").map(node => node.props.value);
     assert.ok(values.includes(id)); assert.match(statusText(f), /indeterminate/); f.dispose();
@@ -101,7 +112,7 @@ test("opening preserves saved/default/missing DACs without probes, enumeration o
 });
 
 test("explicit Shared/Direct and new physical choices update the diagram and serialize only directed checks", async () => {
-  const f = wizard({ config: { ...base, alsa_device: devices[0].id } });
+  const f = audioWizard({ config: { ...base, alsa_device: devices[0].id } });
   assert.equal(diagram(f).mode, "shared");
   mode(f, "alsa").props.onClick(); f.render();
   assert.equal(mode(f, "alsa").props["aria-pressed"], true); assert.equal(diagram(f).mode, "direct");
@@ -118,7 +129,7 @@ test("explicit Shared/Direct and new physical choices update the diagram and ser
 
 test("available, busy, inconclusive and ownership-marker results use the same compact presentation as Settings", async () => {
   for (const state of ["available", "busy", "indeterminate", "current_sonante"]) {
-    const f = wizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
+    const f = audioWizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
     assert.match(statusText(f), /\.checking/);
     f.calls.reads[0].resolve([{ id: devices[0].id, state }]); await flush(); f.render();
     assert.match(statusText(f), new RegExp(`\\.${state === "current_sonante" ? "indeterminate" : state}`));
@@ -127,7 +138,7 @@ test("available, busy, inconclusive and ownership-marker results use the same co
 });
 
 test("help and retry are keyboard-native; a busy observation can become available without a permanent Save lock", async () => {
-  const f = wizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
+  const f = audioWizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
   f.calls.reads[0].resolve([{ id: devices[0].id, state: "busy" }]); await flush(); f.render();
   const help = () => find(f.tree, node => node.type === "button" && node.props["aria-label"] === "settings.deviceAvailability.helpLabel");
   const panel = () => find(f.tree, node => node.props.id === help().props["aria-controls"]);
@@ -141,7 +152,7 @@ test("help and retry are keyboard-native; a busy observation can become availabl
 });
 
 test("current Direct owner, virtual/unlisted choices and page navigation do not trigger extra probes", () => {
-  const f = wizard({ config: { ...base, first_run: false, audio_output_type: "alsa", alsa_device: devices[0].id } });
+  const f = audioWizard({ config: { ...base, first_run: false, audio_output_type: "alsa", alsa_device: devices[0].id } });
   mode(f, "pipewire").props.onClick(); f.render(); mode(f, "alsa").props.onClick(); f.render();
   assert.equal(f.calls.reads.length, 0); assert.equal(button(f, "settings.deviceAvailability.check").props.disabled, true);
   choose(f, "null"); choose(f, "hw:CARD=Unlisted,DEV=0"); next(f); back(f);
@@ -149,15 +160,15 @@ test("current Direct owner, virtual/unlisted choices and page navigation do not 
 });
 
 test("source controls are semantic toggle buttons and all optional combinations reach review before Save", async () => {
-  for (const [local, plex, total] of [[true, false, 4], [false, true, 4], [true, true, 5]]) {
-    const f = wizard({ config: plex ? connected : base });
+  for (const [local, plex, total] of [[true, false, 5], [false, true, 5], [true, true, 6]]) {
+    const f = audioWizard({ config: plex ? connected : base });
     next(f); const localToggle = sourceButton(f, "local"), plexToggle = sourceButton(f, "plex");
     assert.equal(localToggle.props.type, "button"); assert.equal(localToggle.props["aria-pressed"], true);
     assert.equal(plexToggle.props.type, "button"); assert.equal(plexToggle.props["aria-pressed"], false);
     assert.equal(nodes(f.tree).filter(node => node.type === "input" && node.props.type === "checkbox").length, 0);
     if (!local) { localToggle.props.onClick(); f.render(); }
     if (plex) { sourceButton(f, "plex").props.onClick(); f.render(); }
-    assert.match(text(f.tree), new RegExp(`wizard.step:2/${total}`));
+    assert.match(text(f.tree), new RegExp(`wizard.step:3/${total}`));
     next(f);
     if (local) { await button(f, "settings.addFolder").props.onClick(); f.render(); assert.ok(text(f.tree).includes("/fixture/local")); next(f); }
     if (plex) { assert.match(text(f.tree), /wizard.connected/); next(f); }
@@ -170,7 +181,7 @@ test("source controls are semantic toggle buttons and all optional combinations 
 });
 
 test("back/next retains the audio and folder drafts; layout scrolls within the viewport with a fixed footer", async () => {
-  const f = wizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
+  const f = audioWizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
   f.calls.reads[0].resolve([{ id: devices[0].id, state: "available" }]); await flush(); f.render();
   next(f); next(f); await button(f, "settings.addFolder").props.onClick(); f.render();
   back(f); back(f); assert.equal(selector(f, "-device").props.value, devices[0].id); assert.equal(diagram(f).mode, "direct");
@@ -184,7 +195,7 @@ test("back/next retains the audio and folder drafts; layout scrolls within the v
 
 test("PIN authentication retains backend route selection, hides all connection details and offers name-only server selection", async () => {
   const servers = [server(), { ...server("Study", "second-server"), chosen_uri: "https://example.invalid:32401" }];
-  const f = wizard({ servers }); enterPlex(f); await auth(f);
+  const f = audioWizard({ servers }); enterPlex(f); await auth(f);
   assert.equal(f.calls.pins, 1); assert.equal(f.calls.pinChecks, 1); assert.equal(f.calls.servers, 1); assert.equal(f.timers.size, 0);
   assert.match(statusText(f), /wizard.connected/); assert.equal(selector(f, "-server").props.value, "fixture-server");
   assert.deepEqual(nodes(selector(f, "-server")).filter(node => node.type === "option").map(text), ["Living room", "Study"]);
@@ -197,7 +208,7 @@ test("PIN authentication retains backend route selection, hides all connection d
 });
 
 test("one connected Plex server shows only its friendly name and disconnect clears the internal connection", async () => {
-  const f = wizard(); enterPlex(f); await auth(f);
+  const f = audioWizard(); enterPlex(f); await auth(f);
   assert.match(text(f.tree), /Living room/); assert.ok(!nodes(f.tree).some(node => node.type === "select"));
   button(f, "settings.disconnect").props.onClick(); f.render();
   assert.doesNotMatch(statusText(f), /wizard.connected/); assert.ok(button(f, "settings.connectPlex"));
@@ -206,37 +217,37 @@ test("one connected Plex server shows only its friendly name and disconnect clea
 
 test("authentication with no server, invalid route or missing identity never announces a complete connection", async () => {
   for (const servers of [[], [{ ...server(), chosen_uri: "invalid" }], [{ ...server(), client_identifier: "" }]]) {
-    const f = wizard({ servers }); enterPlex(f); await auth(f);
+    const f = audioWizard({ servers }); enterPlex(f); await auth(f);
     assert.doesNotMatch(statusText(f), /wizard.connected/); assert.equal(button(f, "wizard.next").props.disabled, true);
     assert.equal(f.calls.saves.length, 0); assert.equal(f.calls.finished.length, 0);
     if (!servers.length) assert.match(text(f.tree), /wizard.noPlexServers/); f.dispose();
   }
   for (const config of [{ ...connected, plex_url: "" }, { ...connected, plex_server_id: null }, { ...connected, plex_token: "" }]) {
-    const f = wizard({ config }); enterPlex(f); assert.doesNotMatch(statusText(f), /wizard.connected/); f.dispose();
+    const f = audioWizard({ config }); enterPlex(f); assert.doesNotMatch(statusText(f), /wizard.connected/); f.dispose();
   }
 });
 
 test("Plex discovery failure is translated and cannot expose raw credentials or announce success", async () => {
-  const f = wizard({ getServers() { throw new Error("https://user:SECRET@192.0.2.1/?X-Plex-Token=SECRET"); } });
+  const f = audioWizard({ getServers() { throw new Error("https://user:SECRET@192.0.2.1/?X-Plex-Token=SECRET"); } });
   enterPlex(f); await auth(f);
   assert.match(text(f.tree), /wizard.plexDiscoveryError/); assert.doesNotMatch(text(f.tree), /SECRET|https?:/);
   assert.doesNotMatch(statusText(f), /wizard.connected/); assert.equal(button(f, "wizard.next").props.disabled, true); assert.equal(f.timers.size, 0);
 });
 
 test("PIN cancel and unmount discard pending authentication/availability results and clean existing timers", async () => {
-  const pin = deferred(), f = wizard({ createPin: () => pin.promise }); enterPlex(f);
+  const pin = deferred(), f = audioWizard({ createPin: () => pin.promise }); enterPlex(f);
   const start = button(f, "settings.connectPlex").props.onClick(); f.render();
   button(f, "settings.cancel").props.onClick(); f.render(); pin.resolve({ id: 8, code: "OLD", auth_url: "https://example.invalid" });
   await start; await flush(); f.render(); assert.equal(f.calls.browser.length, 0); assert.equal(f.timers.size, 0);
-  const f2 = wizard({ checkPin: () => pin.promise }); enterPlex(f2);
+  const f2 = audioWizard({ checkPin: () => pin.promise }); enterPlex(f2);
   await button(f2, "settings.connectPlex").props.onClick(); f2.render(); assert.equal(f2.timers.size, 1); f2.dispose(); assert.equal(f2.timers.size, 0);
-  const f3 = wizard(); mode(f3, "alsa").props.onClick(); f3.render(); choose(f3, devices[0].id); choose(f3, devices[1].id);
+  const f3 = audioWizard(); mode(f3, "alsa").props.onClick(); f3.render(); choose(f3, devices[0].id); choose(f3, devices[1].id);
   f3.dispose(); f3.calls.reads[0].resolve([{ id: devices[0].id, state: "busy" }]); await flush(); assert.equal(f3.calls.reads.length, 1);
 });
 
 test("late server discovery after disconnect cannot reconnect or replace a new authentication session", async () => {
   const old = deferred(); let reads = 0;
-  const f = wizard({ getServers: () => ++reads === 1 ? old.promise : [server("New server", "new-server")] }); enterPlex(f);
+  const f = audioWizard({ getServers: () => ++reads === 1 ? old.promise : [server("New server", "new-server")] }); enterPlex(f);
   await button(f, "settings.connectPlex").props.onClick(); f.render();
   const pending = [...f.timers.values()][0](); await flush(); f.render();
   assert.match(statusText(f), /settings.searchingServers/); button(f, "settings.disconnect").props.onClick(); f.render();
@@ -246,9 +257,9 @@ test("late server discovery after disconnect cannot reconnect or replace a new a
 });
 
 test("failed/busy/uncertain/accepted Save never finishes early or discards the review draft; retries remain possible", async () => {
-  for (const error of ["ALSA_PREFLIGHT_OUTPUT_BUSY", "ALSA_PREFLIGHT_OUTPUT_UNAVAILABLE", "CONFIG_PERSISTENCE_UNCERTAIN: private", "RAW SECRET", "LOCAL_SOURCE_NEW_OVERLAP"]) {
+  for (const error of ["ALSA_PREFLIGHT_OUTPUT_BUSY", "ALSA_PREFLIGHT_OUTPUT_UNAVAILABLE", "CONFIG_PERSISTENCE_UNCERTAIN: private", "RAW SECRET", "LOCAL_SOURCE_NEW_OVERLAP", "FIRST_RUN_DATABASE_UNCONFIRMED"]) {
     let attempts = 0;
-    const f = wizard({ save: async () => { if (++attempts === 1) throw error; return { status: "completed" }; } });
+    const f = audioWizard({ save: async () => { if (++attempts === 1) throw error; return { status: "completed" }; } });
     selectSources(f, true, false); await button(f, "settings.addFolder").props.onClick(); f.render(); next(f);
     await button(f, "wizard.start").props.onClick(); f.render();
     assert.equal(f.calls.finished.length, 0); assert.match(text(f.tree), /wizard.stepFinalTitle/);
@@ -256,17 +267,31 @@ test("failed/busy/uncertain/accepted Save never finishes early or discards the r
     back(f); assert.match(text(f.tree), /\/fixture\/local/); next(f);
     await button(f, "wizard.start").props.onClick(); assert.equal(f.calls.finished.length, 1); f.dispose();
   }
-  const f = wizard({ save: async () => ({ status: "accepted", operation: { id: "op", phase: "preparing" } }) });
+  const f = audioWizard({ save: async () => ({ status: "accepted", operation: { id: "op", phase: "preparing" } }) });
   selectSources(f, true, false); next(f); await button(f, "wizard.start").props.onClick(); f.render(); assert.equal(f.calls.finished.length, 0);
 });
 
+test("postcommit preparation failure preserves the draft and blocks another completion", async () => {
+  const f = audioWizard({ save: async () => { throw "FIRST_RUN_PREPARATION_INCOMPLETE: private"; } });
+  selectSources(f, true, false); await button(f, "settings.addFolder").props.onClick(); f.render(); next(f);
+  const complete = button(f, "wizard.start").props.onClick;
+  await complete(); f.render();
+  assert.equal(f.calls.finished.length, 0); assert.equal(f.calls.saves.length, 1);
+  assert.match(text(f.tree), /wizard.preparationIncomplete/); assert.doesNotMatch(text(f.tree), /private/);
+  assert.equal(button(f, "wizard.start").props.disabled, true);
+  assert.equal(button(f, "wizard.back").props.disabled, true);
+  await complete(); await button(f, "wizard.start").props.onClick();
+  assert.equal(f.calls.saves.length, 1); assert.equal(f.calls.finished.length, 0);
+  assert.deepEqual(f.calls.saves[0].local_folders, ["/fixture/local"]); f.dispose();
+});
+
 test("pending Save and PIN reads are deduplicated; audio queries cannot run during conclusion", async () => {
-  const save = deferred(); const f = wizard({ save: () => save.promise }); selectSources(f, true, false); next(f);
+  const save = deferred(); const f = audioWizard({ save: () => save.promise }); selectSources(f, true, false); next(f);
   const complete = button(f, "wizard.start").props.onClick(); button(f, "wizard.start").props.onClick(); f.render();
   assert.equal(f.calls.saves.length, 1); assert.equal(button(f, "wizard.starting").props.disabled, true); assert.equal(button(f, "wizard.back").props.disabled, true);
   assert.equal(f.calls.finished.length, 0); assert.equal(f.calls.reads.length, 0);
   save.resolve({ status: "completed" }); await complete; assert.equal(f.calls.finished.length, 1); f.dispose();
-  const pin = deferred(); const f2 = wizard({ checkPin: () => pin.promise }); enterPlex(f2);
+  const pin = deferred(); const f2 = audioWizard({ checkPin: () => pin.promise }); enterPlex(f2);
   const start = button(f2, "settings.connectPlex").props.onClick(); button(f2, "settings.connectPlex").props.onClick(); await start; f2.render();
   assert.equal(f2.calls.pins, 1); const callback = [...f2.timers.values()][0]; const read = callback(); await callback(); assert.equal(f2.calls.pinChecks, 1);
   pin.resolve(null); await read;
@@ -279,15 +304,17 @@ test("connection readiness and completion diagnostics are conservative, translat
   }
   assert.equal(wizardSaveErrorKey(new Error("ALSA_PREFLIGHT_OUTPUT_BUSY")), "wizard.deviceBusy");
   assert.equal(wizardSaveErrorKey(new Error("CONFIG_PERSISTENCE_UNCERTAIN: SECRET")), "wizard.configPersistenceUncertain");
+  assert.equal(wizardSaveErrorKey("FIRST_RUN_DATABASE_UNCONFIRMED. Estado anterior restaurado."), "wizard.libraryPreparationError");
+  assert.equal(wizardSaveErrorKey("FIRST_RUN_PREPARATION_INCOMPLETE: SECRET"), "wizard.preparationIncomplete");
   for (const language of ["en", "pt-BR"]) {
     const locale = JSON.parse(readFileSync(new URL(`../locales/${language}.json`, import.meta.url), "utf8"));
-    for (const key of ["deviceBusy", "deviceUnavailable", "folderError", "noPlexServers", "plexDiscoveryError", "plexNotReady", "unnamedServer"]) assert.ok(locale.wizard[key]);
+    for (const key of ["libraryPreparationError", "preparationIncomplete", "deviceBusy", "deviceUnavailable", "folderError", "noPlexServers", "plexDiscoveryError", "plexNotReady", "unnamedServer"]) assert.ok(locale.wizard[key]);
     assert.match(locale.wizard.step, /{{step}}.*{{total}}/);
   }
 });
 
 test("a stale busy observation cannot veto completion; only the Save backend accepts or refuses it", async () => {
-  const f = wizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
+  const f = audioWizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
   f.calls.reads[0].resolve([{ id: devices[0].id, state: "busy" }]); await flush(); f.render();
   selectSources(f, true, false); next(f);
   assert.equal(button(f, "wizard.start").props.disabled, false);
@@ -297,25 +324,25 @@ test("a stale busy observation cannot veto completion; only the Save backend acc
 
 test("PIN creation, browser and polling failures are translated, cancelable and never publish raw secrets", async () => {
   for (const overrides of [{ createPin() { throw new Error("SECRET"); } }, { openBrowser() { throw new Error("SECRET"); } }]) {
-    const f = wizard(overrides); enterPlex(f);
+    const f = audioWizard(overrides); enterPlex(f);
     await button(f, "settings.connectPlex").props.onClick(); f.render();
     assert.match(text(f.tree), /settings.plexConnectionError/); assert.doesNotMatch(text(f.tree), /SECRET/);
     assert.equal(f.timers.size, 0); assert.ok(button(f, "settings.connectPlex")); f.dispose();
   }
-  const f = wizard({ checkPin() { throw new Error("SECRET"); } }); enterPlex(f);
+  const f = audioWizard({ checkPin() { throw new Error("SECRET"); } }); enterPlex(f);
   await button(f, "settings.connectPlex").props.onClick(); f.render(); await f.tick();
   assert.match(text(f.tree), /settings.plexConnectionError/); assert.doesNotMatch(text(f.tree), /SECRET/);
   assert.equal(f.calls.servers, 0); button(f, "settings.cancel").props.onClick(); f.render(); assert.equal(f.timers.size, 0);
 });
 
 test("retained configuration is reviewed truthfully and an incomplete saved Plex reference cannot be submitted", async () => {
-  const f = wizard({ config: { ...connected, local_folders: ["/fixture/retained"] } });
+  const f = audioWizard({ config: { ...connected, local_folders: ["/fixture/retained"] } });
   selectSources(f, true, false); next(f);
   assert.match(text(f.tree), /wizard.connected.*Living room/);
   await button(f, "wizard.start").props.onClick();
   assert.deepEqual(f.calls.finished[0].local_folders, ["/fixture/retained"]);
   assert.equal(f.calls.finished[0].plex_url, connected.plex_url); f.dispose();
-  const incomplete = wizard({ config: { ...connected, plex_server_id: null } }); selectSources(incomplete, true, false); next(incomplete);
+  const incomplete = audioWizard({ config: { ...connected, plex_server_id: null } }); selectSources(incomplete, true, false); next(incomplete);
   assert.match(text(incomplete.tree), /wizard.plexNotReady/);
   assert.equal(button(incomplete, "wizard.start").props.disabled, true);
   await button(incomplete, "wizard.start").props.onClick(); assert.equal(incomplete.calls.saves.length, 0);
@@ -326,19 +353,76 @@ test("reopened collection wizard prefills existing sources, cancel/reopen is rea
   const existing={...connected,first_run:false,local_folders:["/fixture/existing"]};
   const before=JSON.stringify(existing);let cancelled=0;
   for(let i=0;i<2;i++){
-    const f=wizard({config:existing,onCancel(){cancelled++;}});
+    const f=audioWizard({config:existing,onCancel(){cancelled++;}});
     assert.equal(sourceButton(f,"local").props["aria-pressed"],true);assert.equal(sourceButton(f,"plex").props["aria-pressed"],true);
     next(f);assert.match(text(f.tree),/fixture\/existing/);
     await button(f,"settings.addFolder").props.onClick();f.render();assert.match(text(f.tree),/fixture\/local/);
     button(f,"settings.cancel").props.onClick();assert.equal(cancelled,i+1);assert.equal(f.calls.saves.length,0);assert.equal(f.calls.finished.length,0);assert.equal(f.calls.servers,0);assert.equal(f.calls.reads.length,0);
     f.dispose();assert.equal(JSON.stringify(existing),before);
   }
-  const onlyPlex=wizard({config:{...connected,first_run:false,local_folders:[]},onCancel(){}});
+  const onlyPlex=audioWizard({config:{...connected,first_run:false,local_folders:[]},onCancel(){}});
   assert.equal(sourceButton(onlyPlex,"local").props["aria-pressed"],false);assert.equal(sourceButton(onlyPlex,"plex").props["aria-pressed"],true);
   next(onlyPlex);next(onlyPlex);await button(onlyPlex,"wizard.start").props.onClick();
   assert.equal(onlyPlex.calls.finished.length,1);assert.equal(onlyPlex.calls.finished[0].plex_token,connected.plex_token);assert.deepEqual(onlyPlex.calls.finished[0].local_folders,[]);assert.equal(onlyPlex.calls.finished[0].audio_output_type,connected.audio_output_type);onlyPlex.dispose();
   const operation={id:"fixture-operation",phase:"preparing"};let accepted;
-  const f=wizard({config:{...base,first_run:false},onCancel(){},save:async()=>({status:"accepted",operation}),onSaveAccepted(value){accepted=value;}});
+  const f=audioWizard({config:{...base,first_run:false},onCancel(){},save:async()=>({status:"accepted",operation}),onSaveAccepted(value){accepted=value;}});
   next(f);await button(f,"settings.addFolder").props.onClick();f.render();next(f);
   await button(f,"wizard.start").props.onClick();assert.equal(accepted,operation);assert.equal(f.calls.finished.length,0);assert.equal(f.calls.saves[0].first_run,false);f.dispose();
+});
+
+
+const appearanceRadios = f => {
+  const child=find(f.tree,node=>node.type?.name==="AppearanceSetting");
+  return nodes(child.type(child.props)).filter(node=>node.type==="input"&&node.props.type==="radio");
+};
+const appearanceSelect = f => ({props:{
+ value:appearanceRadios(f).find(node=>node.props.checked).props.value,
+ onChange:event=>appearanceRadios(f).find(node=>node.props.value===event.target.value).props.onChange(),
+}});
+
+test("appearance is the first initial step; reconfiguration starts at Sources by identity, with correct counters and focus",()=>{
+ const f=wizard();assert.match(text(f.tree),/wizard.appearanceTitle/);assert.match(text(f.tree),/wizard.step:1\/5/);
+ assert.equal(f.calls.focused.at(-1),"wizard.appearanceTitle");assert.equal(nodes(f.tree).some(n=>n.type==="button"&&text(n)==="wizard.back"),false);
+ next(f);assert.match(text(f.tree),/wizard.step1Title/);assert.match(text(f.tree),/wizard.step:2\/5/);assert.equal(f.calls.focused.at(-1),"wizard.step1Title");
+ next(f);assert.match(text(f.tree),/wizard.step2Title/);assert.match(text(f.tree),/wizard.step:3\/5/);
+ back(f);back(f);assert.match(text(f.tree),/wizard.appearanceTitle/);assert.equal(f.calls.focused.at(-1),"wizard.appearanceTitle");
+ const reopened=wizard({config:{...connected,first_run:false,local_folders:["/fixture/retained"]},onCancel(){}});
+ assert.match(text(reopened.tree),/wizard.step2Title/);assert.match(text(reopened.tree),/wizard.step:3\/6/);assert.equal(reopened.calls.focused.at(-1),"wizard.step2Title");
+ assert.equal(sourceButton(reopened,"local").props["aria-pressed"],true);assert.equal(sourceButton(reopened,"plex").props["aria-pressed"],true);
+ back(reopened);assert.match(text(reopened.tree),/wizard.step1Title/);back(reopened);assert.match(text(reopened.tree),/wizard.appearanceTitle/);
+});
+
+test("the real appearance control retains an existing choice and persists independently without completing or saving setup",()=>{
+ const raw=JSON.stringify({version:1,value:"light",revision:{counter:4,origin:"saved"}}),config={...connected,local_folders:["/fixture/retained"]},before=JSON.stringify(config);
+ const f=wizard({config,appearanceRaw:raw});assert.equal(appearanceSelect(f).props.value,"light");assert.equal(f.appearanceRaw(),raw);assert.equal(f.calls.appearanceWrites,0);
+ appearanceSelect(f).props.onChange({target:{value:"dark"}});f.render();assert.equal(f.appearance.getSnapshot(),"dark");assert.equal(JSON.parse(f.appearanceRaw()).value,"dark");
+ next(f);back(f);assert.equal(appearanceSelect(f).props.value,"dark");const saved=f.appearanceRaw();f.dispose();
+ const reopened=wizard({config,appearanceRaw:saved});assert.equal(appearanceSelect(reopened).props.value,"dark");
+ assert.equal(JSON.stringify(config),before);for(const sample of [f,reopened]){assert.equal(sample.calls.saves.length,0);assert.equal(sample.calls.finished.length,0);assert.equal(sample.calls.reads.length,0);assert.equal(sample.calls.pins,0);assert.equal(sample.calls.servers,0);assert.equal(sample.calls.pickers,0);}
+ const invalid=wizard({appearanceRaw:'bad'});assert.equal(appearanceSelect(invalid).props.value,"dark");
+});
+
+test("Sources remains mandatory after the new opening page; Local/Plex combinations keep review final",()=>{
+ const previous=globalThis.alert,alerts=[];globalThis.alert=message=>alerts.push(message);
+ try{const f=wizard();next(f);next(f);sourceButton(f,"local").props.onClick();f.render();next(f);assert.match(text(f.tree),/wizard.step2Title/);assert.deepEqual(alerts,["wizard.sourceRequired"]);assert.equal(f.calls.saves.length,0);sourceButton(f,"plex").props.onClick();f.render();next(f);assert.match(text(f.tree),/wizard.step4PlexTitle/);assert.equal(button(f,"wizard.next").props.disabled,true);assert.equal(f.calls.pins,0);}finally{globalThis.alert=previous;}
+ for(const language of ["en","pt-BR"]){const locale=JSON.parse(readFileSync(new URL(`../locales/${language}.json`,import.meta.url),"utf8"));assert.ok(locale.wizard.appearanceTitle);assert.ok(locale.settings.appearanceDark);assert.ok(locale.settings.appearanceLight);}
+});
+
+test("returning to appearance preserves audio/folder drafts and active Plex PIN until ordinary cancel",async()=>{
+ const f=wizard();next(f);mode(f,"alsa").props.onClick();f.render();choose(f,devices[0].id);f.calls.reads[0].resolve([{id:devices[0].id,state:"available"}]);await flush();f.render();
+ next(f);sourceButton(f,"plex").props.onClick();f.render();next(f);await button(f,"settings.addFolder").props.onClick();f.render();next(f);
+ await button(f,"settings.connectPlex").props.onClick();f.render();assert.equal(f.timers.size,1);
+ back(f);back(f);back(f);back(f);appearanceSelect(f).props.onChange({target:{value:"light"}});f.render();assert.equal(f.calls.pins,1);assert.equal(f.timers.size,1);
+ next(f);assert.equal(selector(f,"-device").props.value,devices[0].id);next(f);next(f);assert.match(text(f.tree),/fixture\/local/);next(f);assert.match(text(f.tree),/PIN7/);assert.equal(f.calls.saves.length,0);assert.equal(f.calls.finished.length,0);button(f,"settings.cancel").props.onClick();f.render();assert.equal(f.timers.size,0);
+});
+
+test("confirmed first preferences enter the app while catalogue indexing remains pending", async () => {
+  const indexing = deferred(); let indexed = false;
+  void indexing.promise.then(() => { indexed = true; });
+  const f = audioWizard({save: async () => ({status: "completed"})});
+  selectSources(f, true, false); next(f);
+  await button(f, "wizard.start").props.onClick();
+  assert.equal(indexed, false); assert.equal(f.calls.finished.length, 1);
+  assert.equal(f.calls.finished[0].first_run, false);
+  indexing.resolve(); await flush(); f.dispose();
 });

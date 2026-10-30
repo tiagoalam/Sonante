@@ -27,20 +27,27 @@ test("Settings error messages resolve in both languages without language fallbac
   assert.match(source, /alert\(t\("settings\.plexConnectionError"\)\)/);
 });
 
-test("Save retains its exact classification and diagnostic while translating only visible labels", async () => {
-  const block = source.match(/const summary = diagnostic\.startsWith\("Falha ao persistir configuração:"\)[\s\S]*?alert\([^;]+\);/)?.[0];
+test("Save distinguishes uncertain persistence and output startup without changing technical diagnostics", async () => {
+  const block = source.match(/const summary = diagnostic\.startsWith\("CONFIG_PERSISTENCE_UNCERTAIN:"\)[\s\S]*?alert\([^;]+\);/)?.[0];
   assert.ok(block);
   for (const lng of ["en", "pt-BR"]) {
     const instance = i18next.createInstance();
     await instance.init({ lng, resources, fallbackLng: false });
-    for (const diagnostic of [
-      "Falha ao persistir configuração: CONFIG_PERSISTENCE_UNCERTAIN: fixture",
-      "Falha ao iniciar nova saída: fixture. Estado anterior restaurado.",
-      "OTHER_CODE: fixture",
+    const uncertain = lng === "en"
+      ? "Could not confirm whether the configuration was saved. Check the current settings before trying again."
+      : "Não foi possível confirmar se a configuração foi gravada. Confira as preferências atuais antes de tentar novamente.";
+    const startFailure = lng === "en" ? "Could not start the new audio output." : "Não foi possível iniciar a nova saída de áudio.";
+    for (const [diagnostic, summary] of [
+      ["CONFIG_PERSISTENCE_UNCERTAIN: fixture", uncertain],
+      ["Falha ao persistir configuração: fixture", messages[lng][1]],
+      ["Falha ao iniciar nova saída: fixture. Estado anterior restaurado.", startFailure],
+      ["Falha ao iniciar nova saída: fixture. Rollback também falhou: fixture", startFailure],
+      ["OTHER_CODE: fixture", messages[lng][2]],
+      ["OTHER_CODE: CONFIG_PERSISTENCE_UNCERTAIN: fixture", messages[lng][2]],
+      ["CONFIG_PERSISTENCE_UNCERTAIN_SUFFIX: fixture", messages[lng][2]],
     ]) {
       let displayed;
       new Function("diagnostic", "t", "alert", block)(diagnostic, instance.t.bind(instance), value => { displayed = value; });
-      const summary = messages[lng][diagnostic.startsWith("Falha ao persistir configuração:") ? 1 : 2];
       assert.equal(displayed, `${summary}\n\n${messages[lng][3]}\n${diagnostic}`);
     }
   }

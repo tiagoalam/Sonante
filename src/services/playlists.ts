@@ -1,3 +1,6 @@
+import { localSourceReadQueue } from "../utils/localSourceReadQueue.ts";
+import { ensureDirectOutputChoice } from "./config";
+import { beginPlaybackIntent, playbackIntentToken, type PlaybackIntent } from "../utils/playbackIntent";
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
@@ -27,6 +30,13 @@ export const playlistsService = {
     invoke<Playlist>("reorder_playlist_items", { playlistId, orderedItemIds }),
   resolveItems: (playlistId: string): Promise<PlaylistItemAvailability[]> =>
     invoke<PlaylistItemAvailability[]>("resolve_playlist_items", { playlistId }),
-  play: (playlistId: string, startItemId?: string, shuffle = false): Promise<{ skipped_count: number }> =>
-    invoke<{ skipped_count: number }>("play_playlist", { playlistId, startItemId, shuffle }),
+  play: async (playlistId: string, startItemId?: string, shuffle = false, intent: PlaybackIntent = beginPlaybackIntent()): Promise<{ skipped_count: number }> =>
+    (async()=>{
+      const token=await playbackIntentToken(intent);
+      return localSourceReadQueue.control(async()=>{
+        if(!intent.current())throw "PLAYBACK_SUPERSEDED";
+        await ensureDirectOutputChoice(intent);if(!intent.current())throw "PLAYBACK_SUPERSEDED";
+        return invoke<{ skipped_count: number }>("play_playlist", { playlistId, startItemId, shuffle, intent:token });
+      });
+    })(),
 };

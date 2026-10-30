@@ -1,3 +1,8 @@
+import { LocalPlaybackThumbnail } from "../src/utils/localPlaybackThumbnail.ts";
+import { createLocalCoverBatch } from "../src/utils/localCoverBatch.ts";
+import { createLocalSourceReadQueue } from "../src/utils/localSourceReadQueue.ts";
+import * as directVolumeHelpers from "../src/utils/signalPath.ts";
+import * as playbackIntents from "../src/utils/playbackIntent.ts";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -9,10 +14,11 @@ import * as icons from 'lucide-react';
 import i18next from 'i18next';
 import { nowPlayingWindowBounds, queueItemArtwork, queueItemIsCurrent, queueVisibleRange, QueuePreviewReader, playConfirmedQueuePosition } from '../src/utils/nowPlayingPresentation.ts';
 import { analyzerOwnerMatches } from '../src/utils/nowPlayingHosting.ts';
-import { signalPathInformation } from '../src/utils/signalPath.ts';
+import { routeConditions } from '../src/utils/routeConditions.ts';
+import { signalPathInformation, requiresDeviceVolumeControl } from '../src/utils/signalPath.ts';
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(l=>[l,{translation:JSON.parse(readFileSync(new URL(`../src/locales/${l}.json`,import.meta.url)))}]))});
 globalThis.window={localStorage:{getItem:()=>null,setItem(){}},screen:{availWidth:1920,availHeight:1040},crypto:{randomUUID:()=> 'synthetic-session'},setTimeout,clearTimeout,addEventListener(){},removeEventListener(){}};
-const dependencies={'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{signalPathInformation},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
+const dependencies={'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
 const compile=(file,extra={})=>{const js=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',js)(name=>{assert.ok(name in extra||name in dependencies,name);return extra[name]??dependencies[name];},ex);return ex;};
 dependencies['./PlexImage']={PlexImage:({alt,className})=>React.createElement('div',{'data-plex-artwork':true,'aria-label':alt,className})};
 dependencies['./TrackArtwork']=compile('components/TrackArtwork.tsx');
@@ -21,6 +27,8 @@ dependencies['./PlaybackOptionsControls']=compile('components/PlaybackOptionsCon
 const graph=name=>({[name]:props=>React.createElement('svg',{'aria-label':props.label??name,role:'img',viewBox:'0 0 480 120',preserveAspectRatio:'none',style:{width:'100%',height:name==='VuHorizontal'?28:'100%'}},Array.from({length:40},(_,i)=>React.createElement('rect',{key:i,x:i*12,y:120-(25+(i*17)%85),width:8,height:25+(i*17)%85,rx:1,fill:'#E5A00D',opacity:.6})))});
 for(const name of ['AnalogVu','SpectrumNeon','SpectrumSegmented','VuHorizontal']) dependencies[`./${name}`]=graph(name);
 dependencies['./visualizer/VisualizerPanel']=compile('components/visualizer/VisualizerPanel.tsx');
+dependencies['../utils/playerNavigation']={currentMediaKey:media=>JSON.stringify(media)};
+dependencies['./SourceAudioBadges']={SourceAudioBadges:()=>null};
 const {NowPlayingPresentation:View}=compile('components/NowPlayingPresentation.tsx');
 const snapshot={route:{mode:'shared',endpoint:'default'},health:{state:'available'},playback:{state:'play',elapsed:57,duration:185,audio_format:'96000:24:2',current_media:{kind:'local',uri:'synthetic.flac',queue_index:1},title:'A synthetic song with a deliberately long title that remains above the playback controls',artist:'Synthetic artist',album:'Synthetic album',volume:{value:43,muted:false,writable:true,available:true,backend:'pipewire'},is_updating:false}};
 const props={snapshot,levels:{leftRms:.2,rightRms:.3,leftPeak:.4,rightPeak:.5,spectrum:Array(48).fill(.2)},fullscreen:false,queueOpen:false,queue:null,analyzerAvailable:true,analyzerInactiveLabel:'Unavailable',controlFailed:false,isSeeking:false,seekValue:57};
@@ -29,7 +37,7 @@ const nodes=(tree,pred)=>Array.isArray(tree)?tree.flatMap(n=>nodes(n,pred)):!tre
 test('presentation renders long metadata, all controls and confirmed horizontal signal in both languages/window modes',async()=>{
  for(const lng of ['en','pt-BR']){await i18n.changeLanguage(lng);for(const fullscreen of [false,true]){
   const html=renderToStaticMarkup(React.createElement(View,{...props,fullscreen,queueOpen:true,queue:React.createElement('aside',{id:'now-playing-queue'},'Synthetic queue')}));
-  assert.match(html,/Synthetic artist/);assert.match(html,/Synthetic album/);assert.match(html,/96000|96/);assert.match(html,/PipeWire/);assert.match(html,/aria-controls="now-playing-queue"/);assert.match(html,/aria-expanded="true"/);assert.doesNotMatch(html,/nowPlaying\.|player\.seek|bit-perfect/i);
+  assert.match(html,/Synthetic artist/);assert.match(html,/Synthetic album/);assert.match(html,/aria-haspopup="dialog"/);assert.match(html,/96 kHz/);assert.match(html,/24-bit/);assert.match(html,/np-signal-stages/);assert.doesNotMatch(html,/data-route-conditions|data-alsa-observation/);assert.match(html,/aria-controls="now-playing-queue"/);assert.match(html,/aria-expanded="true"/);assert.doesNotMatch(html,/nowPlaying\.|player\.seek/i);assert.match(html,/data-signal-summary/);assert.doesNotMatch(html,/data-bitperfect/);
   for(const label of [i18n.t('player.previous'),i18n.t('player.pause'),i18n.t('player.next'),i18n.t('nowPlaying.seek'),i18n.t('signalPath.volume')])assert.ok(html.includes(label),label);
  }}await i18n.changeLanguage('en');
 });
@@ -269,7 +277,7 @@ test('embedded and detached hosting actions resolve in pt-BR/en without changing
    const html=renderToStaticMarkup(React.createElement(View,{...props,embedded,hostingError:true,controlsDisabled:true}));
    assert.ok(html.includes(i18n.t(embedded?'nowPlaying.detach':'nowPlaying.reincorporate')));
    assert.ok(html.includes(i18n.t(embedded?'nowPlaying.collapse':'nowPlaying.close')));
-   assert.match(html,/96|96000/);assert.doesNotMatch(html,/nowPlaying\.|bit-perfect/i);
+   assert.match(html,/96 kHz/);assert.match(html,/24-bit/);assert.match(html,/np-signal-stages/);assert.doesNotMatch(html,/data-route-conditions|data-alsa-observation/);assert.doesNotMatch(html,/nowPlaying\./i);assert.match(html,/data-signal-summary/);assert.doesNotMatch(html,/data-bitperfect/);
   }
  }await i18n.changeLanguage('en');
 });
@@ -338,4 +346,125 @@ test('recovered current Local artwork reaches PlayerBar, both Now Playing hosts 
  assert.equal(art[0].props.track.thumb,cover);assert.equal(art[1].props.track,items[1]);assert.deepEqual(items,before);
  assert.equal(queueItemArtwork(items[0],1,current),items[0],'duplicate URI at a different queue index stays untouched');
  assert.equal(queueItemArtwork(items[0],0,{...current,current_media:{kind:'plex',server_id:'s',part_key:'p',queue_index:0}}),items[0]);
+});
+
+
+test('inactive visualizers show readable guidance, hide idle graphs, and keep keyboard help in every mode',async()=>{
+ for(const language of ['en','pt-BR']){
+  await i18n.changeLanguage(language);
+  for(const mode of ['combo','spectrum-neon','spectrum-segmented','vu-amber','vu-blue']){
+   const hooks={...React,default:React,useState:()=>[mode,()=>{}],useEffect(){}};
+   const {VisualizerPanel}=compile('components/visualizer/VisualizerPanel.tsx',{'react':hooks});
+   const label=i18n.t('nowPlaying.analyzerReason.current_audio_format_is_dsd'),help=i18n.t('nowPlaying.visualizer.helpDsdDirect');
+   const tree=VisualizerPanel({levels:props.levels,active:false,inactiveLabel:label,inactiveHelp:help,fullscreen:false});
+   const message=nodes(tree,n=>n.props['data-visualizer-inactive']!==undefined)[0];assert.ok(message);assert.equal(message.props.role,'status');
+   const messageHtml=renderToStaticMarkup(message);assert.ok(messageHtml.includes(label));assert.ok(messageHtml.includes(help));assert.doesNotMatch(messageHtml,/truncate|text-\[8px\]/);
+   assert.doesNotMatch(renderToStaticMarkup(tree),/<svg[^>]*role="img"/);
+   const details=nodes(tree,n=>n.type==='details')[0];const summary=nodes(details,n=>n.type==='summary')[0];assert.equal(summary.props['aria-label'],i18n.t('nowPlaying.visualizer.howItWorks'));
+   const html=renderToStaticMarkup(details);for(const key of ['helpOverview','worksPcm','worksDsd','directDsd'])assert.ok(html.includes(i18n.t('nowPlaying.visualizer.'+key)));
+   let focused=false,prevented=false,stopped=false;const target={open:true,querySelector:()=>({focus(){focused=true;}})};
+   details.props.onKeyDown({key:'Escape',currentTarget:target,preventDefault(){prevented=true;},stopPropagation(){stopped=true;}});assert.equal(target.open,false);assert.ok(focused&&prevented&&stopped);
+   const active=VisualizerPanel({levels:props.levels,active:true,fullscreen:false});assert.equal(nodes(active,n=>n.props['data-visualizer-inactive']!==undefined).length,0);assert.equal(nodes(active,n=>n.type==='details').length,1);
+  }
+ }
+ await i18n.changeLanguage('en');
+});
+
+test('both player hosts explain paused, stopped and unavailable states instead of showing a stale analyzer reason',()=>{
+ const panel=dependencies['./visualizer/VisualizerPanel'].VisualizerPanel;
+ for(const embedded of [true,false]){
+  const cases=[
+   [{analyzerAvailable:true,snapshot:{...snapshot,playback:{...snapshot.playback,state:'pause'}}},'nowPlaying.visualizer.paused','nowPlaying.visualizer.helpPaused'],
+   [{analyzerAvailable:false,snapshot:{...snapshot,playback:{...snapshot.playback,state:'stop'}}},'nowPlaying.analyzerReason.stopped','nowPlaying.visualizer.helpStopped'],
+   [{analyzerAvailable:false,snapshot:{...snapshot,health:{state:'unavailable'}}},'nowPlaying.analyzerReason.mpd_unavailable','nowPlaying.visualizer.helpUnavailable'],
+  ];
+  for(const [change,label,help]of cases){
+   const tree=View({...props,...change,embedded,analyzerInactiveLabel:'old DSD reason',analyzerInactiveHelp:'old DSD help'});
+   const visualizer=nodes(tree,n=>n.type===panel)[0];assert.equal(visualizer.props.active,false);assert.equal(visualizer.props.inactiveLabel,i18n.t(label));assert.equal(visualizer.props.inactiveHelp,i18n.t(help));
+  }
+ }
+});
+
+test('host guidance distinguishes blocked DSD in Direct from unavailable DSD in Shared without audio actions',()=>{
+ for(const embedded of [true,false])for(const mode of ['direct','shared'])for(const reason of ['current_audio_format_is_dsd','current_file_is_dsd','reader_error',null,'unknown/private?token=fixture']){
+  let cursor=0;const states=[false,false,false,0,false,props.levels,false,reason];
+  const hooks={...React,default:React,useState:initial=>[states[cursor++]??initial,()=>{}],useEffect(){},useRef:initial=>({current:initial})};
+  const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{startAudioAnalyzer:()=>assert.fail('unexpected read'),stopAudioAnalyzer:()=>assert.fail('unexpected stop')}});
+  const tree=NowPlayingHost({snapshot:{...snapshot,route:{mode,endpoint:mode==='shared'?'default':'hw:Fixture,0'}},owner,embedded,onReady(){}});
+  const key=reason?.startsWith('current_')?(mode==='shared'?'helpDsdShared':'helpDsdDirect'):reason?'helpRetry':'helpPreparing';
+  assert.equal(tree.props.analyzerInactiveHelp,i18n.t('nowPlaying.visualizer.'+key));assert.ok(!tree.props.analyzerInactiveLabel.includes('token='));
+ }
+});
+
+test('analyzer start rejection produces an explanatory failure state without retrying or changing playback',async()=>{
+ const effects=[],values=[],calls=[];const hooks={...React,default:React,useState:initial=>[initial,value=>values.push(value)],useEffect:fn=>effects.push(fn),useRef:initial=>({current:initial})};
+ const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{listen:async()=>()=>{}},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{AUDIO_LEVEL_EVENT:'level',ANALYZER_STATUS_EVENT:'analyzer',startAudioAnalyzer:async()=>{calls.push('start');throw new Error('synthetic');},stopAudioAnalyzer:async()=>calls.push('stop')}});
+ NowPlayingHost({snapshot,owner,embedded:true,onReady(){}});const cleanup=effects[2]();await flush();assert.ok(values.includes('initial_reconcile_failed'));assert.deepEqual(calls,['start']);cleanup();await flush();assert.deepEqual(calls,['start','stop']);
+});
+
+test('Now Playing hides gradual volume for all Direct transports and retains mute',async()=>{
+ for(const lng of ['en','pt-BR']){await i18n.changeLanguage(lng);
+  for(const embedded of [false,true])for(const [mode,audio_format,backend,slider] of [
+   ['direct','96000:24:2','direct_equipment',false],['direct','dsd64:2','direct_equipment',false],
+   ['direct','705600:dsd:2','direct_equipment',false],['direct','dsd128:2','direct_equipment',false],['shared','dsd64:2','pipewire',true]]){
+   let muted=0;const tree=View({...props,embedded,onMute:()=>{muted++},snapshot:{...snapshot,route:{mode,endpoint:mode==='direct'?'hw:Fixture,0':'default'},playback:{...snapshot.playback,audio_format,volume:{...snapshot.playback.volume,backend,...(mode==='direct'?{value:100,writable:false,direct_gain:'unity',direct_token:'1:65'}:{})}}}});
+   const ranges=nodes(tree,n=>n.type==='input'&&n.props['aria-label']===i18n.t('signalPath.volume'));assert.equal(ranges.length,slider?1:0);
+   const mute=nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('player.mute'))[0];assert.ok(mute);mute.props.onClick();assert.equal(muted,1);
+   if(!slider)assert.ok(renderToStaticMarkup(tree).includes(i18n.t('player.volumeOnDevice')));
+  }
+ }await i18n.changeLanguage('en');
+});
+
+test('embedded and detached hosts use explicit mute without an independent preparation flow',async()=>{
+ const hooks={...React,default:React,useState:initial=>[initial,()=>{}],useEffect(){},useRef:initial=>({current:initial})};
+ for(const embedded of [true,false])for(const [gain,value,muted]of [['pending',0,false],['unity',100,false],['muted',0,true],['changed',43,false]]){
+  const calls=[];window.confirm=()=>assert.fail('no prepare ritual');
+  const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{},'@tauri-apps/api/window':{},'../services/audio':{audioService:{setDirectMute:async r=>calls.push(r),setVolume:()=>assert.fail()}},'../services/nowPlayingWindow':{}});
+  const tree=NowPlayingHost({snapshot:{...snapshot,route:{mode:'direct',endpoint:'hw:Fixture,0'},playback:{...snapshot.playback,volume:{backend:'direct_equipment',available:true,writable:false,value,muted,direct_gain:gain,direct_token:'old:1'}}},owner,embedded,onReady(){}});
+  tree.props.onMute();await flush();assert.deepEqual(calls,[{muted:!muted,token:'old:1'}]);
+ }delete window.confirm;
+});
+
+ test('Now Playing Shared unmute uses backend context instead of an independent default volume',async()=>{
+  const calls=[];
+  const hooks={...React,default:React,useState:initial=>[initial,()=>{}],useEffect(){},useRef:initial=>({current:initial})};
+  const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{},'@tauri-apps/api/window':{},'../services/audio':{audioService:{setSharedMute:async request=>calls.push(request),setVolume:()=>assert.fail('must not choose a level')}},'../services/nowPlayingWindow':{}});
+  const owner={host:'main',session:'fixture',generation:1};
+  const tree=NowPlayingHost({snapshot:{...snapshot,playback:{...snapshot.playback,volume:{value:0,muted:true,writable:true,available:true,backend:'mpd_software',shared_token:'shared-session'}}},owner,embedded:true,onReady(){}});
+  tree.props.onMute();await flush();assert.deepEqual(calls,[{muted:false,token:'shared-session'}]);
+ });
+
+
+test('actual App and PlayerBar callbacks retain a decoded cover across reopening and same-image track changes',()=>{
+ const source=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
+ const ast=ts.createSourceFile('App.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ let player,configure;
+ const walk=node=>{
+  if(ts.isJsxSelfClosingElement(node)&&node.tagName.getText(ast)==='PlayerBar')player=node;
+  if(ts.isVariableDeclaration(node)&&node.name.getText(ast)==='setConfig')configure=node.initializer.arguments[0].getText(ast);
+  ts.forEachChild(node,walk);
+ };walk(ast);assert.ok(player&&configure);
+ const jpeg='data:image/jpeg;base64,'+Buffer.from([255,216,255,192,0,11,8,0,80,0,80,1,1,17,0,255,217]).toString('base64');
+ let value=null,reductions=0;
+ const storage={getItem:()=>value,setItem:(_key,next)=>{value=next},removeItem:()=>{value=null}};
+ const cache=new LocalPlaybackThumbnail(()=>storage,()=>{reductions++;return jpeg});
+ const configFn=ts.transpileModule('exports.configure = '+configure,{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
+ const configExports={};new Function('exports','localPlaybackThumbnail','localAlbumThumbnails','localAlbumCatalog','setConfigState',configFn)(configExports,cache,{setContext(){}},{setPresentationContext(){}},()=>{});
+ configExports.configure({first_run:false,local_folders:['/music']});
+ const callback=name=>new Function('localPlaybackThumbnail','return ('+player.attributes.properties.find(p=>p.name?.getText(ast)===name).initializer.expression.getText(ast)+')')(cache);
+ const loaded=callback('onArtworkLoaded'),failed=callback('onArtworkFailed');
+ const hooks={...React,default:React,useEffect(){},useRef:v=>({current:v}),useState:v=>[v,()=>{}]};
+ const {PlayerBar}=compile('components/PlayerBar.tsx',{'react':hooks,'../services/audio':{audioService:{}}});
+ const image={src:'data:image/png;base64,AAAA',complete:true,naturalWidth:80,naturalHeight:80};
+ let current={...snapshot.playback,current_media:{kind:'local',uri:'Source/Album/one.flac',queue_index:0},thumb:image.src};
+ const render=()=>nodes(PlayerBar({status:current,health:snapshot.health,route:snapshot.route,isQueueOpen:false,onToggleQueue(){},onArtworkLoaded:loaded,onArtworkFailed:failed}),n=>n.type==='img')[0];
+ render().props.onLoad({currentTarget:image});assert.equal(cache.get(current.current_media),jpeg);
+ const restored=new LocalPlaybackThumbnail(()=>storage);restored.setContext(['/music']);
+ assert.equal(restored.get(current.current_media),jpeg,'the next session needs no image or metadata lookup');
+ current={...current,current_media:{...current.current_media,uri:'Source/Album/two.flac',queue_index:1}};
+ render().props.ref(image);assert.equal(cache.get(current.current_media),jpeg,'already decoded unchanged src is retained for the new track too');
+ for(let n=0;n<10;n++)render().props.ref(image);
+ assert.equal(reductions,2,'status renders do not redraw canvas or write storage repeatedly');
+ current={...current,thumb:jpeg};render().props.onError();assert.equal(cache.get(current.current_media),null);
+ configExports.configure({first_run:true,local_folders:['/music']});assert.equal(cache.get(current.current_media),null);
 });

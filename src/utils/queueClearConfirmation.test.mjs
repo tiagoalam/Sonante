@@ -299,3 +299,11 @@ test("confirmation wiring discards cancelled edits, uses an accessible dialog an
     assert.match(settings.queueClearDescription, locale === "en" ? /discard the proposed changes.*reopen saved preferences/ : /descarta as alterações propostas.*reabre as preferências salvas/);
   }
 });
+
+test("removal progress keeps its proposal until a real terminal result", () => {
+  const flow=createQueueClearConfirmationFlow();
+  flow.begin({local_folders:["/own-fixture/keep"]});flow.accepted("9");
+  assert.equal(flow.observe({id:"9",phase:"removing",error:null}),null);
+  const prompt=flow.observe({id:"9",phase:"failed",error:required()});
+  assert.equal(prompt.binding,binding);assert.deepEqual(prompt.config.local_folders,["/own-fixture/keep"]);
+});

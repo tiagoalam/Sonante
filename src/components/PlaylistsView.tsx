@@ -1,3 +1,4 @@
+import { beginPlaybackIntent, isPlaybackSuperseded, playbackFailure } from "../utils/playbackIntent";
 import { logError, logWarning } from "../utils/frontendDiagnostics";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -229,25 +230,29 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
   const formatDate = (timestamp: number) =>
     new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium" }).format(timestamp);
 
+  const preparation = useRef<{ playlistId: string; intent: ReturnType<typeof beginPlaybackIntent> } | null>(null);
+  useEffect(() => () => { const owned = preparation.current; if (owned?.playlistId === selectedId) owned.intent.cancel(); }, [selectedId]);
   const playPlaylist = async (playlistId: string, startItemId?: string, shuffle = false) => {
     if (!isPlaybackAvailable || playRequestInFlight.current) return;
+    const intent = beginPlaybackIntent(); preparation.current = { playlistId, intent };
     playRequestInFlight.current = true;
     setPreparingPlayback(true);
     setError(null);
     setPlaybackFeedback(null);
     try {
-      const result = await playlistsService.play(playlistId, startItemId, shuffle);
-      if (selectedIdRef.current === playlistId && result.skipped_count > 0) {
+      const result = await playlistsService.play(playlistId, startItemId, shuffle, intent);
+      if (intent.current() && selectedIdRef.current === playlistId && result.skipped_count > 0) {
         setPlaybackFeedback(t("playlists.skippedCount", { count: result.skipped_count }));
       }
     } catch (cause) {
+      if (isPlaybackSuperseded(cause) || !await intent.confirmCurrent()) return;
       logError("playlists.play", cause);
       const message = String(cause);
       if (selectedIdRef.current === playlistId) setError(t(message.includes("playlist_no_playable_items")
         ? "playlists.noPlayableItems"
         : message.includes("playlist_selected_item_unavailable")
           ? "playlists.selectedItemUnavailable"
-          : "playlists.playError"));
+          : playbackFailure(cause) === "failed" ? "playlists.playError" : `player.requestError.${playbackFailure(cause)}`));
     } finally {
       playRequestInFlight.current = false;
       setPreparingPlayback(false);
@@ -255,8 +260,8 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
   };
 
   return (
-    <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[#121212] select-none">
-      <header className="flex items-center justify-between gap-6 border-b border-[#222222] p-8 pb-4">
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)] select-none">
+      <header className="flex items-center justify-between gap-6 border-b border-[color:var(--theme-border-soft,#222222)] p-8 pb-4">
         <div className="flex min-w-0 items-center space-x-3">
           {selected && (
             <button
@@ -265,18 +270,18 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                 setSelectedId(null);
                 setEditingId(null);
               }}
-              className="mr-1 cursor-pointer rounded-lg border border-[#333333] bg-[#1E1E1E] p-1.5 text-white transition-colors hover:bg-[#2A2A2A]"
+              className="mr-1 cursor-pointer rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-raised,#1E1E1E)] p-1.5 text-[color:var(--theme-fg-primary,#ffffff)] transition-colors hover:bg-[var(--theme-surface-hover,#2A2A2A)]"
               title={t("playlists.back")}
             >
               <ArrowLeft size={16} />
             </button>
           )}
           <div className="min-w-0">
-            <h2 className="flex items-center space-x-2 truncate text-2xl font-bold tracking-tight text-white">
-              <ListMusic size={22} className="shrink-0 text-[#E5A00D]" />
+            <h2 className="flex items-center space-x-2 truncate text-2xl font-bold tracking-tight text-[color:var(--theme-fg-primary,#ffffff)]">
+              <ListMusic size={22} className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" />
               <span className="truncate">{selected?.name ?? t("playlists.title")}</span>
             </h2>
-            <p className="mt-0.5 text-xs text-[#888888]">
+            <p className="mt-0.5 text-xs text-[color:var(--theme-fg-muted,#888888)]">
               {selected
                 ? t("playlists.itemCount", { count: selected.items.length })
                 : t("playlists.count", { count: playlists.length })}
@@ -291,7 +296,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
               onChange={(event) => setNewName(event.target.value)}
               placeholder={t("playlists.namePlaceholder")}
               disabled={busy}
-              className="min-w-0 flex-1 rounded-lg border border-[#333333] bg-[#1A1A1A] px-3 py-2 text-sm text-white outline-none transition-colors placeholder:text-[#666666] focus:border-[#E5A00D] disabled:opacity-50"
+              className="min-w-0 flex-1 rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-panel,#1A1A1A)] px-3 py-2 text-sm text-[color:var(--theme-fg-primary,#ffffff)] outline-none transition-colors placeholder:text-[color:var(--theme-fg-muted,#666666)] focus:border-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-50"
               aria-label={t("playlists.namePlaceholder")}
             />
             <button
@@ -307,30 +312,30 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
       </header>
 
       {error && (
-        <div className="mx-8 mt-4 rounded-lg border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-200">
+        <div className="mx-8 mt-4 rounded-lg border border-[color:var(--theme-border-error,var(--color-red-400))]/20 bg-red-400/10 px-4 py-3 text-sm text-[color:var(--theme-fg-error,var(--color-red-200))]">
           {error}
         </div>
       )}
 
       {playbackFeedback && (
-        <div role="status" className="mx-8 mt-4 rounded-lg border border-[#E5A00D]/20 bg-[#E5A00D]/10 px-4 py-3 text-sm text-[#E5A00D]">
+        <div role="status" className="mx-8 mt-4 rounded-lg border border-[color:var(--theme-border-accent,#E5A00D)]/20 bg-[#E5A00D]/10 px-4 py-3 text-sm text-[color:var(--theme-fg-accent,#E5A00D)]">
           {playbackFeedback}
         </div>
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto p-8">
         {loading ? (
-          <div className="flex h-full items-center justify-center text-[#777777]">
+          <div className="flex h-full items-center justify-center text-[color:var(--theme-fg-muted,#777777)]">
             <LoaderCircle size={24} className="animate-spin" />
           </div>
         ) : selected ? (
           <section className="mx-auto flex max-w-4xl flex-col">
-            <div className="mb-6 flex items-center justify-between gap-4 rounded-xl border border-[#2B2B2B] bg-[#181818] p-4">
+            <div className="mb-6 flex items-center justify-between gap-4 rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] p-4">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-wider text-[#666666]">
+                <p className="text-xs font-semibold uppercase tracking-wider text-[color:var(--theme-fg-muted,#666666)]">
                   {t("playlists.details")}
                 </p>
-                <p className="mt-1 text-xs text-[#888888]">
+                <p className="mt-1 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                   {t("playlists.updated", { date: formatDate(selected.updated_at) })}
                 </p>
               </div>
@@ -348,7 +353,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                   type="button"
                   onClick={() => void playPlaylist(selected.id, undefined, true)}
                   disabled={!isPlaybackAvailable || preparingPlayback || busy}
-                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-[#E5A00D] bg-[#202020] px-4 py-2 text-xs font-bold text-[#E5A00D] hover:bg-[#2A2A2A] disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-raised,#202020)] px-4 py-2 text-xs font-bold text-[color:var(--theme-fg-accent,#E5A00D)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Shuffle size={15} />
                   <span>{t("playlists.shuffle")}</span>
@@ -357,7 +362,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                   type="button"
                   onClick={() => beginRename(selected)}
                   disabled={preparingPlayback}
-                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-[#333333] bg-[#202020] px-3 py-2 text-xs font-semibold text-[#CCCCCC] hover:bg-[#2A2A2A] hover:text-white"
+                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-raised,#202020)] px-3 py-2 text-xs font-semibold text-[color:var(--theme-fg-secondary,#CCCCCC)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                 >
                   <Pencil size={14} />
                   <span>{t("playlists.rename")}</span>
@@ -366,7 +371,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                   type="button"
                   onClick={() => void deletePlaylist(selected)}
                   disabled={preparingPlayback}
-                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-red-400/20 bg-red-400/5 px-3 py-2 text-xs font-semibold text-red-300 hover:bg-red-400/10"
+                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-[color:var(--theme-border-error,var(--color-red-400))]/20 bg-red-400/5 px-3 py-2 text-xs font-semibold text-[color:var(--theme-fg-error,var(--color-red-300))] hover:bg-red-400/10"
                 >
                   <Trash2 size={14} />
                   <span>{t("playlists.delete")}</span>
@@ -384,7 +389,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                   onChange={(event) => setEditingName(event.target.value)}
                   autoFocus
                   disabled={busy}
-                  className="min-w-0 flex-1 rounded-lg border border-[#E5A00D] bg-[#1A1A1A] px-3 py-2 text-sm text-white outline-none"
+                  className="min-w-0 flex-1 rounded-lg border border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-panel,#1A1A1A)] px-3 py-2 text-sm text-[color:var(--theme-fg-primary,#ffffff)] outline-none"
                   aria-label={t("playlists.rename")}
                 />
                 <button type="submit" disabled={busy} className="rounded-lg bg-[#E5A00D] p-2 text-black">
@@ -393,7 +398,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                 <button
                   type="button"
                   onClick={() => setEditingId(null)}
-                  className="rounded-lg border border-[#333333] bg-[#202020] p-2 text-[#AAAAAA]"
+                  className="rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-raised,#202020)] p-2 text-[color:var(--theme-fg-secondary,#AAAAAA)]"
                 >
                   <X size={17} />
                 </button>
@@ -401,24 +406,24 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
             )}
 
             {selected.items.length === 0 ? (
-              <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-[#333333] bg-[#161616] px-8 py-16 text-center">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-[#E5A00D]/20 bg-[#E5A00D]/10 text-[#E5A00D]">
+              <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-base,#161616)] px-8 py-16 text-center">
+                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-[color:var(--theme-border-accent,#E5A00D)]/20 bg-[#E5A00D]/10 text-[color:var(--theme-fg-accent,#E5A00D)]">
                   <Music2 size={30} />
                 </div>
-                <h3 className="text-lg font-bold text-white">{t("playlists.emptyTitle")}</h3>
-                <p className="mt-2 max-w-md text-sm leading-relaxed text-[#777777]">
+                <h3 className="text-lg font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{t("playlists.emptyTitle")}</h3>
+                <p className="mt-2 max-w-md text-sm leading-relaxed text-[color:var(--theme-fg-muted,#777777)]">
                   {t("playlists.emptyHint")}
                 </p>
               </div>
             ) : (
-              <div className="rounded-xl border border-[#292929] bg-[#151515]">
+              <div className="rounded-xl border border-[color:var(--theme-border-soft,#292929)] bg-[var(--theme-surface-base,#151515)]">
                 {resolving && (
-                  <div className="flex items-center gap-2 border-b border-[#292929] px-4 py-2 text-xs text-[#888888]">
+                  <div className="flex items-center gap-2 border-b border-[color:var(--theme-border-soft,#292929)] px-4 py-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                     <LoaderCircle size={13} className="animate-spin" />
                     <span>{t("playlists.resolving")}</span>
                   </div>
                 )}
-                <div className="divide-y divide-[#242424]">
+                <div className="divide-y divide-[color:var(--theme-border-soft,#242424)]">
                   {selected.items.map((item, index) => {
                     const missing = availability[item.id] === "missing";
                     const unavailable = availability[item.id] === "unavailable";
@@ -427,32 +432,32 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                         key={item.id}
                         className={`flex items-center gap-4 px-4 py-3 ${missing ? "bg-red-400/5" : unavailable ? "bg-amber-400/5" : ""}`}
                       >
-                        <span className="w-7 shrink-0 text-center font-mono text-xs text-[#666666]">
+                        <span className="w-7 shrink-0 text-center font-mono text-xs text-[color:var(--theme-fg-muted,#666666)]">
                           {index + 1}
                         </span>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <h3 className={`truncate text-sm font-semibold ${missing || unavailable ? "text-[#AAAAAA]" : "text-white"}`}>
+                            <h3 className={`truncate text-sm font-semibold ${missing || unavailable ? "text-[color:var(--theme-fg-secondary,#AAAAAA)]" : "text-[color:var(--theme-fg-primary,#ffffff)]"}`}>
                               {item.metadata.title}
                             </h3>
                             {missing && (
-                              <span className="flex shrink-0 items-center gap-1 rounded-full bg-red-400/10 px-2 py-0.5 text-[10px] font-bold text-red-300">
+                              <span className="flex shrink-0 items-center gap-1 rounded-full bg-red-400/10 px-2 py-0.5 text-[10px] font-bold text-[color:var(--theme-fg-error,var(--color-red-300))]">
                                 <CircleAlert size={11} />
                                 {t("playlists.missing")}
                               </span>
                             )}
                             {unavailable && (
-                              <span className="flex shrink-0 items-center gap-1 rounded-full bg-amber-400/10 px-2 py-0.5 text-[10px] font-bold text-amber-300">
+                              <span className="flex shrink-0 items-center gap-1 rounded-full bg-amber-400/10 px-2 py-0.5 text-[10px] font-bold text-[color:var(--theme-fg-accent,var(--color-amber-300))]">
                                 <CircleAlert size={11} />
                                 {t("playlists.unavailable")}
                               </span>
                             )}
                           </div>
-                          <p className="truncate text-xs text-[#777777]">
+                          <p className="truncate text-xs text-[color:var(--theme-fg-muted,#777777)]">
                             {[item.metadata.artist, item.metadata.album].filter(Boolean).join(" • ")}
                           </p>
                         </div>
-                        <span className="shrink-0 font-mono text-xs text-[#777777]">
+                        <span className="shrink-0 font-mono text-xs text-[color:var(--theme-fg-muted,#777777)]">
                           {formatDuration(item.metadata.duration)}
                         </span>
                         <div className="flex shrink-0 items-center gap-1">
@@ -460,7 +465,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                             type="button"
                             disabled={!isPlaybackAvailable || preparingPlayback || busy}
                             onClick={() => void playPlaylist(selected.id, item.id)}
-                            className="rounded-md p-1.5 text-[#E5A00D] hover:bg-[#292929] disabled:cursor-not-allowed disabled:opacity-30"
+                            className="rounded-md p-1.5 text-[color:var(--theme-fg-accent,#E5A00D)] hover:bg-[var(--theme-surface-hover,#292929)] disabled:cursor-not-allowed disabled:opacity-30"
                             title={t("playlists.playFromTrack")}
                             aria-label={t("playlists.playFromTrack")}
                           >
@@ -470,7 +475,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                             type="button"
                             disabled={busy || preparingPlayback || index === 0}
                             onClick={() => void moveItem(selected, index, -1)}
-                            className="rounded-md p-1.5 text-[#888888] hover:bg-[#292929] hover:text-white disabled:opacity-25"
+                            className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#888888)] hover:bg-[var(--theme-surface-hover,#292929)] hover:text-[color:var(--theme-fg-primary,#ffffff)] disabled:opacity-25"
                             title={t("playlists.moveUp")}
                             aria-label={t("playlists.moveUp")}
                           >
@@ -480,7 +485,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                             type="button"
                             disabled={busy || preparingPlayback || index === selected.items.length - 1}
                             onClick={() => void moveItem(selected, index, 1)}
-                            className="rounded-md p-1.5 text-[#888888] hover:bg-[#292929] hover:text-white disabled:opacity-25"
+                            className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#888888)] hover:bg-[var(--theme-surface-hover,#292929)] hover:text-[color:var(--theme-fg-primary,#ffffff)] disabled:opacity-25"
                             title={t("playlists.moveDown")}
                             aria-label={t("playlists.moveDown")}
                           >
@@ -490,7 +495,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                             type="button"
                             disabled={busy || preparingPlayback}
                             onClick={() => void removeItem(selected.id, item.id)}
-                            className="rounded-md p-1.5 text-[#888888] hover:bg-red-400/10 hover:text-red-300 disabled:opacity-50"
+                            className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#888888)] hover:bg-red-400/10 hover:text-[color:var(--theme-fg-error,var(--color-red-300))] disabled:opacity-50"
                             title={t("playlists.removeTrack")}
                             aria-label={t("playlists.removeTrack")}
                           >
@@ -506,9 +511,9 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
           </section>
         ) : playlists.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-center">
-            <ListMusic size={48} className="mb-4 text-[#444444]" />
-            <h3 className="text-lg font-bold text-white">{t("playlists.noneTitle")}</h3>
-            <p className="mt-2 max-w-sm text-sm text-[#777777]">{t("playlists.noneHint")}</p>
+            <ListMusic size={48} className="mb-4 text-[color:var(--theme-fg-faint,#444444)]" />
+            <h3 className="text-lg font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{t("playlists.noneTitle")}</h3>
+            <p className="mt-2 max-w-sm text-sm text-[color:var(--theme-fg-muted,#777777)]">{t("playlists.noneHint")}</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -516,7 +521,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
               <article
                 key={playlist.id}
                 onClick={() => setSelectedId(playlist.id)}
-                className="group cursor-pointer rounded-xl border border-[#2A2A2A] bg-[#181818] p-5 transition-colors hover:border-[#4A3D1B] hover:bg-[#1D1D1D]"
+                className="group cursor-pointer rounded-xl border border-[color:var(--theme-border-soft,#2A2A2A)] bg-[var(--theme-surface-panel,#181818)] p-5 transition-colors hover:border-[color:var(--theme-border-accent,#4A3D1B)] hover:bg-[var(--theme-surface-panel,#1D1D1D)]"
               >
                 {editingId === playlist.id ? (
                   <form
@@ -529,20 +534,20 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                       onChange={(event) => setEditingName(event.target.value)}
                       autoFocus
                       disabled={busy}
-                      className="min-w-0 flex-1 rounded-md border border-[#E5A00D] bg-[#121212] px-2.5 py-1.5 text-sm text-white outline-none"
+                      className="min-w-0 flex-1 rounded-md border border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-base,#121212)] px-2.5 py-1.5 text-sm text-[color:var(--theme-fg-primary,#ffffff)] outline-none"
                       aria-label={t("playlists.rename")}
                     />
-                    <button type="submit" className="text-[#E5A00D]" title={t("playlists.save")}>
+                    <button type="submit" className="text-[color:var(--theme-fg-accent,#E5A00D)]" title={t("playlists.save")}>
                       <Check size={17} />
                     </button>
-                    <button type="button" onClick={() => setEditingId(null)} className="text-[#888888]" title={t("playlists.cancel")}>
+                    <button type="button" onClick={() => setEditingId(null)} className="text-[color:var(--theme-fg-muted,#888888)]" title={t("playlists.cancel")}>
                       <X size={17} />
                     </button>
                   </form>
                 ) : (
                   <>
                     <div className="flex items-start justify-between gap-4">
-                      <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#E5A00D]/10 text-[#E5A00D]">
+                      <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#E5A00D]/10 text-[color:var(--theme-fg-accent,#E5A00D)]">
                         <ListMusic size={20} />
                       </div>
                       <div className="flex items-center gap-1 opacity-60 transition-opacity group-hover:opacity-100">
@@ -552,7 +557,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                             event.stopPropagation();
                             beginRename(playlist);
                           }}
-                          className="rounded-md p-1.5 text-[#999999] hover:bg-[#2B2B2B] hover:text-white"
+                          className="rounded-md p-1.5 text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-hover,#2B2B2B)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                           title={t("playlists.rename")}
                         >
                           <Pencil size={14} />
@@ -563,18 +568,18 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                             event.stopPropagation();
                             void deletePlaylist(playlist);
                           }}
-                          className="rounded-md p-1.5 text-[#999999] hover:bg-red-400/10 hover:text-red-300"
+                          className="rounded-md p-1.5 text-[color:var(--theme-fg-secondary,#999999)] hover:bg-red-400/10 hover:text-[color:var(--theme-fg-error,var(--color-red-300))]"
                           title={t("playlists.delete")}
                         >
                           <Trash2 size={14} />
                         </button>
                       </div>
                     </div>
-                    <h3 className="mt-4 truncate font-bold text-white">{playlist.name}</h3>
-                    <p className="mt-1 text-xs text-[#777777]">
+                    <h3 className="mt-4 truncate font-bold text-[color:var(--theme-fg-primary,#ffffff)]">{playlist.name}</h3>
+                    <p className="mt-1 text-xs text-[color:var(--theme-fg-muted,#777777)]">
                       {t("playlists.itemCount", { count: playlist.items.length })}
                     </p>
-                    <p className="mt-3 text-[10px] uppercase tracking-wide text-[#555555]">
+                    <p className="mt-3 text-[10px] uppercase tracking-wide text-[color:var(--theme-fg-faint,#555555)]">
                       {t("playlists.updated", { date: formatDate(playlist.updated_at) })}
                     </p>
                   </>

@@ -408,6 +408,75 @@ impl AudioAnalyzer {
         Ok(())
     }
 
+    pub(crate) fn suspend_for_output_switch(
+        &mut self,
+        app: &AppHandle,
+    ) -> (Option<AnalyzerOwner>, Result<(), String>) {
+        self.suspend_for_output_switch_with(|analyzer| analyzer.stop(Some(app)))
+    }
+
+    fn suspend_for_output_switch_with(
+        &mut self,
+        stop: impl FnOnce(&mut Self) -> Result<(), String>,
+    ) -> (Option<AnalyzerOwner>, Result<(), String>) {
+        if !self.is_active() {
+            return (None, Ok(()));
+        }
+        let capture = self.event_owner().filter(|owner| {
+            owner
+                .lease_id
+                .as_ref()
+                .is_some_and(|lease| !lease.is_empty())
+        });
+        // stop cleans up threads even when disabling the auxiliary output fails.
+        // Retain the exact capture identity, never a generic permission to start.
+        (capture, stop(self))
+    }
+
+    pub(crate) fn resume_after_output_switch(
+        &mut self,
+        capture: &AnalyzerOwner,
+        app: &AppHandle,
+        shutdown_requested: impl FnOnce() -> bool,
+    ) -> Result<(), String> {
+        self.resume_after_output_switch_with(
+            capture,
+            |host| app.get_webview_window(host).is_some(),
+            shutdown_requested,
+            |analyzer| analyzer.start(app.clone()),
+        )
+    }
+
+    fn resume_after_output_switch_with(
+        &mut self,
+        capture: &AnalyzerOwner,
+        host_exists: impl FnOnce(&str) -> bool,
+        shutdown_requested: impl FnOnce() -> bool,
+        start: impl FnOnce(&mut Self) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let Some(lease) = capture
+            .lease_id
+            .as_deref()
+            .filter(|lease| !lease.is_empty())
+        else {
+            return Ok(());
+        };
+        if self.is_active()
+            || !self.capture_matches(
+                &capture.host,
+                &capture.session_id,
+                capture.generation,
+                lease,
+            )
+            || !self.owner_is_present(host_exists)
+            || shutdown_requested()
+        {
+            return Ok(());
+        }
+        // Called under AnalyzerState: identity cannot change between validation
+        // and start. Existing PCM/DSD reconciliation still decides FIFO enablement.
+        start(self)
+    }
     pub fn is_active(&self) -> bool {
         self.controller_stop.is_some()
     }
@@ -690,15 +759,20 @@ fn reconcile_output_with_io(
 ) -> Result<Option<&'static str>, String> {
     let assessment = (|| {
         if stop.load(Ordering::Acquire) {
-            Ok(Some("stopped"))
+            Ok((Some("stopped"), false))
         } else {
             let status = send("status")?;
             let song = send("currentsong")?;
-            Ok(playback_incompatibility(&status, &song))
+            // The active MPD output, not a UI preference or file extension,
+            // establishes Shared. A literal DoP stream remains unsupported.
+            let shared_dsd = dsd_or_dop_reason(&status, &song).is_some()
+                && !reports_dop(&status, &song)
+                && shared_pcm_outputs(&send("outputs")?);
+            Ok((playback_incompatibility(&status, &song, shared_dsd), shared_dsd))
         }
     })();
-    let mut reason = assessment.map_err(|error| disable_after_failure(error, stop, send))?;
-    if let Err(error) = ensure_auxiliary_output(reason.is_none(), stop, send) {
+    let (mut reason, shared_dsd) = assessment.map_err(|error| disable_after_failure(error, stop, send))?;
+    if let Err(error) = ensure_auxiliary_output_with_policy(reason.is_none(), shared_dsd, stop, send) {
         return Err(if reason.is_none() {
             disable_after_failure(error, stop, send)
         } else {
@@ -732,9 +806,22 @@ fn ensure_auxiliary_output(
     stop: &AtomicBool,
     send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
 ) -> Result<(), String> {
+    ensure_auxiliary_output_with_policy(requested, false, stop, send)
+}
+
+fn ensure_auxiliary_output_with_policy(
+    requested: bool,
+    shared_dsd: bool,
+    stop: &AtomicBool,
+    send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
+) -> Result<(), String> {
     let name = crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME;
-    let (id, actual) = auxiliary_output_state(&send("outputs")?, name)?;
+    let outputs = send("outputs")?;
+    let (id, actual) = auxiliary_output_state(&outputs, name)?;
     let desired = requested && !stop.load(Ordering::Acquire);
+    if desired && shared_dsd && !shared_pcm_outputs(&outputs) {
+        return Err("Saída Shared do analyzer mudou antes da confirmação.".into());
+    }
     if actual == desired {
         return Ok(());
     }
@@ -759,7 +846,11 @@ fn ensure_auxiliary_output(
         (false, false) => "disable_failed",
     });
     result?;
-    let (_, confirmed) = auxiliary_output_state(&send("outputs")?, name)?;
+    let outputs = send("outputs")?;
+    let (_, confirmed) = auxiliary_output_state(&outputs, name)?;
+    if desired && shared_dsd && !shared_pcm_outputs(&outputs) {
+        return Err("Saída Shared do analyzer mudou durante a confirmação.".into());
+    }
     if confirmed != desired && !(desired && !confirmed && stop.load(Ordering::Acquire)) {
         return Err("Estado da saída auxiliar não confirmou a transição aceita pelo MPD.".into());
     }
@@ -857,9 +948,9 @@ fn unique_value<'a>(lines: &'a [String], prefix: &str) -> Option<&'a str> {
     (values.next().is_none() && !value.is_empty()).then_some(value)
 }
 
-fn playback_incompatibility(status: &[String], song: &[String]) -> Option<&'static str> {
+fn playback_incompatibility(status: &[String], song: &[String], shared_dsd: bool) -> Option<&'static str> {
     if let Some(reason) = dsd_or_dop_reason(status, song) {
-        return Some(reason);
+        if !shared_dsd { return Some(reason); }
     }
     if unique_value(status, "state: ") == Some("stop") {
         return Some("stopped");
@@ -873,7 +964,8 @@ fn playback_incompatibility(status: &[String], song: &[String]) -> Option<&'stat
         || status_id != song_id
         || unique_value(song, "file: ").is_none()
         || status.iter().any(|line| line.starts_with("error: "))
-        || !unique_value(status, "audio: ").is_some_and(is_pcm_format)
+        || !unique_value(status, "audio: ").is_some_and(|format|
+            is_pcm_format(format) || (shared_dsd && is_dsd_format(format)))
     {
         return Some("reconcile_failed");
     }
@@ -886,6 +978,41 @@ fn is_pcm_format(value: &str) -> bool {
         && fields[0].parse::<u32>().is_ok_and(|rate| rate > 0)
         && matches!(fields[1], "8" | "16" | "24" | "32" | "f")
         && fields[2].parse::<u8>().is_ok_and(|channels| channels > 0)
+}
+
+// Only the two supervisor-owned outputs are accepted. Unknown, disabled,
+// duplicate or extra outputs cannot grant permission to analyze DSD.
+fn shared_pcm_outputs(lines: &[String]) -> bool {
+    let auxiliary = crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME;
+    let Ok((shared_id, true)) = auxiliary_output_state(lines, "Sonante Shared") else { return false; };
+    let Ok((aux_id, _)) = auxiliary_output_state(lines, auxiliary) else { return false; };
+    if shared_id == aux_id || lines.iter().filter(|line| line.starts_with("outputid: ")).count() != 2 {
+        return false;
+    }
+    for block in lines.split(|line| line.starts_with("outputid: ")).skip(1) {
+        match unique_value(block, "outputname: ") {
+            Some("Sonante Shared") if unique_value(block, "plugin: ") == Some("alsa") => {},
+            Some(name) if name == auxiliary && unique_value(block, "plugin: ") == Some("fifo") => {},
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn is_dsd_format(value: &str) -> bool {
+    let fields: Vec<_> = value.split(':').collect();
+    let channels = |value: &str| value.parse::<u8>().is_ok_and(|n| n > 0);
+    match fields.as_slice() {
+        [level, ch] => level.strip_prefix("dsd").is_some_and(|n| n.parse::<u32>().is_ok_and(|n| n > 0)) && channels(ch),
+        [rate, "dsd", ch] => rate.parse::<u32>().is_ok_and(|n| n > 0) && channels(ch),
+        _ => false,
+    }
+}
+
+fn reports_dop(status: &[String], song: &[String]) -> bool {
+    status.iter().filter_map(|line| line.strip_prefix("audio: "))
+        .chain(song.iter().filter_map(|line| line.strip_prefix("Format: ")))
+        .any(|format| format.to_ascii_lowercase().contains("dop"))
 }
 
 fn dsd_or_dop_reason(status: &[String], current_song: &[String]) -> Option<&'static str> {
@@ -1081,6 +1208,7 @@ mod tests {
         commands: Vec<String>,
         fail: Option<&'static str>,
         ignore_enable: bool,
+        primary_shared: bool,
     }
 
     impl ReconcileIo {
@@ -1099,6 +1227,7 @@ mod tests {
                 commands: Vec::new(),
                 fail: None,
                 ignore_enable: false,
+                primary_shared: false,
             }
         }
 
@@ -1113,10 +1242,12 @@ mod tests {
                 "currentsong" => Ok(self.song.clone()),
                 "outputs" => Ok(vec![
                     "outputid: 7".into(),
-                    "outputname: Sonante Output".into(),
+                    format!("outputname: {}", if self.primary_shared { "Sonante Shared" } else { "Sonante Output" }),
+                    "plugin: alsa".into(),
                     "outputenabled: 1".into(),
                     "outputid: 12".into(),
                     "outputname: Sonante Analyzer".into(),
+                    "plugin: fifo".into(),
                     format!("outputenabled: {}", u8::from(self.enabled)),
                 ]),
                 "enableoutput 12" => {
@@ -1141,6 +1272,68 @@ mod tests {
                 .filter(|command| command.ends_with("output 12"))
                 .map(String::as_str)
                 .collect()
+        }
+    }
+
+    #[test]
+    fn shared_dsd_enables_only_auxiliary_pcm_and_direct_dop_remain_blocked() {
+        let stop=AtomicBool::new(false);
+        for format in ["dsd64:2", "dsd128:2", "dsd256:2", "352800:dsd:2", "48000:24:2"] {
+            let mut io=ReconcileIo::pcm(false);io.primary_shared=true;
+            io.status[3]=format!("audio: {format}");io.song[0]="file: fixture/tone.dsf".into();
+            assert_eq!(io.reconcile(&stop).unwrap(),None,"{format}");
+            for state in ["pause","play","pause","play"] {
+                io.status[0]=format!("state: {state}");assert_eq!(io.reconcile(&stop).unwrap(),None);
+            }
+            assert_eq!(io.transitions(),["enableoutput 12"]);
+            io.primary_shared=false;
+            assert!(io.reconcile(&stop).unwrap().is_some());assert!(!io.enabled);
+            io.primary_shared=true;assert_eq!(io.reconcile(&stop).unwrap(),None);
+            io.song.push("Format: DoP:2".into());
+            assert_eq!(io.reconcile(&stop).unwrap(),Some("current_audio_format_is_dsd"));
+            assert!(!io.enabled);
+            assert_eq!(io.transitions(),["enableoutput 12","disableoutput 12","enableoutput 12","disableoutput 12"]);
+        }
+    }
+
+    #[test]
+    fn shared_dsd_still_requires_consistent_track_and_valid_audio_metadata() {
+        let stop=AtomicBool::new(false);
+        for format in ["", "dsdsecret:2", "dsd64:0", "dsd64:2:1", "0:dsd:2", "352800:dsd:0"] {
+            let mut io=ReconcileIo::pcm(true);io.primary_shared=true;
+            io.status[3]=format!("audio: {format}");io.song[0]="file: fixture/tone.dsf".into();
+            assert_eq!(io.reconcile(&stop).unwrap(),Some("reconcile_failed"));assert!(!io.enabled);
+        }
+        let mut io=ReconcileIo::pcm(true);io.primary_shared=true;io.status[3]="audio: dsd64:2".into();
+        io.song[1]="Id: 43".into();assert_eq!(io.reconcile(&stop).unwrap(),Some("reconcile_failed"));assert!(!io.enabled);
+    }
+
+    #[test]
+    fn shared_dsd_permission_rejects_ambiguous_or_non_shared_outputs() {
+        let mut io=ReconcileIo::pcm(false);io.primary_shared=true;
+        let outputs=io.send("outputs").unwrap();assert!(shared_pcm_outputs(&outputs));
+        for (old,new) in [("Sonante Shared","Sonante Output"),("outputenabled: 1","outputenabled: 0"),
+            ("plugin: alsa","plugin: null"),("plugin: fifo","plugin: alsa"),("outputid: 7","outputid: 12")] {
+            let bad:Vec<_>=outputs.iter().map(|line|line.replace(old,new)).collect();assert!(!shared_pcm_outputs(&bad),"{old} -> {new}");
+        }
+        let mut bad=outputs.clone();bad.extend(outputs[..4].iter().cloned());assert!(!shared_pcm_outputs(&bad));
+        let mut bad=outputs.clone();bad.push("outputenabled: 1".into());assert!(!shared_pcm_outputs(&bad));
+        let mut bad=outputs.clone();bad.push("plugin: fifo".into());assert!(!shared_pcm_outputs(&bad));
+        assert!(!shared_pcm_outputs(&[]));
+    }
+
+    #[test]
+    fn shared_dsd_route_change_during_enable_fails_closed_without_primary_commands() {
+        let stop=AtomicBool::new(false);
+        for change_at in [2,3] {
+            let mut io=ReconcileIo::pcm(false);io.primary_shared=true;io.status[3]="audio: dsd128:2".into();
+            let mut reads=0;
+            let result=reconcile_output_with_io(&stop,&mut |command|{
+                if command=="outputs" { reads+=1;if reads==change_at { io.primary_shared=false; } }
+                io.send(command)
+            });
+            assert!(result.is_err());assert!(!io.enabled);
+            assert!(!io.commands.iter().any(|c|c=="enableoutput 7"||c=="disableoutput 7"));
         }
     }
 
@@ -1517,6 +1710,380 @@ mod tests {
         assert_eq!(analyzer.owner_host(), Some("main"));
     }
 
+    fn output_switch_fixture() -> AudioAnalyzer {
+        let mut analyzer = AudioAnalyzer::new("unused".into(), "unused".into());
+        analyzer.ownership.claim("main", "retained".into());
+        analyzer.active_lease = Some("lease".into());
+        analyzer.controller_stop = Some(Arc::new(AtomicBool::new(false)));
+        analyzer
+    }
+
+    fn suspend_switch_fixture(
+        analyzer: &mut AudioAnalyzer,
+        io: &mut ReconcileIo,
+    ) -> (Option<AnalyzerOwner>, Result<(), String>) {
+        analyzer.suspend_for_output_switch_with(|analyzer| {
+            let stop = analyzer.controller_stop.take().unwrap();
+            stop.store(true, Ordering::Release);
+            io.reconcile(&stop).map(|_| ())
+        })
+    }
+
+    fn resume_switch_fixture(
+        analyzer: &mut AudioAnalyzer,
+        io: &mut ReconcileIo,
+    ) -> Result<(), String> {
+        let stop = Arc::new(AtomicBool::new(false));
+        io.reconcile(&stop)?;
+        analyzer.controller_stop = Some(stop);
+        Ok(())
+    }
+
+    #[test]
+    fn output_switch_confirmed_rollback_resumes_retained_capture() {
+        use std::cell::{Cell, RefCell};
+        for (failure, host) in [
+            ("output start rejected", "main"),
+            ("playback restore rejected", "now-playing"),
+        ] {
+            let analyzer = RefCell::new(output_switch_fixture());
+            analyzer.borrow_mut().ownership.owner.as_mut().unwrap().host = host.into();
+            let io = RefCell::new(ReconcileIo::pcm(true));
+            let starts = Cell::new(0);
+            let result = {
+                let mut resume = crate::AnalyzerSwitchResume::new(|capture| {
+                    analyzer.borrow_mut().resume_after_output_switch_with(
+                        capture,
+                        |current| current == host,
+                        || false,
+                        |analyzer| {
+                            starts.set(starts.get() + 1);
+                            resume_switch_fixture(analyzer, &mut io.borrow_mut())
+                        },
+                    )
+                });
+                let (capture, stopped) =
+                    suspend_switch_fixture(&mut analyzer.borrow_mut(), &mut io.borrow_mut());
+                stopped.unwrap();
+                resume.capture = capture;
+                if failure == "output start rejected" {
+                    crate::confirm_device_switch_start(Err(failure.into()), || {
+                        resume.after_rollback(Ok(()))
+                    })
+                    .map(|_| ())
+                } else {
+                    Err(crate::error_with_rollback(
+                        failure.into(),
+                        resume.after_rollback(Ok(())),
+                    ))
+                }
+            };
+            let error = result.unwrap_err();
+            assert!(error.contains(failure));
+            assert!(error.contains("Estado anterior restaurado"));
+            assert_eq!(starts.get(), 1);
+            assert!(analyzer.borrow().is_active());
+            assert_eq!(
+                io.borrow().transitions(),
+                ["disableoutput 12", "enableoutput 12"]
+            );
+            analyzer.borrow_mut().controller_stop = None;
+        }
+    }
+
+    #[test]
+    fn output_switch_resume_requires_original_live_capture_and_no_shutdown() {
+        use std::cell::{Cell, RefCell};
+        for invalidation in [
+            "inactive",
+            "no_lease",
+            "closed",
+            "released",
+            "host",
+            "session",
+            "generation",
+            "ticket_without_lease",
+            "lease",
+            "lease_revoked",
+            "new_capture",
+            "shutdown",
+            "shutdown_at_presence",
+        ] {
+            let analyzer = RefCell::new(output_switch_fixture());
+            let mut io = ReconcileIo::pcm(true);
+            if invalidation == "inactive" {
+                analyzer.borrow_mut().controller_stop = None;
+            }
+            if invalidation == "no_lease" {
+                analyzer.borrow_mut().active_lease = None;
+            }
+            let (mut capture, stopped) =
+                suspend_switch_fixture(&mut analyzer.borrow_mut(), &mut io);
+            stopped.unwrap();
+            if matches!(invalidation, "inactive" | "no_lease") {
+                assert!(capture.is_none());
+            }
+            let new_stop = Arc::new(AtomicBool::new(false));
+            match invalidation {
+                "released" => {
+                    analyzer.borrow_mut().ownership.clear_if_host("main");
+                }
+                "host" => {
+                    analyzer.borrow_mut().ownership.owner.as_mut().unwrap().host =
+                        "now-playing".into();
+                }
+                "ticket_without_lease" => {
+                    capture.as_mut().unwrap().lease_id = None;
+                }
+                "session" => {
+                    analyzer
+                        .borrow_mut()
+                        .ownership
+                        .owner
+                        .as_mut()
+                        .unwrap()
+                        .session_id = "new".into();
+                }
+                "generation" => {
+                    analyzer
+                        .borrow_mut()
+                        .ownership
+                        .claim("main", "retained".into());
+                }
+                "lease" => {
+                    analyzer.borrow_mut().active_lease = Some("new-lease".into());
+                }
+                "lease_revoked" => {
+                    analyzer.borrow_mut().active_lease = None;
+                }
+                "new_capture" => {
+                    analyzer.borrow_mut().controller_stop = Some(Arc::clone(&new_stop));
+                }
+                _ => {}
+            }
+            let expected_owner = analyzer.borrow().event_owner();
+            let starts = Cell::new(0);
+            let shutdown = Cell::new(invalidation == "shutdown");
+            {
+                let mut resume = crate::AnalyzerSwitchResume::new(|capture| {
+                    analyzer.borrow_mut().resume_after_output_switch_with(
+                        capture,
+                        |_| {
+                            if invalidation == "shutdown_at_presence" {
+                                shutdown.set(true);
+                            }
+                            invalidation != "closed"
+                        },
+                        || shutdown.get(),
+                        |_| {
+                            starts.set(starts.get() + 1);
+                            Ok(())
+                        },
+                    )
+                });
+                resume.capture = capture;
+                resume.after_rollback(Ok(())).unwrap();
+            }
+            assert_eq!(starts.get(), 0, "{invalidation}");
+            assert_eq!(
+                analyzer.borrow().event_owner(),
+                expected_owner,
+                "{invalidation}"
+            );
+            assert_eq!(analyzer.borrow().is_active(), invalidation == "new_capture");
+            assert!(
+                !new_stop.load(Ordering::Acquire),
+                "must not stop a newer capture"
+            );
+            analyzer.borrow_mut().controller_stop = None;
+        }
+    }
+
+    #[test]
+    fn output_switch_uncertain_or_failed_rollback_never_resumes() {
+        use std::cell::Cell;
+        for uncertain in [false, true] {
+            let mut analyzer = output_switch_fixture();
+            let (capture, stopped) =
+                suspend_switch_fixture(&mut analyzer, &mut ReconcileIo::pcm(true));
+            stopped.unwrap();
+            let starts = Cell::new(0);
+            let error = {
+                let mut resume = crate::AnalyzerSwitchResume::new(|_| {
+                    starts.set(starts.get() + 1);
+                    Ok(())
+                });
+                resume.capture = capture;
+                let error = if uncertain {
+                    crate::config::ConfigSaveError::AfterRenameUnconfirmed(
+                        "original persistence error".into(),
+                    )
+                } else {
+                    crate::config::ConfigSaveError::BeforeRename(
+                        "original persistence error".into(),
+                    )
+                };
+                crate::config_save_failure_with_rollback(error, || {
+                    assert!(
+                        !uncertain,
+                        "uncertain persistence must not invoke rollback or authorize resume"
+                    );
+                    resume
+                        .after_rollback(Err("rollback failed".into()))
+                        .map_err(crate::config::ConfigSaveError::BeforeRename)
+                })
+            };
+            assert_eq!(starts.get(), 0);
+            assert!(!analyzer.is_active());
+            let message = crate::config_save_error_message(&error);
+            assert!(message.contains("original persistence error"));
+            assert_eq!(message.contains("rollback failed"), !uncertain);
+        }
+    }
+
+    #[test]
+    fn output_switch_success_and_confirmed_persistence_rollback_resume_once() {
+        use std::cell::{Cell, RefCell};
+        for rollback in [false, true] {
+            let analyzer = RefCell::new(output_switch_fixture());
+            let io = RefCell::new(ReconcileIo::pcm(true));
+            let (capture, stopped) =
+                suspend_switch_fixture(&mut analyzer.borrow_mut(), &mut io.borrow_mut());
+            stopped.unwrap();
+            let starts = Cell::new(0);
+            {
+                let mut resume = crate::AnalyzerSwitchResume::new(|capture| {
+                    analyzer.borrow_mut().resume_after_output_switch_with(
+                        capture,
+                        |_| true,
+                        || false,
+                        |analyzer| {
+                            starts.set(starts.get() + 1);
+                            resume_switch_fixture(analyzer, &mut io.borrow_mut())
+                        },
+                    )
+                });
+                resume.capture = capture;
+                if rollback {
+                    let error = crate::config_save_failure_with_rollback(
+                        crate::config::ConfigSaveError::BeforeRename("persist refused".into()),
+                        || {
+                            resume
+                                .after_rollback(Ok(()))
+                                .map_err(crate::config::ConfigSaveError::BeforeRename)
+                        },
+                    );
+                    assert!(crate::config_save_error_message(&error).contains("persist refused"));
+                } else {
+                    resume.confirmed = true;
+                }
+            }
+            assert_eq!(starts.get(), 1);
+            assert!(analyzer.borrow().is_active());
+            analyzer.borrow_mut().controller_stop = None;
+        }
+    }
+
+    #[test]
+    fn output_switch_analyzer_failures_preserve_primary_result_without_retry() {
+        use std::cell::{Cell, RefCell};
+        for failures in ["stop", "start", "both"] {
+            let analyzer = RefCell::new(output_switch_fixture());
+            let mut io = ReconcileIo::pcm(true);
+            let stop_fails = failures != "start";
+            let start_fails = failures != "stop";
+            if stop_fails {
+                io.fail = Some("disableoutput 12");
+            }
+            let (capture, stopped) = suspend_switch_fixture(&mut analyzer.borrow_mut(), &mut io);
+            assert_eq!(stopped.is_err(), stop_fails);
+            assert!(!analyzer.borrow().is_active());
+            io.fail = None;
+            io.enabled = false; // Confirmed supervisor restart disables the auxiliary output.
+            let starts = Cell::new(0);
+            let original = {
+                let mut resume = crate::AnalyzerSwitchResume::new(|capture| {
+                    analyzer.borrow_mut().resume_after_output_switch_with(
+                        capture,
+                        |_| true,
+                        || false,
+                        |analyzer| {
+                            starts.set(starts.get() + 1);
+                            if start_fails {
+                                Err("synthetic analyzer start failure".into())
+                            } else {
+                                resume_switch_fixture(analyzer, &mut io)
+                            }
+                        },
+                    )
+                });
+                resume.capture = capture;
+                crate::confirm_device_switch_start(Err("primary output failure".into()), || {
+                    resume.after_rollback(Ok(()))
+                })
+            };
+            assert_eq!(starts.get(), 1);
+            assert_eq!(analyzer.borrow().is_active(), !start_fails);
+            assert_eq!(
+                original.unwrap_err(),
+                "Falha ao iniciar nova saída: primary output failure. Estado anterior restaurado."
+            );
+            analyzer.borrow_mut().controller_stop = None;
+        }
+        // An auxiliary failure must not claim that an applied configuration failed.
+        let mut analyzer = output_switch_fixture();
+        let (capture, stopped) = suspend_switch_fixture(&mut analyzer, &mut ReconcileIo::pcm(true));
+        stopped.unwrap();
+        let applied: Result<(), String> = {
+            let mut resume = crate::AnalyzerSwitchResume::new(|capture| {
+                analyzer.resume_after_output_switch_with(
+                    capture,
+                    |_| true,
+                    || false,
+                    |_| Err("synthetic FIFO error".into()),
+                )
+            });
+            resume.capture = capture;
+            resume.confirmed = true;
+            Ok(())
+        };
+        assert!(applied.is_ok());
+        assert!(!analyzer.is_active());
+    }
+
+    #[test]
+    fn output_switch_shutdown_gate_refuses_resume_and_keeps_transaction_order() {
+        use std::cell::Cell;
+        for shutdown in [false, true] {
+            let transaction = crate::ConfigTransactionState::new();
+            let resumed = Cell::new(false);
+            {
+                let _save = transaction.begin().unwrap();
+                let mut resume = crate::AnalyzerSwitchResume::new(|_| {
+                    assert!(
+                        transaction.operations.reserve().is_err(),
+                        "Save must still own admission while resuming"
+                    );
+                    let Some(_permit) = transaction.try_begin_restart() else {
+                        return Ok(());
+                    };
+                    resumed.set(true);
+                    Ok(())
+                });
+                let mut analyzer = output_switch_fixture();
+                let (capture, stopped) =
+                    suspend_switch_fixture(&mut analyzer, &mut ReconcileIo::pcm(true));
+                stopped.unwrap();
+                resume.capture = capture;
+                resume.after_rollback(Ok(())).unwrap();
+                if shutdown {
+                    transaction.request_shutdown();
+                }
+            }
+            assert_eq!(resumed.get(), !shutdown);
+            assert_eq!(transaction.begin().is_ok(), !shutdown);
+        }
+    }
     #[test]
     fn configuration_resume_follows_retained_owner_and_revocation() {
         let mut analyzer =

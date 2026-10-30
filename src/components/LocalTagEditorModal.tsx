@@ -210,21 +210,21 @@ export const LocalTagEditorModal: React.FC<Props> = ({ path, displayName, onClos
         role="dialog"
         aria-modal="true"
         aria-labelledby="local-tag-editor-title"
-        className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#333333] bg-[#171717] shadow-2xl"
+        className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-panel,#171717)] shadow-2xl"
       >
-        <header className="flex items-center justify-between border-b border-[#292929] px-5 py-4">
+        <header className="flex items-center justify-between border-b border-[color:var(--theme-border-soft,#292929)] px-5 py-4">
           <div className="min-w-0">
-            <h2 id="local-tag-editor-title" className="text-base font-bold text-white">
+            <h2 id="local-tag-editor-title" className="text-base font-bold text-[color:var(--theme-fg-primary,#ffffff)]">
               {t("tagEditor.title")}
             </h2>
-            <p className="mt-1 truncate text-xs text-[#777777]">{displayName}</p>
+            <p className="mt-1 truncate text-xs text-[color:var(--theme-fg-muted,#777777)]">{displayName}</p>
           </div>
           <button
             type="button"
             onClick={requestClose}
             disabled={saving}
             aria-label={t("tagEditor.close")}
-            className="rounded-lg p-2 text-[#888888] hover:bg-[#252525] hover:text-white disabled:opacity-50"
+            className="rounded-lg p-2 text-[color:var(--theme-fg-muted,#888888)] hover:bg-[var(--theme-surface-raised,#252525)] hover:text-[color:var(--theme-fg-primary,#ffffff)] disabled:opacity-50"
           >
             <X size={18} />
           </button>
@@ -235,10 +235,10 @@ export const LocalTagEditorModal: React.FC<Props> = ({ path, displayName, onClos
             role={message.kind === "error" ? "alert" : "status"}
             className={`mx-5 mt-4 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${
               message.kind === "success"
-                ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-200"
+                ? "border-[color:var(--theme-border-success,var(--color-emerald-400))]/25 bg-emerald-400/10 text-[color:var(--theme-fg-success,var(--color-emerald-200))]"
                 : message.kind === "warning"
-                  ? "border-amber-400/25 bg-amber-400/10 text-amber-100"
-                  : "border-red-400/25 bg-red-400/10 text-red-200"
+                  ? "border-[color:var(--theme-border-accent,var(--color-amber-400))]/25 bg-amber-400/10 text-[color:var(--theme-fg-accent,var(--color-amber-100))]"
+                  : "border-[color:var(--theme-border-error,var(--color-red-400))]/25 bg-red-400/10 text-[color:var(--theme-fg-error,var(--color-red-200))]"
             }`}
           >
             {message.kind === "warning" && <AlertTriangle size={15} className="mt-0.5 shrink-0" />}
@@ -247,24 +247,24 @@ export const LocalTagEditorModal: React.FC<Props> = ({ path, displayName, onClos
         )}
 
         {loading && !draft ? (
-          <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-[#888888]">
+          <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-[color:var(--theme-fg-muted,#888888)]">
             <LoaderCircle size={20} className="animate-spin" />
             <span>{t("tagEditor.loading")}</span>
           </div>
         ) : draft ? (
           <form onSubmit={saveTags} className="flex min-h-0 flex-1 flex-col">
             <div className="overflow-y-auto px-5 py-4">
-              <div className="mb-4 flex items-center gap-2 text-[11px] uppercase tracking-wider text-[#777777]">
+              <div className="mb-4 flex items-center gap-2 text-[11px] uppercase tracking-wider text-[color:var(--theme-fg-muted,#777777)]">
                 <span>{draft.initial.format.toUpperCase()}</span>
                 <span>•</span>
-                <span className={writable ? "text-emerald-300" : "text-amber-300"}>
+                <span className={writable ? "text-[color:var(--theme-fg-success,var(--color-emerald-300))]" : "text-[color:var(--theme-fg-accent,var(--color-amber-300))]"}>
                   {t(writable ? "tagEditor.editable" : "tagEditor.readOnlyLabel")}
                 </span>
               </div>
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 {textFields.map((field, index) => (
-                  <label key={field} htmlFor={`local-tag-${field}`} className="space-y-1.5 text-xs text-[#BBBBBB]">
+                  <label key={field} htmlFor={`local-tag-${field}`} className="space-y-1.5 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)]">
                     <span>{t(`tagEditor.fields.${field}`)}</span>
                     <input
                       id={`local-tag-${field}`}
@@ -273,14 +273,14 @@ export const LocalTagEditorModal: React.FC<Props> = ({ path, displayName, onClos
                       value={draft.values[field]}
                       onChange={(event) => setValue(field, event.target.value)}
                       disabled={!writable || saving}
-                      className="w-full rounded-lg border border-[#333333] bg-[#111111] px-3 py-2 text-sm text-white outline-none focus:border-[#E5A00D] disabled:opacity-60"
+                      className="w-full rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-base,#111111)] px-3 py-2 text-sm text-[color:var(--theme-fg-primary,#ffffff)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-60"
                     />
                   </label>
                 ))}
                 {numberFields.map((field) => {
                   const fieldError = validationMessage(field);
                   return (
-                    <label key={field} htmlFor={`local-tag-${field}`} className="space-y-1.5 text-xs text-[#BBBBBB]">
+                    <label key={field} htmlFor={`local-tag-${field}`} className="space-y-1.5 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)]">
                       <span>{t(`tagEditor.fields.${field}`)}</span>
                       <input
                         id={`local-tag-${field}`}
@@ -292,23 +292,23 @@ export const LocalTagEditorModal: React.FC<Props> = ({ path, displayName, onClos
                         onChange={(event) => setValue(field, event.target.value)}
                         disabled={!writable || saving}
                         aria-invalid={Boolean(fieldError)}
-                        className="w-full rounded-lg border border-[#333333] bg-[#111111] px-3 py-2 text-sm text-white outline-none focus:border-[#E5A00D] disabled:opacity-60"
+                        className="w-full rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-base,#111111)] px-3 py-2 text-sm text-[color:var(--theme-fg-primary,#ffffff)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-60"
                       />
-                      {fieldError && <span className="block text-[11px] text-red-300">{fieldError}</span>}
+                      {fieldError && <span className="block text-[11px] text-[color:var(--theme-fg-error,var(--color-red-300))]">{fieldError}</span>}
                     </label>
                   );
                 })}
               </div>
             </div>
 
-            <footer className="flex items-center justify-between gap-3 border-t border-[#292929] px-5 py-4">
+            <footer className="flex items-center justify-between gap-3 border-t border-[color:var(--theme-border-soft,#292929)] px-5 py-4">
               <div>
                 {draft.revisionConflict && (
                   <button
                     type="button"
                     onClick={() => void loadTags(true)}
                     disabled={saving || reloading}
-                    className="flex items-center gap-2 rounded-lg border border-amber-400/30 px-3 py-2 text-xs font-bold text-amber-200 hover:bg-amber-400/10 disabled:opacity-50"
+                    className="flex items-center gap-2 rounded-lg border border-[color:var(--theme-border-accent,var(--color-amber-400))]/30 px-3 py-2 text-xs font-bold text-[color:var(--theme-fg-accent,var(--color-amber-200))] hover:bg-amber-400/10 disabled:opacity-50"
                   >
                     <RotateCcw size={14} className={reloading ? "animate-spin" : ""} />
                     {t("tagEditor.reload")}
@@ -320,7 +320,7 @@ export const LocalTagEditorModal: React.FC<Props> = ({ path, displayName, onClos
                   type="button"
                   onClick={requestClose}
                   disabled={saving}
-                  className="rounded-lg border border-[#333333] px-4 py-2 text-sm font-semibold text-white hover:bg-[#252525] disabled:opacity-50"
+                  className="rounded-lg border border-[color:var(--theme-border-soft,#333333)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#252525)] disabled:opacity-50"
                 >
                   {t("tagEditor.cancel")}
                 </button>

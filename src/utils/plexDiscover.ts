@@ -542,6 +542,25 @@ export class PlexDiscoverSession {
       artist_recommendation, artist_candidates: candidates,
       items: hub.items.slice(0, cap).map(item => ({ ...item, library_title: library.title })), partial: hub.partial || hub.items.length > cap };
   }
+  private ownsMixTrack(track: PlexMixTrack) {
+    return !!this.scope && this.state.mix.opened && this.state.mix.phase === "ready"
+      && this.state.mix.tracks.includes(track) && track.server_id === this.scope.serverId
+      && (this.scope.libraryId === "all" || this.scope.libraryId === track.library_id)
+      && this.scope.libraries.some(library => library.key === track.library_id);
+  }
+  mixAlbum(track: PlexMixTrack): PlexAlbum | null {
+    if (!this.ownsMixTrack(track) || typeof track.album_rating_key !== "string"
+      || !/^\d{1,20}$/.test(track.album_rating_key) || !track.album_title?.trim()) return null;
+    return { rating_key: track.album_rating_key, title: track.album_title, artist: track.artist ?? "",
+      artist_rating_key: typeof track.artist_rating_key === "string" && /^\d{1,20}$/.test(track.artist_rating_key) ? track.artist_rating_key : undefined,
+      server_id: track.server_id, library_id: track.library_id, library_title: track.library_title, thumb: track.thumb ?? undefined };
+  }
+  mixArtist(track: PlexMixTrack): SelectedArtist | null {
+    if (!this.ownsMixTrack(track) || typeof track.artist_rating_key !== "string"
+      || !/^\d{1,20}$/.test(track.artist_rating_key) || !track.artist?.trim()) return null;
+    return { rating_key: track.artist_rating_key, name: track.artist,
+      server_id: track.server_id, library_id: track.library_id, thumb: null };
+  }
   owns(item: PlexDiscoverItem) {
     return !!this.scope && (this.state.hero.item === item || this.state.hero.candidates.includes(item) || [...this.state.hubs, ...this.state.libraries.flatMap(row => row.page?.hubs ?? []), ...(this.state.detail?.hub ? [this.state.detail.hub] : [])].some(hub => hub.items.includes(item)));
   }
