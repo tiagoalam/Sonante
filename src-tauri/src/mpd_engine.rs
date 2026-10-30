@@ -263,12 +263,16 @@ mod tests {
 
     #[test]
     fn live_child_identity_is_checked_without_trusting_its_name() {
-        let program = Path::new("/usr/bin/sleep");
+        let program = Path::new("/usr/bin/cat");
         let expected = hash_file(program).unwrap();
         let engine =
             MpdEngine::resolve_override(Some(program.as_os_str()), true, &expected).unwrap();
+        // Keep stdin open so this owned fixture cannot expire while a busy
+        // runner is descheduled between spawn and the executable hash checks.
         let mut child = std::process::Command::new(engine.program())
-            .arg("2")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
         let accepted = engine.verify_child(&child);
@@ -279,7 +283,7 @@ mod tests {
         let rejected = wrong.verify_child(&child);
         let _ = child.kill();
         child.wait().unwrap();
-        assert!(accepted.is_ok());
+        assert!(accepted.is_ok(), "owned fixture identity: {accepted:?}");
         assert!(rejected.is_err());
     }
     struct Fixture(PathBuf);
