@@ -1,5 +1,5 @@
 import type { LocalAlbum } from "../types/local";
-import { compareLocalAlbumsAscending } from "./localAlbumNavigation.ts";
+import { compareLocalAlbumsAscending, localAlbumAddedAt } from "./localAlbumNavigation.ts";
 
 // One replaceable, presentation-only record per webview origin. Never persist
 // AppConfig, artwork, track lists, credentials or a playback confirmation here.
@@ -43,7 +43,9 @@ function projectAlbum(item: unknown): LocalAlbum | null {
       || !text(disc.folder_path) || !count(disc.track_count)) return null;
     discs.push({ number: disc.number, label: disc.label, folder_path: disc.folder_path, track_count: disc.track_count });
   }
+  const addedAt = localAlbumAddedAt(item.added_at);
   return { id: item.id, title: item.title, artist: item.artist,
+    ...(addedAt !== null ? { added_at: addedAt } : {}),
     folder_path: item.folder_path, track_count: item.track_count, discs,
     ...(typeof item.year === "string" ? { year: item.year } : {}),
     ...(Array.isArray(item.genres) ? { genres: [...item.genres] as string[] } : {}),

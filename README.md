@@ -25,9 +25,9 @@ Sonante is designed for substantial, imperfect real-world libraries: multiple st
 
 Download the complete package and `SHA256SUMS.txt` from [Sonante 0.5.6](https://github.com/tiagoalam/Sonante/releases/tag/v0.5.6) for your distribution:
 
-- Ubuntu 22.04: `sonante_0.5.6-2_amd64.deb` (`apt install ./sonante_0.5.6-2_amd64.deb`).
-- Fedora 44: `sonante-0.5.6-2.x86_64.rpm` (`dnf install ./sonante-0.5.6-2.x86_64.rpm`).
-- Arch Linux / Manjaro: `sonante-0.5.6-2-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.5.6-2-x86_64.pkg.tar.zst`).
+- Ubuntu 22.04: `sonante_0.5.6-3_amd64.deb` (`apt install ./sonante_0.5.6-3_amd64.deb`).
+- Fedora 44: `sonante-0.5.6-3.x86_64.rpm` (`dnf install ./sonante-0.5.6-3.x86_64.rpm`).
+- Arch Linux / Manjaro: `sonante-0.5.6-3-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.5.6-3-x86_64.pkg.tar.zst`).
 
 Close Sonante before upgrading, and install with your distribution's package manager. Verify the supplied checksum first. Packages manage their own pinned audio runtimes and do not enable a system MPD service. Corresponding runtime source sidecars accompany the packages; they are not installed into `/usr`.
 
@@ -155,7 +155,7 @@ cargo check --manifest-path src-tauri/Cargo.toml --locked
 python3 -m unittest discover -s tests -p '*packaging_test.py'
 ```
 
-Development CI now produces **`sonante-complete-linux-packages`** after both native build jobs pass. This artifact contains complete DEB, Fedora RPM and Arch installers, corresponding sources and `SHA256SUMS.txt`. The separate `sonante-compilation-*-inputs` artifacts are intermediate build inputs. See [complete-package assembly](packaging/COMPLETE_PACKAGES.md) for provenance, checks and local reproduction. The manual workflow uses the same assembly; it does not publish a release. Published 0.5.6 downloads are the revision-2 packages listed above; CI rebuilds do not replace those tested release assets. AppImage is outside this scope.
+Development CI now produces **`sonante-complete-linux-packages`** after both native build jobs pass. This artifact contains complete DEB, Fedora RPM and Arch installers, corresponding sources and `SHA256SUMS.txt`. The separate `sonante-compilation-*-inputs` artifacts are intermediate build inputs. See [complete-package assembly](packaging/COMPLETE_PACKAGES.md) for provenance, checks and local reproduction. The manual workflow uses the same assembly; it does not publish a release. The 0.5.6 release uses revision-3 packages with the final Local library updates; CI rebuilds do not replace published assets. AppImage is outside this scope.
 
 ## Project status and scope
 

@@ -232,7 +232,7 @@ jobs:
             --candidates "$RUNNER_TEMP/sonante-candidates" \
             --work-dir "$RUNNER_TEMP/sonante-complete-work" \
             --output "$RUNNER_TEMP/sonante-complete-output" \
-            --revision 2
+            --revision 3
       - name: Upload complete installable packages
         uses: actions/upload-artifact@v4
         with:

@@ -622,7 +622,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   };
 
   const [checkingLibrary, setCheckingLibrary] = useState(false);
-  const [checkFeedback, setCheckFeedback] = useState<{scope: string; kind: "updated" | "unchanged" | "failed"} | null>(null);
+  const [checkFeedback, setCheckFeedback] = useState<{scope: string; kind: "updated" | "unchanged" | "failed" | "other-source-unavailable"} | null>(null);
   const libraryCheckInFlight = useRef(false);
   const browserMounted = useRef(true);
   useEffect(() => { browserMounted.current = true; return () => { browserMounted.current = false; }; }, []);
@@ -640,6 +640,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     { value: "artist-desc", label: t("localBrowser.sortArtistDesc") },
     { value: "year-newest", label: t("localBrowser.sortYearNewest") },
     { value: "year-oldest", label: t("localBrowser.sortYearOldest") },
+    { value: "added-newest", label: t("localBrowser.sortAddedNewest") },
+    { value: "added-oldest", label: t("localBrowser.sortAddedOldest") },
   ], [t]);
   const localArtistSortOptions = useMemo(() => [
     { value: "artist-asc", label: t("localBrowser.sortArtistAsc") },
@@ -666,7 +668,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       if (browserMounted.current) setCheckFeedback({scope, kind: changed ? "updated" : "unchanged"});
     } catch (error) {
       logError("library.check-changes", error);
-      if (browserMounted.current) setCheckFeedback({scope, kind: "failed"});
+      if (browserMounted.current) setCheckFeedback({scope, kind:
+        error === "LOCAL_INCREMENTAL_CHECK_OTHER_SOURCE_UNAVAILABLE" ? "other-source-unavailable" : "failed"});
     } finally {
       libraryCheckInFlight.current = false;
       if (browserMounted.current) setCheckingLibrary(false);
@@ -906,7 +909,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
           <div>
             <h2 className="text-2xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight">{headerTitle}</h2>
-            <p className="text-xs text-[color:var(--theme-fg-muted,#888888)] mt-0.5">{headerCount}</p>
+            <p className={selectedAlbum || viewMode === "folders"
+              ? "mt-0.5 text-xs text-[color:var(--theme-fg-muted,#888888)]"
+              : "mt-1 text-sm font-medium tabular-nums text-[color:var(--theme-fg-secondary,#BBBBBB)]"}>{headerCount}</p>
             {viewMode === "albums" && artworkActivity && (
               <div className="text-[11px] text-[color:var(--theme-fg-muted,#777777)] mt-1 flex flex-wrap items-center gap-x-2">
                 <span className="text-[color:var(--theme-fg-accent,#E5A00D)] flex items-center gap-1 max-w-72 truncate" title={artworkActivity.title}>
@@ -994,9 +999,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
             </>
           )}
           {canSelectLibraryCheck && <div className="ml-auto flex min-w-0 shrink-0 items-center gap-2">
-            {checkFeedback?.scope === libraryCheckScope && <span role="status" className="max-w-40 truncate text-[11px] text-[color:var(--theme-fg-muted,#888888)]">
+            {checkFeedback?.scope === libraryCheckScope && <span role="status"
+              title={checkFeedback.kind === "other-source-unavailable" ? t("localBrowser.checkLibrary.otherSourceUnavailableHelp") : undefined}
+              className="max-w-40 truncate text-[11px] text-[color:var(--theme-fg-muted,#888888)]">
               {t(checkFeedback.kind === "updated" ? "localBrowser.checkLibrary.updated"
-                : checkFeedback.kind === "unchanged" ? "localBrowser.checkLibrary.unchanged" : "localBrowser.checkLibrary.failed")}
+                : checkFeedback.kind === "unchanged" ? "localBrowser.checkLibrary.unchanged"
+                : checkFeedback.kind === "other-source-unavailable" ? "localBrowser.checkLibrary.otherSourceUnavailable" : "localBrowser.checkLibrary.failed")}
             </span>}
             <button type="button" onClick={handleLibraryCheck} disabled={checkDisabled} aria-busy={checkingLibrary}
               title={t(checkingLibrary ? "localBrowser.checkLibrary.checking" : activeSourceId !== null || libraryPresentation.mode === "single"

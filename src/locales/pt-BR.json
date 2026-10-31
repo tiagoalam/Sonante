@@ -458,7 +458,9 @@
       "helpAll": "Verificar alterações em todas as bibliotecas locais",
       "updated": "Biblioteca atualizada",
       "unchanged": "Sem alterações",
-      "failed": "Não foi possível verificar. Tente novamente."
+      "failed": "Não foi possível verificar. Tente novamente.",
+      "otherSourceUnavailable": "Selecione Todas e verifique",
+      "otherSourceUnavailableHelp": "Não foi possível confirmar um arquivo de outra biblioteca. Confirme que as pastas estão disponíveis e use Verificar alterações com Todas selecionado."
     },
     "catalogReadUnavailable": "Não foi possível validar o catálogo local. Consulte o estado da biblioteca antes de tentar novamente.",
     "catalogUnsupportedFormat": "O formato salvo da biblioteca local não é suportado por esta versão do Sonante. A consulta está bloqueada; aguardar a atualização da biblioteca não resolve essa incompatibilidade. Preserve os arquivos existentes para análise.",
@@ -507,6 +509,8 @@
     "sortArtistDesc": "Artista Z–A",
     "sortYearNewest": "Ano — mais recente",
     "sortYearOldest": "Ano — mais antigo",
+    "sortAddedNewest": "Adicionados — mais recentes",
+    "sortAddedOldest": "Adicionados — mais antigos",
     "albumIndex": "Índice alfabético de álbuns",
     "jumpToBucket": "Ir para {{bucket}}",
     "artistIndex": "Índice alfabético de artistas",
@@ -720,7 +724,7 @@
     "playAlbum": "Tocar Álbum"
   },
   "settings": {
-    "localWatchNeedsCheck": "O monitoramento automático da biblioteca precisa de atenção. Confirme que as pastas estão disponíveis e as gravações terminaram; depois use Reindexar nas preferências locais.",
+    "localWatchNeedsCheck": "O monitoramento automático da biblioteca foi interrompido. Confirme que as pastas estão disponíveis e as cópias terminaram. Para atualizar o catálogo, use Verificar alterações.",
     "noServerSelected": "Nenhum servidor selecionado.",
     "manualTokenPlaceholder": "Token manual",
     "deviceAvailability": {

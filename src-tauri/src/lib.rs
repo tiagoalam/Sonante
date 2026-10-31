@@ -3794,7 +3794,14 @@ fn prepare_index_check(socket:&str, inventory:index_coverage::Inventory, ids:std
 fn get_local_watch_needs_check(watcher: State<LocalWatcherState>) -> bool { watcher.needs_check() }
 
 fn local_watch_needs_check(app: &AppHandle, reason: &'static str) {
-    if reason == "ready" { let _ = app.emit("local-library-watch-ready", ()); return; }
+    match local_watcher::notice_needs_check(reason) {
+        None => {
+            eprintln!("[Watcher] changes_pending; external changes await an explicit Check for changes; no automatic catalog update");
+            return;
+        }
+        Some(false) => { let _ = app.emit("local-library-watch-ready", ()); return; }
+        Some(true) => {}
+    }
     app.state::<LocalWatcherState>().mark_needs_check();
     eprintln!("[Watcher] needs_check={reason}; automatic monitoring stopped or unavailable; manual rescan after writes/sources are stable");
     let _ = app.emit("local-library-watch-needs-check", ());
@@ -3842,19 +3849,18 @@ fn start_local_watcher(app: &AppHandle) {
     let notice_app = app.clone();
     let watcher_app = app.clone();
     let result = current_local_watch_context(app).and_then(|context| app.state::<LocalWatcherState>().start_context(context,
-        // File events may request a manual check; they never publish a new
-        // generation or update the MPD database without a user action.
+        // Normal external changes are informational. Source/context failures
+        // remain actionable alarms. Neither path publishes a generation or
+        // updates the MPD database without a user action.
         move |batch| {
             use local_watcher::Reconcile;
             let folders = match watcher_app.state::<ConfigState>().0.lock() {
                 Ok(config) => config.local_folders.clone(), Err(_) => return Reconcile::Blocked,
             };
             if !batch.context.is_current(&MpdSupervisor::library_dir(), &folders) { return Reconcile::Blocked; }
-            match watcher_app.state::<LocalWatcherState>().own_writes.filter(batch) {
-                None => Reconcile::Busy,
-                Some(batch) if batch.paths.is_empty() => Reconcile::Confirmed,
-                Some(_) => Reconcile::Blocked,
-            }
+            local_watcher::reconcile_manual_changes(
+                &watcher_app.state::<LocalWatcherState>().own_writes, batch,
+            )
         },
         move |reason| local_watch_needs_check(&notice_app, reason)));
     if result.is_err() { local_watch_needs_check(app, "start_failed"); }

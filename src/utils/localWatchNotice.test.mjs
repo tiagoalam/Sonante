@@ -21,7 +21,7 @@ function mount(lang='pt-BR',query=async()=>false,report=null){
 }
 function find(node,predicate){if(!React.isValidElement(node))return null;if(predicate(node))return node;for(const child of React.Children.toArray(node.props.children)){const found=find(child,predicate);if(found)return found;}return null;}
 test('real notice subscribes once, loads persisted issue, translates and opens Local preferences',async()=>{
- for(const lang of ['pt-BR','en']){const f=mount(lang,async()=>true);await flush();const html=f.html();assert.match(html,/role="alert"/);assert.ok(html.includes(lang==='pt-BR'?'monitoramento automático':'Automatic library monitoring'));
+ for(const lang of ['pt-BR','en']){const f=mount(lang,async()=>true);await flush();const html=f.html();assert.match(html,/role="alert"/);assert.ok(html.includes(lang==='pt-BR'?'monitoramento automático':'Automatic library monitoring'));assert.ok(html.includes(lang==='pt-BR'?'Verificar alterações':'Check for changes'));assert.doesNotMatch(html,/Reindex/i);
  const button=find(f.draw(),n=>n.type==='button'&&!n.props['aria-label']);button.props.onClick();assert.equal(f.opened,1);assert.equal(f.calls,1);for(let i=0;i<10;i++)f.draw();assert.equal(f.calls,1);f.close();assert.equal(f.cleaned.length,2);}
 });
 test('ready notification clears issue and stale startup query cannot restore it',async()=>{

@@ -314,6 +314,8 @@ pub struct LocalAlbum {
     pub title: String,
     pub artist: String,
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<String>,
     #[serde(default)]
     pub genres: Vec<String>,
     pub folder_path: String,
@@ -1088,6 +1090,7 @@ const LOCAL_ALBUM_PAGE_SIZE: usize = 500;
 struct AlbumCollector {
     title: String,
     year: Option<String>,
+    added_at: Option<String>,
     genres: Vec<String>,
     track_count: usize,
     tag_presence: LocalAlbumTagPresence,
@@ -1121,7 +1124,40 @@ struct VirtualCueTrackPath {
     physical_folder: String,
 }
 
+// MPD emits Added in UTC at second precision. Unknown/invalid optional
+// metadata must not prevent the rest of the catalog from being displayed.
+fn parse_local_album_added_at(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20 || !bytes.iter().enumerate().all(|(i, b)| match i {
+        4 | 7 => *b == b'-',
+        10 => *b == b'T',
+        13 | 16 => *b == b':',
+        19 => *b == b'Z',
+        _ => b.is_ascii_digit(),
+    }) { return None; }
+    let year = value[..4].parse::<u32>().ok()?;
+    let month = value[5..7].parse::<usize>().ok()?;
+    let day = value[8..10].parse::<u32>().ok()?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if year < 1970 || !(1..=12).contains(&month) || day == 0 || day > days[month - 1]
+        || value[11..13].parse::<u32>().ok()? > 23
+        || value[14..16].parse::<u32>().ok()? > 59
+        || value[17..19].parse::<u32>().ok()? > 59 { return None; }
+    Some(value.to_owned())
+}
+
 impl AlbumCollector {
+    // The album entered the catalog with its first known track. Adding another
+    // track/disc or editing tags must not make an existing album look new.
+    fn observe_added_at(&mut self, added: Option<String>) {
+        if let Some(added) = added {
+            if self.added_at.as_ref().is_none_or(|previous| added < *previous) {
+                self.added_at = Some(added);
+            }
+        }
+    }
+
     fn into_disc_tracks(self) -> Vec<LocalAlbumDiscTracks> {
         let tracks = self.tracks;
         self.discs
@@ -1141,6 +1177,7 @@ impl AlbumCollector {
         for genre in &other.genres {
             crate::catalog_genres::add_genre(&mut self.genres, genre);
         }
+        self.observe_added_at(other.added_at);
         self.track_count += other.track_count;
         self.tag_presence.merge(&other.tag_presence);
         self.track_uris.extend(other.track_uris);
@@ -1188,6 +1225,7 @@ impl AlbumCollector {
         for genre in &other.genres {
             crate::catalog_genres::add_genre(&mut self.genres, genre);
         }
+        self.observe_added_at(other.added_at);
         self.track_count += other.track_count;
         self.tag_presence.merge(&other.tag_presence);
         self.track_uris.extend(other.track_uris);
@@ -1739,6 +1777,7 @@ impl AudioEngine {
                     title: col.title,
                     artist,
                     year: col.year,
+                    added_at: col.added_at,
                     genres: col.genres,
                     folder_path: col.folder_path,
                     source_id,
@@ -1800,9 +1839,11 @@ impl AudioEngine {
                         && cue.track_count >= 2
                         && cue.discs.len() == 1
                     {
+                        cue.observe_added_at(entry.get().added_at.clone());
                         cue.genres = genres;
                         entry.insert(cue);
                     } else {
+                        entry.get_mut().observe_added_at(cue.added_at);
                         entry.get_mut().genres = genres;
                     }
                 }
@@ -1824,6 +1865,7 @@ impl AudioEngine {
         let mut cur_artist = None;
         let mut cur_album_artist = None;
         let mut cur_date = None;
+        let mut cur_added_at = None;
         let mut cur_genres = Vec::new();
         let mut cur_duration = None;
         let mut cur_presence = [false; 5];
@@ -1835,6 +1877,7 @@ impl AudioEngine {
                             artist: Option<String>,
                             album_artist: Option<String>,
                             date: Option<String>,
+                            added_at: Option<String>,
                             genres: Vec<String>,
                             duration: Option<f64>,
                             present: [bool; 5]| {
@@ -1880,6 +1923,7 @@ impl AudioEngine {
             let entry = map.entry(key).or_insert_with(|| AlbumCollector {
                 title: title.clone(),
                 year: date.clone(),
+                added_at: None,
                 genres: Vec::new(),
                 track_count: 0,
                 tag_presence: LocalAlbumTagPresence::default(),
@@ -1895,6 +1939,7 @@ impl AudioEngine {
             if title > entry.title {
                 entry.title = title.clone();
             }
+            entry.observe_added_at(added_at);
             entry.track_count += 1;
             entry.tag_presence.observe(present);
             if retain_tracks {
@@ -1955,6 +2000,7 @@ impl AudioEngine {
                             cur_artist.take(),
                             cur_album_artist.take(),
                             cur_date.take(),
+                            cur_added_at.take(),
                             std::mem::take(&mut cur_genres),
                             cur_duration.take(),
                             std::mem::replace(&mut cur_presence, [false; 5]),
@@ -1962,6 +2008,7 @@ impl AudioEngine {
                         cur_file = v.to_string();
                         found += 1;
                     }
+                    "Added" | "added" if !cur_file.is_empty() => cur_added_at = parse_local_album_added_at(v),
                     "Title" if !cur_file.is_empty() => cur_title = Some(v.to_string()),
                     "Album" if !cur_file.is_empty() => {
                         cur_presence[0] |= !v.trim().is_empty();
@@ -2001,6 +2048,7 @@ impl AudioEngine {
             cur_artist,
             cur_album_artist,
             cur_date,
+            cur_added_at,
             cur_genres,
             cur_duration,
             cur_presence,
@@ -5606,6 +5654,86 @@ mod tests {
             .map(|album| (album.id.clone(), serde_json::to_value(album).unwrap()))
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(payloads(summary), payloads(full));
+    }
+
+    #[test]
+    fn local_album_added_at_validates_optional_protocol_metadata() {
+        for value in ["1970-01-01T00:00:00Z", "2000-02-29T23:59:59Z", "2024-02-29T12:00:00Z"] {
+            assert_eq!(parse_local_album_added_at(value).as_deref(), Some(value));
+        }
+        for value in ["", "1969-12-31T23:59:59Z", "1900-02-29T00:00:00Z",
+            "2026-02-29T00:00:00Z", "2026-04-31T00:00:00Z", "2026-00-01T00:00:00Z",
+            "2026-01-00T00:00:00Z", "2026-01-01T24:00:00Z", "2026-01-01T00:60:00Z",
+            "2026-01-01T00:00:60Z", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00.000Z",
+            "2026-1-1T00:00:00Z", "２０２６-01-01T00:00:00Z"] {
+            assert_eq!(parse_local_album_added_at(value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn local_album_added_at_keeps_first_entry_across_pages_without_leaking_to_other_albums() {
+        let pages = vec![album_test_lines(&[
+            "file: Music/Album/one.flac", "Album: Album", "Added: 2026-10-30T12:00:00Z",
+            "file: Music/Legacy/one.flac", "Album: Legacy",
+        ]), album_test_lines(&[
+            "file: Music/Album/two.flac", "Album: Album", "Added: 2026-10-29T12:00:00Z",
+            "file: Music/Album/three.flac", "Album: Album", "Added: 2026-10-31T12:00:00Z",
+            "file: Music/Invalid/one.flac", "Album: Invalid", "Added: 2026-02-30T12:00:00Z",
+        ])];
+        let sources = HashSet::from(["Music".into()]);
+        assert_summary_matches_full(pages.clone(), &sources);
+        let albums = AudioEngine::finalize_local_album_collection(collect_album_pages(pages), &sources);
+        let added = |title: &str| albums.iter().find(|a| a.title == title).unwrap().added_at.as_deref();
+        assert_eq!(added("Album"), Some("2026-10-29T12:00:00Z"));
+        assert_eq!(added("Legacy"), None);
+        assert_eq!(added("Invalid"), None);
+        assert_eq!(albums.iter().find(|a| a.title == "Album").unwrap().track_count, 3);
+    }
+
+    #[test]
+    fn local_album_added_at_survives_dominant_title_and_disc_consolidation() {
+        let mut lines = Vec::new();
+        for i in 0..4 {
+            lines.extend([format!("file: Music/Box/CD1/{i}.flac"), "Album: Box (Disc 1)".into(),
+                "Added: 2026-10-30T12:00:00Z".into()]);
+        }
+        lines.extend(album_test_lines(&[
+            "file: Music/Box/CD1/variant.flac", "Album: Typo", "Added: 2026-10-29T12:00:00Z",
+            "file: Music/Box/CD2/one.flac", "Album: Box (Disc 2)", "Added: 2026-10-28T12:00:00Z",
+        ]));
+        let sources = HashSet::from(["Music".into()]);
+        assert_summary_matches_full(vec![lines.clone()], &sources);
+        let albums = AudioEngine::finalize_local_album_collection(collect_album_pages(vec![lines]), &sources);
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].title, "Box");
+        assert_eq!(albums[0].added_at.as_deref(), Some("2026-10-28T12:00:00Z"));
+        assert_eq!(albums[0].track_count, 6);
+        assert_eq!(albums[0].discs.len(), 2);
+    }
+
+    #[test]
+    fn local_album_added_at_survives_both_physical_and_cue_precedence() {
+        let sources = HashSet::from(["Music".into()]);
+        for (physical, cue) in [(1, 3), (3, 3)] {
+            for physical_older in [true, false] {
+                let old = "2026-10-29T12:00:00Z";
+                let new = "2026-10-30T12:00:00Z";
+                let mut lines = Vec::new();
+                for line in cue_fixture_lines("Music/Album", "Album", physical, cue) {
+                    let added = line.starts_with("file:").then(|| if line.contains(".cue/") {
+                        if physical_older { new } else { old }
+                    } else if physical_older { old } else { new });
+                    lines.push(line);
+                    if let Some(added) = added { lines.push(format!("Added: {added}")); }
+                }
+                assert_summary_matches_full(vec![lines.clone()], &sources);
+                let albums = AudioEngine::finalize_local_album_collection(collect_album_pages(vec![lines]), &sources);
+                assert_eq!(albums.len(), 1);
+                assert_eq!(albums[0].added_at.as_deref(), Some(old));
+                assert_eq!(albums[0].track_count, 3);
+                assert_eq!(albums[0].discs[0].folder_path.contains(".cue"), physical == 1);
+            }
+        }
     }
 
     #[test]

@@ -114,8 +114,8 @@ for(const lng of ['pt-BR','en']){
  });
 }
 
-async function libraryCheckHarness(folders) {
- language=i18next.createInstance();await language.init({lng:'pt-BR',resources:{'pt-BR':{translation:JSON.parse(readFileSync(resolve(root,'src/locales/pt-BR.json'),'utf8'))}}});
+async function libraryCheckHarness(folders, lng='pt-BR') {
+ language=i18next.createInstance();await language.init({lng,resources:{[lng]:{translation:JSON.parse(readFileSync(resolve(root,`src/locales/${lng}.json`),'utf8'))}}});
  const h=setup();h.props={...h.props,initialAlbumId:undefined,configuredLocalFolders:folders};
  snapshot={...snapshot,albums:folders.map((_,i)=>({...album,id:`album-${i}`,source_id:`source-${i}`,source_label:`Library ${i}`}))};
  await h.settle();return h;
@@ -194,5 +194,39 @@ test('manual check keeps Local album playback available and a refused optional c
   const info=nodes(h.render(),n=>n.type==='button'&&n.props['aria-label']===language.t('fileInfo.forTrack',{title:track.title}));
   assert.equal(info.length,1);assert.equal(info[0].props.disabled,true);
   assert.equal(logs.at(-1).op,'local.album-artwork');
+ }finally{h.close();}
+});
+
+
+test('unavailable retained source guides All explicitly without widening scope, refreshing or touching playback',async()=>{
+ for(const lng of ['pt-BR','en']){
+  const folders=['/fixture/one','/fixture/two'],h=await libraryCheckHarness(folders,lng),calls=[];
+  const rows=snapshot.albums,original=catalog.requestRefresh;let refreshes=0;catalog.requestRefresh=()=>refreshes++;
+  audioService.checkLocalLibrary=async(...args)=>{calls.push(args);throw 'LOCAL_INCREMENTAL_CHECK_OTHER_SOURCE_UNAVAILABLE';};
+  try{
+   selectLibrary(h,'source-0');await h.click(language.t('localBrowser.checkLibrary.button'));await h.settle();
+   const html=markup(h.tree);
+   assert.ok(html.includes(language.t('localBrowser.checkLibrary.otherSourceUnavailable')));
+   assert.ok(html.includes(language.t('localBrowser.checkLibrary.otherSourceUnavailableHelp')));
+   assert.doesNotMatch(html,/LOCAL_INCREMENTAL_CHECK_|\/fixture\//);
+   assert.deepEqual(calls,[['source-0',folders]]);assert.equal(refreshes,0);assert.equal(snapshot.albums,rows);assert.deepEqual(requests,[]);
+   const scope=nodes(h.tree,n=>n.props?.label===language.t('localBrowser.libraryScope'))[0];
+   assert.equal(scope.props.value,'source-0','error must not silently change the chosen library');
+   // Only an explicit scope change and new click may run a general check.
+   audioService.checkLocalLibrary=async(...args)=>{calls.push(args);return false;};
+   selectLibrary(h,'');await h.click(language.t('localBrowser.checkLibrary.button'));await h.settle();
+   assert.deepEqual(calls,[['source-0',folders],[undefined,folders]]);
+   assert.ok(markup(h.tree).includes(language.t('localBrowser.checkLibrary.unchanged')));assert.equal(refreshes,0);
+  }finally{catalog.requestRefresh=original;h.close();}
+ }
+});
+
+test('compound cleanup failure is not reduced to an ordinary unavailable-source instruction',async()=>{
+ const h=await libraryCheckHarness(['/fixture/one','/fixture/two']);
+ audioService.checkLocalLibrary=async()=>{throw 'LOCAL_INCREMENTAL_CHECK_OTHER_SOURCE_UNAVAILABLE; cleanup da staging também falhou';};
+ try{
+  selectLibrary(h,'source-0');await h.click(language.t('localBrowser.checkLibrary.button'));await h.settle();
+  assert.ok(markup(h.tree).includes(language.t('localBrowser.checkLibrary.failed')));
+  assert.ok(!markup(h.tree).includes(language.t('localBrowser.checkLibrary.otherSourceUnavailable')));
  }finally{h.close();}
 });

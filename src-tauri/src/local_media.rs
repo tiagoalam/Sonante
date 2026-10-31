@@ -1183,6 +1183,8 @@ pub(crate) mod mirror {
         build_filtered_staging_scoped(staging_path, live_library_path, configured_roots, generation_id, None, before_publish)
     }
 
+    pub(crate) const OTHER_SOURCE_UNAVAILABLE: &str = "LOCAL_INCREMENTAL_CHECK_OTHER_SOURCE_UNAVAILABLE";
+
     pub(crate) fn prepare_managed_generation_for_source_check(
         live: &Path, staging: &Path, roots: &[PathBuf], generation: &str, source_id: &str,
     ) -> Result<ManagedGenerationPreparation, String> {
@@ -1267,7 +1269,11 @@ pub(crate) mod mirror {
                         PublishedEntry::Symlink(physical) => {
                             let relative = parts.as_path().to_path_buf();
                             let file = ScannedFile { physical: physical.clone(), relative: relative.clone() };
-                            let metadata = publish_link(staging_path, id, &file)?;
+                            // A selected-source check must retain other sources intact.
+                            // Never widen its scope or silently drop an unavailable target.
+                            let metadata = publishable_file_metadata(physical)
+                                .map_err(|_| OTHER_SOURCE_UNAVAILABLE.to_string())?;
+                            publish_validated_link(staging_path, id, &file)?;
                             let kind = match classify_path(physical) {
                                 LocalMediaClass::PlayableAudio => Some(crate::index_coverage::Kind::Audio),
                                 LocalMediaClass::ControlSidecar => Some(crate::index_coverage::Kind::Cue),
@@ -2872,6 +2878,13 @@ pub(crate) mod mirror {
 
     fn publish_link(staging: &Path, source_id: &str, file: &ScannedFile) -> Result<fs::Metadata, String> {
         let metadata = publishable_file_metadata(&file.physical)?;
+        publish_validated_link(staging, source_id, file)?;
+        Ok(metadata)
+    }
+
+    // Caller must validate the physical target first; keep staging/publication
+    // failures separate from target availability and avoid a second metadata read.
+    fn publish_validated_link(staging: &Path, source_id: &str, file: &ScannedFile) -> Result<(), String> {
         let destination = staging.join(source_id).join(&file.relative);
         let parent = destination
             .parent()
@@ -2880,7 +2893,7 @@ pub(crate) mod mirror {
             .map_err(|error| format!("Falha ao criar diretório virtual: {error}"))?;
         symlink(&file.physical, &destination)
             .map_err(|error| format!("Falha ao publicar symlink filtrado: {error}"))?;
-        Ok(metadata)
+        Ok(())
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5022,6 +5035,50 @@ pub(crate) mod mirror {
             assert_eq!(report.scope,"paths");
             assert!(fs::symlink_metadata(live.join(&id).join("song.flac")).unwrap().file_type().is_symlink());
             cleanup_managed_generation(&prepared.staging_path).unwrap();
+        }
+
+        #[test]
+        fn scoped_library_check_missing_retained_target_matches_general_then_scoped_sequence() {
+            for missing in ["track.flac", "cover.jpg"] {
+                let fixture = Fixture::new("scoped-check-missing-retained");
+                let music = fixture.path("Music");
+                let other = fixture.path("Other");
+                write(&music.join("Album/existing.flac"), b"existing");
+                write(&other.join("Album/keep.flac"), b"keep");
+                write(&other.join("Album").join(missing), b"obsolete");
+                let roots = vec![music.clone(), other.clone()];
+                let live = build_generation(&fixture, "library", &fixture.path("missing-live"), &roots, "before");
+                let before = read_manifest(&live).unwrap();
+                let id = before.sources.iter().find(|(_, root)| **root == music).unwrap().0.clone();
+                let other_id = before.sources.iter().find(|(_, root)| **root == other).unwrap().0.clone();
+                fs::remove_file(other.join("Album").join(missing)).unwrap();
+                write(&music.join("Album/new.flac"), b"new");
+                let staging = fixture.path("library.next");
+                let error = prepare_managed_generation_for_source_check(&live, &staging, &roots, "scoped", &id).unwrap_err();
+                assert_eq!(error, OTHER_SOURCE_UNAVAILABLE, "{missing}: {error}");
+                assert!(!staging.exists(), "failed preparation must clean only its own staging");
+                assert_eq!(read_manifest(&live).unwrap(), before);
+                assert!(fs::symlink_metadata(live.join(&other_id).join("Album").join(missing)).unwrap().file_type().is_symlink());
+                assert!(!live.join(&id).join("Album/new.flac").exists());
+
+                let mut general = expect_prepared(prepare_managed_generation_for_refresh(&live, &staging, &roots, "general", true));
+                general.refresh_plan = crate::explicit_incremental_check_plan(
+                    plan_filesystem_refresh(&live, &general).unwrap(), &general.manifest.sources,
+                ).unwrap();
+                assert!(!matches!(general.refresh_plan, ManagedRefreshPlan::Full));
+                let publication = publish_prepared_managed_generation(&live, &general).unwrap();
+                publication.cleanup_previous().unwrap();
+                assert!(live.join(&id).join("Album/new.flac").is_symlink());
+                assert!(!live.join(&other_id).join("Album").join(missing).exists());
+
+                let scoped = expect_prepared(prepare_managed_generation_for_source_check(&live, &staging, &roots, "after-general", &id));
+                assert_eq!(scoped.manifest.sources, before.sources);
+                assert_eq!(scoped.manifest.registry_id, before.registry_id);
+                assert!(scoped.staging_path.join(&other_id).join("Album/keep.flac").is_symlink());
+                cleanup_managed_generation(&scoped.staging_path).unwrap();
+                assert_eq!(fs::read(music.join("Album/new.flac")).unwrap(), b"new");
+                assert_eq!(fs::read(other.join("Album/keep.flac")).unwrap(), b"keep");
+            }
         }
 
         #[test]

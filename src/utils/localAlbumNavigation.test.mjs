@@ -7,6 +7,7 @@ import {
   localAlbumIndexBucket,
   localAlbumNavigationResetKey,
   parseLocalAlbumYear,
+  localAlbumAddedAt,
   sortLocalAlbums,
 } from "./localAlbumNavigation.ts";
 
@@ -136,4 +137,37 @@ test("ten thousand albums produce data-only sort and bucket indices", () => {
   assert.equal(sorted.length, 10_000);
   assert.equal(indices.size, 1);
   assert.equal(indices.get("A"), 0);
+});
+
+
+test("added sorting handles UTC dates, stable ties and absent legacy metadata without mutation", () => {
+  const dated = (id, title, date) => ({ ...album(id, title, "Artist", "2000"), added_at: date });
+  const albums = [
+    dated("missing", "Unknown B", undefined),
+    dated("new-b", "Beta", "2026-10-30T10:00:00Z"),
+    dated("old", "Old", "2025-01-01T00:00:00Z"),
+    dated("invalid", "Unknown A", "2026-02-30T10:00:00Z"),
+    dated("new-a", "Alpha", "2026-10-30T10:00:00Z"),
+  ];
+  const original = structuredClone(albums);
+  assert.deepEqual(ids(sortLocalAlbums(albums, "added-newest")), ["new-a", "new-b", "old", "invalid", "missing"]);
+  assert.deepEqual(ids(sortLocalAlbums(albums, "added-oldest")), ["old", "new-a", "new-b", "invalid", "missing"]);
+  assert.deepEqual(ids(sortLocalAlbums([...albums].reverse(), "added-newest")), ["new-a", "new-b", "old", "invalid", "missing"]);
+  assert.deepEqual(albums, original);
+  assert.equal(isTextLocalAlbumSort("added-newest"), false);
+  assert.equal(localAlbumBucketFirstIndices(albums, "added-oldest").size, 0);
+  const scoped = filterLocalAlbumsByScope([
+    { ...albums[2], source_id: "Other" }, ...albums.filter(a => a.id !== "old"),
+  ], "Library", "Alpha");
+  assert.deepEqual(ids(sortLocalAlbums(scoped, "added-newest")), ["new-a"]);
+});
+
+test("added timestamps accept only canonical calendar-valid MPD UTC dates", () => {
+  for (const date of ["1970-01-01T00:00:00Z", "2000-02-29T23:59:59Z", "2024-02-29T12:00:00Z"])
+    assert.equal(localAlbumAddedAt(date), date);
+  for (const date of [undefined, null, 123, "", "1969-12-31T23:59:59Z", "1900-02-29T00:00:00Z",
+    "2026-02-29T00:00:00Z", "2026-04-31T00:00:00Z", "2026-00-01T00:00:00Z", "2026-01-00T00:00:00Z",
+    "2026-01-01T24:00:00Z", "2026-01-01T00:60:00Z", "2026-01-01T00:00:60Z", "2026-01-01T00:00:00+00:00",
+    "2026-01-01T00:00:00.000Z", "2026-1-1T00:00:00Z", "２０２６-01-01T00:00:00Z"])
+    assert.equal(localAlbumAddedAt(date), null, String(date));
 });

@@ -18,6 +18,7 @@ export interface LocalAlbum {
   title: string;
   artist: string;
   year?: string;
+  added_at?: string | null;
   genres?: string[];
   folder_path: string;
   source_id?: string | null;

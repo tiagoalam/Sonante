@@ -458,7 +458,9 @@
       "helpAll": "Check for changes in all local libraries",
       "updated": "Library updated",
       "unchanged": "No changes",
-      "failed": "Could not check for changes. Try again."
+      "failed": "Could not check for changes. Try again.",
+      "otherSourceUnavailable": "Select All and check again",
+      "otherSourceUnavailableHelp": "A file in another library could not be confirmed. Check that folders are available, then use Check for changes with All selected."
     },
     "catalogReadUnavailable": "The local catalog could not be validated. Check the library status before trying again.",
     "catalogUnsupportedFormat": "The saved local library format is not supported by this version of Sonante. Library access is blocked; waiting for a library update will not resolve this incompatibility. Preserve the existing files for review.",
@@ -507,6 +509,8 @@
     "sortArtistDesc": "Artist Z–A",
     "sortYearNewest": "Year — newest",
     "sortYearOldest": "Year — oldest",
+    "sortAddedNewest": "Added — newest",
+    "sortAddedOldest": "Added — oldest",
     "albumIndex": "Album alphabet index",
     "jumpToBucket": "Jump to {{bucket}}",
     "artistIndex": "Artist alphabet index",
@@ -720,7 +724,7 @@
     "playAlbum": "Play Album"
   },
   "settings": {
-    "localWatchNeedsCheck": "Automatic library monitoring needs attention. Check that folders are available and writes have finished, then use Reindex in Local preferences.",
+    "localWatchNeedsCheck": "Automatic library monitoring was interrupted. Check that folders are available and copies have finished. To update the catalog, use Check for changes.",
     "noServerSelected": "No server selected.",
     "manualTokenPlaceholder": "Manual token",
     "deviceAvailability": {

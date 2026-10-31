@@ -327,3 +327,14 @@ test("different configurations that exceed cache limits still invalidate confirm
   await tick(); assert.equal(loads, 2); assert.equal(catalog.getSnapshot().albums[0].id, "2");
   assert.equal(storage.writes, 0);
 });
+
+
+test("added metadata survives reopening while legacy and malformed dates remain usable", () => {
+  const { cache, storage } = fixture();
+  const dated = { ...album("new"), added_at: "2026-10-30T12:00:00Z" };
+  cache.write(context, [album("legacy"), dated, { ...album("invalid"), added_at: "2026-02-30T00:00:00Z" }]);
+  const reopened = createLocalAlbumPresentationCache(() => storage).read(context);
+  assert.deepEqual(reopened, [album("legacy"), dated, album("invalid")]);
+  assert.deepEqual(sortLocalAlbums(reopened, "added-newest").map(a => a.id), ["new", "invalid", "legacy"]);
+  assert.doesNotMatch(storage.value, /2026-02-30/);
+});

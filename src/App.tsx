@@ -1845,7 +1845,7 @@ export function App() {
                                 : plexViewMode === "genres" ? t("common.genresLabel") : t("player.source.plex")}
                   </h2>
                   {searchQuery.trim().length === 0 && (
-                    <p className="mt-0.5 text-xs text-[color:var(--theme-fg-muted,#888888)]">
+                    <p className="mt-1 text-sm font-medium tabular-nums text-[color:var(--theme-fg-secondary,#BBBBBB)]">
                       {activeCollection
                         ? t("plex.albumsCount", { count: collectionAlbums.length })
                         : fallbackPlexArtist
