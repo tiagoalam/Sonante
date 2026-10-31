@@ -1,3 +1,7 @@
+import { NowPlayingFullscreen } from "../src/utils/nowPlayingFullscreen.ts";
+import { NowPlayingIdle } from "../src/utils/nowPlayingIdle.ts";
+import * as layoutHelpers from "../src/utils/nowPlayingLayout.ts";
+import * as psychoScene from "../src/utils/psychoScene.ts";
 import { passiveQueueInsertion } from "./support/passiveQueueInsertion.mjs";
 import * as queuePresentationHelpers from "../src/utils/queuePresentation.ts";
 import { LocalPlaybackThumbnail } from "../src/utils/localPlaybackThumbnail.ts";
@@ -20,17 +24,20 @@ import { routeConditions } from '../src/utils/routeConditions.ts';
 import { signalPathInformation, requiresDeviceVolumeControl } from '../src/utils/signalPath.ts';
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(l=>[l,{translation:JSON.parse(readFileSync(new URL(`../src/locales/${l}.json`,import.meta.url)))}]))});
 globalThis.window={localStorage:{getItem:()=>null,setItem(){}},screen:{availWidth:1920,availHeight:1040},crypto:{randomUUID:()=> 'synthetic-session'},setTimeout,clearTimeout,addEventListener(){},removeEventListener(){}};
-const dependencies={...passiveQueueInsertion,'../utils/queuePresentation':queuePresentationHelpers,'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
+const dependencies={'../utils/nowPlayingFullscreen':{NowPlayingFullscreen},'./TrackLyrics':{TrackLyrics:()=>null},'./SleepTimerControl':{SleepTimerControl:()=>null},'../utils/nowPlayingLayout':layoutHelpers,'../../utils/psychoScene':psychoScene,...passiveQueueInsertion,'../utils/queuePresentation':queuePresentationHelpers,'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
 const compile=(file,extra={})=>{const js=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',js)(name=>{assert.ok(name in extra||name in dependencies,name);return extra[name]??dependencies[name];},ex);return ex;};
 dependencies['./PlexImage']={PlexImage:({alt,className})=>React.createElement('div',{'data-plex-artwork':true,'aria-label':alt,className})};
 dependencies['./TrackArtwork']=compile('components/TrackArtwork.tsx');
 dependencies['./SignalPath']=compile('components/SignalPath.tsx');
 dependencies['./PlaybackOptionsControls']=compile('components/PlaybackOptionsControls.tsx',{'../services/audio':{audioService:{changePlaybackOption:async()=>{throw new Error('unexpected option request');}}}});
 const graph=name=>({[name]:props=>React.createElement('svg',{'aria-label':props.label??name,role:'img',viewBox:'0 0 480 120',preserveAspectRatio:'none',style:{width:'100%',height:name==='VuHorizontal'?28:'100%'}},Array.from({length:40},(_,i)=>React.createElement('rect',{key:i,x:i*12,y:120-(25+(i*17)%85),width:8,height:25+(i*17)%85,rx:1,fill:'#E5A00D',opacity:.6})))});
-for(const name of ['AnalogVu','SpectrumNeon','SpectrumSegmented','VuHorizontal']) dependencies[`./${name}`]=graph(name);
+for(const name of ['InstrumentCanvas','AnalogVu','SpectrumNeon','SpectrumSegmented','VuHorizontal']) dependencies[`./${name}`]=graph(name);
 dependencies['./visualizer/VisualizerPanel']=compile('components/visualizer/VisualizerPanel.tsx');
 dependencies['../utils/playerNavigation']={currentMediaKey:media=>JSON.stringify(media)};
 dependencies['./SourceAudioBadges']={SourceAudioBadges:()=>null};
+dependencies['./NowPlayingImmersive']=compile('components/NowPlayingImmersive.tsx',{'../utils/nowPlayingIdle':{NowPlayingIdle}});
+dependencies['./NowPlayingLayoutPicker']=compile('components/NowPlayingLayoutPicker.tsx');
+dependencies['./visualizer/PsychoVisualizer']=compile('components/visualizer/PsychoVisualizer.tsx');
 const {NowPlayingPresentation:View}=compile('components/NowPlayingPresentation.tsx');
 const snapshot={route:{mode:'shared',endpoint:'default'},health:{state:'available'},playback:{state:'play',elapsed:57,duration:185,audio_format:'96000:24:2',current_media:{kind:'local',uri:'synthetic.flac',queue_index:1},title:'A synthetic song with a deliberately long title that remains above the playback controls',artist:'Synthetic artist',album:'Synthetic album',volume:{value:43,muted:false,writable:true,available:true,backend:'pipewire'},is_updating:false}};
 const props={snapshot,levels:{leftRms:.2,rightRms:.3,leftPeak:.4,rightPeak:.5,spectrum:Array(48).fill(.2)},fullscreen:false,queueOpen:false,queue:null,analyzerAvailable:true,analyzerInactiveLabel:'Unavailable',controlFailed:false,isSeeking:false,seekValue:57};
@@ -182,15 +189,15 @@ test('window service reuses one window, waits for nonce readiness and sizes the 
  assert.equal(await ex.openNowPlayingWindow('Synthetic'),'synthetic-runtime');assert.deepEqual(calls,['focus']);existing=null;
  await Promise.all([ex.openNowPlayingWindow('Synthetic'),ex.openNowPlayingWindow('Synthetic')]);assert.deepEqual(calls,['focus','create']);assert.equal(options.fullscreen,false);assert.deepEqual(Object.fromEntries(Object.keys(nowPlayingWindowBounds(area,1.25)).map(k=>[k,options[k]])),nowPlayingWindowBounds(area,1.25));assert.equal(listeners.size,0);
 });
-test('all five visualizer modes and circular selection remain available and do not request audio',()=>{
- const modes=['combo','spectrum-neon','spectrum-segmented','vu-amber','vu-blue'];
+test('all six visualizer modes and circular selection remain available and do not request audio',()=>{
+ const modes=['combo','spectrum-neon','spectrum-segmented','vu-amber','vu-blue','vu-radial'];
  for(let index=0;index<modes.length;index++){
   const selected=[];const hooks={...React,default:React,useState:()=>[modes[index],v=>selected.push(v)],useEffect(){}};
   const {VisualizerPanel}=compile('components/visualizer/VisualizerPanel.tsx',{'react':hooks});
   const tree=VisualizerPanel({levels:props.levels,active:true,fullscreen:true});
   assert.equal(tree.props['aria-label'],i18n.t(`nowPlaying.visualizer.modes.${modes[index]}`));
   const buttons=nodes(tree,n=>n.type==='button');buttons[0].props.onClick();buttons[1].props.onClick();
-  assert.deepEqual(selected,[modes[(index+4)%5],modes[(index+1)%5]]);
+  assert.deepEqual(selected,[modes[(index+modes.length-1)%modes.length],modes[(index+1)%modes.length]]);
  }
 });
 test('artwork forwards Plex references unchanged and local errors retain the fallback',()=>{
@@ -245,9 +252,9 @@ test('App uses one visible primary control set, keeps previous page mounted and 
  assert.match(source,/isOpen=\{showQueue && !nowPlayingEmbedded\}/);assert.match(source,/onOpenNowPlaying=\{showNowPlaying\}/);
  const drawer=readFileSync(new URL('../src/components/QueueDrawer.tsx',import.meta.url),'utf8');assert.match(drawer,/<NowPlayingQueue/);assert.doesNotMatch(drawer,/audioService|fetchQueue|playQueueIndex|clearQueue/);
 });
-test('embedded presentation has detach/back and album/artist navigation, with no fullscreen control',()=>{
+test('embedded presentation retains detach/back and album/artist navigation alongside fullscreen',()=>{
  const calls=[];const tree=View({...props,embedded:true,onDetach:()=>calls.push('detach'),onNavigate:view=>calls.push(view),onClose:()=>calls.push('back')});
- const buttons=nodes(tree,n=>n.type==='button');assert.equal(buttons.some(n=>n.props['aria-label']===i18n.t('nowPlaying.enterFullscreen')),false);
+ const buttons=nodes(tree,n=>n.type==='button');assert.equal(buttons.some(n=>n.props['aria-label']===i18n.t('nowPlaying.enterFullscreen')),true);
  buttons.find(n=>n.props['aria-label']===i18n.t('nowPlaying.detach')).props.onClick();buttons.find(n=>n.props['aria-label']===i18n.t('nowPlaying.collapse')).props.onClick();
  buttons.find(n=>n.props.children==='Synthetic artist').props.onClick();buttons.find(n=>n.props.children==='Synthetic album').props.onClick();assert.deepEqual(calls,['detach','back','artist','album']);
 });
@@ -354,7 +361,7 @@ test('recovered current Local artwork reaches PlayerBar, both Now Playing hosts 
 test('inactive visualizers show readable guidance, hide idle graphs, and keep keyboard help in every mode',async()=>{
  for(const language of ['en','pt-BR']){
   await i18n.changeLanguage(language);
-  for(const mode of ['combo','spectrum-neon','spectrum-segmented','vu-amber','vu-blue']){
+  for(const mode of ['combo','spectrum-neon','spectrum-segmented','vu-amber','vu-blue','vu-radial']){
    const hooks={...React,default:React,useState:()=>[mode,()=>{}],useEffect(){}};
    const {VisualizerPanel}=compile('components/visualizer/VisualizerPanel.tsx',{'react':hooks});
    const label=i18n.t('nowPlaying.analyzerReason.current_audio_format_is_dsd'),help=i18n.t('nowPlaying.visualizer.helpDsdDirect');
@@ -514,4 +521,299 @@ test('Now Playing uses the same Radio Direct message without changing Local or P
    if(kind==='radio')assert.ok(!html.includes(i18n.t('player.playbackError.format_unsupported')));
   }
  }await i18n.changeLanguage('en');
+});
+
+
+test('each layout preserves real transport/seek/queue callbacks and keeps instruments exclusive to Audiophile',async()=>{
+ for(const language of ['en','pt-BR']) { await i18n.changeLanguage(language);
+  for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS)for(const embedded of [true,false]) {
+   const calls=[];
+   const tree=View({...props,layout,embedded,onTogglePlay:()=>calls.push('play'),onSeekCommit:value=>calls.push(['seek',value]),onQueue:()=>calls.push('queue')});
+   const html=renderToStaticMarkup(React.createElement(View,{...props,layout,embedded}));
+   assert.match(html,new RegExp('data-now-playing-layout="'+layout+'"'));
+   assert.ok(!html.includes('nowPlaying.look.')&&!html.includes('nowPlaying.layouts.'));
+   nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('player.pause'))[0].props.onClick();
+   nodes(tree,n=>n.type==='input'&&n.props['aria-label']===i18n.t('nowPlaying.seek'))[0].props.onPointerUp({currentTarget:{value:'72.5'}});
+   nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('nowPlaying.showQueue'))[0].props.onClick();
+   assert.deepEqual(calls,['play',['seek',72.5],'queue']);
+   assert.equal(nodes(tree,n=>n.type===dependencies['./visualizer/VisualizerPanel'].VisualizerPanel).length,layout==='audiophile'?1:0);
+   assert.equal(nodes(tree,n=>n.type===dependencies['./visualizer/PsychoVisualizer'].PsychoVisualizer).length,layout==='psycho'?1:0);
+   assert.equal(nodes(tree,n=>n.props.className==='np-signal').length,layout==='audiophile'?1:0);
+   if(layout==='sleeve')assert.ok(html.includes(i18n.t('nowPlaying.look.recordDetails')));
+  }
+ }
+ await i18n.changeLanguage('en');
+});
+
+test('all layouts retain actionable errors and nonseekable live Radio',()=>{
+ for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
+  const radio={...snapshot.playback,current_media:{kind:'radio',station_id:'station',queue_index:0},playback_error:{code:'format_unsupported'}};
+  const tree=View({...props,layout,snapshot:{...snapshot,playback:radio}});
+  assert.equal(nodes(tree,n=>n.type==='input'&&n.props['aria-label']===i18n.t('nowPlaying.seek'))[0].props.disabled,true);
+  const html=renderToStaticMarkup(React.createElement(View,{...props,layout,snapshot:{...snapshot,playback:radio}}));
+  assert.ok(html.includes(i18n.t('radio.directError')));
+  const unavailable=View({...props,layout,snapshot:{...snapshot,health:{state:'unavailable'}}});
+  assert.equal(nodes(unavailable,n=>n.type==='button'&&n.props['aria-label']===i18n.t('player.pause'))[0].props.disabled,true);
+ }
+});
+
+test('look preference validates damaged/unknown values and survives host remounts with blocked storage fallback',()=>{
+ const original=window.localStorage;let saved=null;
+ window.localStorage={getItem:()=>saved,setItem:(_key,value)=>{saved=value}};
+ try {
+  for(const value of [null,'broken','null','[]','{"layout":"unknown","psychoPlacement":"bad"}'])assert.deepEqual(layoutHelpers.parseNowPlayingLook(value),{layout:'audiophile',psychoPlacement:'frame'});
+  layoutHelpers.saveNowPlayingLook({layout:'psycho',psychoPlacement:'background'});
+  assert.deepEqual(layoutHelpers.readNowPlayingLook(),{layout:'psycho',psychoPlacement:'background'});
+  window.localStorage={getItem(){throw Error('blocked');},setItem(){throw Error('blocked');}};
+  assert.deepEqual(layoutHelpers.readNowPlayingLook(),{layout:'audiophile',psychoPlacement:'frame'});
+  assert.doesNotThrow(()=>layoutHelpers.saveNowPlayingLook({layout:'poster',psychoPlacement:'frame'}));
+ }finally{window.localStorage=original;}
+});
+
+test('layout and placement selectors change only visual preferences in both hosts and sync storage safely',()=>{
+ const stored=window.localStorage;const add=window.addEventListener,remove=window.removeEventListener;
+ let value=null;window.localStorage={getItem:()=>value,setItem:(_key,next)=>{value=next}};
+ try{
+  for(const embedded of [true,false]){
+   let stateIndex=0;const states=[],effects=[],listeners=new Map();
+   const hooks={...React,default:React,useState:initial=>{const index=stateIndex++;states[index]=typeof initial==='function'?initial():initial;return[states[index],next=>{states[index]=typeof next==='function'?next(states[index]):next;}]},useEffect:fn=>effects.push(fn),useRef:initial=>({current:initial})};
+   window.addEventListener=(name,fn)=>listeners.set(name,fn);window.removeEventListener=(name,fn)=>{if(listeners.get(name)===fn)listeners.delete(name)};
+   const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{},'@tauri-apps/api/window':{},'../services/audio':{audioService:new Proxy({},{get(){assert.fail('visual preference must not submit audio requests')}})},'../services/nowPlayingWindow':{}});
+   const render=()=>{stateIndex=0;effects.length=0;return NowPlayingHost({snapshot,owner,embedded,onReady(){}})};
+   let tree=render();tree.props.onLayoutChange('poster');assert.equal(JSON.parse(value).layout,'poster');
+   // A new window/host reads the persisted preference without touching playback.
+   tree=render();assert.equal(tree.props.layout,'poster');
+   tree.props.onLayoutChange('psycho');tree=render();tree.props.onPsychoPlacementChange('background');assert.equal(JSON.parse(value).psychoPlacement,'background');
+   // Exercise the actual storage subscription only, without acquiring an analyzer.
+   const storageEffect=effects.find(effect=>effect.toString().includes('syncLook'));assert.ok(storageEffect);
+   const cleanup=storageEffect();assert.ok(listeners.has('storage'));
+   listeners.get('storage')({key:layoutHelpers.NOW_PLAYING_LOOK_KEY,newValue:'{"layout":"sleeve","psychoPlacement":"frame"}'});
+   assert.deepEqual(states.at(-1),{layout:'sleeve',psychoPlacement:'frame'});
+   cleanup();assert.ok(!listeners.has('storage'));
+  }
+ }finally{window.localStorage=stored;window.addEventListener=add;window.removeEventListener=remove;}
+});
+
+test('all Psycho scenes bound geometry, reject invalid telemetry and reduce drawing work in economy',()=>{
+ assert.deepEqual(psychoScene.psychoCanvasSize(7680,4320,3),{width:1280,height:720});
+ assert.deepEqual(psychoScene.psychoCanvasSize(7680,4320,3,'light'),{width:896,height:504});
+ for(const scene of psychoScene.PSYCHO_SCENES){
+  const counts=[];
+  for(const detail of ['rich','light']){
+   const args=[];const gradient={addColorStop(){}};
+   const ctx=new Proxy({createRadialGradient:()=>gradient,createLinearGradient:()=>gradient},{get(target,key){return target[key]??((...values)=>args.push([key,...values]));},set(target,key,value){target[key]=value;return true;}});
+   const canvas={width:1280,height:720,getContext:()=>ctx};
+   psychoScene.drawPsychoScene(canvas,2,psychoScene.psychoEnergy({leftRms:NaN,rightRms:Infinity,leftPeak:-1,rightPeak:3,spectrum:[NaN,Infinity,-2,8]}),scene,detail);
+   assert.ok(args.length<2400,'bounded geometry for '+scene);counts.push(args.length);
+   for(const [, ...values]of args)for(const n of values)if(typeof n==='number')assert.ok(Number.isFinite(n));
+  }
+  assert.ok(counts[1]<counts[0]*.7,'economy actually reduces geometry for '+scene);
+ }
+});
+
+test('Psycho animation caps draws and releases frames/listeners when paused, hidden, offscreen or reduced-motion',()=>{
+ const originalWindow=globalThis.window,originalDocument=globalThis.document,originalResize=globalThis.ResizeObserver,originalIntersection=globalThis.IntersectionObserver;
+ try{
+  for(const active of [true,false])for(const reduced of [true,false])for(const frozen of [true,false]){
+   let nextId=0,draws=0,disconnected=0;const raf=new Map(),docListeners=new Map(),motionListeners=new Map();let intersection;
+   const motion={matches:reduced,addEventListener:(name,fn)=>motionListeners.set(name,fn),removeEventListener:name=>motionListeners.delete(name)};
+   globalThis.window={devicePixelRatio:3,matchMedia:()=>motion,requestAnimationFrame:fn=>{raf.set(++nextId,fn);return nextId},cancelAnimationFrame:id=>raf.delete(id)};
+   globalThis.document={hidden:false,addEventListener:(name,fn)=>docListeners.set(name,fn),removeEventListener:name=>docListeners.delete(name)};
+   globalThis.ResizeObserver=class{observe(){}disconnect(){disconnected++}};
+   globalThis.IntersectionObserver=class{constructor(fn){intersection=fn}observe(){}disconnect(){disconnected++}};
+   const effects=[],canvas={clientWidth:3840,clientHeight:2160,width:0,height:0};let ref=0,state=0;
+   const hooks={...React,default:React,useState:value=>[state++===0?frozen:value,()=>{}],useEffect:fn=>effects.push(fn),useRef:value=>({current:ref++===0?canvas:value})};
+   const {PsychoVisualizer}=compile('components/visualizer/PsychoVisualizer.tsx',{'react':hooks,'../../utils/psychoScene':{...psychoScene,drawPsychoScene:()=>draws++}});
+   PsychoVisualizer({levels:props.levels,active,inactiveLabel:'Inactive'});const cleanup=effects[0]();
+   assert.equal(canvas.width,1280);assert.equal(canvas.height,720);
+   assert.equal(raf.size,active&&!reduced&&!frozen?1:0);
+   const initial=draws;
+   for(let time=1;time<=1000;time+=1000/120){for(const [id,fn]of [...raf]){raf.delete(id);fn(time)}}
+   assert.ok(draws-initial<=30);if(active&&!reduced&&!frozen)assert.ok(draws-initial>=20);
+   document.hidden=true;docListeners.get('visibilitychange')();assert.equal(raf.size,0);
+   document.hidden=false;docListeners.get('visibilitychange')();
+   intersection([{isIntersecting:false}]);assert.equal(raf.size,0);
+   intersection([{isIntersecting:true}]);assert.equal(raf.size,active&&!reduced&&!frozen?1:0);
+   motion.matches=true;motionListeners.get('change')();assert.equal(raf.size,0);
+   cleanup();assert.equal(raf.size,0);assert.equal(docListeners.size,0);assert.equal(motionListeners.size,0);assert.equal(disconnected,2);
+  }
+ }finally{globalThis.window=originalWindow;globalThis.document=originalDocument;globalThis.ResizeObserver=originalResize;globalThis.IntersectionObserver=originalIntersection;}
+});
+
+
+test('the visible layout picker exposes four translated choices and scopes Effects to Psycho',async()=>{
+ const Picker=dependencies['./NowPlayingLayoutPicker'].NowPlayingLayoutPicker;
+ for(const language of ['en','pt-BR']) {await i18n.changeLanguage(language);
+  for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
+   const changes=[];const tree=Picker({layout,placement:'frame',onLayout:value=>changes.push(value),onPlacement:value=>changes.push(value)});
+   const selects=nodes(tree,n=>n.type==='select');assert.equal(selects.length,layout==='psycho'?2:1);
+   assert.deepEqual(nodes(selects[0],n=>n.type==='option').map(n=>n.props.children),layoutHelpers.NOW_PLAYING_LAYOUTS.map(value=>i18n.t('nowPlaying.layouts.'+value)));
+   selects[0].props.onChange({target:{value:'poster'}});selects[0].props.onChange({target:{value:'invalid'}});assert.deepEqual(changes,['poster']);
+   if(layout==='psycho'){selects[1].props.onChange({target:{value:'background'}});assert.deepEqual(changes,['poster','background']);}
+  }
+ }await i18n.changeLanguage('en');
+});
+
+test('Encarte and Poster ignore high-rate analyzer frames without changing capture ownership or player controls',async()=>{
+ const original=window.localStorage;
+ try{
+  for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
+   window.localStorage={getItem:()=>JSON.stringify({layout,psychoPlacement:'frame'}),setItem(){}};
+   const listeners=new Map(),effects=[],writes=[];let index=0;
+   const hooks={...React,default:React,useState:initial=>{const at=index++;return[typeof initial==='function'?initial():initial,next=>writes.push([at,next])]},useEffect:fn=>effects.push(fn),useRef:value=>({current:value})};
+   const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{listen:async(name,fn)=>{listeners.set(name,fn);return()=>listeners.delete(name)}},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{AUDIO_LEVEL_EVENT:'levels',ANALYZER_STATUS_EVENT:'analyzer',startAudioAnalyzer:async()=>{},stopAudioAnalyzer:async()=>{}}});
+   NowPlayingHost({snapshot,owner,embedded:true,onReady(){}});const cleanup=effects[2]();await flush();writes.length=0;
+   listeners.get('levels')({payload:{owner:{...owner,leaseId:'synthetic-session'},data:props.levels}});
+   assert.equal(writes.filter(([at])=>at===5).length,['audiophile','psycho'].includes(layout)?1:0);
+   cleanup();await flush();assert.equal(listeners.size,0);
+  }
+ }finally{window.localStorage=original;}
+});
+
+
+test('Psycho budget reduces once under sustained cost, ignores isolated slow frames and never probes higher quality',()=>{
+ const fast=new psychoScene.PsychoRenderBudget();
+ for(let i=0;i<100;i++)fast.observe(i===30?80:2,i===30?200:34);
+ assert.equal(fast.detail,'rich');
+ const slow=new psychoScene.PsychoRenderBudget();
+ for(let i=0;i<40;i++)slow.observe(19,34);
+ assert.equal(slow.detail,'light');assert.ok(slow.interval>fast.interval);
+ for(let i=0;i<500;i++)slow.observe(1,34);
+ assert.equal(slow.detail,'light');
+ const delayed=new psychoScene.PsychoRenderBudget();for(let i=0;i<12;i++)delayed.observe(1,100);
+ assert.equal(delayed.detail,'light');
+ const economy=new psychoScene.PsychoRenderBudget('economy');assert.equal(economy.detail,'light');
+});
+
+test('Psycho scene preferences validate unknown values, survive remount and remain usable without storage',()=>{
+ const old=window.localStorage;let stored=null;
+ try{
+  window.localStorage={getItem:()=>stored,setItem:(_key,value)=>{stored=value}};
+  for(const scene of psychoScene.PSYCHO_SCENES){psychoScene.savePsychoPreferences({scene,quality:'economy'});assert.deepEqual(psychoScene.readPsychoPreferences(),{scene,quality:'economy'});}
+  for(const value of [null,'invalid','{"scene":"unknown","quality":"ultra"}','null'])assert.deepEqual(psychoScene.parsePsychoPreferences(value),{scene:'aurora',quality:'auto'});
+  window.localStorage={getItem(){throw Error('blocked')},setItem(){throw Error('blocked')}};
+  assert.deepEqual(psychoScene.readPsychoPreferences(),{scene:'aurora',quality:'auto'});
+  assert.doesNotThrow(()=>psychoScene.savePsychoPreferences({scene:'mandala',quality:'auto'}));
+ }finally{window.localStorage=old;}
+});
+
+test('Psycho scene controls are translated and save only artistic preferences',async()=>{
+ const original=window.localStorage;let saved=null;
+ try{
+  window.localStorage={getItem:()=>null,setItem:(_key,value)=>{saved=value}};
+  for(const language of ['en','pt-BR']){await i18n.changeLanguage(language);
+   const hooks={...React,default:React,useState:initial=>[typeof initial==='function'?initial():initial,()=>{}],useEffect(){},useRef:value=>({current:value})};
+   const {PsychoVisualizer}=compile('components/visualizer/PsychoVisualizer.tsx',{'react':hooks});
+   const tree=PsychoVisualizer({levels:props.levels,active:true,inactiveLabel:'Inactive'});
+   const selects=nodes(tree,n=>n.type==='select');assert.equal(selects.length,2);
+   assert.equal(selects[0].props['aria-label'],i18n.t('nowPlaying.psycho.scene'));
+   assert.deepEqual(nodes(selects[0],n=>n.type==='option').map(n=>n.props.children),psychoScene.PSYCHO_SCENES.map(scene=>i18n.t('nowPlaying.psycho.scenes.'+scene)));
+   selects[0].props.onChange({target:{value:'cosmos'}});assert.deepEqual(JSON.parse(saved),{scene:'cosmos',quality:'auto'});
+   selects[1].props.onChange({target:{value:'economy'}});assert.deepEqual(JSON.parse(saved),{scene:'aurora',quality:'economy'});
+  }
+ }finally{window.localStorage=original;await i18n.changeLanguage('en');}
+});
+
+
+test('real Psycho host lowers its canvas budget under cost and preserves scene time through pause and scene changes',()=>{
+ const before={window:globalThis.window,document:globalThis.document,resize:globalThis.ResizeObserver,intersection:globalThis.IntersectionObserver,performance:Object.getOwnPropertyDescriptor(globalThis,'performance')};
+ try{
+  const raf=new Map(),docListeners=new Map(),winListeners=new Map(),motionListeners=new Map(),draws=[],slots=[],pending=[];
+  let clock=0,cursor=0,nextId=0,stored=JSON.stringify({scene:'cosmos',quality:'auto'});
+  const motion={matches:false,addEventListener:(key,fn)=>motionListeners.set(key,fn),removeEventListener:key=>motionListeners.delete(key)};
+  globalThis.window={devicePixelRatio:3,localStorage:{getItem:()=>stored,setItem:(_key,value)=>{stored=value}},matchMedia:()=>motion,requestAnimationFrame:fn=>{raf.set(++nextId,fn);return nextId},cancelAnimationFrame:id=>raf.delete(id),addEventListener:(key,fn)=>winListeners.set(key,fn),removeEventListener:key=>winListeners.delete(key)};
+  globalThis.document={hidden:false,addEventListener:(key,fn)=>docListeners.set(key,fn),removeEventListener:key=>docListeners.delete(key)};
+  globalThis.ResizeObserver=class{observe(){}disconnect(){}};globalThis.IntersectionObserver=class{observe(){}disconnect(){}};
+  Object.defineProperty(globalThis,'performance',{configurable:true,value:{now:()=>clock}});
+  const changed=(a,b)=>!a||a.length!==b.length||a.some((value,index)=>!Object.is(value,b[index]));
+  const hooks={...React,default:React,useRef:initial=>{const index=cursor++;return slots[index]??={current:initial}},useState:initial=>{const index=cursor++;if(!(index in slots))slots[index]=typeof initial==='function'?initial():initial;return[slots[index],next=>{slots[index]=typeof next==='function'?next(slots[index]):next}]},useEffect:(fn,deps)=>{const index=cursor++,old=slots[index];if(changed(old?.deps,deps))pending.push(()=>{old?.cleanup?.();slots[index]={deps,cleanup:fn()}})}};
+  const {PsychoVisualizer}=compile('components/visualizer/PsychoVisualizer.tsx',{'react':hooks,'../../utils/psychoScene':{...psychoScene,drawPsychoScene:(canvas,time,_energy,scene,detail)=>{draws.push({time,scene,detail,width:canvas.width});clock+=18}}});
+  const canvas={clientWidth:3840,clientHeight:2160,width:0,height:0};
+  const render=()=>{cursor=0;const tree=PsychoVisualizer({levels:props.levels,active:true,inactiveLabel:'Inactive'});nodes(tree,n=>n.type==='canvas')[0].props.ref.current=canvas;pending.splice(0).forEach(fn=>fn());return tree};
+  let tree=render();const tick=time=>{for(const [id,fn]of [...raf]){raf.delete(id);fn(time)}};
+  for(let i=0;i<42;i++)tick(1+i*40);
+  assert.equal(canvas.width,896);assert.equal(draws.at(-1).detail,'light');assert.ok(draws.every(draw=>draw.scene==='cosmos'));
+  const time=draws.at(-1).time;
+  nodes(tree,n=>n.type==='button')[0].props.onClick();tree=render();assert.equal(raf.size,0);assert.equal(draws.at(-1).time,time);
+  nodes(tree,n=>n.type==='button')[0].props.onClick();tree=render();tick(2000);assert.equal(draws.at(-1).time,time);tick(2060);assert.ok(draws.at(-1).time>time);
+  const beforeScene=draws.at(-1).time;nodes(tree,n=>n.type==='select')[0].props.onChange({target:{value:'mandala'}});tree=render();
+  assert.equal(draws.at(-1).scene,'mandala');assert.equal(draws.at(-1).time,beforeScene);assert.equal(draws.at(-1).detail,'light','scene changes do not probe higher quality again');
+  document.hidden=true;docListeners.get('visibilitychange')();assert.equal(raf.size,0);
+  for(const slot of slots)slot?.cleanup?.();
+  assert.equal(raf.size,0);assert.equal(winListeners.size,0);assert.equal(docListeners.size,0);assert.equal(motionListeners.size,0);
+ }finally{globalThis.window=before.window;globalThis.document=before.document;globalThis.ResizeObserver=before.resize;globalThis.IntersectionObserver=before.intersection;Object.defineProperty(globalThis,'performance',before.performance);}
+});
+
+
+test('fullscreen immersion is enabled only for healthy uninterrupted playback, keeping errors and interactions visible',()=>{
+ const full={...props,fullscreen:true,embedded:false};assert.equal(View(full).props.enabled,true);
+ for(const change of [{fullscreen:false},{embedded:true},{busy:true},{isSeeking:true},{hostingError:true},{controlFailed:true},
+  {snapshot:{...snapshot,health:{state:'unavailable'}}},{snapshot:{...snapshot,playback:{...snapshot.playback,state:'pause'}}},
+  {snapshot:{...snapshot,playback:{...snapshot.playback,state:'stop'}}},{snapshot:{...snapshot,playback:{...snapshot.playback,playback_error:{code:'queue_uncertain'}}}}])assert.equal(View({...full,...change}).props.enabled,false);
+ assert.equal(View({...full,queueOpen:true}).props.enabled,true,'visible queue content is not closed or reset by immersion');
+});
+
+test('queue panel memory stays separate for each layout and survives host remounts without any playback command',()=>{
+ const savedWindow=window,savedDocument=globalThis.document,storage=new Map(),events=new Map();
+ globalThis.window={...window,localStorage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value)},addEventListener:(key,fn)=>events.set(key,fn),removeEventListener:(key,fn)=>{if(events.get(key)===fn)events.delete(key)}};
+ try{
+  const mount=embedded=>{
+   const slots=[],effects=[];let cursor=0;
+   const hooks={...React,default:React,useState:initial=>{const index=cursor++;if(!(index in slots))slots[index]=typeof initial==='function'?initial():initial;return[slots[index],next=>{slots[index]=typeof next==='function'?next(slots[index]):next}]},useEffect:fn=>effects.push(fn),useRef:initial=>({current:initial})};
+   const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{},'@tauri-apps/api/window':{},'../services/audio':{audioService:new Proxy({},{get(){assert.fail('panel preferences cannot read/change playback')}})},'../services/nowPlayingWindow':{}});
+   return {render(){cursor=0;effects.length=0;return NowPlayingHost({snapshot,owner,embedded,onReady(){}})},effects};
+  };
+  const host=mount(true);let tree=host.render();assert.equal(tree.props.queueOpen,true);
+  tree.props.onQueue();tree=host.render();assert.equal(tree.props.queueOpen,false);
+  tree.props.onLayoutChange('psycho');tree=host.render();assert.equal(tree.props.queueOpen,true,'new layouts retain the existing default until explicitly chosen');tree.props.onQueue();tree=host.render();assert.equal(tree.props.queueOpen,false);
+  tree.props.onLayoutChange('audiophile');tree=host.render();assert.equal(tree.props.queueOpen,false);tree.props.onQueue();tree=host.render();assert.equal(tree.props.queueOpen,true);
+  tree.props.onLayoutChange('psycho');tree=host.render();assert.equal(tree.props.queueOpen,false);
+  const detached=mount(false);assert.equal(detached.render().props.queueOpen,false);
+  const sync=detached.effects.find(fn=>fn.toString().includes('syncLook'));const cleanup=sync();
+  const beforeWrites=storage.get(layoutHelpers.NOW_PLAYING_QUEUE_PANELS_KEY);
+  events.get('storage')({key:layoutHelpers.NOW_PLAYING_QUEUE_PANELS_KEY,newValue:'{"psycho":true,"audiophile":true,"sleeve":false,"poster":true}'});
+  assert.equal(detached.render().props.queueOpen,true);assert.equal(storage.get(layoutHelpers.NOW_PLAYING_QUEUE_PANELS_KEY),beforeWrites,'storage sync does not echo writes');cleanup();
+  const remembered=JSON.parse(storage.get(layoutHelpers.NOW_PLAYING_QUEUE_PANELS_KEY));assert.equal(remembered.audiophile,true);assert.equal(remembered.psycho,false);
+  let focus=0;globalThis.document={getElementById:()=>({focus(){focus++}})};
+  const esc=detached.effects.find(fn=>fn.toString().includes('const escape'));const closeEsc=esc();
+  events.get('keydown')({key:'Escape',defaultPrevented:false,preventDefault(){},stopPropagation(){}});
+  assert.equal(detached.render().props.queueOpen,false);assert.equal(focus,1);assert.equal(JSON.parse(storage.get(layoutHelpers.NOW_PLAYING_QUEUE_PANELS_KEY)).psycho,false);closeEsc();
+ }finally{globalThis.window=savedWindow;globalThis.document=savedDocument;}
+});
+
+
+test('deferred lyrics cannot load or mount in either host even with the old opt-in preference enabled',()=>{
+ const previous=window.localStorage;
+ try{
+  window.localStorage={getItem:key=>key==='sonante.nowPlaying.lyrics.enabled.v1'?'true':null};
+  const {NowPlayingPresentation:DeferredView}=compile('components/NowPlayingPresentation.tsx',{
+   './TrackLyrics':{get TrackLyrics(){assert.fail('deferred provider must not load in the active player')}}
+  });
+  for(const embedded of [true,false])for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
+   const tree=DeferredView({...props,embedded,layout});
+   assert.equal(nodes(tree,n=>n.type===dependencies['./TrackLyrics'].TrackLyrics).length,0);
+   const html=renderToStaticMarkup(React.createElement(DeferredView,{...props,embedded,layout}));
+   assert.doesNotMatch(html,/np-lyrics|LRCLIB|Buscar letras online|Find lyrics online/);
+   if(layout==='sleeve')assert.ok(html.includes(i18n.t('nowPlaying.look.recordDetails')));
+   assert.ok(nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('player.pause')).length);
+  }
+ }finally{window.localStorage=previous}
+});
+
+
+test('cover double-click and visible fullscreen button share one window action in every layout and host',()=>{
+ for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS)for(const embedded of [true,false]){
+  const calls=[];const tree=View({...props,layout,embedded,onFullscreen:()=>calls.push('fullscreen'),onTogglePlay:()=>assert.fail('cover must not toggle playback')});
+  const cover=nodes(tree,n=>n.props?.className==='np-cover')[0];assert.equal(cover.props.onClick,undefined);
+  let prevented=0;cover.props.onDoubleClick({button:0,preventDefault(){prevented++}});
+  nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('nowPlaying.enterFullscreen'))[0].props.onClick();
+  assert.deepEqual(calls,['fullscreen','fullscreen']);assert.equal(prevented,1);assert.equal(cover.props.title,i18n.t('nowPlaying.coverFullscreen'));
+  for(const change of [{busy:true},{controlsDisabled:true}]){
+   const disabled=View({...props,layout,embedded,...change,onFullscreen:()=>assert.fail('handoff cannot toggle fullscreen')});
+   nodes(disabled,n=>n.props?.className==='np-cover')[0].props.onDoubleClick({button:0,preventDefault(){assert.fail('unhandled click should not be consumed')}});
+   assert.equal(nodes(disabled,n=>n.type==='button'&&n.props['aria-label']===i18n.t('nowPlaying.enterFullscreen'))[0].props.disabled,true);
+  }
+ }
+ const {NowPlayingLayoutPicker}=dependencies['./NowPlayingLayoutPicker'];const picker=NowPlayingLayoutPicker({layout:'audiophile',placement:'frame'});
+ const select=nodes(picker,n=>n.type==='select')[0];assert.equal(select.props['aria-keyshortcuts'],'1 2 3 4');assert.equal(select.props.title,i18n.t('nowPlaying.look.shortcuts'));
 });

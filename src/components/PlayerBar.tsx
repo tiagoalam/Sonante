@@ -1,3 +1,4 @@
+import { SleepTimerControl } from "./SleepTimerControl";
 import { SourceAudioBadges } from "./SourceAudioBadges";
 import type { PlayerSourceInfo } from "../types/sourceAudio";
 import { currentMediaKey } from "../utils/playerNavigation";
@@ -367,29 +368,34 @@ export const PlayerBar: React.FC<Props> = ({
           </span>
         </div>
 
-        {onOpenNowPlaying && (
+        <div className="flex shrink-0 flex-col items-end gap-1" data-player-timer-actions>
+        <div className="flex items-center gap-2">
+          {onOpenNowPlaying && (
+            <button
+              type="button"
+              onClick={onOpenNowPlaying}
+              className="shrink-0 p-2.5 rounded-lg border border-[color:var(--theme-border-soft,#2D2D2D)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#202020)] transition-colors cursor-pointer"
+              title={t("player.openNowPlaying")}
+            >
+              <Maximize2 size={17} />
+            </button>
+          )}
+
           <button
             type="button"
-            onClick={onOpenNowPlaying}
-            className="shrink-0 p-2.5 rounded-lg border border-[color:var(--theme-border-soft,#2D2D2D)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#202020)] transition-colors cursor-pointer"
-            title={t("player.openNowPlaying")}
+            onClick={onToggleQueue}
+            className={`shrink-0 p-2.5 rounded-lg border transition-colors cursor-pointer ${
+              isQueueOpen
+                ? "bg-[var(--theme-surface-accent,#252014)] border-[color:var(--theme-border-accent,#E5A00D)] text-[color:var(--theme-fg-accent,#E5A00D)]"
+                : "border-[color:var(--theme-border-soft,#262626)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#202020)]"
+            }`}
+            title={t("player.queue")}
           >
-            <Maximize2 size={17} />
+            <ListMusic size={17} />
           </button>
-        )}
-
-        <button
-          type="button"
-          onClick={onToggleQueue}
-          className={`shrink-0 p-2.5 rounded-lg border transition-colors cursor-pointer ${
-            isQueueOpen
-              ? "bg-[var(--theme-surface-accent,#252014)] border-[color:var(--theme-border-accent,#E5A00D)] text-[color:var(--theme-fg-accent,#E5A00D)]"
-              : "border-[color:var(--theme-border-soft,#262626)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#202020)]"
-          }`}
-          title={t("player.queue")}
-        >
-          <ListMusic size={17} />
-        </button>
+        </div>
+        <SleepTimerControl compact />
+        </div>
       </div>
     </footer>
   );

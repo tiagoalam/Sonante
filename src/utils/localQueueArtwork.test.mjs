@@ -1,3 +1,5 @@
+import { NowPlayingFullscreen } from "./nowPlayingFullscreen.ts";
+import * as layoutHelpers from "./nowPlayingLayout.ts";
 import { passiveQueueInsertion } from "../../tests/support/passiveQueueInsertion.mjs";
 import * as queuePresentationHelpers from "./queuePresentation.ts";
 import { createLocalCoverBatch } from "./localCoverBatch.ts";
@@ -20,13 +22,13 @@ import { localAlbumForMedia } from "./playerNavigation.ts";
 import { logError } from "./frontendDiagnostics.ts";
 const coverPaths = calls => calls.filter(c=>c[0]==="get_local_covers").flatMap(c=>c[1].paths);
 const read = file => readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
-function compile(file,deps){const js=ts.transpileModule(read(file),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};new Function("require","exports",js)(id=>{if(id === "../utils/playbackIntent") return playbackIntents; if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; if(id==="../utils/signalPath")return signalPathHelpers; if(id==="../utils/localCoverBatch")return {createLocalCoverBatch}; if(id==="../utils/localSourceReadQueue")return {createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()}; assert.ok(id in deps,id);return deps[id];},exports);return exports;}
+function compile(file,deps){const js=ts.transpileModule(read(file),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};new Function("require","exports",js)(id=>{if(id === "../utils/nowPlayingFullscreen")return {NowPlayingFullscreen}; if(id === "../utils/playbackIntent") return playbackIntents; if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; if(id==="../utils/signalPath")return signalPathHelpers; if(id==="../utils/localCoverBatch")return {createLocalCoverBatch}; if(id==="../utils/localSourceReadQueue")return {createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()}; assert.ok(id in deps,id);return deps[id];},exports);return exports;}
 const flush=async()=>{for(let i=0;i<60;i++)await Promise.resolve();};
 const defer=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};};
 const album=(id,folder)=>({id,title:"Same title",artist:"Same artist",folder_path:folder,discs:[],source_id:folder.split("/")[0],track_count:2});
 const a=album("a","Source/Album"),b=album("b","Other/Album");
 const track=(uri)=>({title:"Same title",artist:"Same artist",album:"Same title",uri,media_locator:{kind:"local",uri}});
-const common={...passiveQueueInsertion,"../utils/queuePresentation":queuePresentationHelpers,"react/jsx-runtime":jsx,"lucide-react":icons,"react-i18next":{useTranslation:()=>({t:key=>key})},"./nowPlaying.css":{}};
+const common={"../utils/nowPlayingLayout":layoutHelpers,...passiveQueueInsertion,"../utils/queuePresentation":queuePresentationHelpers,"react/jsx-runtime":jsx,"lucide-react":icons,"react-i18next":{useTranslation:()=>({t:key=>key})},"./nowPlaying.css":{}};
 const {TrackArtwork}=compile("components/TrackArtwork.tsx",{...common,react:{...React,default:React},"./PlexImage":{PlexImage:()=>null}});
 const nodes=(tree,pred)=>Array.isArray(tree)?tree.flatMap(n=>nodes(n,pred)):!tree||typeof tree!=="object"?[]:[...(pred(tree)?[tree]:[]),...nodes(tree.props?.children,pred)];
 const fixtures=new Set();

@@ -364,8 +364,10 @@
         "spectrum-neon": "Neon Spectrum",
         "spectrum-segmented": "Segmented Spectrum",
         "vu-amber": "Amber VU",
-        "vu-blue": "Blue VU"
-      }
+        "vu-blue": "Blue VU",
+        "vu-radial": "Circular VU"
+      },
+      "levelScale": "Needles show RMS in dBFS; the separate mark shows the signal peak. A slower fall is intentional and does not delay new attacks."
     },
     "vuUnavailable": "Inactive",
     "analyzerReason": {
@@ -378,7 +380,63 @@
       "reconcile_failed": "Audio for this track could not be confirmed",
       "fifo_open_failed": "Audio analysis could not be prepared",
       "initial_reconcile_failed": "Audio analysis could not be started"
-    }
+    },
+    "layouts": {
+      "audiophile": "Audiophile",
+      "psycho": "Psycho",
+      "sleeve": "Sleeve",
+      "poster": "Poster"
+    },
+    "look": {
+      "label": "Layout",
+      "placement": "Effects",
+      "frame": "Framed",
+      "background": "Background",
+      "psychoCaption": "Sound in colour",
+      "pauseEffects": "Pause effects",
+      "resumeEffects": "Resume effects",
+      "reducedMotion": "Reduced motion",
+      "posterCaption": "A song. A moment.",
+      "psychoEyebrow": "Now playing",
+      "sleeveEyebrow": "Between the grooves",
+      "posterEyebrow": "Listening / Sonante",
+      "recordDetails": "Inside the record",
+      "artist": "Artist",
+      "album": "Album",
+      "source": "Source",
+      "duration": "Duration",
+      "shortcuts": "Shortcuts: 1 Audiophile · 2 Psychedelic · 3 Sleeve · 4 Poster"
+    },
+    "psycho": {
+      "scene": "Visual environment",
+      "quality": "Effect detail",
+      "auto": "Automatic",
+      "economy": "Economy",
+      "scenes": {
+        "aurora": "Aurora",
+        "mandala": "Mandala",
+        "cosmos": "Cosmos"
+      }
+    },
+    "lyrics": {
+      "title": "Lyrics",
+      "enable": "Find lyrics online",
+      "privacy": "When enabled, sends the track title, artist, album and duration to LRCLIB. Results are cached locally.",
+      "noMetadata": "Track information is not sufficient to find lyrics.",
+      "loading": "Finding lyrics…",
+      "error": "Lyrics are temporarily unavailable. Playback is unaffected.",
+      "retry": "Try again",
+      "credit": "Lyrics: LRCLIB · Community contributions",
+      "notFound": "No lyrics found for this version.",
+      "instrumental": "This track is listed as instrumental.",
+      "failure": {
+        "connection": "Could not connect to the lyrics service. Try again later.",
+        "service": "The lyrics service is temporarily unavailable. Try again later.",
+        "timeout": "The lyrics service took too long to respond. Try again.",
+        "invalid_response": "The lyrics service returned an unreadable response. Try again later."
+      }
+    },
+    "coverFullscreen": "Double-click the cover to enter or exit fullscreen"
   },
   "queue": {
     "filterLabel": "Filter the current queue",
@@ -706,6 +764,12 @@
     "albums": "Albums",
     "tracks": "Tracks",
     "loading": "Loading media...",
+    "loadingLibraries": "Loading Plex libraries…",
+    "loadingCatalog": "Loading Plex albums…",
+    "librariesUnavailable": "Could not load Plex libraries. Check the connection and try again.",
+    "catalogUnavailable": "Could not load albums from this library. Try again.",
+    "noLibraries": "No music libraries were found in Plex.",
+    "retryLoad": "Try again",
     "libraryLabel": "Library",
     "tabAlbums": "Albums",
     "tabArtists": "Artists",
@@ -1931,5 +1995,17 @@
     "page": "Page {{number}}",
     "directoryCredit": "Community directory:",
     "filtersError": "Reload countries and genres"
+  },
+  "sleepTimer": {
+    "title": "Sleep timer",
+    "help": "Stops playback when the time is up. Your queue is preserved.",
+    "remaining_one": "Stop in {{count}} minute",
+    "remaining_other": "Stop in {{count}} minutes",
+    "option_one": "Stop in {{count}} minute",
+    "option_other": "Stop in {{count}} minutes",
+    "cancel": "Cancel timer",
+    "dismiss": "Dismiss",
+    "stopping": "Stopping…",
+    "error": "The timer could not be confirmed. Playback may still be running."
   }
 }

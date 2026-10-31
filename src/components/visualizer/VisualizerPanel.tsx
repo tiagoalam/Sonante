@@ -6,10 +6,10 @@ import type { AudioLevelFrame } from "../../types/audio";
 import { AnalogVu } from "./AnalogVu";
 import { SpectrumNeon } from "./SpectrumNeon";
 import { SpectrumSegmented } from "./SpectrumSegmented";
-import { VuHorizontal } from "./VuHorizontal";
+import { InstrumentCanvas } from "./InstrumentCanvas";
 
 const STORAGE_KEY = "sonante.nowPlaying.visualizerMode";
-const MODES = ["combo", "spectrum-neon", "spectrum-segmented", "vu-amber", "vu-blue"] as const;
+const MODES = ["combo", "spectrum-neon", "spectrum-segmented", "vu-amber", "vu-blue", "vu-radial"] as const;
 type VisualizerMode = (typeof MODES)[number];
 
 const isVisualizerMode = (value: string | null): value is VisualizerMode =>
@@ -96,6 +96,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
               <p className="mb-2 font-semibold text-white">{t("nowPlaying.visualizer.howItWorks")}</p>
               <p>{t("nowPlaying.visualizer.helpOverview")}</p>
               <ul className="mt-2 list-disc space-y-1 pl-4">
+                <li>{t("nowPlaying.visualizer.levelScale")}</li>
                 <li>{t("nowPlaying.visualizer.worksPcm")}</li>
                 <li>{t("nowPlaying.visualizer.worksDsd")}</li>
                 <li>{t("nowPlaying.visualizer.directDsd")}</li>
@@ -114,20 +115,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
           <p className="text-sm font-semibold leading-relaxed text-white/90">{inactiveLabel || t("nowPlaying.vuUnavailable")}</p>
           <p className="mt-2 text-xs leading-relaxed text-white/65">{inactiveHelp || t("nowPlaying.visualizer.helpRetry")}</p>
         </div> : <>
-        {mode === "combo" && (
-          <>
-            <VuHorizontal levels={levels} active={active} />
-            <div className="np-combo-spectrum min-h-0 flex-1 mt-2 border-t border-white/[0.06] pt-2">
-              <SpectrumNeon
-                spectrum={levels.spectrum}
-                active={active}
-                label={t("nowPlaying.spectrum")}
-                compact
-                fullscreen={fullscreen}
-              />
-            </div>
-          </>
-        )}
+        {mode === "combo" && <InstrumentCanvas levels={levels} active={active} mode="combo" label={modeLabel} fullscreen={fullscreen} />}
         {mode === "spectrum-neon" && (
           <SpectrumNeon
             spectrum={levels.spectrum}
@@ -144,11 +132,11 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
             fullscreen={fullscreen}
           />
         )}
-        {(mode === "vu-amber" || mode === "vu-blue") && (
+        {(mode === "vu-amber" || mode === "vu-blue" || mode === "vu-radial") && (
           <AnalogVu
             levels={levels}
             active={active}
-            variant={mode === "vu-amber" ? "amber" : "blue"}
+            variant={mode === "vu-radial" ? "radial" : mode === "vu-amber" ? "amber" : "blue"}
             leftLabel={t("nowPlaying.visualizer.left")}
             rightLabel={t("nowPlaying.visualizer.right")}
             relativeLabel={t("nowPlaying.visualizer.relativeLevel")}

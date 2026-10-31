@@ -1,0 +1,20 @@
+.sleep-timer { position: relative; display: inline-flex; align-items: center; flex-shrink: 0; color: var(--theme-fg-muted,#999); font-size: 11px; }
+.sleep-timer details { position: static; }
+.sleep-timer summary { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; padding: 10px; border: 1px solid var(--theme-border-soft,#333); border-radius: 10px; list-style: none; }
+.sleep-timer summary::-webkit-details-marker { display: none; }
+.sleep-timer summary:focus-visible, .sleep-timer button:focus-visible { outline: 2px solid var(--theme-fg-accent,#e5a00d); outline-offset: 3px; }
+.sleep-timer-active { color: var(--theme-fg-accent,#e5a00d); }
+.sleep-timer-cancel { padding: 5px !important; border: 0 !important; background: transparent !important; cursor: pointer; }
+.sleep-timer-menu { position: absolute; bottom: calc(100% + 12px); right: 0; z-index: 60; width: 230px; padding: 14px; display: grid; gap: 6px; background: var(--theme-surface-panel,#191919); color: var(--theme-fg-primary,#eee); border: 1px solid var(--theme-border-soft,#444); border-radius: 12px; box-shadow: 0 12px 40px #0009; }
+.np-header .sleep-timer-menu { top: calc(100% + 12px); bottom: auto; }
+.sleep-timer-menu strong { font-size: 13px; }
+.sleep-timer-menu p { font-size: 11px; line-height: 1.5; color: var(--theme-fg-muted,#aaa); }
+.sleep-timer .sleep-timer-menu button { cursor: pointer; text-align: left; border: 0; border-radius: 6px; padding: 8px; color: inherit; background: var(--theme-surface-hover,#ffffff08); font-size: 12px; }
+.sleep-timer .sleep-timer-menu button:hover { color: var(--theme-fg-accent,#e5a00d); background: var(--theme-surface-raised,#ffffff12); }
+.sleep-timer button:disabled { opacity: .4; cursor: wait; }
+.sleep-timer-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--theme-fg-error,#f88); }
+
+/* Stack under the existing actions: an active timer consumes no extra player-bar width. */
+.sleep-timer-compact summary { padding: 2px 4px; border: 0; gap: 4px; }
+.sleep-timer-compact summary > svg { width: 13px; height: 13px; }
+.sleep-timer-compact .sleep-timer-cancel { padding: 2px !important; }

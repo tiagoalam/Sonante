@@ -1,3 +1,5 @@
+import { PlexBrowserLoadNotice } from "./components/PlexBrowserLoadNotice";
+import { plexBrowserLoadState } from "./utils/plexBrowserLoadState";
 import { RadioView } from "./components/RadioView";
 import { Radio } from "lucide-react";
 import { HistoryView } from "./components/HistoryView";
@@ -429,6 +431,9 @@ export function App() {
   // Opaque identities prevent credential values from reaching cards, errors or persisted navigation.
   const plexConnectionIdentity = useMemo(() => ({}), [config?.plex_server_id, config?.plex_url, config?.plex_token]);
   const plexBrowserIdentity = useMemo(() => ({}), [plexConnectionIdentity, selectedLibrary?.key]);
+  const plexBrowserIdentityRef = useRef(plexBrowserIdentity);
+  plexBrowserIdentityRef.current = plexBrowserIdentity;
+  const plexCatalogRetryRef = useRef<unknown>(null);
   const [plexLibrariesIdentity, setPlexLibrariesIdentity] = useState<unknown>(null);
   const [plexLibrariesError, setPlexLibrariesError] = useState(false);
   const [plexDiscoveryAttempt, setPlexDiscoveryAttempt] = useState(0);
@@ -1279,6 +1284,33 @@ export function App() {
     };
   }, [selectedLibrary, plexLibrariesIdentity, plexConnectionIdentity, plexBrowserIdentity, plexCatalog, centralSection, plexArea]);
 
+  const retryPlexBrowser = async () => {
+    if (loadingLibraries || plexCatalogRetryRef.current === plexBrowserIdentity) return;
+    if (plexLibrariesError || plexLibrariesIdentity !== plexConnectionIdentity || !selectedLibrary) {
+      // Same discovery path used by Discover's existing retry button.
+      setPlexDiscoveryAttempt(attempt => attempt + 1);
+      return;
+    }
+    if (plexAlbumLoad?.identity === plexBrowserIdentity && plexAlbumLoad.phase === "loading") return;
+    const identity = plexBrowserIdentity;
+    const generation = ++plexLibraryRequestGenerationRef.current;
+    const current = () => plexBrowserIdentityRef.current === identity && plexLibraryRequestGenerationRef.current === generation;
+    plexCatalogRetryRef.current = identity;
+    setPlexAlbumLoad({ identity, phase: "loading" });
+    try {
+      const loaded = await plexCatalog.loadLibrary(selectedLibrary, true);
+      if (!current()) return;
+      setAlbums(loaded);
+      setPlexAlbumLoad({ identity, phase: "ready" });
+    } catch (error) {
+      if (!current()) return;
+      setPlexAlbumLoad({ identity, phase: "error" });
+      logError("plex.albums-load", error);
+    } finally {
+      if (plexCatalogRetryRef.current === identity) plexCatalogRetryRef.current = null;
+    }
+  };
+
   // Busca Plex
   useEffect(() => {
     const q = searchQuery.trim();
@@ -1567,6 +1599,11 @@ export function App() {
   const selectedPlexDecadeSummary = selectedPlexDecade === null
     ? undefined
     : plexYearNavigation.decades.find((item) => item.decade === selectedPlexDecade);
+  const plexLoadState = plexBrowserLoadState({
+    loadingLibraries, librariesError: plexLibrariesError, librariesIdentity: plexLibrariesIdentity,
+    connectionIdentity: plexConnectionIdentity, selectedLibrary, browserIdentity: plexBrowserIdentity, albumLoad: plexAlbumLoad,
+  });
+  const plexLoadBlocksContent = !!plexLoadState && (!selectedLibrary || (!albums.length && !searchQuery.trim()));
   const plexCountsReady = plexAlbumLoad?.identity === plexBrowserIdentity && plexAlbumLoad.phase === "ready";
   const plexCounts = {
     albums: albums.length, artists: plexArtists.length, genres: plexGenreOptions.length, collections: collections.length,
@@ -2074,7 +2111,8 @@ export function App() {
             )}
 
             <div ref={setPlexScrollContainer} className="flex-1 overflow-y-auto p-8">
-              {searchQuery.trim().length > 0 ? (
+              <PlexBrowserLoadNotice state={plexLoadState} compact={!plexLoadBlocksContent} onRetry={() => { void retryPlexBrowser(); }} />
+              {plexLoadBlocksContent ? null : searchQuery.trim().length > 0 ? (
                 isSearching ? (
                   <div className="h-40 flex items-center justify-center text-xs text-[color:var(--theme-fg-muted,#666666)]">
                     {t("plex.searching")}
@@ -2231,7 +2269,7 @@ export function App() {
                     {t("plex.noResults", { query: searchQuery })}
                   </div>
                 )
-              ) : (loading || (activeCollection && loadingCollection)) ? (
+              ) : ((loading && !plexLoadState) || (activeCollection && loadingCollection)) ? (
                 <div className="h-full flex items-center justify-center text-[color:var(--theme-fg-muted,#666666)]">
                   {t("plex.loading")}
                 </div>

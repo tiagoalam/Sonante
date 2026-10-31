@@ -1,3 +1,4 @@
+import * as layoutHelpers from "./nowPlayingLayout.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -141,6 +142,10 @@ test("Now Playing receives route changes through the existing snapshot event and
   const js = ts.transpileModule(source, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS } }).outputText;
   let fullscreen = false;
   const dependencies = {
+    "./TrackLyrics": { TrackLyrics: () => null },
+    "./SleepTimerControl": { SleepTimerControl: () => null },
+    "./NowPlayingImmersive": { NowPlayingImmersive: ({children}) => React.createElement("main",null,children) },
+    "../utils/nowPlayingLayout": layoutHelpers, "./NowPlayingLayoutPicker": { NowPlayingLayoutPicker: () => null }, "./visualizer/PsychoVisualizer": { PsychoVisualizer: () => null },
     react: { ...hooks, default: hooks, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons,
     "react-i18next": { useTranslation: () => ({ t }) },
     "../utils/signalPath": { requiresDeviceVolumeControl },

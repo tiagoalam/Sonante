@@ -4158,6 +4158,16 @@ impl AudioEngine {
         stopped.map(|_| ()).map_err(|_| "RADIO_PLAYBACK_UNAVAILABLE".into())
     }
 
+    pub(crate) fn stop_for_sleep(&mut self) -> Result<(), String> {
+        let socket = self.socket_path.clone(); let gate = self.direct_playback.clone();
+        self.stop_for_sleep_with_io(|command| Self::send_with_gate(&socket, gate.as_deref(), command))
+    }
+    fn stop_for_sleep_with_io(&mut self, send: impl FnOnce(&str) -> Result<Vec<String>, String>) -> Result<(), String> {
+        self.note_eq_intervention(); self.invalidate_playback_intents();
+        // Explicit stop releases the output; never toggles, clears or rebuilds a queue.
+        send("stop").map(|_| ())
+    }
+
     pub(crate) fn stop_upnp(&mut self) -> Result<(), String> {
         self.note_eq_intervention(); self.invalidate_playback_intents();
         self.send_command("stop").map(|_| ())
@@ -9720,6 +9730,23 @@ mod tests {
         assert_eq!(status.title,"Current Song");assert_eq!(status.artist,"Synthetic Station");assert_eq!(status.album,"Current Artist");assert_eq!(status.duration,0.);assert!(matches!(status.current_media,Some(CurrentMedia::Radio{queue_index:0,..})));
         let stopped=engine.get_status_with_io(true,true,|_|panic!("no local cover"),|cmd|{assert_eq!(cmd,"status");Ok(vec!["state: stop".into()])}).unwrap();
         assert_eq!(stopped.state,"stop");assert_eq!(stopped.title,"Synthetic Station");assert_eq!(stopped.duration,0.);assert!(matches!(stopped.current_media,Some(CurrentMedia::Radio{..})));
+    }
+    #[test]
+    fn sleep_stop_preserves_local_plex_radio_queue_and_propagates_transport_failures() {
+        for failure in [None, Some("ACK rejected"), Some("socket unavailable"), Some("timeout"), Some("EOF")] {
+            for tracks in [vec![], vec![engine_with_track("Source/local \"音楽\".flac").queue[0].clone()], vec![plex_track()], vec![radio_track_fixture()]] {
+                let mut engine = engine_with_track("old.flac"); engine.queue = tracks;
+                let before = engine.queue.clone(); let mut sent = vec![];
+                let cursor = PlaybackResumeSnapshot { queue_index: 0, elapsed: 42.5, state: PlaybackState::Paused };
+                engine.restored_resume = Some(cursor);
+                let result = engine.stop_for_sleep_with_io(|command| {
+                    sent.push(command.to_string()); match failure { Some(error) => Err(error.into()), None => Ok(vec![]) }
+                });
+                assert_eq!(sent, vec!["stop"]); assert_eq!(engine.queue,before);
+                assert_eq!(engine.restored_resume,Some(cursor));
+                assert_eq!(result.err().as_deref(),failure);
+            }
+        }
     }
     #[test]
     fn radio_stop_is_idempotent_source_bound_and_reports_transport_failure_without_toggle() {

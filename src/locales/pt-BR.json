@@ -364,8 +364,10 @@
         "spectrum-neon": "Espectro neon",
         "spectrum-segmented": "Espectro segmentado",
         "vu-amber": "VU âmbar",
-        "vu-blue": "VU azul"
-      }
+        "vu-blue": "VU azul",
+        "vu-radial": "VU circular"
+      },
+      "levelScale": "Os ponteiros mostram RMS em dBFS; a marca separada indica o pico do sinal. A descida é mais lenta, sem atrasar novos ataques."
     },
     "vuUnavailable": "Inativo",
     "analyzerReason": {
@@ -378,7 +380,63 @@
       "reconcile_failed": "Não foi possível confirmar o áudio desta faixa",
       "fifo_open_failed": "Não foi possível preparar a análise de áudio",
       "initial_reconcile_failed": "Não foi possível iniciar a análise de áudio"
-    }
+    },
+    "layouts": {
+      "audiophile": "Audiófilo",
+      "psycho": "Psico",
+      "sleeve": "Encarte",
+      "poster": "Pôster"
+    },
+    "look": {
+      "label": "Layout",
+      "placement": "Efeitos",
+      "frame": "Quadro",
+      "background": "Fundo",
+      "psychoCaption": "O som em cores",
+      "pauseEffects": "Pausar efeitos",
+      "resumeEffects": "Retomar efeitos",
+      "reducedMotion": "Movimento reduzido",
+      "posterCaption": "Uma música. Um momento.",
+      "psychoEyebrow": "Tocando agora",
+      "sleeveEyebrow": "Entre os sulcos",
+      "posterEyebrow": "Em cartaz / Sonante",
+      "recordDetails": "Por dentro do disco",
+      "artist": "Artista",
+      "album": "Álbum",
+      "source": "Fonte",
+      "duration": "Duração",
+      "shortcuts": "Atalhos: 1 Audiófilo · 2 Psico · 3 Encarte · 4 Pôster"
+    },
+    "psycho": {
+      "scene": "Ambiente visual",
+      "quality": "Detalhe dos efeitos",
+      "auto": "Automático",
+      "economy": "Econômico",
+      "scenes": {
+        "aurora": "Aurora",
+        "mandala": "Mandala",
+        "cosmos": "Cosmos"
+      }
+    },
+    "lyrics": {
+      "title": "Letra",
+      "enable": "Buscar letras online",
+      "privacy": "Ao ativar, envia título, artista, álbum e duração ao LRCLIB. Os resultados ficam em cache local.",
+      "noMetadata": "Faltam informações da faixa para buscar a letra.",
+      "loading": "Buscando letra…",
+      "error": "As letras estão indisponíveis no momento. Isso não afeta a reprodução.",
+      "retry": "Tentar novamente",
+      "credit": "Letras: LRCLIB · Contribuições da comunidade",
+      "notFound": "Não encontramos a letra desta versão.",
+      "instrumental": "Esta faixa está identificada como instrumental.",
+      "failure": {
+        "connection": "Não foi possível conectar ao serviço de letras. Tente novamente mais tarde.",
+        "service": "O serviço de letras está temporariamente indisponível. Tente novamente mais tarde.",
+        "timeout": "O serviço de letras demorou demais para responder. Tente novamente.",
+        "invalid_response": "O serviço de letras retornou uma resposta que não foi possível ler. Tente novamente mais tarde."
+      }
+    },
+    "coverFullscreen": "Duplo clique na capa para entrar ou sair da tela cheia"
   },
   "queue": {
     "filterLabel": "Filtrar a fila atual",
@@ -706,6 +764,12 @@
     "albums": "Álbuns",
     "tracks": "Faixas",
     "loading": "Carregando mídias...",
+    "loadingLibraries": "Carregando bibliotecas do Plex…",
+    "loadingCatalog": "Carregando álbuns do Plex…",
+    "librariesUnavailable": "Não foi possível carregar as bibliotecas do Plex. Confira a conexão e tente novamente.",
+    "catalogUnavailable": "Não foi possível carregar os álbuns desta biblioteca. Tente novamente.",
+    "noLibraries": "Nenhuma biblioteca musical foi encontrada no Plex.",
+    "retryLoad": "Tentar novamente",
     "libraryLabel": "Biblioteca",
     "tabAlbums": "Álbuns",
     "tabArtists": "Artistas",
@@ -1931,5 +1995,17 @@
     "page": "Página {{number}}",
     "directoryCredit": "Diretório comunitário:",
     "filtersError": "Recarregar países e gêneros"
+  },
+  "sleepTimer": {
+    "title": "Temporizador",
+    "help": "Para a reprodução ao terminar o prazo. A fila será preservada.",
+    "remaining_one": "Parar em {{count}} minuto",
+    "remaining_other": "Parar em {{count}} minutos",
+    "option_one": "Parar em {{count}} minuto",
+    "option_other": "Parar em {{count}} minutos",
+    "cancel": "Cancelar temporizador",
+    "dismiss": "Dispensar",
+    "stopping": "Parando…",
+    "error": "Não foi possível confirmar o temporizador. A reprodução pode continuar ativa."
   }
 }
