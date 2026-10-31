@@ -53,6 +53,8 @@ mod system_tray;
 mod online_metadata;
 mod persistence;
 mod playlists;
+mod listening_history;
+mod radio;
 mod plex;
 mod shared_volume;
 mod shared_mute;
@@ -3203,6 +3205,7 @@ async fn get_playback_status(app: AppHandle, diagnostic_id: Option<u64>) -> Resu
             diagnostic.phase("volume.read");
             apply_volume_context(&mut playback, &before, &after);
             attach_shared_mute(&mut playback,&app.state::<SupervisorState>().0,shared_before)?;
+            listening_history::observe(&app, &playback);
             upnp_bridge::publish(&app, &playback, true);
             Ok(playback)
         })();
@@ -3276,7 +3279,7 @@ async fn get_mpd_status_snapshot(app: AppHandle, diagnostic_id: Option<u64>) -> 
                         evidence
                     },
                 );
-                if let Some(playback) = &snapshot.playback { upnp_bridge::publish(&app, playback, true); }
+                if let Some(playback) = &snapshot.playback { listening_history::observe(&app, playback); upnp_bridge::publish(&app, playback, true); }
                 snapshot
             });
         diagnostic.result(&result);
@@ -3593,7 +3596,7 @@ fn initial_queue_uris(audio: &AudioEngine, context: &initial_plex_playback::Sess
     let queue = audio.get_queue();
     if (!allow_empty && queue.is_empty()) || audio.startup_queue_pending()
         || queue.iter().any(|track| match &track.media_locator {
-            Some(MediaLocator::Upnp { .. }) => true,
+            Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }) => true,
             Some(MediaLocator::Plex { server_id, part_key, .. }) => server_id.is_empty() || part_key.is_empty(),
             Some(MediaLocator::Local { uri }) => !context.accepts_local(uri),
             None => !context.accepts_local(&track.uri),
@@ -3700,7 +3703,10 @@ async fn resolve_playback_uris(
 ) -> Result<Vec<String>, String> {
     let mut uris = Vec::with_capacity(tracks.len());
     for track in tracks {
-        let uri = if let Some(locator) = &track.media_locator {
+        let uri = if let Some(MediaLocator::Radio { station_id }) = &track.media_locator {
+            if !radio::valid_id(station_id) { return Err("RADIO_INVALID".into()); }
+            radio::stream_url(&track.uri)?
+        } else if let Some(locator) = &track.media_locator {
             plex_client.resolve_media_locator(locator).await?
         } else {
             if track.uri.trim().is_empty() {
@@ -3909,6 +3915,95 @@ async fn enqueue_tracks(app: AppHandle, tracks: Vec<TrackMetadata>, placement: a
         audio.validate_playback_intent(&token)?;
         audio.enqueue_tracks(tracks, resolved.map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?, placement)
     }).await.map_err(|_| "QUEUE_INSERT_UNAVAILABLE".to_string())?
+}
+
+#[tauri::command]
+async fn search_radio(app: AppHandle, search: radio::Search) -> Result<radio::Page, String> {
+    let state=app.state::<radio::State>();
+    tokio::time::timeout(std::time::Duration::from_secs(14), radio::search(&state, search)).await.map_err(|_| "RADIO_DIRECTORY_UNAVAILABLE".to_string())?
+}
+#[tauri::command]
+async fn radio_filters(app: AppHandle) -> Result<radio::Filters, String> {
+    let state=app.state::<radio::State>();
+    tokio::time::timeout(std::time::Duration::from_secs(14), radio::filters(&state)).await.map_err(|_| "RADIO_DIRECTORY_UNAVAILABLE".to_string())?
+}
+#[tauri::command]
+async fn radio_favorites(app: AppHandle, id: Option<String>, enabled: Option<bool>, name: Option<String>, url: Option<String>) -> Result<Vec<radio::Station>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<radio::State>(); let mut store = state.store.lock().map_err(|_| "RADIO_FAVORITES_UNAVAILABLE")?;
+        match (id,enabled,name,url) {
+            (Some(id),Some(enabled),None,None) => store.favorite(&id,enabled),
+            (None,None,Some(name),Some(url)) => store.manual(&name,&url),
+            (Some(id),None,Some(name),Some(url)) => store.edit_manual(&id,&name,&url),
+            (None,None,None,None) => store.list(), _ => Err("RADIO_INVALID".into()),
+        }
+    }).await.map_err(|_| "RADIO_FAVORITES_UNAVAILABLE".to_string())?
+}
+#[tauri::command]
+async fn stop_radio(app: AppHandle, id: String, intent: Option<String>) -> Result<(), String> {
+    let token = admit_or_validate_playback(&app.state::<AudioState>().0, &app.state::<ConfigTransactionState>(), intent)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        finish_playback_intent(&app.state::<AudioState>().0, &app.state::<ConfigTransactionState>(), &token, |audio| audio.stop_radio(&id))
+    }).await.map_err(|_| "RADIO_PLAYBACK_UNAVAILABLE".to_string())?
+}
+#[tauri::command]
+async fn play_radio(app: AppHandle, id: String, intent: Option<String>) -> Result<(), String> {
+    let token = admit_or_validate_playback(&app.state::<AudioState>().0, &app.state::<ConfigTransactionState>(), intent)?;
+    if initial_playback_context(&app.state::<ConfigTransactionState>(), Some(&token))?.is_some() { return Err(initial_plex_playback::WAIT.into()); }
+    let notify = app.clone(); let clicked = id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let track = { let state = app.state::<radio::State>(); let mut store = state.store.lock().map_err(|_| "RADIO_FAVORITES_UNAVAILABLE")?; store.station(&id)?.track()? };
+        let uri = track.uri.clone();
+        finish_playback_intent(&app.state::<AudioState>().0, &app.state::<ConfigTransactionState>(), &token, |audio| audio.play_tracks(vec![track], vec![uri], 0))
+    }).await.map_err(|_| "RADIO_PLAYBACK_UNAVAILABLE".to_string())??;
+    tauri::async_runtime::spawn(async move { let state=notify.state::<radio::State>(); let _=tokio::time::timeout(std::time::Duration::from_secs(5), radio::count_click(&state,&clicked)).await; });
+    Ok(())
+}
+
+#[tauri::command]
+async fn listening_history(app: AppHandle, enabled: Option<bool>, clear: Option<bool>) -> Result<listening_history::HistoryFile, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<listening_history::HistoryState>();
+        let mut store = state.0.lock().map_err(|_| "HISTORY_UNAVAILABLE")?;
+        if enabled.is_some() || clear.unwrap_or(false) { store.configure(enabled, clear.unwrap_or(false)) } else { store.list() }
+    }).await.map_err(|_| "HISTORY_UNAVAILABLE".to_string())?
+}
+#[tauri::command]
+async fn history_plex_navigation(app: AppHandle, id: String) -> Result<plex::PlexTrackNavigation, String> {
+    let locator = {
+        let state = app.state::<listening_history::HistoryState>(); let mut store = state.0.lock().map_err(|_| "HISTORY_UNAVAILABLE")?;
+        store.list()?.entries.into_iter().find(|entry| entry.id == id).and_then(|entry| entry.track.media_locator).ok_or("HISTORY_UNAVAILABLE")?
+    };
+    let client = app.state::<PlexState>().0.lock().map_err(|_| "HISTORY_UNAVAILABLE")?.clone();
+    let navigation = client.resolve_track_navigation(&locator).await?;
+    { let state = app.state::<listening_history::HistoryState>(); let mut store = state.0.lock().map_err(|_| "HISTORY_UNAVAILABLE")?;
+      if !store.list()?.entries.iter().any(|entry| entry.id == id && entry.track.media_locator.as_ref() == Some(&locator)) { return Err("HISTORY_UNAVAILABLE".into()); } }
+    let MediaLocator::Plex { server_id, .. } = &locator else { return Err("HISTORY_UNAVAILABLE".into()); };
+    if !app.state::<PlexState>().0.lock().map_err(|_| "HISTORY_UNAVAILABLE")?.navigation_server_is_selected(server_id) { return Err("HISTORY_UNAVAILABLE".into()); }
+    Ok(navigation)
+}
+
+#[tauri::command]
+async fn get_queue_edit_snapshot(app: AppHandle) -> Result<audio::QueueEditSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let transactions = app.state::<ConfigTransactionState>(); let _permit = begin_volume_transaction(&transactions)?;
+        if transactions.shutdown_requested() || transactions.shutdown_started() { return Err("PLAYBACK_SUPERSEDED".into()); }
+        transactions.manual_check_playback.admit()?;
+        let state = app.state::<AudioState>(); let mut audio = state.0.lock().map_err(|_| "QUEUE_EDIT_UNAVAILABLE")?;
+        audio.queue_edit_snapshot()
+    }).await.map_err(|_| "QUEUE_EDIT_UNAVAILABLE".to_string())?
+}
+#[tauri::command]
+async fn edit_queue(app: AppHandle, revision: String, action: audio::QueueEditAction, intent: Option<String>) -> Result<(), String> {
+    let token = admit_or_validate_playback(&app.state::<AudioState>().0, &app.state::<ConfigTransactionState>(), intent)?;
+    if initial_playback_context(&app.state::<ConfigTransactionState>(), Some(&token))?.is_some() { return Err(initial_plex_playback::WAIT.into()); }
+    tauri::async_runtime::spawn_blocking(move || {
+        let transactions = app.state::<ConfigTransactionState>(); let _permit = begin_volume_transaction(&transactions)?;
+        if transactions.shutdown_requested() || transactions.shutdown_started() { return Err("PLAYBACK_SUPERSEDED".into()); }
+        transactions.manual_check_playback.admit()?;
+        let state = app.state::<AudioState>(); let mut audio = state.0.lock().map_err(|_| "QUEUE_EDIT_UNAVAILABLE")?;
+        audio.validate_playback_intent(&token)?; audio.edit_queue(&revision, action)
+    }).await.map_err(|_| "QUEUE_EDIT_UNAVAILABLE".to_string())?
 }
 
 #[tauri::command]
@@ -4767,7 +4862,7 @@ async fn resolve_playlist_items(
     let mut statuses = Vec::with_capacity(playlist.items.len());
     for item in playlist.items {
         let status = match &item.media_locator {
-            MediaLocator::Upnp { .. } => local_playlist_item_availability(item.id, Err("UPNP_SESSION_EXPIRED".into())),
+            MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } => local_playlist_item_availability(item.id, Err("UPNP_SESSION_EXPIRED".into())),
             MediaLocator::Local { uri } => {
                 let result = audio_state
                     .0
@@ -4834,7 +4929,7 @@ fn prepare_playlist_playback(
                 media_locator: Some(item.media_locator.clone()),
                 uri: match &item.media_locator {
                     MediaLocator::Local { uri } => uri.clone(),
-                    MediaLocator::Plex { .. } | MediaLocator::Upnp { .. } => String::new(),
+                    MediaLocator::Plex { .. } | MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } => String::new(),
                 },
                 duration: item.metadata.duration,
             });
@@ -4919,7 +5014,7 @@ async fn play_playlist(
     let mut resolved_uris = Vec::with_capacity(playlist.items.len());
     for item in &playlist.items {
         let uri = match &item.media_locator {
-            MediaLocator::Upnp { .. } => None,
+            MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } => None,
             MediaLocator::Local { uri } => {
                 let exists = audio_state
                     .0
@@ -6934,6 +7029,8 @@ pub fn run() {
         .manage(LocalWatcherState::new())
         .manage(index_coverage::State::default())
         .manage(shared_dsp::State::new())
+        .manage(listening_history::HistoryState(std::sync::Mutex::new(listening_history::HistoryStore::default())))
+        .manage(radio::State::default())
         .manage(PlaylistState(Mutex::new(PlaylistStore::default())))
         .manage(mpris::MprisState::default())
         .manage(upnp::State::default())
@@ -6960,6 +7057,15 @@ pub fn run() {
             upnp_bridge::set_upnp_receiver,
             play_tracks,
             enqueue_tracks,
+            get_queue_edit_snapshot,
+            listening_history,
+            search_radio,
+            radio_filters,
+            radio_favorites,
+            play_radio,
+            stop_radio,
+            history_plex_navigation,
+            edit_queue,
             admit_playback_intent,
             cancel_playback_intent,
             playback_intent_current,

@@ -187,7 +187,7 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
 
   return <NowPlayingPresentation snapshot={snapshot} controlsDisabled={busy || !owner} embedded={embedded} busy={busy} hostingError={hostingError}
     onDetach={onDetach} onReincorporate={onReincorporate} onNavigate={onNavigate} levels={levels} fullscreen={isFullscreen}
-    optionsControls={<PlaybackOptionsControls options={status?.options ?? null} disabled={!isAvailable} />}
+    optionsControls={<PlaybackOptionsControls options={status?.options ?? null} disabled={!isAvailable || status?.current_media?.kind === "radio"} />}
     queueOpen={queueOpen} queue={<NowPlayingQueue open={queueOpen} available={isAvailable} status={status} artworkContext={snapshot?.queueArtwork} detached={!embedded} />}
     analyzerAvailable={analyzerAvailable} analyzerInactiveLabel={analyzerInactiveLabel} analyzerInactiveHelp={analyzerInactiveHelp} controlFailed={controlFailed}
     isSeeking={isSeeking} seekValue={seekValue} onSeekStart={() => setIsSeeking(true)} onSeekChange={setSeekValue} onSeekCommit={handleSeekCommit}

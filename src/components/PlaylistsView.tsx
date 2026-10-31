@@ -1,3 +1,4 @@
+import { useTrackSelection } from "./TrackSelection";
 import { beginPlaybackIntent, isPlaybackSuperseded, playbackFailure } from "../utils/playbackIntent";
 import { logError, logWarning } from "../utils/frontendDiagnostics";
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -50,6 +51,8 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
     [playlists, selectedId],
   );
 
+  const selectionContext = useMemo(() => ({}), [selectedId, selected?.updated_at]);
+  const selection = useTrackSelection(selectionContext, selected?.items.map(item => ({ ...item.metadata, duration: item.metadata.duration ?? undefined, media_locator: item.media_locator })) ?? [], isPlaybackAvailable && !busy && !preparingPlayback);
   useEffect(() => {
     setPlaybackFeedback(null);
   }, [selectedId]);
@@ -423,6 +426,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                     <span>{t("playlists.resolving")}</span>
                   </div>
                 )}
+                {selection.toolbar}
                 <div className="divide-y divide-[color:var(--theme-border-soft,#242424)]">
                   {selected.items.map((item, index) => {
                     const missing = availability[item.id] === "missing";
@@ -430,10 +434,11 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
                     return (
                       <article
                         key={item.id}
-                        className={`flex items-center gap-4 px-4 py-3 ${missing ? "bg-red-400/5" : unavailable ? "bg-amber-400/5" : ""}`}
+                        onClick={event => { selection.click(event, index); }}
+                        className={`${selection.checked(index) ? "track-selected " : ""}flex items-center gap-4 px-4 py-3 ${missing ? "bg-red-400/5" : unavailable ? "bg-amber-400/5" : ""}`}
                       >
                         <span className="w-7 shrink-0 text-center font-mono text-xs text-[color:var(--theme-fg-muted,#666666)]">
-                          {index + 1}
+                          {selection.checkbox(index)}<span className="ml-1">{index + 1}</span>
                         </span>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">

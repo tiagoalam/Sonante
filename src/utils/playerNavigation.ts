@@ -23,6 +23,7 @@ export function visitPlayerTarget(
 
 export function currentMediaKey(media: CurrentMedia | null): string {
   if (!media) return "none";
+  if (media.kind === "radio") return JSON.stringify([media.kind, media.station_id, media.queue_index]);
   if (media.kind === "upnp") return JSON.stringify([media.kind, media.session_id, media.queue_index]);
   return JSON.stringify(media.kind === "local"
     ? [media.kind, media.uri, media.queue_index]

@@ -1,3 +1,4 @@
+import { passiveTrackSelection } from "./support/passiveQueueInsertion.mjs";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -151,7 +152,7 @@ test('real Plex album context menu and ellipsis insert exact ordered album refer
  let plays=0;
  const {AlbumView}=compile('components/AlbumView.tsx',{
   react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t})},'lucide-react':icons,
-  './QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},'../utils/queueActions':metadata,
+  './TrackSelection':passiveTrackSelection, './QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},'../utils/queueActions':metadata,
   '../utils/usePlaybackAttempt':{usePlaybackAttempt:()=>({failure:null,run:async()=>{plays++;}})},'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},
   '../utils/frontendDiagnostics':{logError:()=>{}},'../services/plex':{plexService:{getAlbumTracks:async()=>tracks}},
   '../services/audio':{audioService:f.audioService},'../services/favorites':{favoritesService:{getFavorites:async()=>[]}},
@@ -163,4 +164,95 @@ test('real Plex album context menu and ellipsis insert exact ordered album refer
  assert.equal(plays,0);assert.equal(f.calls.length,1);assert.deepEqual(f.calls[0][0].map(track=>track.media_locator),tracks.map(track=>track.media_locator));assert.equal(f.calls[0][1],'end');
  const trigger=nodes(tree,n=>n.props?.['data-queue-trigger'])[1];trigger.props.onClick(f.event());tree=host.paint();menu=nodes(tree,n=>n.props?.choose&&n.props?.target)[0];menu.props.choose('next');await flush();host.paint();
  assert.equal(f.calls.length,2);assert.deepEqual(f.calls[1][0][0].media_locator,tracks[1].media_locator);assert.equal(f.calls[1][1],'next');assert.equal(plays,0);host.close();
+});
+
+test('album-card scope loads the complete album only after an explicit next/end action; custom edits reuse the admitted intent', async () => {
+ const f=await fixture();let reads=0,edits=0;
+ const tracks=[local('Disc 1'),local('Disc 2','Source/Disc2/2.flac')];
+ const request={track:local('Album'),scope:'album',load:async()=>{reads++;return tracks},actions:[{id:'move-next',label:'Move next',run:async intent=>{assert.equal(await intent.confirmCurrent(),true);edits++}}]};
+ f.open(request);assert.equal(reads,0);await f.choose('next');assert.equal(reads,1);assert.deepEqual(f.calls[0].slice(0,2),[tracks,'next']);
+ f.open(request);await f.choose('move-next');assert.equal(reads,1);assert.equal(f.calls.length,1);assert.equal(edits,1);f.host.close();
+});
+
+test('real multi-selection preserves displayed order and duplicate occurrences, supports Shift and batches queue/playlist actions without playback', async () => {
+ const f=await fixture();f.host.close();
+ const selectionModel=await import('../src/utils/trackSelection.ts');
+ let currentContext={},available=true;
+ const tracks=[local('First'),local('Duplicate','Source/dup.flac'),local('Duplicate','Source/dup.flac'),local('Last','Source/last.flac')];
+ const {useTrackSelection}=compile('components/TrackSelection.tsx',{
+  react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t})},'../utils/trackSelection':selectionModel,
+  './QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null},
+ });
+ const host=new f.Harness(()=>useTrackSelection(currentContext,tracks,available));let view=host.paint();
+ assert.equal(view.click({},1),false);assert.deepEqual(f.calls,[]);
+ assert.equal(view.click({ctrlKey:true,preventDefault(){},stopPropagation(){}},1),true);view=host.paint();assert.equal(view.checked(1),true);assert.equal(view.checked(2),false);
+ view.click({shiftKey:true,preventDefault(){},stopPropagation(){}},3);view=host.paint();assert.deepEqual(tracks.map((_,i)=>view.checked(i)),[false,true,true,true]);
+ const all=nodes(view.toolbar,n=>n.type==='button'&&n.props.children===f.t('selection.all'))[0];all.props.onClick();view=host.paint();
+ const queueButton=nodes(view.toolbar,n=>n.props?.['data-queue-trigger'])[0];queueButton.props.onClick(f.event());view=host.paint();
+ let menu=nodes(view.toolbar,n=>typeof n.props?.choose==='function')[0];menu.props.choose('end');await flush();view=host.paint();
+ assert.deepEqual(f.calls[0].slice(0,2),[tracks,'end']);
+ nodes(view.toolbar,n=>n.type==='button'&&n.props.children===f.t('selection.playlist'))[0].props.onClick();view=host.paint();
+ const picker=nodes(view.toolbar,n=>n.props?.items?.length===4)[0];assert.ok(picker);assert.deepEqual(picker.props.items.map(item=>item.media_locator),tracks.map(track=>track.media_locator));assert.equal(f.calls.length,1);
+ // Metadata/artwork changes retain selection; a source/order change discards it.
+ tracks[0]={...tracks[0],thumb:'new-cover'};view=host.paint();assert.equal(view.checked(0),true);
+ currentContext={};view=host.paint();assert.equal(view.checked(0),false);assert.equal(nodes(view.toolbar,n=>n.props?.items).length,0);
+ available=false;host.paint();host.close();
+});
+
+test('multi-selection queued payload is discarded after its view becomes unavailable or changes source', async () => {
+ for(const mode of ['unavailable','source','unmount']) {
+  const f=await fixture();f.host.close();const model=await import('../src/utils/trackSelection.ts');let context={},available=true;
+  const {useTrackSelection}=compile('components/TrackSelection.tsx',{react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t})},'../utils/trackSelection':model,'./QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null}});
+  const host=new f.Harness(()=>useTrackSelection(context,[local()],available));let view=host.paint();view.checkbox(0).props.onClick({stopPropagation(){}});view=host.paint();nodes(view.toolbar,n=>n.props?.['data-queue-trigger'])[0].props.onClick(f.event());view=host.paint();
+  const menu=nodes(view.toolbar,n=>typeof n.props?.choose==='function')[0];menu.props.choose('next');
+  if(mode==='unavailable'){available=false;host.paint()}if(mode==='source'){context={};host.paint()}if(mode==='unmount')host.close();
+  await flush();assert.deepEqual(f.calls,[],mode);if(mode!=='unmount')host.close();
+ }
+});
+
+async function historyFixture(f, initial) {
+ const calls=[],service={
+  list:async()=>{calls.push(['list']);return initial;},configure:async(enabled,clear)=>{calls.push(['configure',enabled,clear]);return{...initial,enabled:enabled??initial.enabled,entries:clear?[]:initial.entries};},
+  plexNavigation:async id=>{calls.push(['navigate',id]);return {album:{rating_key:'album-1',server_id:'server',title:'Album',artist:'Artist'}};},
+  subscribe:async callback=>{service.changed=callback;return()=>calls.push(['unlisten']);},
+ };
+ const album={id:'album-local',title:'Album',artist:'Artist',folder_path:'Source/Album',discs:[],track_count:1};
+ const audio={playTracks:async(...args)=>calls.push(['play',...args]),getLocalAlbums:async()=>{calls.push(['albums']);return[album];}};
+ const playback=compile('utils/usePlaybackAttempt.ts',{react:f.react,'./playbackIntent':intents,'./frontendDiagnostics':{logError(){}}});
+ const {HistoryView}=compile('components/HistoryView.tsx',{
+  react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t,i18n:{language:'en'}})},'lucide-react':icons,
+  '../services/history':{historyService:service},'../services/audio':{audioService:audio},'../utils/localAlbumCatalogSession':{localAlbumCatalog:{getSnapshot:()=>({loaded:true,albums:[album]})}},
+  '../utils/playerNavigation':{localAlbumForMedia},'../utils/usePlaybackAttempt':playback,'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},'./QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},
+  './LocalBrowserView':{LocalBrowserView:()=>null},'./AlbumView':{AlbumView:()=>null},
+ });
+ const props={config:{local_folders:['synthetic'],plex_token:'configured',online_artwork_enabled:false},plexIdentity:{},status:{state:'stop',is_updating:false},active:true,isPlaybackAvailable:true,catalogRefreshRevision:0};
+ const host=new f.Harness(()=>HistoryView(props));host.paint();await flush();host.paint();return{host,service,calls,props,paint:()=>host.paint()};
+}
+
+test('Recent history is source-filtered, plays only on explicit request and opens exact Local/Plex albums without touching transport',async()=>{
+ const f=await fixture();f.host.close();
+ const entries=[{id:'local-id',played_at:1720000000000,track:local()},{id:'plex-id',played_at:1720000001000,track:{...local('Plex track'),media_locator:{kind:'plex',server_id:'server',part_key:'/library/parts/2/file.flac',rating_key:'2'}}}];
+ const h=await historyFixture(f,{version:1,enabled:true,entries});let tree=h.paint();assert.equal(nodes(tree,n=>n.type==='li').length,2);assert.deepEqual(h.calls,[['list']]);
+ let rows=nodes(tree,n=>n.type==='li');nodes(rows[0],n=>n.type==='button'&&n.props['aria-label']===f.t('history.openAlbum'))[0].props.onClick();await flush();tree=h.paint();assert.ok(nodes(tree,n=>n.props?.initialAlbumId==='album-local').length);assert.deepEqual(h.calls,[['list']]);
+ nodes(tree,n=>n.type==='button')[0].props.onClick();tree=h.paint();rows=nodes(tree,n=>n.type==='li');nodes(rows[1],n=>n.type==='button'&&n.props['aria-label']===f.t('history.openAlbum'))[0].props.onClick();await flush();tree=h.paint();assert.ok(nodes(tree,n=>n.props?.album?.rating_key==='album-1').length);assert.equal(h.calls.at(-1)[0],'navigate');
+ nodes(tree,n=>n.props?.album?.rating_key==='album-1')[0].props.onBack();tree=h.paint();nodes(tree,n=>n.type==='button'&&n.props.children===f.t('history.plex'))[0].props.onClick();tree=h.paint();rows=nodes(tree,n=>n.type==='li');assert.equal(rows.length,1);
+ nodes(rows[0],n=>n.type==='button'&&n.props['aria-label']===f.t('history.play',{title:'Plex track'}))[0].props.onClick();await flush();const play=h.calls.find(call=>call[0]==='play');assert.deepEqual(play[1],[entries[1].track]);assert.equal(play[2],0);h.host.close();
+});
+
+test('Recent clear requires confirmation, disabling persists independently of playback and status events read only on change',async()=>{
+ const f=await fixture();f.host.close();const h=await historyFixture(f,{version:1,enabled:true,entries:[{id:'a',played_at:1720000000000,track:local()}]});let tree=h.paint();
+ nodes(tree,n=>n.type==='input')[0].props.onChange({target:{checked:false}});await flush();tree=h.paint();assert.deepEqual(h.calls.at(-1),['configure',false,false]);assert.equal(nodes(tree,n=>n.type==='input')[0].props.checked,false);
+ nodes(tree,n=>n.type==='button'&&Array.isArray(n.props.children)&&n.props.children.includes(f.t('history.clear')))[0].props.onClick();tree=h.paint();assert.equal(h.calls.filter(call=>call[0]==='configure').length,1);
+ nodes(tree,n=>n.type==='button'&&n.props.children===f.t('history.clear'))[0].props.onClick();await flush();tree=h.paint();assert.deepEqual(h.calls.at(-1),['configure',undefined,true]);assert.equal(nodes(tree,n=>n.type==='li').length,0);assert.equal(h.calls.some(call=>call[0]==='play'),false);
+ const previous=h.calls.length;h.paint();h.paint();assert.equal(h.calls.length,previous);h.service.changed();await flush();assert.deepEqual(h.calls.at(-1),['list']);h.host.close();assert.deepEqual(h.calls.at(-1),['unlisten']);
+});
+
+test('Recent drops pending navigation/read replies after source change or unmount and never leaks raw errors',async()=>{
+ for(const mode of ['navigation','read','error']) {
+  const f=await fixture();f.host.close();const h=await historyFixture(f,{version:1,enabled:true,entries:[{id:'plex',played_at:1720000000000,track:{...local(),media_locator:{kind:'plex',server_id:'server',part_key:'/library/parts/2/file.flac',rating_key:'2'}}}]});const slow=deferred();
+  if(mode==='navigation'){h.service.plexNavigation=()=>slow.promise;const tree=h.paint();nodes(tree,n=>n.type==='button'&&n.props['aria-label']===f.t('history.openAlbum'))[0].props.onClick();h.props.plexIdentity={};h.paint();slow.resolve({album:{rating_key:'old'}});await flush();assert.equal(nodes(h.paint(),n=>n.props?.album?.rating_key==='old').length,0);}
+  if(mode==='read'){h.service.list=()=>slow.promise;h.service.changed();h.host.close();slow.resolve({version:1,enabled:true,entries:[]});await flush();}
+  if(mode==='error'){h.service.configure=async()=>{throw Error('PRIVATE_TOKEN /private/path')};nodes(h.paint(),n=>n.type==='input')[0].props.onChange({target:{checked:false}});await flush();const html=renderToStaticMarkup(h.paint());assert.match(html,/History could not/);assert.doesNotMatch(html,/PRIVATE_TOKEN|private\/path/);assert.equal(nodes(h.paint(),n=>n.type==='input')[0].props.checked,false);}
+  if(mode!=='read')h.host.close();
+ }
 });

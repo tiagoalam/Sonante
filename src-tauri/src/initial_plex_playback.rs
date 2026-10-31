@@ -63,7 +63,7 @@ impl Addition {
     }
     pub(crate) fn verify_queue(&self, tracks: &[crate::audio::TrackMetadata], uris: &[String]) -> Result<(), String> {
         if tracks.len() != uris.len() || tracks.iter().zip(uris).any(|(track, actual)| match &track.media_locator {
-            Some(crate::audio::MediaLocator::Upnp { .. }) => true,
+            Some(crate::audio::MediaLocator::Upnp { .. } | crate::audio::MediaLocator::Radio { .. }) => true,
             Some(crate::audio::MediaLocator::Plex { server_id, part_key, .. }) => server_id.is_empty() || part_key.is_empty()
                 || (!(actual.starts_with("http://") || actual.starts_with("https://")) && !self.mapped(actual)),
             Some(crate::audio::MediaLocator::Local { uri }) => uri != actual || !self.local(uri),
@@ -83,7 +83,7 @@ impl Session {
     pub(crate) fn accepts_tracks(&self, tracks: &[crate::audio::TrackMetadata], plex: &crate::plex::PlexClient) -> bool {
         if !self.is_addition() { return plex.initial_stream_references(tracks); }
         !tracks.is_empty() && tracks.iter().all(|track| match &track.media_locator {
-            Some(crate::audio::MediaLocator::Upnp { .. }) => false,
+            Some(crate::audio::MediaLocator::Upnp { .. } | crate::audio::MediaLocator::Radio { .. }) => false,
             Some(crate::audio::MediaLocator::Plex { .. }) => plex.playback_references_match(std::slice::from_ref(track)),
             Some(crate::audio::MediaLocator::Local { uri }) => self.accepts_local(uri),
             None => self.accepts_local(&track.uri),

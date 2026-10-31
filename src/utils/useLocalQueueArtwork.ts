@@ -9,7 +9,7 @@ import { VisibleQueueArtwork } from "./visibleQueueArtwork";
 import { audioService } from "../services/audio";
 import { logError } from "./frontendDiagnostics";
 
-const localMedia = (item: TrackMetadata) => item.media_locator?.kind === "plex" ? null
+const localMedia = (item: TrackMetadata) => item.media_locator?.kind === "plex" || item.media_locator?.kind === "radio" || item.media_locator?.kind === "upnp" ? null
   : { kind: "local" as const, uri: item.media_locator?.kind === "local" ? item.media_locator.uri : item.uri ?? "", queue_index: 0 };
 
 export function useLocalQueueArtwork(items: TrackMetadata[], start: number, end: number,

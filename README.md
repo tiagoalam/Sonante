@@ -14,6 +14,7 @@ Sonante is a desktop music player built for people who want to **listen to, navi
 | --- | --- |
 | **Local music** | Multiple local folders and mounted shares; album, artist, year, genre, and folder browsing; source selection and incremental library updates. |
 | **Plex** | Account authorization, server/library selection, album and artist navigation, years, genres, collections, and remote playback. |
+| **Online radio** | Worldwide station directory with name, country and genre filters; favorites, manual stream addresses and live playback. |
 | **Playback** | Queue management, play/pause, next/previous, seek, session restoration without automatic playback, and desktop media-key integration through MPRIS2. |
 | **Collection tools** | Local and Plex favorites, named playlists, availability-aware playlist playback, local album diagnostics, and reviewed FLAC tag editing with per-file results. |
 | **Artwork & browsing** | Local and Plex album artwork, virtualized grids for large catalogs, and artwork caching with bounded work. |
@@ -21,17 +22,17 @@ Sonante is a desktop music player built for people who want to **listen to, navi
 
 Sonante is designed for substantial, imperfect real-world libraries: multiple storage locations, multi-disc albums, CUE-based albums, varying metadata, and sources that may temporarily become unavailable.
 
-## Installation — 0.5.7
+## Installation — 0.5.8
 
-Download the complete package and `SHA256SUMS.txt` from [Sonante 0.5.7](https://github.com/tiagoalam/Sonante/releases/tag/v0.5.7) for your distribution:
+Download the complete package and `SHA256SUMS.txt` from [Sonante 0.5.8](https://github.com/tiagoalam/Sonante/releases/tag/v0.5.8) for your distribution:
 
-- Ubuntu 22.04: `sonante_0.5.7-1_amd64.deb` (`apt install ./sonante_0.5.7-1_amd64.deb`).
-- Fedora 44: `sonante-0.5.7-1.x86_64.rpm` (`dnf install ./sonante-0.5.7-1.x86_64.rpm`).
-- Arch Linux / Manjaro: `sonante-0.5.7-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.5.7-1-x86_64.pkg.tar.zst`).
+- Ubuntu 22.04: `sonante_0.5.8-1_amd64.deb` (`apt install ./sonante_0.5.8-1_amd64.deb`).
+- Fedora 44: `sonante-0.5.8-1.x86_64.rpm` (`dnf install ./sonante-0.5.8-1.x86_64.rpm`).
+- Arch Linux / Manjaro: `sonante-0.5.8-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.5.8-1-x86_64.pkg.tar.zst`).
 
 Close Sonante before upgrading, and install with your distribution's package manager. Verify the supplied checksum first. Packages manage their own pinned audio runtimes and do not enable a system MPD service. Corresponding runtime source sidecars accompany the packages; they are not installed into `/usr`.
 
-Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the complete 0.5.7 release payload.
+Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the complete 0.5.8 release payload.
 
 ### System requirements
 
@@ -91,7 +92,15 @@ Artwork requests are handled through the backend; authenticated Plex URLs and ac
 
 **Unified search** (Ctrl+K) searches Local and Plex albums, artists, and tracks together, with source/type filters and keyboard navigation. Results open their original source context.
 
-**Now Playing** can fill the main content area or open as a detached window with fullscreen support. The queue opens on the right with album artwork and can be hidden. Repeat queue, repeat track, and shuffle controls share the MPD playback state across player presentations. The queue supports filtering, jumping to the current occurrence, and duration estimates when the playback mode permits them. Track context menus and ellipsis buttons can insert a track after the current queue position, append it, or append its identified album without replacing the queue or starting playback on an empty queue. Existing shuffle/repeat settings are retained.
+**Now Playing** can fill the main content area or open as a detached window with fullscreen support. The queue opens on the right with album artwork and can be hidden. Repeat queue, repeat track, and shuffle controls share the MPD playback state across player presentations. The queue supports filtering, jumping to the current occurrence, and duration estimates when the playback mode permits them. Track context menus and ellipsis buttons can insert a track after the current queue position, append it, or append its identified album without replacing the queue or starting playback on an empty queue. Existing shuffle/repeat settings are retained. Reorder queue occurrences by dragging or with the keyboard, move a queued track next, and remove other occurrences while protecting the currently playing or paused item.
+
+Use Ctrl/Shift or the selection checkboxes to add multiple tracks to the queue or a playlist. Album menus load tracks only when an action needs them. **Recent history** keeps up to 100 Local/Plex tracks locally and can be cleared or disabled.
+
+## Online radio
+
+**Radio** searches the community [Radio Browser](https://www.radio-browser.info/) directory by station name, country and genre. Results are paginated; **Clear filters** immediately restores the unfiltered list. Save favorites or add a direct HTTP/HTTPS audio stream address. Manually added stations can be edited or deleted in Favorites. A website address is not an audio stream.
+
+Playback uses the selected Sonante output and shows **Live**, with station/track metadata when supplied by the broadcaster. Live radio cannot be seeked; Stop ends the stream. Availability, codec support and compatibility with strict Direct output vary by station; try another station or Shared when necessary. Radio streams do not enter Local/Plex listening history, playlists or automatic session restoration. Directory searches and explicit station playback contact the directory and/or broadcaster; opening unrelated library sections does not query the radio directory.
 
 ## Appearance and remote control
 
@@ -125,6 +134,8 @@ Sonante stores its per-user configuration and library state locally. Typical pat
 | `~/.config/sonante/config.json` | Audio, source, and Plex settings |
 | `~/.config/sonante/favorites.json` | Favorite albums |
 | `~/.config/sonante/queue_cache.json` | Cached queue metadata |
+| `~/.config/sonante/radio-favorites.json` | Favorite and manually added radio stations |
+| `~/.config/sonante/listening-history.json` | Bounded Local/Plex listening history |
 | `~/.config/sonante/mpd.conf` and `mpd-v2.db` | Private MPD configuration and catalog |
 | `~/.config/sonante/library/` | Managed virtual library |
 | `$XDG_RUNTIME_DIR/sonante/` | Private MPD runtime socket and process metadata, when the runtime directory is available |
@@ -135,12 +146,12 @@ Configuration directories and sensitive files are created with restrictive Linux
 
 Development requires **Node.js 22**, npm, a stable Rust toolchain, and the native development dependencies for Tauri 2, GTK 3, WebKitGTK 4.1, ALSA, and OpenSSL. See the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/) and the [CI workflow](https://github.com/tiagoalam/Sonante/blob/main/.github/workflows/ci.yml) for the Ubuntu build environment.
 
-For a development compilation of the verified 0.5.7 source archive without installation, extract the supplied source archive and run the normal build commands. This compilation alone does not create the complete release packages.
+For a development compilation of the verified 0.5.8 source archive without installation, extract the supplied source archive and run the normal build commands. This compilation alone does not create the complete release packages.
 
 ```bash
 # Extract the supplied, SHA-verified source archive first.
 cd sonante
-# The supplied sources already identify version 0.5.7; no unpublished tag is required.
+# The supplied sources already identify version 0.5.8; no unpublished tag is required.
 npm ci
 npm run tauri -- build --no-bundle -- --locked
 ```
@@ -163,13 +174,13 @@ cargo check --manifest-path src-tauri/Cargo.toml --locked
 python3 -m unittest discover -s tests -p '*packaging_test.py'
 ```
 
-Development CI now produces **`sonante-complete-linux-packages`** after both native build jobs pass. This artifact contains complete DEB, Fedora RPM and Arch installers, corresponding sources and `SHA256SUMS.txt`. The separate `sonante-compilation-*-inputs` artifacts are intermediate build inputs. See [complete-package assembly](packaging/COMPLETE_PACKAGES.md) for provenance, checks and local reproduction. The manual workflow uses the same assembly; it does not publish a release. The 0.5.7 release uses revision-1 packages; CI rebuilds do not replace published assets. AppImage is outside this scope.
+Development CI now produces **`sonante-complete-linux-packages`** after both native build jobs pass. This artifact contains complete DEB, Fedora RPM and Arch installers, corresponding sources and `SHA256SUMS.txt`. The separate `sonante-compilation-*-inputs` artifacts are intermediate build inputs. See [complete-package assembly](packaging/COMPLETE_PACKAGES.md) for provenance, checks and local reproduction. The manual workflow uses the same assembly; it does not publish a release. The 0.5.8 release uses revision-1 packages; CI rebuilds do not replace published assets. AppImage is outside this scope.
 
 ## Project status and scope
 
 Sonante prioritizes **reliable playback, conservative MPD lifecycle management, safe library changes, and clear audio reporting** over claiming support for every possible codec or audio feature. Platform and hardware behavior must be tested rather than inferred from a successful build.
 
-Local tag editing is limited to supported physical FLAC files and reports independent per-file results. Availability of codecs, network sources, and DAC capabilities depends on the configured system. The 0.5.7 release targets DEB, RPM, and Arch packages for x86_64; each requires its own final installation and startup evidence.
+Local tag editing is limited to supported physical FLAC files and reports independent per-file results. Availability of codecs, network sources, and DAC capabilities depends on the configured system. The 0.5.8 release targets DEB, RPM, and Arch packages for x86_64; each requires its own final installation and startup evidence.
 
 Bug reports and reproducible feedback can be submitted through [GitHub Issues](https://github.com/tiagoalam/Sonante/issues).
 

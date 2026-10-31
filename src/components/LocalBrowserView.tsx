@@ -1,3 +1,5 @@
+import { useTrackSelection } from "./TrackSelection";
+import { loadLocalAlbumQueue } from "../utils/queueAlbumLoader";
 import { useQueueInsertion } from "./QueueInsertionMenu";
 import { localQueueTrack } from "../utils/queueActions";
 import { loadQueuedAlbum } from "../utils/queueAlbumLoader";
@@ -7,7 +9,6 @@ import React, { useEffect, useLayoutEffect, useMemo, useState, useRef, useSyncEx
 import { createPlayerAlbumLookup, type PlayerNavigationTarget } from "../utils/playerNavigation";
 import {
   Folder,
-  Music,
   Play,
   ArrowLeft,
   Disc3,
@@ -114,6 +115,9 @@ const LocalAlbumCard: React.FC<{
   readEnabled: boolean;
 }> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable, onlineArtworkEnabled, isLibraryUpdating, readEnabled }) => {
   const { t } = useTranslation();
+  const cardContext = useMemo(() => ({}), [album, readEnabled]);
+  const cardActions = useQueueInsertion(cardContext, readEnabled && isPlaybackAvailable);
+  const albumRequest = { track: { title: album.title, artist: album.artist, album: album.title }, scope: "album" as const, load: () => loadLocalAlbumQueue(album) };
   const [cover, setCover] = useState<string | null>(() => readEnabled ? localArtworkResolver.get(album.id) : null);
   const [failedCover, setFailedCover] = useState<string | null>(null);
 
@@ -193,8 +197,10 @@ const LocalAlbumCard: React.FC<{
   useEffect(() => { localAlbumThumbnails.observeInitialCard(album); }, [album]);
 
   return (
-    <div ref={cardRef} onClick={readEnabled ? onClick : undefined} aria-disabled={!readEnabled} className={`group flex flex-col relative ${readEnabled ? "cursor-pointer" : "cursor-default"}`}>
+    <div ref={cardRef} onContextMenu={event => cardActions.open(event, albumRequest)} onClick={readEnabled ? onClick : undefined} aria-disabled={!readEnabled} className={`group flex flex-col relative ${readEnabled ? "cursor-pointer" : "cursor-default"}`}>
+      {cardActions.menu}{cardActions.notice}
       <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md">
+        <span className="album-queue-trigger">{cardActions.trigger(albumRequest)}</span>
         {displayCover && displayCover !== failedCover ? (
           <img
             src={displayCover}
@@ -255,6 +261,7 @@ export interface LocalBrowserViewProps {
   initialAlbumId?: string;
   albumNavigationAvailable?: boolean;
   onAlbumNavigationBack?: () => void;
+  externalBackNavigation?: boolean;
   playerTarget?: Extract<PlayerNavigationTarget, { kind: "local" }>;
   onPlayerNavigationBack?: () => void;
   importPreview?: readonly PreviewAlbum[];
@@ -275,6 +282,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   initialAlbumId,
   albumNavigationAvailable = true,
   onAlbumNavigationBack,
+  externalBackNavigation = false,
   playerTarget,
   onPlayerNavigationBack,
   importPreview = [],
@@ -572,6 +580,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const runLocalPlayback = localPlayback.run;
   const playbackFailure = localPlayback.failure;
   const queueActions = useQueueInsertion(playbackContext, isPlaybackAvailable && catalogConfirmed && !isLibraryUpdating && !catalog.manualCheckPlayback);
+  const selectableTracks = useMemo(() => (selectedAlbum ? albumTracks : items.filter(item => item.item_type !== "directory")).map(track => localQueueTrack(track, selectedAlbum, selectedAlbum ? albumCover : folderCover)), [selectedAlbum, albumTracks, items, albumCover, folderCover]);
+  const selection = useTrackSelection(playbackContext, selectableTracks, isPlaybackAvailable && catalogConfirmed && !isLibraryUpdating && !catalog.manualCheckPlayback);
+  const folderSelectionIndices = new Map(items.filter(item => item.item_type !== "directory").map((item, index) => [item.path, index]));
   const queueRequest = (track: LocalItem, album?: LocalAlbum | null) => ({
     track: localQueueTrack(track, album, album ? albumCover : folderCover),
     album: album && tracksReady ? async () => albumTracks.map(item => localQueueTrack(item, album, albumCover)) : () => loadQueuedAlbum(localQueueTrack(track, album)),
@@ -902,7 +913,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
   return (
     <main className="flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)] select-none">
-      {queueActions.notice}{queueActions.menu}
+      {queueActions.notice}{queueActions.menu}{selection.toolbar}
       {detailUnavailable && <div role="status" className="space-y-3 p-6 text-sm text-[color:var(--theme-fg-secondary,#BBBBBB)]">
         <p>{t("explore.detailUnavailable")}</p>
         <button type="button" disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)}
@@ -917,7 +928,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       <div className={metadataMode ? "hidden" : "contents"}>
       <div className="flex flex-wrap items-center justify-between gap-4 px-8 pt-8 pb-4">
         <div className="flex items-center space-x-3">
-          {showContextBack && (
+          {showContextBack && !(externalBackNavigation && (initialAlbumId && (!selectedAlbum || selectedAlbum.id === initialAlbumId) || initialArtist && !selectedAlbum)) && (
             <button
               onClick={handleContextBack}
               className="p-1.5 rounded-lg bg-[var(--theme-surface-raised,#1E1E1E)] border border-[color:var(--theme-border-soft,#333333)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer mr-1"
@@ -1234,17 +1245,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   {section.tracks.map((track, idx) => (
                     <div
                       key={track.path}
-                      onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, section.startIndex + idx)}
+                      onClick={event => { if (!selection.click(event, section.startIndex + idx)) void handlePlayEntireAlbum(selectedAlbum, albumTracks, section.startIndex + idx); }}
                       onContextMenu={event => queueActions.open(event, queueRequest(track, selectedAlbum))}
                   aria-disabled={!isPlaybackAvailable}
-                  className={`grid grid-cols-[2rem_minmax(0,1fr)_auto] px-4 py-3 text-xs items-center transition-colors group ${
+                  className={`${selection.checked(section.startIndex + idx) ? "track-selected " : ""}grid grid-cols-[2rem_minmax(0,1fr)_auto] px-4 py-3 text-xs items-center transition-colors group ${
                     isPlaybackAvailable
                       ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                       : "opacity-60 cursor-not-allowed"
                   }`}
                 >
                   <span className="text-center font-mono text-[color:var(--theme-fg-muted,#666666)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
-                    {idx + 1}
+                    {selection.checkbox(section.startIndex + idx)}<span className="ml-1">{idx + 1}</span>
                   </span>
                   <div className="min-w-0 flex flex-col pr-2">
                     <span className="font-semibold text-[color:var(--theme-fg-primary,#ffffff)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate">
@@ -1550,7 +1561,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     <div
                       key={item.path}
                       onContextMenu={isDir ? undefined : event => queueActions.open(event, queueRequest(item))}
-                      onClick={() => {
+                      onClick={event => {
+                        if (!isDir && selection.click(event, folderSelectionIndices.get(item.path)!)) return;
                         if (isDir) {
                           setCurrentPath(item.path);
                         } else if (isPlaybackAvailable) {
@@ -1568,7 +1580,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                         }
                       }}
                       aria-disabled={!isDir && !isPlaybackAvailable}
-                      className={`flex items-center justify-between p-3 transition-colors group ${
+                      className={`${!isDir && selection.checked(folderSelectionIndices.get(item.path)!) ? "track-selected " : ""}flex items-center justify-between p-3 transition-colors group ${
                         isDir || isPlaybackAvailable
                           ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                           : "opacity-60 cursor-not-allowed"
@@ -1578,7 +1590,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                         {isDir ? (
                           <Folder size={18} className="text-[color:var(--theme-fg-accent,#E5A00D)] shrink-0" />
                         ) : (
-                          <Music size={18} className="text-[color:var(--theme-fg-muted,#888888)] group-hover:text-[color:var(--theme-fg-primary,#ffffff)] shrink-0" />
+                          selection.checkbox(folderSelectionIndices.get(item.path)!)
                         )}
                         <span className="text-xs font-medium text-[color:var(--theme-fg-primary,#ffffff)] truncate">
                           {isDir && !currentPath ? localLibraryPathLabel(item.path, sourceOptions) : item.title || item.name}

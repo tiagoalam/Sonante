@@ -1,3 +1,5 @@
+import { useQueueInsertion } from "./QueueInsertionMenu";
+import { loadLocalAlbumQueue } from "../utils/queueAlbumLoader";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Play, ArrowLeft, Compass, RefreshCw, UserRound, ChevronLeft, ChevronRight, Guitar, Piano, Mic2, Radio, Headphones, Music2, Disc3, AudioLines, ListMusic } from "lucide-react";
@@ -45,6 +47,10 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
       if (valid()) setPlayError(true);
     } finally { pending.current = false; if (mounted.current) setPlaying(false); }
   };
+  const queueContext = useMemo(() => ({}), [entry, revision, active]);
+  const queueActions = useQueueInsertion(queueContext, active && isPlaybackAvailable && !artworkBlocked && !artworkOnly);
+  const albumRequest = { track: { title: entry.album.title, artist: entry.album.artist, album: entry.album.title }, scope: "album" as const,
+    load: () => loadLocalAlbumQueue(entry.album), current: () => live.current() };
   const origin = `${t(`explore.sources.${entry.source}`)} · ${exploreOriginName(entry) ?? t("explore.unknownOrigin")}`;
   useEffect(() => {
     if (!active || typeof IntersectionObserver === "undefined" || !cardNode.current) return;
@@ -85,13 +91,13 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
       {cover ? <img src={cover} alt="" className="h-full w-full object-cover" onError={() => { setCover(null); setPhase("error"); }} /> : fallback ?? <AlbumArtworkPlaceholder />}
     </div>;
   if (artworkOnly) return <div ref={cardNode as React.Ref<HTMLDivElement>} className="h-full w-full">{artwork}</div>;
-  return <div ref={cardNode as React.Ref<HTMLDivElement>}
+  return <div ref={cardNode as React.Ref<HTMLDivElement>} onContextMenu={event => queueActions.open(event, albumRequest)}
     onKeyDown={event => { if (event.key === " " || event.key === "Enter") event.stopPropagation(); }}
     className="group relative w-full min-w-0 rounded-xl p-2 text-left hover:bg-[var(--theme-surface-raised,#222222)]">
     <button type="button" onClick={() => { if (active && live.current()) onOpen(); }} disabled={!active}
       aria-label={`${entry.album.title || t("explore.untitled")} · ${entry.album.artist || t("explore.artistNotProvided")}`}
       className="absolute inset-0 rounded-xl focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-60" />
-    {artwork}
+    {artwork}{queueActions.menu}{queueActions.notice}<span className="album-queue-trigger">{queueActions.trigger(albumRequest)}</span>
     {onPlay && <div data-theme-surface="contrast" className="pointer-events-none absolute top-2 left-2 right-2 aspect-square rounded-lg bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.4))] opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity flex items-center justify-center">
       <button type="button" onClick={handlePlay} disabled={!active || !isPlaybackAvailable || artworkBlocked || playing}
         aria-label={`${t("common.playAlbum")}: ${entry.album.title}`} title={t("common.playAlbum")}

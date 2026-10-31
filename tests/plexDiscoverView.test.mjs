@@ -1,3 +1,4 @@
+import { passiveQueueInsertion } from "./support/passiveQueueInsertion.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -17,13 +18,14 @@ const i18n=i18next.createInstance();
 await i18n.init({lng:"en",resources:Object.fromEntries(["en","pt-BR"].map(lang=>[lang,{translation:JSON.parse(readFileSync(new URL(`../src/locales/${lang}.json`,import.meta.url),"utf8"))}]))});
 let host=null;
 const hooks={
+  useMemo: fn => fn(),
   useEffect(){},
   useLayoutEffect(fn){if(host)host.effects.push(fn);},
   useRef(value){return host ? host.refs[host.cursor++]??={current:value} : {current:value};},
   useState(value){if(host?.values){const h=host,i=h.valueCursor++;if(!(i in h.values))h.values[i]=typeof value==="function"?value():value;return[h.values[i],next=>h.values[i]=typeof next==="function"?next(h.values[i]):next];}return [typeof value==="function"?value():value,()=>{}];},
   useSyncExternalStore(_,get){return get();}
 };
-const dependencies={react:{__esModule:true,...React,...hooks,default:React},"react/jsx-runtime":await import("react/jsx-runtime"),"react-i18next":{useTranslation:()=>({t:i18n.t.bind(i18n)})},"lucide-react":icons,
+const dependencies={...passiveQueueInsertion, "../services/plex": { plexService: { getAlbumTracks: async () => { throw new Error("unexpected album read in Discover navigation fixture"); } } },react:{__esModule:true,...React,...hooks,default:React},"react/jsx-runtime":await import("react/jsx-runtime"),"react-i18next":{useTranslation:()=>({t:i18n.t.bind(i18n)})},"lucide-react":icons,
   "../utils/plexDiscover":{PlexDiscoverSession},"../utils/plexDiscoverPresentation":presentation,"./PlexImage":{PlexImage:({alt,...props})=>React.createElement("div",{"data-synthetic-artwork":true,"aria-label":alt,className:props.className})},
   "./AlbumArtworkPlaceholder":{AlbumArtworkPlaceholder:()=>React.createElement("div",{"data-synthetic-artwork":true,className:"h-full w-full bg-[#303030]"})}};
 const choiceCompiled=ts.transpileModule(readFileSync(new URL('../src/components/MixChoiceCard.tsx',import.meta.url),'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;

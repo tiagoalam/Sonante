@@ -1,8 +1,11 @@
+import { useTrackSelection } from "./TrackSelection";
+import { useQueueInsertion } from "./QueueInsertionMenu";
+import type { TrackMetadata } from "../types/audio";
 import {favoriteLocalTracks,favoritePlexTracks} from '../utils/favoriteTracks';
 import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { logError } from "../utils/frontendDiagnostics";
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import {
   Heart,
   Play,
@@ -52,6 +55,12 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
   const selectedIdentityRef=useRef(selectedIdentity);selectedIdentityRef.current=selectedIdentity;
   const closeAlbum=()=>{albumGeneration.current++;setSelectedAlbum(null);setTracks([]);setLoadingTracks(false);setPlaylistItems(null);};
   const loadFavoriteTracks=(fav:FavoriteAlbum)=>fav.source==='local'?favoriteLocalTracks(fav,audioService):plexService.getAlbumTracks(fav.path_or_key).then(items=>favoritePlexTracks(items,fav));
+  const queueContext = useMemo(() => ({}), [selectedIdentity, activeTab, search, tracks]);
+  const metadata = (track: typeof tracks[number], fav: FavoriteAlbum): TrackMetadata => ({ ...track, album: fav.title, media_locator: track.media_locator ?? { kind: "local", uri: track.uri || "" } });
+  const queueActions = useQueueInsertion(queueContext, isPlaybackAvailable && !loadingTracks);
+  const selection = useTrackSelection(queueContext, selectedAlbum ? tracks.map(track => metadata(track, selectedAlbum)) : [], isPlaybackAvailable && !loadingTracks);
+  const albumRequest = (fav: FavoriteAlbum) => ({ track: { title: fav.title, artist: fav.artist, album: fav.title }, scope: "album" as const,
+    load: async () => (await loadFavoriteTracks(fav)).map(track => metadata(track, fav)) });
   const loadFavorites = async () => {
     try {
       const data = await favoritesService.getFavorites();
@@ -166,7 +175,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
 
   return (
     <main className="min-h-0 min-w-0 flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)] select-none">
-      <PlaybackRequestNotice failure={request.failure} />
+      <PlaybackRequestNotice failure={request.failure} />{queueActions.menu}{queueActions.notice}{selection.toolbar}
       <div className="flex shrink-0 items-center justify-between p-8 pb-4 border-b border-[color:var(--theme-border-soft,#222222)]">
         <div className="flex items-center space-x-3">
           {selectedAlbum && (
@@ -301,16 +310,17 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                 {tracks.map((tItem, idx) => (
                   <div
                     key={tItem.uri || (tItem.media_locator?.kind === "plex" ? tItem.media_locator.part_key : `${tItem.title}-${idx}`)}
-                    onClick={() => handlePlayAll(idx)}
+                    onClick={event => { if (!selection.click(event, idx)) handlePlayAll(idx); }}
+                    onContextMenu={event => queueActions.open(event, { track: metadata(tItem, selectedAlbum), album: async () => tracks.map(track => metadata(track, selectedAlbum)) })}
                     aria-disabled={!isPlaybackAvailable}
-                    className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
+                    className={`${selection.checked(idx) ? "track-selected " : ""}grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
                       isPlaybackAvailable
                         ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                         : "opacity-60 cursor-not-allowed"
                     }`}
                   >
                     <span className="col-span-1 text-center font-mono text-[color:var(--theme-fg-muted,#666666)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
-                      {idx + 1}
+                      {selection.checkbox(idx)}<span className="ml-1">{idx + 1}</span>
                     </span>
                     <div className="col-span-8 flex flex-col pr-2">
                       <span className="font-semibold text-[color:var(--theme-fg-primary,#ffffff)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate">
@@ -360,9 +370,11 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                 <div
                   key={fav.id}
                   onClick={() => handleOpenAlbum(fav)}
+                  onContextMenu={event => { if (!isMissing) queueActions.open(event, albumRequest(fav)); }}
                   className={`group flex flex-col cursor-pointer ${isMissing ? "opacity-60" : ""}`}
                 >
                   <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md">
+                    {!isMissing && <span className="album-queue-trigger">{queueActions.trigger(albumRequest(fav))}</span>}
                     {fav.source === "plex" && fav.plex_image ? (
                       <PlexImage
                         image={fav.plex_image}

@@ -1,3 +1,7 @@
+import { RadioView } from "./components/RadioView";
+import { Radio } from "lucide-react";
+import { HistoryView } from "./components/HistoryView";
+import { History } from "lucide-react";
 import { useQueueInsertion } from "./components/QueueInsertionMenu";
 import { plexQueueTrack } from "./utils/queueActions";
 import {plexTrackArtist,plexTrackDurationSeconds} from './utils/plexTrackMetadata';
@@ -287,12 +291,18 @@ const PlexAlbumCard = memo<{
   playAlbumText,
   isPlaybackAvailable,
 }) => {
+  const cardContext = useMemo(() => ({}), [album]);
+  const cardActions = useQueueInsertion(cardContext, isPlaybackAvailable);
+  const albumRequest = { track: { title: album.title, artist: album.artist, album: album.title }, scope: "album" as const,
+    load: async () => (await plexService.getAlbumTracks(album.rating_key)).map(track => plexQueueTrack(track, album)) };
   return (
-    <div
+    <div onContextMenu={event => cardActions.open(event, albumRequest)}
       onClick={() => onSelect(album)}
       className="group flex flex-col cursor-pointer relative"
     >
+      {cardActions.menu}{cardActions.notice}
       <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md">
+        <span className="album-queue-trigger">{cardActions.trigger(albumRequest)}</span>
         {album.thumb ? (
           <PlexImage
             image={album.thumb}
@@ -1695,6 +1705,10 @@ export function App() {
                     mainSectionPreference.navigate("favorites");
                   }}
                 />
+                <SidebarNavItem icon={Radio} label={t("radio.title")} active={mediaSource === "radio"}
+                  onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("radio"); }} />
+                <SidebarNavItem icon={History} label={t("history.title")} active={mediaSource === "history"}
+                  onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("history"); }} />
                 <SidebarNavItem diagnosticAction="playlists"
                   icon={ListMusic}
                   label={t("sidebar.playlists")}
@@ -1767,6 +1781,12 @@ export function App() {
               catalogRefreshRevision={localCatalogRevision} isPlaybackAvailable={isPlaybackAvailable} isLibraryUpdating={playbackStatus.is_updating}
               onlineArtworkEnabled={config?.online_artwork_enabled ?? false} configuredLocalFolders={config?.local_folders ?? []} />}
           </div>
+        ) : centralSection === "radio" ? (
+          <RadioView available={isPlaybackAvailable} status={playbackStatus}
+            active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
+        ) : centralSection === "history" ? (
+          <HistoryView config={config} plexIdentity={plexConnectionIdentity} status={playbackStatus} isPlaybackAvailable={isPlaybackAvailable} catalogRefreshRevision={localCatalogRevision}
+            active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
         ) : centralSection === "playlists" ? (
           <PlaylistsView isPlaybackAvailable={isPlaybackAvailable} refreshKey={playlistRevision} />
         ) : centralSection === "favorites" ? (

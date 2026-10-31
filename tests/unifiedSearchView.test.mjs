@@ -44,8 +44,8 @@ function fixture(language = "en", overrides = {}) {
     close() { host.slots.forEach(slot => slot?.cleanup?.()); },
   };
   const LocalView = () => React.createElement("div", { "data-local-detail": true });
-  const AlbumView = () => React.createElement("div", { "data-plex-album-detail": true });
-  const ArtistView = () => React.createElement("div", { "data-plex-artist-detail": true });
+  const AlbumView = props => React.createElement("div", { "data-plex-album-detail": true }, React.createElement("button", { onClick: props.onBack }, props.backLabel ?? "Back to library"));
+  const ArtistView = props => React.createElement("div", { "data-plex-artist-detail": true }, React.createElement("button", { onClick: props.onBack }, props.backLabel ?? "Back to library"));
   const dependencies = {...passiveQueueInsertion, react: { __esModule: true, ...React, ...hooks, default: React }, "react/jsx-runtime": jsx,
     "react-i18next": { useTranslation: () => ({ t }) }, "lucide-react": icons, "../utils/unifiedSearch": search,
     "../services/audio": { audioService: { searchLocalTracks: query => { calls.push(["local", query]); return host.readLocal(query); }, playTracks: async (...args) => calls.push(["play", ...args]) } },
@@ -294,4 +294,18 @@ test("completed Plex matches remain usable while a Local track request is still 
   assert.equal(nodes(host.paint(), node => node.type === AlbumView).length, 1);
   local.resolve({ tracks: [], limited: false }); await flush();
   assert.equal(nodes(host.paint(), node => node.type === AlbumView).length, 1); host.close();
+});
+
+test('Plex album and artist opened from unified search each expose one Back to search and retain query/focus on return', async()=>{
+ for(const language of ['en','pt-BR']) {
+  const plexResult={artists:[{rating_key:'artist',name:'Live Artist',server_id:'server'}],albums:[{rating_key:'album',title:'Live Album',artist:'Artist',server_id:'server'}],tracks:[]};
+  const f=fixture(language,{readPlex:async()=>plexResult});f.host.type('Live');let tree=await f.host.tick();const viewport=nodes(tree,n=>n.props?.ref&&n.props?.onScroll)[0];viewport.props.ref.current={scrollTop:0};
+  for(const kind of ['album','artist']) {
+   const label=kind==='album'?'Live Album':'Live Artist';let focused=0;
+   const button=nodes(tree,n=>n.type==='button'&&n.props['aria-label']?.includes(label)&&n.props['aria-label']?.includes('Plex'))[0];assert.ok(button);button.props.onClick({currentTarget:{focus(){focused++}}});tree=f.host.paint();
+   const html=renderToStaticMarkup(tree);const text=f.t('unifiedSearch.back');assert.equal(html.split(text).length-1,1);assert.doesNotMatch(html,/Back to library|Voltar para a biblioteca/);
+   const detail=nodes(tree,n=>n.type===(kind==='album'?f.AlbumView:f.ArtistView))[0];assert.equal(detail.props.backLabel,text);detail.props.onBack();tree=f.host.paint();assert.equal(nodes(tree,n=>n.type==='input')[0].props.value,'Live');assert.equal(focused,1);
+  }
+  f.host.close();
+ }
 });

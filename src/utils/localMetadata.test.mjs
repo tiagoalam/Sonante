@@ -29,6 +29,9 @@ const virtualUrl = dataModule(`import React from ${JSON.stringify(import.meta.re
  export const VirtualList = props => React.createElement("div", {"data-virtual-list": true}, props.items.map(item => React.createElement(React.Fragment, {key: props.getItemKey(item)}, props.renderItem(item))));
  export const VirtualAlbumGrid = () => null;`);
 const componentMocks = new Map([
+  ["QueueInsertionMenu.tsx", dataModule('export const useQueueInsertion = () => ({open(){},trigger:()=>null,menu:null,notice:null});')],
+  ["TrackSelection.tsx", dataModule('export const useTrackSelection = () => ({click:()=>false,checked:()=>false,checkbox:()=>null,toolbar:null});')],
+  ["queueAlbumLoader.ts", dataModule('export const loadQueuedAlbum = async () => []; export const loadLocalAlbumQueue = async () => [];')],
   ["audio.ts", audioUrl], ["favorites.ts", favoritesUrl], ["localArtworkSession.ts", artworkUrl],
   ["VirtualList.tsx", virtualUrl], ["VirtualAlbumGrid.tsx", virtualUrl],
   ...["LocalAlbumTagEditorModal", "LibraryDoctorModal", "LocalTagEditorModal", "PlaylistPickerModal", "LocalImportPreviewSection", "AlbumArtworkPlaceholder", "ToolbarSelect", "AlbumGenreGrid"].map(name => [name + ".tsx", dataModule(`export const ${name} = () => null;`)]),
@@ -260,10 +263,10 @@ test("browser cards retained under Metadata cannot start artwork reads even if p
   const card = get(tree, VirtualAlbumGrid).props.renderItem(localAlbumCatalog.getSnapshot().albums[0]);
   assert.equal(card.props.readEnabled, false);
   const previousObserver = globalThis.IntersectionObserver;
-  globalThis.IntersectionObserver = class { observe() {} disconnect() {} };
+  globalThis.IntersectionObserver = class { constructor(callback) { this.callback = callback; } observe() { this.callback([{ isIntersecting: true }]); } disconnect() {} };
   const h = host(card.type, card.props);
   try {
-    h.render(); h.effects(); h.slots[2] = true; h.render(); h.effects(); await flush();
+    h.render(); h.effects(); h.render(); h.effects(); await flush();
     assert.deepEqual(f.reads, []);
   } finally { h.cleanup(); f.h.cleanup(); globalThis.IntersectionObserver = previousObserver; }
 });

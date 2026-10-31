@@ -169,3 +169,24 @@ fn unsupported_format_diagnostic_is_allowlisted_and_never_exposes_server_data() 
     let error = "Failed to open private://SECRET?X-Plex-Token=SECRET: Sonante Direct strict: unsupported sample rate";
     assert_eq!(serde_json::to_string(&PlaybackDiagnostic::from_mpd_error(error)).unwrap(),r#"{"code":"format_unsupported"}"#);
 }
+
+#[test]
+fn strict_diagnostic_requires_a_known_terminal_reason_and_does_not_expose_source_text() {
+    for reason in ["unsupported sample format", "unsupported channel count", "unsupported sample rate",
+        "forced output format is incompatible", "allowed_formats is incompatible"] {
+        for context in ["", "Failed to open Sonante Output: "] {
+            let raw = format!("{context}Sonante Direct strict: {reason}");
+            assert_eq!(PlaybackDiagnostic::from_mpd_error(&raw), PlaybackDiagnostic::FormatUnsupported);
+        }
+    }
+    for raw in [
+        "Failed to open https://private.invalid/live?token=SECRET: HTTP 404 Not Found",
+        "Sonante Direct strict: connection refused https://private.invalid/?token=SECRET",
+        "Failed to decode Sonante Direct strict: unsupported sample rate in source name",
+        "Failed to open https://private.invalid/Sonante Direct strict: unsupported sample rate",
+    ] {
+        let code=PlaybackDiagnostic::from_mpd_error(raw);
+        assert_eq!(code, PlaybackDiagnostic::PlaybackError);
+        assert_eq!(serde_json::to_string(&code).unwrap(), r#"{"code":"playback_error"}"#);
+    }
+}

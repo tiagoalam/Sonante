@@ -62,7 +62,7 @@ test('virtual queue shares artwork/actions and retains duplicate positions/curre
  const {NowPlayingQueue}=compile('components/NowPlayingQueue.tsx',{'react':hooks,'../services/audio':{audioService:{getQueue:async()=>{calls.push('read');return[local,local];},playQueueIndex:async index=>calls.push(['play',index]),clearQueue:async()=>calls.push('clear')}}});
  const tree=NowPlayingQueue({open:true,available:true,status:{...snapshot.playback,state:'pause',current_media:{kind:'local',uri:'same.flac',queue_index:1}}});
  const rows=nodes(tree,n=>n.type==='li');assert.equal(rows.length,2);assert.equal(rows[0].props['aria-current'],undefined);assert.equal(rows[1].props['aria-current'],'true');assert.equal(rows[1].props['aria-posinset'],2);assert.deepEqual(calls,[]);
- nodes(rows[1],n=>n.type==='button')[0].props.onClick();nodes(rows[1],n=>n.type==='button')[0].props.onClick();for(let i=0;i<12;i++)await Promise.resolve();assert.deepEqual(calls,['read',['play',1]]);
+ nodes(rows[1],n=>n.props?.className==='np-queue-track')[0].props.onClick({});nodes(rows[1],n=>n.props?.className==='np-queue-track')[0].props.onClick({});for(let i=0;i<12;i++)await Promise.resolve();assert.deepEqual(calls,['read',['play',1]]);
  nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('queue.clear'))[0].props.onClick();for(let i=0;i<12;i++)await Promise.resolve();assert.equal(calls.at(-1),'clear');
 });
 const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
@@ -488,4 +488,30 @@ test('Now Playing suppresses stale DAC output notices only after confirmed playb
   const html=renderToStaticMarkup(React.createElement(View,{...props,snapshot:{...snapshot,playback:{...snapshot.playback,state,playback_error:{code}}}}));
   assert.equal(html.includes(i18n.t(`player.playbackError.${code}`)),state==='stop');
  }
+});
+
+test('Radio presentation is live/nonseekable in both players and never offers album navigation',async()=>{
+ const radio={...snapshot.playback,current_media:{kind:'radio',station_id:'rb:01234567-89ab-cdef-0123-456789abcdef',queue_index:0},title:'Live song',artist:'Synthetic Station',album:'Live artist',duration:999};
+ const hooks={...React,default:React,useState:v=>[v,()=>{}],useEffect(){},useRef:v=>({current:v})};
+ const {PlayerBar}=compile('components/PlayerBar.tsx',{react:hooks,'../services/audio':{audioService:{}}});
+ for(const language of ['en','pt-BR']){
+  await i18n.changeLanguage(language);let navigations=0;
+  const full=View({...props,snapshot:{...snapshot,playback:radio},onNavigate:()=>navigations++});
+  assert.equal(nodes(full,n=>n.type==='input'&&n.props['aria-label']===i18n.t('nowPlaying.seek'))[0].props.disabled,true);assert.equal(nodes(full,n=>n.type==='button'&&n.props['aria-label']===i18n.t('radio.stop')).length,1);
+  assert.equal(nodes(full,n=>n.type==='button'&&['Live artist','Synthetic Station'].includes(n.props.children)).length,0);
+  const bar=PlayerBar({status:radio,health:snapshot.health,route:snapshot.route,onToggleQueue(){},isQueueOpen:false,onNavigateToAlbum:()=>navigations++,onNavigateToArtist:()=>navigations++});
+  assert.equal(nodes(bar,n=>n.type==='input'&&n.props.type==='range')[0].props.disabled,true);assert.equal(nodes(bar,n=>n.type==='button'&&n.props.title===i18n.t('radio.stop')).length,1);
+  assert.ok(renderToStaticMarkup(full).includes(i18n.t('radio.live')));assert.equal(i18n.exists('player.source.radio'),true);assert.equal(navigations,0);
+ }
+ await i18n.changeLanguage('en');
+});
+
+test('Now Playing uses the same Radio Direct message without changing Local or Plex diagnostics',async()=>{
+ for(const language of ['en','pt-BR']) {await i18n.changeLanguage(language);
+  for(const kind of ['radio','local','plex']) {
+   const html=renderToStaticMarkup(React.createElement(View,{...props,snapshot:{...snapshot,playback:{...snapshot.playback,state:'stop',current_media:{kind},playback_error:{code:'format_unsupported'}}}}));
+   assert.ok(html.includes(i18n.t(kind==='radio'?'radio.directError':'player.playbackError.format_unsupported')));
+   if(kind==='radio')assert.ok(!html.includes(i18n.t('player.playbackError.format_unsupported')));
+  }
+ }await i18n.changeLanguage('en');
 });

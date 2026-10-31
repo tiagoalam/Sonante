@@ -2,6 +2,7 @@ import type { CurrentMedia, TrackMetadata, PlaybackStatus } from "../types/audio
 
 export const queueItemIsCurrent = (item: TrackMetadata, index: number, current: CurrentMedia | null): boolean => {
   if (!current || current.queue_index !== index) return false;
+  if (current.kind === "radio") return item.media_locator?.kind === "radio" && current.station_id === item.media_locator.station_id;
   if (current.kind === "upnp") return item.media_locator?.kind === "upnp" && current.session_id === item.media_locator.session_id;
   if (current.kind === "plex") return item.media_locator?.kind === "plex" &&
     current.server_id === item.media_locator.server_id && current.part_key === item.media_locator.part_key;
@@ -102,7 +103,8 @@ export const nowPlayingWindowBounds = (area: WorkArea, scaleFactor: number) => {
     minWidth: Math.min(640, innerWidth), minHeight: Math.min(480, innerHeight) };
 };
 
-const trackIdentity = (item: TrackMetadata) => item.media_locator?.kind === "upnp"
+const trackIdentity = (item: TrackMetadata) => item.media_locator?.kind === "radio"
+  ? JSON.stringify(["radio", item.media_locator.station_id]) : item.media_locator?.kind === "upnp"
   ? JSON.stringify(["upnp", item.media_locator.session_id]) : item.media_locator?.kind === "plex"
   ? JSON.stringify(["plex", item.media_locator.server_id, item.media_locator.part_key])
   : item.media_locator?.kind === "local" ? JSON.stringify(["local", item.media_locator.uri])

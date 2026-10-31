@@ -1,3 +1,4 @@
+import { useTrackSelection } from "./TrackSelection";
 import { useQueueInsertion } from "./QueueInsertionMenu";
 import { plexQueueTrack } from "../utils/queueActions";
 import { loadQueuedAlbum } from "../utils/queueAlbumLoader";
@@ -139,6 +140,9 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, plexIdentity, statu
   const rows = query ? sortSearchRows([
     ...(showLocal && localReady ? [...localMetadata.rows, ...local.value?.rows ?? []] : []), ...(showPlex ? plex.value?.rows ?? [] : []),
   ], query) : [];
+  const selectionRows = rows.filter((row): row is Extract<SearchRow, { kind: "track" }> => row.kind === "track");
+  const selection = useTrackSelection(playbackContext, selectionRows.map(searchTrackMetadata), active && !currentDetail && isPlaybackAvailable && !status.is_updating);
+
   const visibleRows = (["album", "artist", "track"] as const).flatMap(group =>
     kind === "all" || kind === group ? rows.filter(row => row.kind === group) : []);
   const enabledResults = () => visibleRows.map(row => resultButtons.current.get(row.key)).filter((button): button is HTMLButtonElement => Boolean(button && !button.disabled));
@@ -211,7 +215,7 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, plexIdentity, statu
       </header>
       <div ref={scroll} onScroll={event => { if (!currentDetail) position.current = event.currentTarget.scrollTop; }} className="min-h-0 flex-1 overflow-y-auto px-6 py-6 sm:px-8">
         <PlaybackRequestNotice failure={request.failure} />
-        {queueActions.notice}{queueActions.menu}
+        {queueActions.notice}{queueActions.menu}{selection.toolbar}
         {!query || !localConfigured && !plexConfigured ? <div className="mx-auto max-w-xl py-16 text-center"><Search size={42} className="mx-auto mb-5 text-[color:var(--theme-fg-accent,#E5A00D)]" /><h2 className="text-lg font-semibold">{t("unifiedSearch.startTitle")}</h2><p className="mt-3 text-sm leading-relaxed text-[color:var(--theme-fg-muted,#888888)]">{t(localConfigured || plexConfigured ? "unifiedSearch.startHint" : "unifiedSearch.configureHint")}</p></div> : <>
           <div role="status" className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
             {showLocal && sourceStatus(t("explore.sources.local"), !localUnavailable && (!localReady || local.phase === "loading" || local.phase === "idle"), localUnavailable || local.phase === "error", local.value?.tracksUnavailable)}
@@ -226,17 +230,17 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, plexIdentity, statu
             return <section key={group} aria-label={kinds[group]} className="mb-8"><h2 className="mb-3 flex items-center gap-2 text-base font-semibold"><Icon size={19} className="text-[color:var(--theme-fg-accent,#E5A00D)]" />{kinds[group]}<span className="ml-1 rounded-full bg-[var(--theme-surface-raised,#262626)] px-2 py-0.5 text-xs text-[color:var(--theme-fg-muted,#888888)]">{entries.length}</span></h2>
               <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">{entries.map(row => {
                 const text = rowText(row), Origin = row.source === "local" ? Folder : Server;
-                return <div key={row.key} className="relative" onContextMenu={row.kind === "track" ? event => queueActions.open(event, queueRequest(row)) : undefined}>
+                return <div key={row.key} className={`relative ${row.kind === "track" && selection.checked(selectionRows.indexOf(row)) ? "track-selected" : ""}`} onContextMenu={row.kind === "track" ? event => queueActions.open(event, queueRequest(row)) : undefined}>
                   <button type="button" data-search-result={row.key}
                   ref={button => { if (button) resultButtons.current.set(row.key, button); else resultButtons.current.delete(row.key); }} disabled={!active || row.kind === "track" && !isPlaybackAvailable}
                   title={[text.title, text.subtitle].filter(Boolean).join(" · ")}
-                  onClick={event => open(row, event.currentTarget)} aria-label={`${row.kind === "track" ? t("unifiedSearch.playTrack") : t("unifiedSearch.open")}: ${text.title} · ${t(row.source === "local" ? "explore.sources.local" : "explore.sources.plex")}`}
-                  className={`group flex w-full min-w-0 items-center gap-3 rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] px-4 py-3 text-left transition-colors hover:border-[color:var(--theme-border-accent,#E5A00D)]/60 hover:bg-[var(--theme-surface-raised,#222222)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-40 ${row.kind === "track" ? "pr-14" : ""}`}>
+                  onClick={event => { if (row.kind !== "track" || !selection.click(event, selectionRows.indexOf(row))) open(row, event.currentTarget); }} aria-label={`${row.kind === "track" ? t("unifiedSearch.playTrack") : t("unifiedSearch.open")}: ${text.title} · ${t(row.source === "local" ? "explore.sources.local" : "explore.sources.plex")}`}
+                  className={`group flex w-full min-w-0 items-center gap-3 rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] px-4 py-3 text-left transition-colors hover:border-[color:var(--theme-border-accent,#E5A00D)]/60 hover:bg-[var(--theme-surface-raised,#222222)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-40 ${row.kind === "track" ? "pr-24" : ""}`}>
                   <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--theme-surface-accent,#332b15)] text-[color:var(--theme-fg-accent,#E5A00D)]"><Icon size={22} /></span>
                   <span className="min-w-0 flex-1"><span title={text.title} className="block truncate text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)]">{text.title}</span><span title={text.subtitle || undefined} className="mt-0.5 block truncate text-xs text-[color:var(--theme-fg-muted,#888888)]">{text.subtitle || t(row.kind === "artist" ? "unifiedSearch.artistAction" : "unifiedSearch.open")}</span></span>
                   <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-[color:var(--theme-border-soft,#333333)] px-2.5 py-1 text-[11px] text-[color:var(--theme-fg-secondary,#AAAAAA)]"><Origin size={12} />{t(row.source === "local" ? "explore.sources.local" : "explore.sources.plex")}</span>
                   {row.kind === "track" ? <Play size={17} className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" /> : <ArrowUpRight size={17} className="shrink-0 text-[color:var(--theme-fg-muted,#888888)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)]" />}
-                </button>{row.kind === "track" && <span className="absolute right-2 top-1/2 -translate-y-1/2">{queueActions.trigger(queueRequest(row))}</span>}</div>;
+                </button>{row.kind === "track" && <span className="absolute right-2 top-1/2 flex items-center gap-2 -translate-y-1/2">{selection.checkbox(selectionRows.indexOf(row))}{queueActions.trigger(queueRequest(row))}</span>}</div>;
               })}</div></section>;
           })}
           {!searching && !rows.some(row => kind === "all" || row.kind === kind) && <p className="py-12 text-center text-sm text-[color:var(--theme-fg-muted,#888888)]">{t("unifiedSearch.empty")}</p>}
@@ -244,15 +248,15 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, plexIdentity, statu
         </>}
       </div>
     </main>
-    {currentDetail && <div className="flex min-h-0 min-w-0 flex-1 flex-col"><div className="shrink-0 border-b border-[color:var(--theme-border-soft,#262626)] px-6 py-3 sm:px-8"><button type="button" onClick={back} className="flex items-center gap-2 rounded-lg px-2 py-1 text-sm text-[color:var(--theme-fg-secondary,#AAAAAA)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"><ArrowLeft size={17} />{t("unifiedSearch.back")}</button></div>
-      {currentDetail.source === "local" ? <LocalBrowserView key={currentDetail.key}
+    {currentDetail && <div className="flex min-h-0 min-w-0 flex-1 flex-col">{currentDetail.source === "local" && <div className="shrink-0 border-b border-[color:var(--theme-border-soft,#262626)] px-6 py-3 sm:px-8"><button type="button" onClick={back} className="flex items-center gap-2 rounded-lg px-2 py-1 text-sm text-[color:var(--theme-fg-secondary,#AAAAAA)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"><ArrowLeft size={17} />{t("unifiedSearch.back")}</button></div>}
+      {currentDetail.source === "local" ? <LocalBrowserView key={currentDetail.key} externalBackNavigation
         initialAlbumId={currentDetail.kind === "album" ? currentDetail.album.id : undefined}
         initialArtist={currentDetail.kind === "artist" ? currentDetail.artist.name : undefined} onClearInitialArtist={back}
         onAlbumNavigationBack={back} catalogRefreshRevision={catalogRefreshRevision} isPlaybackAvailable={isPlaybackAvailable}
         isLibraryUpdating={status.is_updating} onlineArtworkEnabled={config.online_artwork_enabled} configuredLocalFolders={config.local_folders} />
-      : currentDetail.kind === "album" ? <AlbumView album={currentDetail.album} active={active} onBack={back} isPlaybackAvailable={isPlaybackAvailable}
+      : currentDetail.kind === "album" ? <AlbumView album={currentDetail.album} active={active} onBack={back} backLabel={t("unifiedSearch.back")} isPlaybackAvailable={isPlaybackAvailable}
         onToggleFavorite={onFavoritesChanged} onSelectArtist={artist => setDetail({ row: { source: "plex", kind: "artist", key: `plex:artist:${artist.rating_key}`, artist: { rating_key: artist.rating_key, name: artist.name, thumb: artist.thumb ?? undefined } }, identity: plexIdentity })} />
-      : <ArtistView artist={{ ...currentDetail.artist, server_id: config.plex_server_id ?? undefined }} requestIdentity={plexIdentity} active={active} onBack={back}
+      : <ArtistView artist={{ ...currentDetail.artist, server_id: config.plex_server_id ?? undefined }} requestIdentity={plexIdentity} active={active} onBack={back} backLabel={t("unifiedSearch.back")}
         onSelectAlbum={album => setDetail({ row: { source: "plex", kind: "album", key: `plex:album:${album.rating_key}`, album }, identity: plexIdentity })}
         status={status} isPlaybackAvailable={isPlaybackAvailable} />}
     </div>}
