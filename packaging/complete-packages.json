@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "baseline_release": "v0.5.5",
+  "baseline_revision": 10,
+  "packages": {
+    "ubuntu": {
+      "filename": "sonante_0.5.5-10_amd64.deb",
+      "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/sonante_0.5.5-10_amd64.deb",
+      "sha256": "b2b5c9273685b9efde527741e9b05ac3f83dade625a9ab0ecbcff3c7a77237c2",
+      "bytes": 83413924,
+      "payload_files": 171,
+      "descriptor": "packaging/private-runtimes.json",
+      "descriptor_sha256": "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769"
+    },
+    "fedora": {
+      "filename": "sonante-0.5.5-10.x86_64.rpm",
+      "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/sonante-0.5.5-10.x86_64.rpm",
+      "sha256": "0f76dd33c190fbdca1c4b76b56c8e85e31213b6b095d85a34fdfa15f80cd91a8",
+      "bytes": 82896717,
+      "payload_files": 174,
+      "descriptor": "packaging/qualified-0.5.4/fedora.runtime.json",
+      "descriptor_sha256": "c93f1ac2dc06a8dcee5101858381efc265c3907e50dc2a334a11d293a21cf02f"
+    },
+    "arch": {
+      "filename": "sonante-0.5.5-10-x86_64.pkg.tar.zst",
+      "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/sonante-0.5.5-10-x86_64.pkg.tar.zst",
+      "sha256": "c00bb1acc2a4a2f0d126501e1407773e90cbd48ae36d051519f1272c3a0aabc4",
+      "bytes": 102845158,
+      "payload_files": 171,
+      "descriptor": "packaging/private-runtimes.json",
+      "descriptor_sha256": "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769"
+    }
+  },
+  "sources": [
+    {
+      "filename": "runtime-source-materials-consumer-clock.tar.zst",
+      "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/runtime-source-materials-consumer-clock.tar.zst",
+      "sha256": "0b0f8a91f965711398a36b912b7ae8d193c1230622fd14d67f8c3a8c5e503af6",
+      "bytes": 272635700
+    },
+    {
+      "filename": "fedora-compat-source-materials-20261020.3.tar.zst",
+      "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/fedora-compat-source-materials-20261020.3.tar.zst",
+      "sha256": "b6ed25e1c11614ab5e07c3112710f9309a1ad211a321d05220dc18c187880533",
+      "bytes": 1071301
+    }
+  ]
+}

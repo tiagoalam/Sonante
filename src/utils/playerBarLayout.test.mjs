@@ -308,3 +308,28 @@ test("All Direct transports use equipment volume and dedicated mute; Shared stay
   }
  }
 });
+
+test('retained generic MPD errors stay out of the player while explicit playback remains available',async()=>{
+ const {render,t}=await fixture();
+ for(const state of ['play','pause','stop']) {
+  const tree=render({status:{...status,state,playback_error:{code:'playback_error'}}});
+  const html=renderToStaticMarkup(tree);
+  assert.ok(!html.includes(t('player.playbackError.playback_error')));
+  const toggle=nodes(tree).find(node=>node.type==='button'&&node.props.title===t(state==='play'?'player.pause':'player.play'));
+  assert.equal(toggle.props.disabled,false);
+ }
+ for(const code of ['queue_uncertain','persistence_failed','format_unsupported']) {
+  assert.ok(renderToStaticMarkup(render({status:{...status,playback_error:{code}}})).includes(t(`player.playbackError.${code}`)));
+ }
+});
+
+
+test('DAC output diagnostics stop appearing after confirmed playback but remain actionable while stopped',async()=>{
+ const {render,t}=await fixture();
+ for(const code of ['output_busy','output_unavailable']) {
+  const resumed=renderToStaticMarkup(render({status:{...status,state:'play',playback_error:{code}}}));
+  assert.ok(!resumed.includes(t(`player.playbackError.${code}`)));
+  const stopped=renderToStaticMarkup(render({status:{...status,state:'stop',playback_error:{code}}}));
+  assert.ok(stopped.includes(t(`player.playbackError.${code}`)));
+ }
+});

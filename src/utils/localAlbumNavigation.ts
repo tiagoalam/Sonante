@@ -6,7 +6,9 @@ export type LocalAlbumSortMode =
   | "artist-asc"
   | "artist-desc"
   | "year-newest"
-  | "year-oldest";
+  | "year-oldest"
+  | "added-newest"
+  | "added-oldest";
 
 export const LOCAL_ALBUM_INDEX_BUCKETS = [
   "#", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
@@ -58,11 +60,30 @@ export function parseLocalAlbumYear(
   return parsed >= 1000 && parsed <= currentYear + 1 ? parsed : null;
 }
 
+// The protocol supplies UTC timestamps, never filesystem folder mtimes.
+export function localAlbumAddedAt(value: unknown): string | null {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value)) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && time >= 0 && new Date(time).toISOString() === value.slice(0, -1) + ".000Z" ? value : null;
+}
+
 export function sortLocalAlbums(
   albums: readonly LocalAlbum[],
   mode: LocalAlbumSortMode,
   currentYear = new Date().getFullYear(),
 ): LocalAlbum[] {
+  if (mode === "added-newest" || mode === "added-oldest") {
+    // Validate once per album, outside the O(N log N) comparison loop.
+    return albums.map(album => ({ album, added: localAlbumAddedAt(album.added_at) }))
+      .sort((left, right) => {
+        if (left.added === null && right.added !== null) return 1;
+        if (left.added !== null && right.added === null) return -1;
+        if (left.added !== null && right.added !== null && left.added !== right.added) {
+          return compareRaw(left.added, right.added) * (mode === "added-newest" ? -1 : 1);
+        }
+        return compareLocalAlbumsAscending(left.album, right.album);
+      }).map(({ album }) => album);
+  }
   const sorted = [...albums];
   sorted.sort((left, right) => {
     switch (mode) {

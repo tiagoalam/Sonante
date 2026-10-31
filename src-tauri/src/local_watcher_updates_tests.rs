@@ -378,3 +378,60 @@ fn rename_between_drain_and_metadata_check_keeps_write_until_close_event() {
     assert!(blocked, "open renamed file became eligible before CLOSE_WRITE");
     assert!(closed, "close must release the same target for reconciliation");
 }
+
+
+#[test]
+fn manual_changes_distinguish_external_files_from_active_and_confirmed_tag_writes() {
+    let r = root();
+    let file = r.join("track.flac");
+    fs::write(&file, b"fixture").unwrap();
+    let writes = Arc::new(crate::local_own_writes::OwnWrites::default());
+    let context = Context::for_roots(&[r.clone()]);
+    let batch = || Batch { context: context.clone(), paths: BTreeSet::from([file.clone()]) };
+    assert_eq!(reconcile_manual_changes(&writes, batch()), Reconcile::ChangesPending);
+    let lease = writes.begin(&r, &["track.flac".into()]).unwrap();
+    assert_eq!(reconcile_manual_changes(&writes, batch()), Reconcile::Busy);
+    let revision = crate::tags::revision_for_metadata(&fs::metadata(&file).unwrap());
+    lease.complete(true, &revision);
+    assert_eq!(reconcile_manual_changes(&writes, batch()), Reconcile::Confirmed);
+    fs::write(&file, b"externally replaced fixture with different size").unwrap();
+    assert_eq!(reconcile_manual_changes(&writes, batch()), Reconcile::ChangesPending);
+    fs::remove_dir_all(r).unwrap();
+}
+
+#[test]
+fn pending_manual_changes_do_not_raise_or_clear_a_monitor_failure() {
+    for existing_issue in [false, true] {
+        let r = root();
+        let state = LocalWatcherState::new();
+        let (nt, nr) = mpsc::channel();
+        state.start_context(
+            Context::for_roots(&[r.clone()]),
+            |_| Reconcile::ChangesPending,
+            move |reason| { nt.send(reason).ok(); },
+        ).unwrap();
+        assert_eq!(receive(&nr), "ready");
+        if existing_issue { state.mark_needs_check(); }
+        fs::write(r.join("new.flac"), b"fixture").unwrap();
+        assert_eq!(receive(&nr), "changes_pending");
+        assert_eq!(state.needs_check(), existing_issue);
+        // Context-only handoff must not discard events or claim a repaired
+        // observer. Normal pending changes still cannot create an error toast.
+        state.install(Context::for_roots(&[r.clone()]), None).unwrap();
+        assert!(nr.recv_timeout(Duration::from_millis(70)).is_err());
+        assert_eq!(state.needs_check(), existing_issue);
+        state.begin_shutdown();
+        state.stop_and_join();
+        fs::remove_dir_all(r).unwrap();
+    }
+}
+
+#[test]
+fn watcher_failure_notices_remain_actionable() {
+    assert_eq!(notice_needs_check("ready"), Some(false));
+    assert_eq!(notice_needs_check("changes_pending"), None);
+    for reason in ["reconciliation_blocked", "source_unavailable", "source_changed", "registration_failed",
+        "overflow", "write_not_closed", "inotify_unavailable", "mailbox_unavailable", "unknown_failure"] {
+        assert_eq!(notice_needs_check(reason), Some(true), "{reason}");
+    }
+}

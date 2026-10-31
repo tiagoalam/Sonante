@@ -10,9 +10,11 @@ const current = (flag: CurrentFlag): boolean => typeof flag === "function" ? fla
 const onlineInFlight = new Map<string, Promise<string | null>>();
 
 export function artworkReadBlocked(updating: boolean, catalog: {
-  loaded: boolean; loading: boolean; saveBlocked: boolean; mpdBusy: boolean; error: string | null;
+  loaded: boolean; loading: boolean; saveBlocked: boolean; mpdBusy: boolean; error: string | null; manualCheckPlayback?: boolean; manualCheckArtwork?: boolean;
 }): boolean {
-  return updating || !catalog.loaded || catalog.loading || catalog.saveBlocked || catalog.mpdBusy || !!catalog.error;
+  const confirmedCheck = catalog.manualCheckPlayback === true && catalog.manualCheckArtwork === true;
+  return ((updating || catalog.manualCheckPlayback === true) && !confirmedCheck)
+    || !catalog.loaded || catalog.loading || catalog.saveBlocked || catalog.mpdBusy || !!catalog.error;
 }
 
 export class LocalArtworkResolver {

@@ -424,3 +424,22 @@ fn inherited_unknown_invalidates_changed_configuration_but_not_same_scope_partia
     assert_eq!(unknown.revision, changed);
     assert!(state.snapshot(&["new-config".into()]).report.is_none());
 }
+
+#[test]
+fn scoped_complete_source_allows_its_removals_and_preserves_other_prior_records() {
+    let f=Fixture::new();let other=f.base.join("Other");fs::create_dir(&other).unwrap();
+    let keep=other.join("keep.flac");fs::write(&keep,b"keep").unwrap();
+    let sources=BTreeMap::from([("Music".into(),f.music.clone()),("Other".into(),other)]);
+    let mut inventory=Inventory::new("source-check",&sources,false).unwrap();
+    inventory.observe("Other",Path::new("keep.flac"),&keep,Kind::Audio,&fs::metadata(&keep).unwrap()).unwrap();
+    let ids=sources.keys().cloned().collect();
+    let before=catalog(&["Music/removed.flac","Other/keep.flac"]);
+    let after=catalog(&["Other/keep.flac"]);
+    assert_eq!(compare(&inventory,&before,&ids,&after).unwrap_err(),LOST);
+    inventory.mark_source_complete("Music").unwrap();
+    let report=compare(&inventory,&before,&ids,&after).unwrap();
+    assert_eq!(report.scope,"paths");
+    assert_eq!(report.outcome,Outcome::Confirmed);
+    assert_eq!(compare(&inventory,&catalog(&["Music/removed.flac","Other/keep.flac","Other/must-stay.flac"]),&ids,&after).unwrap_err(),LOST);
+    assert!(inventory.mark_source_complete("missing").is_err());
+}

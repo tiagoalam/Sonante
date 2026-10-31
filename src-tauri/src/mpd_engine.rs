@@ -263,14 +263,31 @@ mod tests {
 
     #[test]
     fn live_child_identity_is_checked_without_trusting_its_name() {
-        let program = Path::new("/usr/bin/sleep");
+        let program = Path::new("/usr/bin/cat");
         let expected = hash_file(program).unwrap();
         let engine =
             MpdEngine::resolve_override(Some(program.as_os_str()), true, &expected).unwrap();
+        // Keep stdin open so this owned fixture cannot expire while a busy
+        // runner is descheduled between spawn and the executable hash checks.
         let mut child = std::process::Command::new(engine.program())
-            .arg("2")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
+        // A successful spawn alone is not the fixture's readiness proof.
+        // Echo a bounded challenge before sampling /proc/<pid>/exe so this
+        // test observes the running auxiliary, not its startup transition.
+        let challenge = b"owned-fixture-ready\n";
+        let sent = std::io::Write::write_all(child.stdin.as_mut().unwrap(), challenge);
+        let mut output = child.stdout.take().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut echoed = [0u8; 20];
+            let result = output.read_exact(&mut echoed).map(|_| echoed);
+            let _ = send.send(result);
+        });
+        let ready = receive.recv_timeout(std::time::Duration::from_secs(5));
         let accepted = engine.verify_child(&child);
         let wrong = MpdEngine {
             program: program.into(),
@@ -279,7 +296,11 @@ mod tests {
         let rejected = wrong.verify_child(&child);
         let _ = child.kill();
         child.wait().unwrap();
-        assert!(accepted.is_ok());
+        reader.join().unwrap();
+        assert!(sent.is_ok(), "owned fixture challenge: {sent:?}");
+        assert!(matches!(&ready, Ok(Ok(bytes)) if bytes.as_slice() == challenge),
+            "owned fixture must echo its readiness challenge: {ready:?}");
+        assert!(accepted.is_ok(), "owned fixture identity: {accepted:?}");
         assert!(rejected.is_err());
     }
     struct Fixture(PathBuf);

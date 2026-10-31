@@ -182,6 +182,31 @@ pub struct CamillaRuntimeController<T: RuntimeTransport = LocalWebSocketTranspor
     current_generation: Arc<AtomicU64>,
     shared: Arc<RuntimeShared>,
     transport: T,
+    expected_render: Mutex<Option<ExpectedRender>>,
+}
+
+// One deterministic conversion per unchanged input, owned by this controller.
+// This is never an observation of the processor: health still reads config,
+// gain and the PipeWire graph on every existing verification cycle.
+struct ExpectedRender {
+    preset: EqPreset,
+    format: PcmFormat,
+    reference: bool,
+    config: Arc<Value>,
+}
+
+impl ExpectedRender {
+    fn matches(&self, preset: &EqPreset, format: PcmFormat, reference: bool) -> bool {
+        self.format == format && self.reference == reference && self.preset == *preset
+            // Conversion hashes the serialized preset into filter identities.
+            // PartialEq alone equates -0.0 and +0.0, whose JSON hashes differ.
+            && self.preset.preamp_db.to_bits() == preset.preamp_db.to_bits()
+            && self.preset.bands.iter().zip(&preset.bands).all(|(a, b)| {
+                a.frequency_hz.to_bits() == b.frequency_hz.to_bits()
+                    && a.gain_db.to_bits() == b.gain_db.to_bits()
+                    && a.q.to_bits() == b.q.to_bits()
+            })
+    }
 }
 
 #[derive(Default)]
@@ -217,6 +242,7 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
             current_generation,
             shared,
             transport,
+            expected_render: Mutex::new(None),
         }
     }
 
@@ -275,6 +301,44 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
         Ok(config)
     }
 
+    fn expected_render(
+        &self,
+        preset: &EqPreset,
+        format: PcmFormat,
+        reference: bool,
+    ) -> Result<Arc<Value>, RuntimeError> {
+        {
+            let cached = self
+                .expected_render
+                .lock()
+                .map_err(|_| RuntimeError::RuntimeUnavailable)?;
+            if let Some(entry) = cached.as_ref() {
+                if entry.matches(preset, format, reference) {
+                    return Ok(Arc::clone(&entry.config));
+                }
+            }
+        }
+        // Calculate outside the lock. Concurrent callers may duplicate work,
+        // but each receives only the conversion of its own complete input.
+        let desired = if reference {
+            super::peq::convert_reference(preset, format)
+        } else {
+            convert_preset(preset, format)
+        }
+        .map_err(RuntimeError::Conversion)?;
+        let config =
+            Arc::new(serde_json::to_value(desired).map_err(|_| RuntimeError::UnexpectedConfig)?);
+        *self
+            .expected_render
+            .lock()
+            .map_err(|_| RuntimeError::RuntimeUnavailable)? = Some(ExpectedRender {
+            preset: preset.clone(),
+            format,
+            reference,
+            config: Arc::clone(&config),
+        });
+        Ok(config)
+    }
     pub(super) fn confirm_initial(
         &self,
         preset: &EqPreset,
@@ -283,7 +347,7 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
         self.confirm_rendered(preset,format,false)
     }
     pub(super) fn confirm_rendered(&self,preset:&EqPreset,format:PcmFormat,reference:bool)->Result<(),RuntimeError>{
-        let desired = if reference {super::peq::convert_reference(preset,format)}else{convert_preset(preset,format)}.map_err(RuntimeError::Conversion)?;
+        let desired = self.expected_render(preset, format, reference)?;
         let config = self.config(self.endpoint.generation)?;
         if config
             .pointer("/devices/capture/type")
@@ -316,7 +380,7 @@ impl<T: RuntimeTransport> CamillaRuntimeController<T> {
             || self.volume_target(self.endpoint.generation)? > 0.001
             || !same_dsp(
                 &config,
-                &serde_json::to_value(desired).map_err(|_| RuntimeError::UnexpectedConfig)?,
+                &desired,
             )?
         {
             return Err(RuntimeError::UnexpectedConfig);
@@ -742,6 +806,242 @@ mod tests {
         controller.confirm_initial(&preset,pcm(48000)).unwrap();assert_eq!(state.patches.load(Ordering::SeqCst),0);
     }
 
+    #[test]
+    fn expected_render_cache_reuses_only_the_complete_unchanged_input() {
+        let (controller, _) = fixture(48000);
+        let preset = flat_preset();
+        let original = controller
+            .expected_render(&preset, pcm(48000), false)
+            .unwrap();
+        for _ in 0..32 {
+            assert!(Arc::ptr_eq(
+                &original,
+                &controller
+                    .expected_render(&preset, pcm(48000), false)
+                    .unwrap()
+            ));
+        }
+        let mut variants = Vec::new();
+        let mut p = preset.clone();
+        p.preamp_db = -0.0;
+        variants.push(p);
+        let mut p = preset.clone();
+        p.bands[0].gain_db = -0.0;
+        variants.push(p);
+        let mut p = preset.clone();
+        p.id = "other".into();
+        variants.push(p);
+        let mut p = preset.clone();
+        p.name = "Other".into();
+        variants.push(p);
+        let mut p = preset.clone();
+        p.preamp_db = -2.;
+        variants.push(p);
+        let mut p = preset.clone();
+        p.bands[0].id = "other_band".into();
+        variants.push(p);
+        let mut p = preset.clone();
+        p.bands[0].enabled = false;
+        variants.push(p);
+        let mut p = preset.clone();
+        p.bands[0].frequency_hz = 60.;
+        variants.push(p);
+        let mut p = preset.clone();
+        p.bands[0].gain_db = -2.;
+        variants.push(p);
+        let mut p = preset.clone();
+        p.bands[0].q = 2.;
+        variants.push(p);
+        let mut p = preset.clone();
+        p.bands[0].filter_type = crate::equalizer::EqFilterType::LowShelf;
+        variants.push(p);
+        let mut p = preset.clone();
+        p.bands.swap(0, 1);
+        variants.push(p);
+        for variant in variants {
+            let prior = controller
+                .expected_render(&preset, pcm(48000), false)
+                .unwrap();
+            let next = controller
+                .expected_render(&variant, pcm(48000), false)
+                .unwrap();
+            assert!(!Arc::ptr_eq(&prior, &next));
+            assert_eq!(
+                *next,
+                serde_json::to_value(convert_preset(&variant, pcm(48000)).unwrap()).unwrap()
+            );
+        }
+        let before = controller
+            .expected_render(&preset, pcm(48000), false)
+            .unwrap();
+        let reference = controller
+            .expected_render(&preset, pcm(48000), true)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&before, &reference));
+        let other_rate = controller
+            .expected_render(&preset, pcm(44100), true)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&reference, &other_rate));
+        assert!(controller
+            .expected_render(
+                &preset,
+                PcmFormat {
+                    sample_rate_hz: 48000,
+                    channels: 1
+                },
+                false
+            )
+            .is_err());
+        assert!(controller.expected_render(&preset, pcm(0), false).is_err());
+        let mut invalid = preset.clone();
+        invalid.bands[0].q = f64::NAN;
+        assert!(controller
+            .expected_render(&invalid, pcm(48000), false)
+            .is_err());
+        invalid = preset;
+        invalid.preamp_db = 24.;
+        assert!(controller
+            .expected_render(&invalid, pcm(48000), false)
+            .is_err());
+        // Failed conversions neither become entries nor overwrite a valid one.
+        assert!(Arc::ptr_eq(
+            &other_rate,
+            &controller
+                .expected_render
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .config
+        ));
+    }
+
+    #[test]
+    fn expected_render_cache_matches_uncached_presets_and_reference_exactly() {
+        let (controller, _) = fixture(48000);
+        for preset in crate::equalizer::built_in_presets() {
+            for rate in [44100, 48000, 96000] {
+                for reference in [false, true] {
+                    let direct = if reference {
+                        super::super::peq::convert_reference(&preset, pcm(rate))
+                    } else {
+                        convert_preset(&preset, pcm(rate))
+                    };
+                    match direct {
+                        Ok(config) => {
+                            let expected = serde_json::to_value(config).unwrap();
+                            let cached = controller
+                                .expected_render(&preset, pcm(rate), reference)
+                                .unwrap();
+                            assert_eq!(*cached, expected);
+                            assert!(Arc::ptr_eq(
+                                &cached,
+                                &controller
+                                    .expected_render(&preset, pcm(rate), reference)
+                                    .unwrap()
+                            ));
+                        }
+                        Err(error) => assert_eq!(
+                            controller
+                                .expected_render(&preset, pcm(rate), reference)
+                                .unwrap_err(),
+                            RuntimeError::Conversion(error)
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_expected_render_still_detects_runtime_drift_disconnect_and_stale_session() {
+        let (controller, state) = fixture(48000);
+        let preset = flat_preset();
+        let dsp = controller
+            .expected_render(&preset, pcm(48000), false)
+            .unwrap();
+        let baseline = json!({"title":"private_token","devices":{"samplerate":48000,"target_level":4096,"enable_rate_adjust":false,"capture":{"type":"RawFile","channels":2,"format":"S32_LE","filename":"cap"},"playback":{"node_name":"play"}},"filters":dsp["filters"],"pipeline":dsp["pipeline"]});
+        *state.config.lock().unwrap() = baseline.clone();
+        controller.confirm_initial(&preset, pcm(48000)).unwrap();
+        for (pointer, value) in [
+            ("/filters/peq_preamp/parameters/gain", json!(0.)),
+            ("/pipeline", json!([])),
+            ("/title", json!("foreign")),
+            ("/devices/capture/filename", json!("foreign")),
+            ("/devices/playback/node_name", json!("foreign")),
+            ("/devices/target_level", json!(1024)),
+            ("/devices/enable_rate_adjust", json!(true)),
+        ] {
+            let mut wrong = baseline.clone();
+            *wrong.pointer_mut(pointer).unwrap() = value;
+            *state.config.lock().unwrap() = wrong;
+            assert_eq!(
+                controller.confirm_initial(&preset, pcm(48000)),
+                Err(RuntimeError::UnexpectedConfig),
+                "{pointer}"
+            );
+            assert!(Arc::ptr_eq(
+                &dsp,
+                &controller
+                    .expected_render(&preset, pcm(48000), false)
+                    .unwrap()
+            ));
+        }
+        *state.config.lock().unwrap() = baseline;
+        *state.volume.lock().unwrap() = 1.;
+        assert_eq!(
+            controller.confirm_initial(&preset, pcm(48000)),
+            Err(RuntimeError::UnexpectedConfig)
+        );
+        *state.volume.lock().unwrap() = 0.;
+        controller.confirm_initial(&preset, pcm(48000)).unwrap();
+        state.unavailable.store(true, Ordering::SeqCst);
+        assert_eq!(
+            controller.confirm_initial(&preset, pcm(48000)),
+            Err(RuntimeError::WebSocketConnectFailed)
+        );
+        state.unavailable.store(false, Ordering::SeqCst);
+        state.generation.store(8, Ordering::SeqCst);
+        assert_eq!(
+            controller.confirm_initial(&preset, pcm(48000)),
+            Err(RuntimeError::SessionStale)
+        );
+        assert_eq!(state.patches.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn concurrent_expected_render_callers_receive_their_own_conversion() {
+        let (controller, _) = fixture(48000);
+        let handles: Vec<_> = [false, true]
+            .into_iter()
+            .map(|reference| {
+                let controller = Arc::clone(&controller);
+                std::thread::spawn(move || {
+                    let mut preset = flat_preset();
+                    preset.bands[0].enabled = true;
+                    preset.bands[0].gain_db = -2.;
+                    let direct = if reference {
+                        super::super::peq::convert_reference(&preset, pcm(48000))
+                    } else {
+                        convert_preset(&preset, pcm(48000))
+                    }
+                    .unwrap();
+                    let expected = serde_json::to_value(direct).unwrap();
+                    for _ in 0..16 {
+                        assert_eq!(
+                            *controller
+                                .expected_render(&preset, pcm(48000), reference)
+                                .unwrap(),
+                            expected
+                        );
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
     #[test]
     fn flat_one_band_and_ten_band_apply_only_after_observed_config() {
         for rate in [44_100, 48_000, 96_000] {

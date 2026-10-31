@@ -66,6 +66,9 @@ export class LocalArtworkEnrichment {
 
   getSnapshot = (): ArtworkEnrichmentStatus => this.status;
 
+  // The browser displays the online notice, not per-album progress counters.
+  getOnlineActivitySnapshot = (): ArtworkEnrichmentStatus["onlineActivity"] => this.status.onlineActivity;
+
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

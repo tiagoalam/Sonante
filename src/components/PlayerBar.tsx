@@ -60,6 +60,11 @@ export const PlayerBar: React.FC<Props> = ({
   }, [isSeeking]);
 
   const isAvailable = health.state === "available";
+  const playbackDiagnostic = status.playback_error;
+  const playbackNotice = playbackDiagnostic?.code === "playback_error"
+    || (isAvailable && status.state === "play"
+      && (playbackDiagnostic?.code === "output_busy" || playbackDiagnostic?.code === "output_unavailable"))
+    ? null : playbackDiagnostic;
 
   useEffect(() => {
     if (isAvailable && !isSeekingRef.current) {
@@ -250,11 +255,11 @@ export const PlayerBar: React.FC<Props> = ({
           role="status"
           aria-live="polite"
           aria-atomic="true"
-          title={status.playback_error ? t(`player.playbackError.${status.playback_error.code}`) : undefined}
-          className={status.playback_error ? "w-full truncate text-[10px] leading-tight text-[color:var(--theme-fg-accent,#C9A45D)] text-center" : "sr-only"}
+          title={playbackNotice ? t(`player.playbackError.${playbackNotice.code}`) : undefined}
+          className={playbackNotice ? "w-full truncate text-[10px] leading-tight text-[color:var(--theme-fg-accent,#C9A45D)] text-center" : "sr-only"}
         >
-          {status.playback_error
-            ? t(`player.playbackError.${status.playback_error.code}`)
+          {playbackNotice
+            ? t(`player.playbackError.${playbackNotice.code}`)
             : ""}
         </span>
         {!isAvailable && (

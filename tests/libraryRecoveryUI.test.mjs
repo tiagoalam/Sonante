@@ -123,3 +123,23 @@ test('recovery service drops unknown progress and preserves the invocation resul
  for(const stage of ['checking','/private/path','completed','reopen',{stage:'restoring'},'restoring'])progress.onmessage(stage);
  assert.deepEqual(seen,['checking','restoring']);assert.deepEqual(await result,{completed:true,backup_retained:true,requires_reopen:true});
 });
+
+
+for (const language of ['pt-BR', 'en']) test(`recovery exposes a busy indicator only while an operation is active in ${language}`, async () => {
+ const h = await host(language);
+ const status = () => nodes(h.draw()).find(node => node.props.role === 'status' && node.props['aria-live'] === 'polite');
+ assert.equal(status().props['aria-busy'], false);
+ h.click('analyze');
+ assert.equal(status().props['aria-busy'], true);
+ assert.ok(nodes(status()).some(node => node.props['aria-hidden'] === 'true'));
+ h.pending[0].resolve(executable); await h.settle();
+ assert.equal(status().props['aria-busy'], false);
+ h.click('execute');
+ assert.equal(status().props['aria-busy'], true);
+ assert.ok(!h.text().includes(h.i18n.t('libraryRecovery.explanation')), 'the readonly check description must not describe a modifying execution');
+ h.executions[0].reject(new Error('fixture failure')); await h.settle();
+ assert.equal(status().props['aria-busy'], false);
+ assert.ok(h.text().includes(h.i18n.t('libraryRecovery.sessionUnconfirmed')));
+ assert.equal(h.calls.filter(call => call[0] === 'reopen').length, 0);
+ h.cleanup();
+});

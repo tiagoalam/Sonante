@@ -351,6 +351,29 @@ pub(crate) fn now_playing_auxiliary(action: &'static str) {
     }
 }
 
+// MPD retains its last error in status after playback can resume. Log only
+// finite categories/numeric codes, once per change, without media or device text.
+#[derive(Default)]
+struct PlaybackErrorLog {
+    previous: Option<(MpdErrorShape, String)>,
+}
+impl PlaybackErrorLog {
+    fn changed(&mut self, error: Option<&str>) -> Option<String> {
+        let Some(error) = error else { self.previous = None; return None; };
+        let key = (mpd_error_shape(error), error_summary(error));
+        if self.previous.as_ref() == Some(&key) { return None; }
+        let line = format!("class={} output_hint={} {}", key.0.class, key.0.output_hint, key.1);
+        self.previous = Some(key);
+        Some(line)
+    }
+}
+static PLAYBACK_ERROR_LOG: OnceLock<Mutex<PlaybackErrorLog>> = OnceLock::new();
+pub(crate) fn playback_mpd_error(error: Option<&str>) {
+    let line = PLAYBACK_ERROR_LOG.get_or_init(|| Mutex::new(PlaybackErrorLog::default()))
+        .lock().ok().and_then(|mut log| log.changed(error));
+    if let Some(line) = line { eprintln!("[Audio] mpd_playback_error {line}"); }
+}
+
 pub(crate) fn now_playing_mpd_error(error: Option<&str>) {
     if !now_playing_enabled() {
         return;
@@ -902,5 +925,26 @@ mod observation_tests {
         for _ in 0..1000 { assert!(state.start("cover", None, now).is_none()); }
         let snapshot = state.snapshot(now); assert_eq!(snapshot["active_count"], 128);
         assert_eq!(snapshot["pending"].as_array().unwrap().len(), 16); assert_eq!(snapshot["omitted"], 1000);
+    }
+}
+
+#[cfg(test)]
+mod playback_error_log_tests {
+    use super::*;
+    #[test]
+    fn persistent_error_is_logged_only_when_its_safe_category_changes() {
+        let mut log = PlaybackErrorLog::default();
+        assert!(log.changed(Some("Failed to open ALSA device private: No such device")).is_some());
+        assert!(log.changed(Some("Failed to open ALSA device another: No such device")).is_none());
+        assert!(log.changed(Some("Failed to open ALSA device private: Device or resource busy")).is_some());
+        assert!(log.changed(None).is_none());
+        assert!(log.changed(Some("Failed to open ALSA device private: Device or resource busy")).is_some());
+    }
+    #[test]
+    fn terminal_error_log_never_contains_raw_media_device_or_credentials() {
+        let mut log = PlaybackErrorLog::default();
+        let line = log.changed(Some("Failed to decode https://private-host/secret-track?X-Plex-Token=private-token /private/music (os error 19)")).unwrap();
+        assert!(line.contains("os_code=19"));
+        for private in ["private-host", "secret-track", "private-token", "X-Plex-Token", "/private/music"] { assert!(!line.contains(private)); }
     }
 }

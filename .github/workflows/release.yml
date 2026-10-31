@@ -1,4 +1,4 @@
-name: Build Linux compilation packages
+name: Build complete Linux packages
 
 on:
   workflow_dispatch:
@@ -7,9 +7,8 @@ permissions:
   contents: read
 
 jobs:
-  # These CI packages are compilation artifacts. Public releases use the exact
-  # complete packages validated on the supported distributions, uploaded by the
-  # release operator together with their checksums and source materials.
+  # Build all formats with pinned runtimes, licenses and corresponding sources.
+  # This workflow does not create a tag or publish a release.
   packages:
     uses: ./.github/workflows/ci.yml
     permissions:

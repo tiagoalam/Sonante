@@ -17,3 +17,18 @@ test('filesystem notifications cannot enter automatic index refresh; explicit ve
  assert.match(lib,/fn run_managed_manual_rescan[\s\S]*?ManagedMirrorRefreshMode::Manual/);
  assert.match(lib,/async fn rescan_library[\s\S]*?run_managed_manual_rescan/);
 });
+
+test('managed startup reuses a watched original mirror proof without dropping admission boundaries',()=>{
+ const initial=section('fn start_initial_mpd(', '#[cfg_attr(mobile');
+ assert.match(initial,/ReadonlyMirrorSnapshot::open_cached\(&library_dir\)/);
+ assert.match(initial,/admission\.origins=admission\.observe_origins\(\)\?/);
+ assert.match(initial,/admission\.validate\(config\)\?/);
+ assert.match(initial,/supervisor\.start_initial_existing\(config,&admission\)/);
+ const validation=section("impl InitialManagedGeneration<'_>", 'fn start_initial_mpd(');
+ assert.equal((validation.match(/self\.mirror\.revalidate\(\)/g)||[]).length,2);
+ for(const guard of ['self.owner.validate()', 'self.profile.validate()', 'self.library.validate()',
+  'self.transaction.belongs_to', 'shutdown_requested()', 'check_startup(', 'self.profile.file_identity(',
+  'self.profile.read(', 'self.observe_origins()?!=self.origins'])assert.ok(validation.includes(guard),guard);
+ const supervisor=readFileSync(new URL('../src-tauri/src/supervisor.rs',import.meta.url),'utf8');
+ assert.equal((supervisor.match(/admission\.validate\(cfg\)/g)||[]).length,4);
+});

@@ -114,7 +114,7 @@ test("all pending catalog states block artwork reads", () => {
   const ready = { loaded: true, loading: false, saveBlocked: false, mpdBusy: false, error: null };
   assert.equal(artworkReadBlocked(false, ready), false);
   assert.equal(artworkReadBlocked(true, ready), true);
-  for (const patch of [{ loaded: false }, { loading: true }, { saveBlocked: true }, { mpdBusy: true }, { error: "failed" }]) {
+  for (const patch of [{ loaded: false }, { loading: true }, { saveBlocked: true }, { mpdBusy: true }, { error: "failed" }, { manualCheckPlayback: true }]) {
     assert.equal(artworkReadBlocked(false, { ...ready, ...patch }), true);
   }
 });
@@ -248,6 +248,19 @@ test("cards and selected album retain covers, invalidate obsolete reads and resu
   assert.match(view, /return \(\) => \{ active = false; \};\s*\}, \[selectedAlbum, artworkBlocked\]/);
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   assert.match(app, /localArtworkResolver\.setContext\(blocked, localCatalog\.albums\)/);
-  assert.match(app, /localArtworkEnrichment\.setUpdating\(blocked\)/);
+  assert.match(app, /localArtworkEnrichment\.setUpdating\(blocked \|\| localCatalog\.manualCheckPlayback === true\)/);
   assert.match(app, /useLayoutEffect\(\(\) => \{\s*\/\/ Publish the artwork gate/);
+});
+
+// Existing confirmed cards must keep resolving local pictures during an explicit Check.
+test("manual verification resolves confirmed album covers without unblocking other saves", async () => {
+  const catalog = { loaded: true, loading: false, saveBlocked: false, mpdBusy: false, error: null,
+    manualCheckPlayback: true, manualCheckArtwork: true };
+  const resolver = new LocalArtworkResolver(async () => "confirmed-local-cover", async () => assert.fail("no online search"));
+  resolver.setContext(artworkReadBlocked(true, catalog), [album]);
+  assert.equal(await resolver.resolve(album, false, artworkReadBlocked(true, catalog)), "confirmed-local-cover");
+  assert.equal(artworkReadBlocked(true, { ...catalog, manualCheckArtwork: false }), true);
+  assert.equal(artworkReadBlocked(true, { ...catalog, saveBlocked: true }), true);
+  assert.equal(artworkReadBlocked(true, { ...catalog, error: "uncertain" }), true);
+  assert.equal(artworkReadBlocked(true, { ...catalog, manualCheckPlayback: false, manualCheckArtwork: false }), true);
 });

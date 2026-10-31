@@ -163,13 +163,14 @@ impl PreliminaryInventory {
     // Called only inside with_read_inventory, whose final full validation must
     // succeed before this data is published. Standalone consumers use the
     // full-fenced read_cover_pair above.
-    pub(crate) fn read_cover_pair_in_context<T>(
+    pub(crate) fn read_cover_pair_in_context<'a,T>(
         &self, owner:&crate::profile_lease::Lease,
-        transaction:&crate::config_save_operation::Transaction<'_>,
+        transaction:impl Into<local_media::CoverReadOwner<'a>>,
         coordinator:&crate::config_save_operation::Coordinator,
         library:&Path,configured:&[String],paths:&[String],
         mut read:impl FnMut(&str,&local_media::SourceCoverTarget<'_>)->Result<T,String>,
     )->Result<Vec<Result<T,String>>,String> {
+        let transaction=transaction.into();
         if paths.is_empty() || paths.len()>2 {return Err("LOCAL_COVER_BATCH_BOUND".into());}
         if library!=self.library.as_path() {return Err("LOCAL_COVER_CONTEXT_CHANGED".into());}
         self.revalidate_read_bindings(configured).map_err(|_|"LOCAL_COVER_CONTEXT_CHANGED")?;
@@ -675,6 +676,74 @@ mod tests {
         assert!(after.is_ok(),"reading an already-private config must not invalidate the source snapshot");
     }
     #[test]
+    fn startup_mirror_capture_and_ten_rechecks_preserve_the_original_snapshot() {
+        use crate::local_media::mirror::ReadonlyMirrorSnapshot;
+        let f = Fixture::new_with_extra_b(false, 6000);
+        f.readonly(|| {
+            // Five startup admission checks each bracket origins with two
+            // revalidations. Include capture/watch installation in both totals.
+            let start = std::time::Instant::now();
+            let original = ReadonlyMirrorSnapshot::open(&f.library).unwrap();
+            for _ in 0..10 {original.revalidate().unwrap();}
+            let original_us = start.elapsed().as_micros();
+            let start = std::time::Instant::now();
+            let watched = ReadonlyMirrorSnapshot::open_cached(&f.library).unwrap();
+            assert!(watched.has_change_watch());
+            for _ in 0..10 {watched.revalidate().unwrap();}
+            let watched_us = start.elapsed().as_micros();
+            assert_eq!(original.manifest, watched.manifest);
+            // Same original topology, independently rebuilt as an oracle.
+            original.revalidate_by_rebuilding_for_comparison().unwrap();
+            watched.revalidate_by_rebuilding_for_comparison().unwrap();
+            eprintln!("STARTUP_MIRROR entries=6000 rechecks=10 original_total_us={original_us} watched_total_us={watched_us}");
+        });
+        f._lease.validate().unwrap();
+    }
+
+    #[test]
+    fn startup_watched_mirror_rejects_mutation_after_each_validation_boundary() {
+        use crate::local_media::mirror::ReadonlyMirrorSnapshot;
+        // Mutations use only generated fixtures, never a profile or real music.
+        for scene in 0..8 {
+            let f = Fixture::new(false);
+            let b = f.id(&f.b);
+            // Identical writes within one filesystem timestamp tick need not
+            // change the stamp. Start this marker in the past so scene 5 also
+            // exercises a real, observable change for the original algorithm.
+            let marker = f.library.join(local_media::mirror::MANIFEST_NAME);
+            let old_modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+            if scene == 5 {
+                fs::File::open(&marker).unwrap()
+                    .set_times(fs::FileTimes::new().set_modified(old_modified)).unwrap();
+            }
+            let original = ReadonlyMirrorSnapshot::open(&f.library).unwrap();
+            let watched = ReadonlyMirrorSnapshot::open_cached(&f.library).unwrap();
+            assert!(watched.has_change_watch());
+            for _ in 0..10 {watched.revalidate().unwrap();}
+            let link = f.library.join(&b).join("b.flac");
+            match scene {
+                0 => symlink(f.b.join("b.flac"), f.library.join(&b).join("added.flac")).unwrap(),
+                1 => fs::remove_file(&link).unwrap(),
+                2 => {fs::remove_file(&link).unwrap();symlink(f.a.join("a.flac"), &link).unwrap();},
+                3 => fs::rename(f.library.join(&b), f.library.join("moved-source")).unwrap(),
+                4 => fs::hard_link(&link, f.root.join("external-link")).unwrap(),
+                5 => {
+                    let bytes=fs::read(&marker).unwrap();fs::write(&marker, bytes).unwrap();
+                    assert_ne!(fs::metadata(&marker).unwrap().modified().unwrap(), old_modified,
+                        "fixture must change the marker stamp independently of timestamp resolution");
+                },
+                6 => watched.remove_change_watch(),
+                7 => {let marker=f.library.join(local_media::mirror::MANIFEST_NAME);let bytes=fs::read(&marker).unwrap();fs::remove_file(&marker).unwrap();fs::write(&marker, bytes).unwrap();},
+                _ => unreachable!(),
+            }
+            assert!(watched.revalidate().is_err(), "scene={scene}");
+            assert!(watched.revalidate().is_err(), "dirty proof must not revive: scene={scene}");
+            if scene != 6 {assert!(original.revalidate().is_err(), "original algorithm scene={scene}");}
+            f._lease.validate().unwrap();
+        }
+    }
+
+    #[test]
     fn retained_mirror_revalidation_rejects_added_removed_and_retargeted_entries() {
         for scene in 0..3 {
             let f=Fixture::new_with_extra_b(false,1500);
@@ -890,6 +959,98 @@ mod tests {
         let result=with_cached_read_inventory(&cache,&f.library,&f.config,|_,_,_| {calls.set(1);Ok(())});
         assert!(matches!(result,Err(ref e) if e=="SOURCE_AVAILABILITY_CHANGED"));
         assert_eq!(calls.get(),0);assert!(proof.revalidate().is_err());assert_eq!(f.inventory(),before);
+    }
+
+    #[test]
+    fn manual_check_cover_reads_reuse_real_owner_and_keep_source_fences() {
+        let f=Fixture::new(false); let a=f.id(&f.a); let b=f.id(&f.b);
+        fs::write(f.b.join("cover.png"),b"confirmed cover").unwrap();
+        let coordinator=std::sync::Arc::new(crate::config_save_operation::Coordinator::new());
+        let transaction=coordinator.begin().unwrap();
+        let gate=coordinator.manual_check_playback.clone();
+        let records=[format!("file: {b}/b.flac")].into();
+        let session=gate.begin(&transaction,&coordinator,&records).unwrap();
+        f.readonly(|| {
+            let control=gate.control().unwrap();
+            let owner=local_media::CoverReadOwner::Check(&control);
+            assert!(coordinator.reserve().is_err());
+            assert!(coordinator.try_begin_background().is_err());
+            // The same source/FD reader as production; a present folder cover
+            // needs no socket, real MPD, audio, profile or user collection.
+            let verify=|| if control.current() {Ok(())}else{Err("revoked".into())};
+            let cover=local_media::with_source_cover_target(&f._lease,owner,&coordinator,&f.library,&f.config,&b,
+                |target| {
+                    target.validate_probe_uri(&format!("{b}/b.flac"))?;
+                    assert!(target.validate_probe_uri(&format!("{b}/new.flac")).is_err());
+                    crate::audio::AudioEngine::get_local_cover_from_source(
+                        f.root.join("never-started.socket").to_str().unwrap(),&b,target,&verify)
+                }).unwrap();
+            assert_eq!(cover.as_deref(),Some("data:image/png;base64,Y29uZmlybWVkIGNvdmVy"));
+            for uri in [a,format!("{b}2"),format!("{b}/new"),format!("{b}/../outside")] {
+                assert!(local_media::with_source_cover_target(&f._lease,owner,&coordinator,&f.library,&f.config,&uri,
+                    |_|Ok(())).is_err());
+            }
+            let foreign=crate::config_save_operation::Coordinator::new();
+            assert!(local_media::with_source_cover_target(&f._lease,owner,&foreign,&f.library,&f.config,&b,|_|Ok(())).is_err());
+            let paths=vec![b.clone(),format!("{b}/b.flac")];
+            let pair=with_read_inventory(&f.library,&f.config,|_,recheck,inventory| {
+                let values=inventory.read_cover_pair_in_context(&f._lease,owner,&coordinator,&f.library,&f.config,&paths,
+                    |_,target| { let file=target.open_cover("cover.png")?.unwrap(); file.validate()?;Ok(file.len()) })?;
+                recheck()?;Ok(values)
+            }).unwrap().0;
+            assert_eq!(pair.len(),2);assert!(pair.iter().all(|row|row.as_ref()==Ok(&15)));
+            assert!(coordinator.try_begin_background().is_err(),"a cover must never release the Check owner");
+        });
+        drop(session);assert!(!gate.artwork_ready());
+        assert!(coordinator.try_begin_background().is_err());
+        drop(transaction);assert!(coordinator.try_begin_background().is_ok());
+    }
+
+    #[test]
+    fn manual_check_cover_completion_rejects_changed_topology_and_origin_escape() {
+        for escape in [false,true] {
+            let f=Fixture::new(false);let b=f.id(&f.b);
+            let cover=f.b.join("cover.png");fs::write(&cover,b"confirmed").unwrap();
+            if escape { fs::remove_file(&cover).unwrap();let outside=f.root.join("outside.png");fs::write(&outside,b"outside").unwrap();symlink(outside,&cover).unwrap(); }
+            let coordinator=crate::config_save_operation::Coordinator::new();let transaction=coordinator.begin().unwrap();
+            let gate=coordinator.manual_check_playback.clone();
+            let session=gate.begin(&transaction,&coordinator,&[format!("file: {b}/b.flac")].into()).unwrap();
+            let control=gate.control().unwrap();let owner=local_media::CoverReadOwner::Check(&control);
+            let result=with_read_inventory(&f.library,&f.config,|_,_,inventory| {
+                let values=inventory.read_cover_pair_in_context(&f._lease,owner,&coordinator,&f.library,&f.config,&[b.clone()],
+                    |_,target| {
+                        let file=target.open_cover("cover.png")?.unwrap();file.validate()?;
+                        let entry=f.library.join(&b).join("b.flac");fs::remove_file(&entry).unwrap();symlink(f.a.join("a.flac"),entry).unwrap();
+                        Ok(file.len())
+                    })?;
+                Ok(values)
+            });
+            if escape {assert!(result.unwrap().0[0].is_err());}else{assert!(result.is_err(),"the final full snapshot must discard already-read bytes");}
+            assert!(coordinator.try_begin_background().is_err());drop(control);drop(session);
+        }
+    }
+
+    #[test]
+    fn manual_check_cover_revocation_discards_an_open_physical_read_before_drain() {
+        let f=Fixture::new(false);let b=f.id(&f.b);fs::write(f.b.join("cover.png"),b"cover").unwrap();
+        let coordinator=crate::config_save_operation::Coordinator::new();let transaction=coordinator.begin().unwrap();
+        let gate=coordinator.manual_check_playback.clone();
+        let session=gate.begin(&transaction,&coordinator,&[format!("file: {b}/b.flac")].into()).unwrap();
+        std::thread::scope(|scope| {
+            let control=gate.control().unwrap();
+            let result=local_media::with_source_cover_target(&f._lease,local_media::CoverReadOwner::Check(&control),
+                &coordinator,&f.library,&f.config,&b,|target| {
+                    let file=target.open_cover("cover.png")?.unwrap();file.validate()?;
+                    scope.spawn(move || session.revoke());
+                    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3);
+                    while gate.admit().is_ok() && std::time::Instant::now()<deadline {std::thread::yield_now();}
+                    assert!(!control.current(),"revocation closes admission before waiting for readers");
+                    assert!(file.validate().is_err(),"bytes from an already-open file cannot escape revocation");
+                    Ok(())
+                });
+            assert!(result.is_err());drop(control);
+        });
+        assert!(!gate.artwork_ready());assert!(coordinator.try_begin_background().is_err());
     }
 
 }

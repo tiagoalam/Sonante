@@ -115,6 +115,8 @@ test("known codes survive, including confirmation code without its private bindi
     { error_type: "object", code: "durability_failed", http_status: 503, committed: true });
   assert.equal(summarizeDiagnostic({ code: "EACCES" }).code, "EACCES");
   assert.equal(summarizeDiagnostic("playlist_no_playable_items").code, "playlist_no_playable_items");
+  const checkCode = "LOCAL_INCREMENTAL_CHECK_OTHER_SOURCE_UNAVAILABLE";
+  assert.deepEqual(summarizeDiagnostic(`${checkCode}: ${secrets}`), { error_type: "string", code: checkCode, hint: "unavailable" });
   assert.equal(summarizeDiagnostic({ code: "secret" }).code, undefined);
   assert.equal(summarizeDiagnostic(`UNKNOWN_CODE:${secrets}`).code, undefined);
   assert.equal(summarizeDiagnostic({ status: 999 }).http_status, undefined);

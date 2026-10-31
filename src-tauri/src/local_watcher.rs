@@ -402,7 +402,30 @@ type Mailbox = Arc<Mutex<Option<Install>>>;
 pub(crate) enum Reconcile {
     Confirmed,
     Busy,
+    // External changes await the user's incremental check; this is not a
+    // failed monitor and never authorizes an automatic catalog update.
+    ChangesPending,
     Blocked,
+}
+
+// Information-only notices must neither set an alarm nor clear a real issue.
+pub(crate) fn notice_needs_check(reason: &str) -> Option<bool> {
+    match reason {
+        "ready" => Some(false),
+        "changes_pending" => None,
+        _ => Some(true),
+    }
+}
+
+pub(crate) fn reconcile_manual_changes(
+    own_writes: &crate::local_own_writes::OwnWrites,
+    batch: Batch,
+) -> Reconcile {
+    match own_writes.filter(batch) {
+        None => Reconcile::Busy,
+        Some(batch) if batch.paths.is_empty() => Reconcile::Confirmed,
+        Some(_) => Reconcile::ChangesPending,
+    }
 }
 
 pub(crate) struct LocalWatcher {
@@ -677,7 +700,9 @@ impl LocalWatcherState {
             self.shutdown.clone(),
             on_change,
             move |reason| {
-                status.store(reason != "ready", Ordering::SeqCst);
+                if let Some(needs_check) = notice_needs_check(reason) {
+                    status.store(needs_check, Ordering::SeqCst);
+                }
                 needs_check(reason);
             },
         )?);
@@ -868,6 +893,10 @@ fn run_watcher<F, N>(
                     // No attempt ceiling: bounded memory and at most 1 retry/s.
                     // poll continues draining/coalescing events and shutdown.
                     pending.retry_not_before = Some(Instant::now() + BUSY_RETRY_INTERVAL);
+                }
+                Reconcile::ChangesPending => {
+                    needs_check("changes_pending");
+                    paused = true;
                 }
                 Reconcile::Blocked => {
                     needs_check("reconciliation_blocked");

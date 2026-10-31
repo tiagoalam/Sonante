@@ -421,9 +421,28 @@ impl OpenedCoverPath {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum CoverReadOwner<'a> {
+    Transaction(&'a crate::config_save_operation::Transaction<'a>),
+    Check(&'a crate::manual_check_playback::Control<'a>),
+}
+impl<'a> From<&'a crate::config_save_operation::Transaction<'a>> for CoverReadOwner<'a> {
+    fn from(value: &'a crate::config_save_operation::Transaction<'a>) -> Self { Self::Transaction(value) }
+}
+impl CoverReadOwner<'_> {
+    fn validate(&self, coordinator: &crate::config_save_operation::Coordinator, uri: &str) -> Result<(), String> {
+        let admitted = match self {
+            Self::Transaction(transaction) => transaction.belongs_to(coordinator),
+            Self::Check(control) => control.admits_cover(coordinator, uri),
+        };
+        if !admitted || coordinator.shutdown_requested() { return Err(COVER_CHANGED.into()); }
+        Ok(())
+    }
+}
 pub(crate) struct SourceCoverTarget<'a> {
     owner:&'a crate::profile_lease::Lease,
-    transaction:&'a crate::config_save_operation::Transaction<'a>,
+    cover_owner:CoverReadOwner<'a>,
+    requested_uri:String,
     coordinator:&'a crate::config_save_operation::Coordinator,
     identity:&'a crate::source_identity::ReadonlyIdentitySnapshot,
     mirror:&'a mirror::ReadonlyMirrorSnapshot,
@@ -446,9 +465,7 @@ impl SourceCoverFile<'_,'_> {
 impl SourceCoverTarget<'_> {
     pub(crate) fn validate(&self)->Result<(),String> {
         use std::os::unix::fs::MetadataExt;
-        if !self.transaction.belongs_to(self.coordinator) || self.coordinator.shutdown_requested() {
-            return Err(COVER_CHANGED.into());
-        }
+        self.cover_owner.validate(self.coordinator, &self.requested_uri)?;
         self.owner.validate().map_err(|_|COVER_CHANGED)?;
         self.identity.revalidate().map_err(|_|COVER_CHANGED)?;
         // Per-step checks bind the retained marker and root; the complete
@@ -496,6 +513,7 @@ impl SourceCoverTarget<'_> {
     }
     pub(crate) fn validate_probe_uri(&self,uri:&str)->Result<(),String> {
         let path=validate_local_uri(uri).map_err(|_|COVER_ESCAPE)?;cover_path_bound(&path)?;
+        self.cover_owner.validate(self.coordinator,uri)?;
         if path.components().next()!=Some(Component::Normal(std::ffi::OsStr::new(&self.source_id))) {
             return Err(COVER_ESCAPE.into());
         }
@@ -505,14 +523,15 @@ impl SourceCoverTarget<'_> {
 
 // Called only inside the retained real source context. No source path escapes
 // this callback; the result is data/None, not a physical playback capability.
-pub(crate) fn with_source_cover_target<T>(
+pub(crate) fn with_source_cover_target<'a,T>(
     owner:&crate::profile_lease::Lease,
-    transaction:&crate::config_save_operation::Transaction<'_>,
+    transaction:impl Into<CoverReadOwner<'a>>,
     coordinator:&crate::config_save_operation::Coordinator,
     library:&Path,configured:&[String],uri:&str,
     read:impl FnOnce(&SourceCoverTarget<'_>)->Result<T,String>,
 )->Result<T,String> {
-    if !transaction.belongs_to(coordinator) || coordinator.shutdown_requested() {return Err(COVER_CHANGED.into());}
+    let transaction=transaction.into();
+    transaction.validate(coordinator,uri)?;
     owner.validate().map_err(|_|COVER_CHANGED)?;
     if library.parent()!=Some(owner.root().path.as_path()) {return Err(COVER_CHANGED.into());}
     let identity=crate::source_identity::ReadonlyIdentitySnapshot::open(library).map_err(|_|COVER_UNAVAILABLE)?;
@@ -527,9 +546,9 @@ pub(crate) fn with_source_cover_target<T>(
 // The caller must retain and finally revalidate these same original snapshots
 // before publishing any result. Real Lease/transaction/D03/FD checks still run
 // for every target; sharing an inventory alone never admits a read.
-pub(crate) fn with_source_cover_target_in_snapshot<T>(
+pub(crate) fn with_source_cover_target_in_snapshot<'a,T>(
     owner:&crate::profile_lease::Lease,
-    transaction:&crate::config_save_operation::Transaction<'_>,
+    transaction:impl Into<CoverReadOwner<'a>>,
     coordinator:&crate::config_save_operation::Coordinator,
     library:&Path,configured:&[String],uri:&str,
     identity:&crate::source_identity::ReadonlyIdentitySnapshot,
@@ -537,7 +556,8 @@ pub(crate) fn with_source_cover_target_in_snapshot<T>(
     read:impl FnOnce(&SourceCoverTarget<'_>)->Result<T,String>,
 )->Result<T,String> {
     use std::os::unix::fs::OpenOptionsExt;
-    if !transaction.belongs_to(coordinator) || coordinator.shutdown_requested() {return Err(COVER_CHANGED.into());}
+    let transaction=transaction.into();
+    transaction.validate(coordinator,uri)?;
     owner.validate().map_err(|_|COVER_CHANGED)?;
     if library.parent()!=Some(owner.root().path.as_path()) {return Err(COVER_CHANGED.into());}
     if !identity.matches_manifest(mirror.manifest.registry_id.as_deref().ok_or(COVER_CHANGED)?,&mirror.manifest.sources) {
@@ -563,7 +583,7 @@ pub(crate) fn with_source_cover_target_in_snapshot<T>(
     let requested=root.join(parts.collect::<PathBuf>());
     let opened=OpenedCoverPath::open(&root,&root_fd,&requested,None)?.ok_or(COVER_UNAVAILABLE)?;
     if opened.leaf.as_ref().is_some_and(|leaf|!leaf.stamp.regular()) {return Err(COVER_UNAVAILABLE.into());}
-    let target=SourceCoverTarget {owner,transaction,coordinator,identity:&identity,mirror:&mirror,
+    let target=SourceCoverTarget {owner,cover_owner:transaction,requested_uri:uri.to_owned(),coordinator,identity:&identity,mirror:&mirror,
         root,root_fd,root_stamp,source_id,opened};
     target.validate()?;
     let value=read(&target)?;
@@ -599,7 +619,7 @@ fn validate_local_uri(uri: &str) -> Result<PathBuf, LocalPathResolveError> {
 pub(crate) mod mirror {
     use super::{classify_path, is_safe_relative_mpd_uri, LocalMediaClass};
     use serde::{Deserialize, Serialize};
-    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::ffi::{CStr, CString, OsStr, OsString};
     use std::fs;
     use std::io::{ErrorKind, Read, Write};
@@ -1160,6 +1180,29 @@ pub(crate) mod mirror {
     where
         F: FnOnce() -> Result<(), String>,
     {
+        build_filtered_staging_scoped(staging_path, live_library_path, configured_roots, generation_id, None, before_publish)
+    }
+
+    pub(crate) const OTHER_SOURCE_UNAVAILABLE: &str = "LOCAL_INCREMENTAL_CHECK_OTHER_SOURCE_UNAVAILABLE";
+
+    pub(crate) fn prepare_managed_generation_for_source_check(
+        live: &Path, staging: &Path, roots: &[PathBuf], generation: &str, source_id: &str,
+    ) -> Result<ManagedGenerationPreparation, String> {
+        build_filtered_staging_scoped(staging, live, roots, generation, Some(source_id), || Ok(()))
+            .map(ManagedGenerationPreparation::Prepared)
+    }
+
+    fn build_filtered_staging_scoped<F>(
+        staging_path: &Path,
+        live_library_path: &Path,
+        configured_roots: &[PathBuf],
+        generation_id: &str,
+        selected_source: Option<&str>,
+        before_publish: F,
+    ) -> Result<MirrorBuildResult, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
         validate_generation_id(generation_id)?;
         validate_sibling_paths(staging_path, live_library_path)?;
         if path_exists_without_following(staging_path)? {
@@ -1170,15 +1213,31 @@ pub(crate) mod mirror {
         }
 
         let roots = canonical_configured_roots(configured_roots)?;
-        // Preserve the legacy/topology validation before reserving any new ID.
-        load_existing_source_mapping(live_library_path, &roots)?;
-        let (current, namespace) = identity_sources(live_library_path)?;
-        let (sources, registry_id) = crate::source_identity::reserve(
-            live_library_path, &roots, &current, namespace.as_deref(),
-        )?;
+        // A scoped check uses existing bound IDs only. Other sources come from
+        // their published virtual entries, never from physical discovery/CUE reads.
+        let retained = if selected_source.is_some() {
+            let snapshot = managed_generation_snapshot_with_target_validation(live_library_path,
+                PublishedTargetValidation::AllowMissingFromPreviousGeneration)?;
+            if snapshot.registry_id.is_none()
+                || snapshot.sources.values().cloned().collect::<BTreeSet<_>>() != roots.iter().cloned().collect()
+                || !snapshot.sources.contains_key(selected_source.unwrap()) {
+                return Err("LOCAL_INCREMENTAL_CHECK_SCOPE_CHANGED".into());
+            }
+            Some(snapshot)
+        } else { None };
+        let (sources, registry_id) = if let Some(previous) = &retained {
+            (previous.sources.clone(), previous.registry_id.clone().unwrap())
+        } else {
+            // Preserve the legacy/topology validation before reserving any new ID.
+            load_existing_source_mapping(live_library_path, &roots)?;
+            let (current, namespace) = identity_sources(live_library_path)?;
+            crate::source_identity::reserve(live_library_path, &roots, &current, namespace.as_deref())?
+        };
         let mut scanned = Vec::with_capacity(sources.len());
         for (source_id, root) in &sources {
-            scanned.push((source_id.clone(), scan_source(root)?));
+            if selected_source.is_none_or(|selected| selected == source_id) {
+                scanned.push((source_id.clone(), scan_source(root)?));
+            }
         }
 
         // Generated mirror directories must satisfy the readonly admission
@@ -1193,9 +1252,42 @@ pub(crate) mod mirror {
         let build_result = (|| -> Result<MirrorBuildResult, String> {
             before_publish()?;
             crate::source_identity::verify_origins(staging_path, &sources)?;
-            let mut coverage = crate::index_coverage::Inventory::new(generation_id, &sources, true)?;
+            let mut coverage = crate::index_coverage::Inventory::new(generation_id, &sources, retained.is_none())?;
             for (source_id, source) in &scanned {
                 publish_source(staging_path, source_id, source, &mut coverage)?;
+                if retained.is_some() { coverage.mark_source_complete(source_id)?; }
+            }
+            if let Some(previous) = &retained {
+                for (path, entry) in &previous.entries {
+                    let mut parts = path.components();
+                    let id = parts.next().and_then(|part| part.as_os_str().to_str())
+                        .ok_or("LOCAL_INCREMENTAL_CHECK_SCOPE_CHANGED")?;
+                    if Some(id) == selected_source { continue; }
+                    match entry {
+                        PublishedEntry::Directory => fs::DirBuilder::new().recursive(true).mode(0o700)
+                            .create(staging_path.join(path)).map_err(|_| "LOCAL_INCREMENTAL_CHECK_COPY_FAILED")?,
+                        PublishedEntry::Symlink(physical) => {
+                            let relative = parts.as_path().to_path_buf();
+                            let file = ScannedFile { physical: physical.clone(), relative: relative.clone() };
+                            // A selected-source check must retain other sources intact.
+                            // Never widen its scope or silently drop an unavailable target.
+                            let metadata = publishable_file_metadata(physical)
+                                .map_err(|_| OTHER_SOURCE_UNAVAILABLE.to_string())?;
+                            publish_validated_link(staging_path, id, &file)?;
+                            let kind = match classify_path(physical) {
+                                LocalMediaClass::PlayableAudio => Some(crate::index_coverage::Kind::Audio),
+                                LocalMediaClass::ControlSidecar => Some(crate::index_coverage::Kind::Cue),
+                                _ => None,
+                            };
+                            if let Some(kind) = kind { coverage.observe(id, &relative, physical, kind, &metadata)?; }
+                        }
+                    }
+                }
+                coverage.verify()?;
+                if managed_generation_snapshot_with_target_validation(live_library_path,
+                    PublishedTargetValidation::AllowMissingFromPreviousGeneration)? != *previous {
+                    return Err("LOCAL_INCREMENTAL_CHECK_SCOPE_CHANGED".into());
+                }
             }
             let manifest = MirrorManifest {
                 schema_version: MIRROR_SCHEMA_VERSION,
@@ -1209,6 +1301,7 @@ pub(crate) mod mirror {
                 return Err("O manifesto validado difere do manifesto gravado.".to_string());
             }
             validate_published_links(staging_path, &scanned)?;
+            if retained.is_some() { managed_generation_snapshot(staging_path)?; }
             Ok(MirrorBuildResult {
                 staging_path: staging_path.to_path_buf(),
                 manifest,
@@ -1631,6 +1724,16 @@ pub(crate) mod mirror {
         publish_prepared_with_sync(live_library_path, prepared, before_exchange, sync_parent_fd)
     }
 
+    // Unlike the existing validation hook, this fence is acquired only after
+    // origin validation and retained through the actual local atomic exchange.
+    // Read/control fencing must never cover physical/NFS discovery or probing.
+    pub(crate) fn publish_prepared_managed_generation_fenced<G>(
+        live: &Path, prepared: &MirrorBuildResult,
+        fence: impl FnOnce() -> Result<G, String>,
+    ) -> Result<ManagedMirrorPublication, String> {
+        publish_prepared_with_fence(live, prepared, || Ok(()), sync_parent_fd, fence)
+    }
+
     pub(crate) const PUBLICATION_UNCONFIRMED: &str = "LOCAL_MIRROR_PUBLICATION_UNCONFIRMED";
     fn sync_parent_fd(fd: RawFd) -> Result<(), String> {
         if unsafe { libc::fsync(fd) } != 0 {
@@ -1643,6 +1746,14 @@ pub(crate) mod mirror {
         prepared: &MirrorBuildResult,
         before_exchange: impl FnOnce() -> Result<(), String>,
         sync: impl FnOnce(RawFd) -> Result<(), String>,
+    ) -> Result<ManagedMirrorPublication, String> {
+        publish_prepared_with_fence(live, prepared, before_exchange, sync, || Ok(()))
+    }
+    fn publish_prepared_with_fence<G>(
+        live: &Path, prepared: &MirrorBuildResult,
+        before_exchange: impl FnOnce() -> Result<(), String>,
+        sync: impl FnOnce(RawFd) -> Result<(), String>,
+        fence: impl FnOnce() -> Result<G, String>,
     ) -> Result<ManagedMirrorPublication, String> {
         let validated = validate_prepared_managed_publication(live, prepared)?;
         let metadata = prepared.refresh_plan == ManagedRefreshPlan::MetadataOnly;
@@ -1671,7 +1782,7 @@ pub(crate) mod mirror {
                 "Sincronização da migração não confirmada; staging preservada.".to_string()
             })?;
         }
-        let publication = publish_validated_managed_generation(validated)?;
+        let publication = publish_validated_managed_generation_fenced(validated, fence)?;
         if let Some(anchor) = anchor {
             publication.validate_parent(&anchor)
                 .and_then(|_| sync(anchor.parent.as_raw_fd()))
@@ -1788,6 +1899,12 @@ pub(crate) mod mirror {
     fn publish_validated_managed_generation(
         validated: ValidatedManagedPublication,
     ) -> Result<ManagedMirrorPublication, String> {
+        publish_validated_managed_generation_fenced(validated, || Ok(()))
+    }
+    fn publish_validated_managed_generation_fenced<G>(
+        validated: ValidatedManagedPublication,
+        fence: impl FnOnce() -> Result<G, String>,
+    ) -> Result<ManagedMirrorPublication, String> {
         let ValidatedManagedPublication {
             live_path,
             staging_path,
@@ -1800,6 +1917,7 @@ pub(crate) mod mirror {
         if manifest.registry_id.is_some() {
             crate::source_identity::verify_origins(&staging_path, &manifest.sources)?;
         }
+        let _fence = fence()?;
         if let Some((previous, previous_kind)) = previous {
             require_identity(&staging_path, published, "staging preparada")?;
             require_identity(&live_path, previous, "library existente")?;
@@ -2760,6 +2878,13 @@ pub(crate) mod mirror {
 
     fn publish_link(staging: &Path, source_id: &str, file: &ScannedFile) -> Result<fs::Metadata, String> {
         let metadata = publishable_file_metadata(&file.physical)?;
+        publish_validated_link(staging, source_id, file)?;
+        Ok(metadata)
+    }
+
+    // Caller must validate the physical target first; keep staging/publication
+    // failures separate from target availability and avoid a second metadata read.
+    fn publish_validated_link(staging: &Path, source_id: &str, file: &ScannedFile) -> Result<(), String> {
         let destination = staging.join(source_id).join(&file.relative);
         let parent = destination
             .parent()
@@ -2768,7 +2893,7 @@ pub(crate) mod mirror {
             .map_err(|error| format!("Falha ao criar diretório virtual: {error}"))?;
         symlink(&file.physical, &destination)
             .map_err(|error| format!("Falha ao publicar symlink filtrado: {error}"))?;
-        Ok(metadata)
+        Ok(())
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4173,6 +4298,45 @@ pub(crate) mod mirror {
             publication.cleanup_rejected_after_rollback().unwrap();
         }
         #[test]
+        fn manual_check_fence_surrounds_real_exchange_and_refusal_preserves_both_generations() {
+            use crate::{config_save_operation::Coordinator, manual_check_playback::Publication};
+            use std::cell::Cell;
+            struct Fence<'a> { _guard: Publication<'a>, live: &'a Path, exchanged: &'a Cell<bool> }
+            impl Drop for Fence<'_> {
+                fn drop(&mut self) {
+                    assert_eq!(read_manifest(self.live).unwrap().schema_version, MIRROR_SCHEMA_VERSION);
+                    self.exchanged.set(true);
+                }
+            }
+            for accept in [false, true] {
+                let (_fixture, _music, live, prepared) = namespace_migration_fixture();
+                let before = read_manifest(&live).unwrap();
+                let coordinator = Coordinator::new();
+                let owner = coordinator.begin().unwrap();
+                let gate = coordinator.manual_check_playback.clone();
+                let session = gate.begin(&owner, &coordinator, &Default::default()).unwrap();
+                let exchanged = Cell::new(false);
+                let result = publish_prepared_managed_generation_fenced(&live, &prepared, || {
+                    if !accept { return Err("fixture fence refusal".into()); }
+                    assert_eq!(read_manifest(&live).unwrap(), before);
+                    Ok(Fence { _guard: session.publication()?, live: &live, exchanged: &exchanged })
+                });
+                if accept {
+                    let publication = result.unwrap();
+                    assert!(exchanged.get());
+                    assert!(gate.control().is_ok());
+                    publication.cleanup_previous().unwrap();
+                    session.confirm();
+                } else {
+                    assert!(result.is_err());
+                    assert!(!exchanged.get());
+                    assert_eq!(read_manifest(&live).unwrap(), before);
+                    assert!(prepared.staging_path.is_dir());
+                }
+            }
+        }
+
+        #[test]
         fn metadata_only_flag_cannot_hide_a_change_after_the_publication_guard() {
             let (_fixture, music, live, prepared) = namespace_migration_fixture();
             let before = fs::read(live.join(MANIFEST_NAME)).unwrap();
@@ -4813,6 +4977,123 @@ pub(crate) mod mirror {
             assert_eq!(prepared.refresh_plan, ManagedRefreshPlan::Full);
             assert!(is_managed_generation(&staging));
             assert_eq!(fs::read_link(live.join("Existing ID")).unwrap(), legacy_target);
+        }
+
+        #[test]
+        fn scoped_library_check_discovers_only_the_selected_source() {
+            let fixture = Fixture::new("scoped-check-discovery");
+            let music = fixture.path("Music"); let other = fixture.path("Other");
+            write(&music.join("Album/existing.flac"), b"existing");
+            write(&other.join("existing.flac"), b"existing");
+            let roots = vec![music.clone(), other.clone()];
+            let live = build_generation(&fixture,"library",&fixture.path("missing"),&roots,"before");
+            let before = read_manifest(&live).unwrap();
+            let id = before.sources.iter().find(|(_,root)| **root == music).unwrap().0.clone();
+            let other_id = before.sources.iter().find(|(_,root)| **root == other).unwrap().0.clone();
+            write(&music.join("Album/new.flac"), b"new");
+            write(&music.join("Album/image.cue"), b"FILE \"existing.flac\" WAVE\nTRACK 01 AUDIO\n");
+            // New files/CUE errors outside this selection must not be discovered.
+            write(&other.join("not-selected.flac"), b"not selected");
+            write(&other.join("invalid.cue"), b"FILE \"../outside.flac\" WAVE\nTRACK 01 AUDIO\n");
+            let prepared = expect_prepared(prepare_managed_generation_for_source_check(
+                &live,&fixture.path("library.next"),&roots,"check",&id));
+            assert!(prepared.staging_path.join(&id).join("Album/new.flac").is_symlink());
+            assert!(prepared.staging_path.join(&id).join("Album/image.cue").is_symlink());
+            assert!(!prepared.staging_path.join(&other_id).join("not-selected.flac").exists());
+            assert!(!prepared.staging_path.join(&other_id).join("invalid.cue").exists());
+            assert!(prepared.staging_path.join(&other_id).join("existing.flac").is_symlink());
+            assert_eq!(prepared.manifest.sources,before.sources);
+            assert_eq!(prepared.manifest.registry_id,before.registry_id);
+            let plan = crate::scoped_incremental_check_plan(plan_filesystem_refresh(&live,&prepared).unwrap(),
+                &prepared.manifest.sources,Some(&id)).unwrap();
+            assert!(matches!(plan,ManagedRefreshPlan::Targeted {directories,..} if directories == vec![format!("{id}/Album")]));
+            assert_eq!(read_manifest(&live).unwrap(),before);
+            cleanup_managed_generation(&prepared.staging_path).unwrap();
+        }
+
+        #[test]
+        fn scoped_library_check_removes_selected_entries_without_discovering_other_changes() {
+            let fixture=Fixture::new("scoped-check-remove");
+            let music=fixture.path("Music");let other=fixture.path("Other");
+            write(&music.join("song.flac"),b"old");write(&other.join("keep.flac"),b"keep");
+            let roots=vec![music.clone(),other.clone()];
+            let live=build_generation(&fixture,"library",&fixture.path("missing"),&roots,"before");
+            let manifest=read_manifest(&live).unwrap();
+            let id=manifest.sources.iter().find(|(_,root)|**root==music).unwrap().0.clone();
+            fs::remove_file(music.join("song.flac")).unwrap();
+            write(&other.join("new.flac"),b"outside selection");
+            let prepared=expect_prepared(prepare_managed_generation_for_source_check(&live,&fixture.path("library.next"),&roots,"check",&id));
+            assert!(!prepared.staging_path.join(&id).join("song.flac").exists());
+            let plan=crate::scoped_incremental_check_plan(plan_filesystem_refresh(&live,&prepared).unwrap(),&prepared.manifest.sources,Some(&id)).unwrap();
+            assert!(matches!(plan,ManagedRefreshPlan::Targeted{directories,..} if directories==vec![id.clone()]));
+            let other_id=prepared.manifest.sources.iter().find(|(_,root)|**root==other).unwrap().0;
+            let before=crate::index_coverage::Catalog::from_records([
+                format!("file: {id}/song.flac"),format!("file: {other_id}/keep.flac")].into()).unwrap();
+            let after=crate::index_coverage::Catalog::from_records([format!("file: {other_id}/keep.flac")].into()).unwrap();
+            let report=crate::index_coverage::compare(&prepared.coverage,&before,
+                &prepared.manifest.sources.keys().cloned().collect(),&after).unwrap();
+            assert_eq!(report.scope,"paths");
+            assert!(fs::symlink_metadata(live.join(&id).join("song.flac")).unwrap().file_type().is_symlink());
+            cleanup_managed_generation(&prepared.staging_path).unwrap();
+        }
+
+        #[test]
+        fn scoped_library_check_missing_retained_target_matches_general_then_scoped_sequence() {
+            for missing in ["track.flac", "cover.jpg"] {
+                let fixture = Fixture::new("scoped-check-missing-retained");
+                let music = fixture.path("Music");
+                let other = fixture.path("Other");
+                write(&music.join("Album/existing.flac"), b"existing");
+                write(&other.join("Album/keep.flac"), b"keep");
+                write(&other.join("Album").join(missing), b"obsolete");
+                let roots = vec![music.clone(), other.clone()];
+                let live = build_generation(&fixture, "library", &fixture.path("missing-live"), &roots, "before");
+                let before = read_manifest(&live).unwrap();
+                let id = before.sources.iter().find(|(_, root)| **root == music).unwrap().0.clone();
+                let other_id = before.sources.iter().find(|(_, root)| **root == other).unwrap().0.clone();
+                fs::remove_file(other.join("Album").join(missing)).unwrap();
+                write(&music.join("Album/new.flac"), b"new");
+                let staging = fixture.path("library.next");
+                let error = prepare_managed_generation_for_source_check(&live, &staging, &roots, "scoped", &id).unwrap_err();
+                assert_eq!(error, OTHER_SOURCE_UNAVAILABLE, "{missing}: {error}");
+                assert!(!staging.exists(), "failed preparation must clean only its own staging");
+                assert_eq!(read_manifest(&live).unwrap(), before);
+                assert!(fs::symlink_metadata(live.join(&other_id).join("Album").join(missing)).unwrap().file_type().is_symlink());
+                assert!(!live.join(&id).join("Album/new.flac").exists());
+
+                let mut general = expect_prepared(prepare_managed_generation_for_refresh(&live, &staging, &roots, "general", true));
+                general.refresh_plan = crate::explicit_incremental_check_plan(
+                    plan_filesystem_refresh(&live, &general).unwrap(), &general.manifest.sources,
+                ).unwrap();
+                assert!(!matches!(general.refresh_plan, ManagedRefreshPlan::Full));
+                let publication = publish_prepared_managed_generation(&live, &general).unwrap();
+                publication.cleanup_previous().unwrap();
+                assert!(live.join(&id).join("Album/new.flac").is_symlink());
+                assert!(!live.join(&other_id).join("Album").join(missing).exists());
+
+                let scoped = expect_prepared(prepare_managed_generation_for_source_check(&live, &staging, &roots, "after-general", &id));
+                assert_eq!(scoped.manifest.sources, before.sources);
+                assert_eq!(scoped.manifest.registry_id, before.registry_id);
+                assert!(scoped.staging_path.join(&other_id).join("Album/keep.flac").is_symlink());
+                cleanup_managed_generation(&scoped.staging_path).unwrap();
+                assert_eq!(fs::read(music.join("Album/new.flac")).unwrap(), b"new");
+                assert_eq!(fs::read(other.join("Album/keep.flac")).unwrap(), b"keep");
+            }
+        }
+
+        #[test]
+        fn scoped_library_check_rejects_unknown_scope_or_changed_configuration_before_staging() {
+            let fixture=Fixture::new("scoped-check-refusal");let music=fixture.path("Music");
+            write(&music.join("song.flac"),b"old");let roots=vec![music.clone()];
+            let live=build_generation(&fixture,"library",&fixture.path("missing"),&roots,"before");
+            let before=read_manifest(&live).unwrap();let id=before.sources.keys().next().unwrap();
+            for invalid in ["", "../Music", "missing"] {
+                assert!(prepare_managed_generation_for_source_check(&live,&fixture.path("library.next"),&roots,"check",invalid).is_err());
+                assert!(!fixture.path("library.next").exists());
+            }
+            assert!(prepare_managed_generation_for_source_check(&live,&fixture.path("library.next"),&[],"check",id).is_err());
+            assert!(!fixture.path("library.next").exists());
+            assert_eq!(read_manifest(&live).unwrap(),before);
         }
 
         #[test]
