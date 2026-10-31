@@ -1,6 +1,8 @@
 import { canToggleMute, directMuteRequest, sharedMuteRequest } from "../utils/signalPath";
 import { PlaybackOptionsControls } from "./PlaybackOptionsControls";
 import { NowPlayingPresentation } from "./NowPlayingPresentation";
+import { NOW_PLAYING_LAYOUTS, NOW_PLAYING_LOOK_KEY, nowPlayingLayout, readNowPlayingLook, saveNowPlayingLook, parseNowPlayingLook, NOW_PLAYING_QUEUE_PANELS_KEY, readQueuePanels, saveQueuePanels, normalizeQueuePanels, parseQueuePanels, type NowPlayingLook } from "../utils/nowPlayingLayout";
+import { NowPlayingFullscreen } from "../utils/nowPlayingFullscreen";
 import { NowPlayingQueue } from "./NowPlayingQueue";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useRef, useState } from "react";
@@ -40,7 +42,7 @@ interface Props {
 }
 export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, busy = false, hostingError = false, onReady, onCollapse, onDetach, onReincorporate, onNavigate }) => {
   const { t } = useTranslation();
-  const [queueOpen, setQueueOpen] = useState(true);
+  const [queuePanels, setQueuePanels] = useState(readQueuePanels);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekValue, setSeekValue] = useState(0);
@@ -48,8 +50,18 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
   const [levels, setLevels] = useState<AudioLevelFrame>(zeroLevels);
   const [analyzerAvailable, setAnalyzerAvailable] = useState(false);
   const [analyzerReason, setAnalyzerReason] = useState<string | null>(null);
+  const [look, setLook] = useState<NowPlayingLook>(readNowPlayingLook);
+  const layout = nowPlayingLayout(look.layout);
+  const queueOpen = normalizeQueuePanels(queuePanels)[layout];
+  const changeQueuePanel = (open: boolean) => {
+    const next = { ...normalizeQueuePanels(queuePanels), [layout]: open };
+    setQueuePanels(next); saveQueuePanels(next);
+  };
   const isSeekingRef = useRef(false);
   const levelTimeoutRef = useRef<number | undefined>(undefined);
+  const showVisualsRef = useRef(true);
+  const fullscreenController = useRef<NowPlayingFullscreen | null>(null);
+  showVisualsRef.current = ["audiophile", "psycho"].includes(nowPlayingLayout(look.layout));
 
   const status = snapshot?.playback;
   const health = snapshot?.health;
@@ -84,6 +96,8 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
     };
     void Promise.all([
       register<AudioLevelFrame>(AUDIO_LEVEL_EVENT, data => {
+        // Non-animated layouts do not re-render the entire player for every analyzer frame.
+        if (!showVisualsRef.current) return;
         setLevels(data);
         window.clearTimeout(levelTimeoutRef.current);
         levelTimeoutRef.current = window.setTimeout(() => setLevels(zeroLevels()), 150);
@@ -111,23 +125,29 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
     };
   }, [owner?.generation, owner?.sessionId]);
   useEffect(() => {
-    if (embedded) return;
-    let disposed = false;
-    void getCurrentWindow().isFullscreen().then(value => { if (!disposed) setIsFullscreen(value); })
-      .catch(err => logError("now-playing.fullscreen-status", err));
-    return () => { disposed = true; };
+    const controller = new NowPlayingFullscreen({
+      window: { isFullscreen: () => getCurrentWindow().isFullscreen(), setFullscreen: value => getCurrentWindow().setFullscreen(value) },
+      changed: setIsFullscreen, restoreOnDispose: embedded,
+      failed: (operation, error) => {
+        if (operation === "status") logError("now-playing.fullscreen-status", error);
+        else logError("now-playing.fullscreen-toggle", error);
+      },
+    });
+    fullscreenController.current = controller;
+    void controller.refresh();
+    return () => { if (fullscreenController.current === controller) fullscreenController.current = null; controller.dispose(); };
   }, [embedded]);
   useEffect(() => {
     const escape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || busy || event.defaultPrevented) return;
       event.preventDefault(); event.stopPropagation();
-      if (queueOpen) { setQueueOpen(false); document.getElementById("now-playing-queue-toggle")?.focus(); }
+      if (queueOpen) { changeQueuePanel(false); document.getElementById("now-playing-queue-toggle")?.focus(); }
+      else if (isFullscreen) void fullscreenController.current?.exit();
       else if (embedded) onCollapse?.();
-      else if (isFullscreen) void getCurrentWindow().setFullscreen(false).then(() => setIsFullscreen(false));
     };
     window.addEventListener("keydown", escape);
     return () => window.removeEventListener("keydown", escape);
-  }, [queueOpen, embedded, isFullscreen, busy, onCollapse]);
+  }, [queueOpen, queuePanels, layout, embedded, isFullscreen, busy, onCollapse]);
 
   useEffect(() => {
     if (status?.state !== "play" || !isAvailable || !analyzerAvailable) {
@@ -135,6 +155,41 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
       setLevels(zeroLevels());
     }
   }, [status?.state, isAvailable, analyzerAvailable]);
+
+  useEffect(() => {
+    // Both WebViews use the same origin. A handoff also reads this preference on mount.
+    const syncLook = (event: StorageEvent) => {
+      if (event.key === NOW_PLAYING_LOOK_KEY || event.key === null) setLook(parseNowPlayingLook(event.newValue));
+      if (event.key === NOW_PLAYING_QUEUE_PANELS_KEY || event.key === null) setQueuePanels(parseQueuePanels(event.newValue));
+    };
+    window.addEventListener("storage", syncLook);
+    return () => window.removeEventListener("storage", syncLook);
+  }, []);
+  const changeLook = (patch: Partial<NowPlayingLook>) => {
+    const next = { ...look, ...patch };
+    setLook(next); saveNowPlayingLook(next);
+  };
+
+  useEffect(() => {
+    if (busy || hostingError || isSeeking || !owner || owner.host !== (embedded ? "main" : "now-playing")) return;
+    const layoutShortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229
+        || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || !/^[1-4]$/.test(event.key)) return;
+      const root = document.querySelector(".np-shell");
+      if (!root) return;
+      const target = event.target as HTMLElement | null;
+      if (target && typeof target.closest === "function") {
+        if (target !== document.body && target !== document.documentElement && !root.contains(target)) return;
+        if (target.isContentEditable || target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[role="combobox"],[role="slider"],[role="spinbutton"]')) return;
+      }
+      if (document.querySelector('dialog[open],[aria-modal="true"],[role="dialog"],[role="menu"],[role="listbox"],details[open]')) return;
+      const next = NOW_PLAYING_LAYOUTS[Number(event.key) - 1];
+      event.preventDefault(); event.stopPropagation();
+      if (next !== look.layout) changeLook({ layout: next });
+    };
+    window.addEventListener("keydown", layoutShortcut);
+    return () => window.removeEventListener("keydown", layoutShortcut);
+  }, [look, busy, hostingError, isSeeking, embedded, owner?.host, owner?.generation, owner?.sessionId]);
 
   const runControl = async (control: () => Promise<void>) => {
     if (!isAvailable) return;
@@ -163,14 +218,8 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
     if(request) void runControl(()=>audioService.setSharedMute(request));
   };
 
-  const handleFullscreen = async () => {
-    try {
-      const nextValue = !(await getCurrentWindow().isFullscreen());
-      await getCurrentWindow().setFullscreen(nextValue);
-      setIsFullscreen(nextValue);
-    } catch (err) {
-      logError("now-playing.fullscreen-toggle", err);
-    }
+  const handleFullscreen = () => {
+    if (!busy && owner) void fullscreenController.current?.toggle();
   };
 
   const analyzerInactiveLabel = analyzerReason
@@ -185,7 +234,9 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
       : analyzerReason === "stopped" ? t("nowPlaying.visualizer.helpStopped")
         : analyzerReason ? t("nowPlaying.visualizer.helpRetry") : t("nowPlaying.visualizer.helpPreparing");
 
-  return <NowPlayingPresentation snapshot={snapshot} controlsDisabled={busy || !owner} embedded={embedded} busy={busy} hostingError={hostingError}
+  return <NowPlayingPresentation layout={look.layout} psychoPlacement={look.psychoPlacement}
+    onLayoutChange={layout => changeLook({ layout })} onPsychoPlacementChange={psychoPlacement => changeLook({ psychoPlacement })}
+    snapshot={snapshot} controlsDisabled={busy || !owner} embedded={embedded} busy={busy} hostingError={hostingError}
     onDetach={onDetach} onReincorporate={onReincorporate} onNavigate={onNavigate} levels={levels} fullscreen={isFullscreen}
     optionsControls={<PlaybackOptionsControls options={status?.options ?? null} disabled={!isAvailable || status?.current_media?.kind === "radio"} />}
     queueOpen={queueOpen} queue={<NowPlayingQueue open={queueOpen} available={isAvailable} status={status} artworkContext={snapshot?.queueArtwork} detached={!embedded} />}
@@ -193,6 +244,6 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
     isSeeking={isSeeking} seekValue={seekValue} onSeekStart={() => setIsSeeking(true)} onSeekChange={setSeekValue} onSeekCommit={handleSeekCommit}
     onPrevious={() => void runControl(audioService.previous)} onTogglePlay={() => void runControl(audioService.togglePlay)}
     onNext={() => void runControl(audioService.next)} onVolume={value => void runControl(() => audioService.setVolume(value))}
-    onMute={handleToggleMute} onQueue={() => setQueueOpen(value => !value)} onFullscreen={() => void handleFullscreen()}
+    onMute={handleToggleMute} onQueue={() => changeQueuePanel(!queueOpen)} onFullscreen={() => void handleFullscreen()}
     onClose={() => embedded ? onCollapse?.() : void getCurrentWindow().close().catch(err => logError("now-playing.close", err))} />;
 };

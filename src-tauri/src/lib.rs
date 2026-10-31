@@ -55,6 +55,7 @@ mod persistence;
 mod playlists;
 mod listening_history;
 mod radio;
+mod sleep_timer;
 mod plex;
 mod shared_volume;
 mod shared_mute;
@@ -6777,6 +6778,7 @@ fn start_coordinated_shutdown(app_handle: &AppHandle, exit_code: i32) {
                 eprintln!("[Audio] Initial playback shutdown drain unconfirmed.");
                 return;
             }
+            sleep_timer::shutdown(&shutdown_app);
             shutdown_controlled_resources(&shutdown_app);
             shutdown_app.state::<shared_dsp::State>().join();
             transaction_state.mark_shutdown_complete();
@@ -7031,6 +7033,7 @@ pub fn run() {
         .manage(shared_dsp::State::new())
         .manage(listening_history::HistoryState(std::sync::Mutex::new(listening_history::HistoryStore::default())))
         .manage(radio::State::default())
+        .manage(sleep_timer::State::default())
         .manage(PlaylistState(Mutex::new(PlaylistStore::default())))
         .manage(mpris::MprisState::default())
         .manage(upnp::State::default())
@@ -7064,6 +7067,8 @@ pub fn run() {
             radio_favorites,
             play_radio,
             stop_radio,
+            sleep_timer::get_sleep_timer,
+            sleep_timer::set_sleep_timer,
             history_plex_navigation,
             edit_queue,
             admit_playback_intent,

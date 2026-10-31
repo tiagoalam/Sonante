@@ -8,10 +8,19 @@ import { TrackArtwork } from "./TrackArtwork";
 import { requiresDeviceVolumeControl, canToggleMute, muteLabel } from "../utils/signalPath";
 import { SignalPath } from "./SignalPath";
 import { VisualizerPanel } from "./visualizer/VisualizerPanel";
+import { NowPlayingLayoutPicker } from "./NowPlayingLayoutPicker";
+import { PsychoVisualizer } from "./visualizer/PsychoVisualizer";
+import { nowPlayingLayout, type NowPlayingLayout, type PsychoPlacement } from "../utils/nowPlayingLayout";
+import { NowPlayingImmersive } from "./NowPlayingImmersive";
+import { SleepTimerControl } from "./SleepTimerControl";
 import "./nowPlaying.css";
 
 export interface NowPlayingPresentationProps {
   snapshot: NowPlayingSnapshot | null;
+  layout?: NowPlayingLayout;
+  psychoPlacement?: PsychoPlacement;
+  onLayoutChange?: (layout: NowPlayingLayout) => void;
+  onPsychoPlacementChange?: (placement: PsychoPlacement) => void;
   embedded?: boolean;
   busy?: boolean;
   controlsDisabled?: boolean;
@@ -50,6 +59,8 @@ const formatTime = (seconds: number) => {
 // Only presentation and callbacks; window events/analyzer ownership stay in the host.
 export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = props => {
   const { t } = useTranslation();
+  const layout = nowPlayingLayout(props.layout);
+  const psychoPlacement = props.psychoPlacement === "background" ? "background" : "frame";
   const status = props.snapshot?.playback;
   const health = props.snapshot?.health;
   const available = health?.state === "available";
@@ -78,37 +89,60 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
         : status?.state === "pause"
           ? { label: t("nowPlaying.visualizer.paused"), help: t("nowPlaying.visualizer.helpPaused") }
           : { label: t("nowPlaying.vuUnavailable"), help: t("nowPlaying.visualizer.helpPreparing") };
-  return <main className={`np-shell text-[color:var(--theme-fg-primary,#ffffff)]${props.embedded ? " np-embedded" : ""}`} aria-busy={props.busy}>
+  const immersive = props.fullscreen && !props.embedded && available && status?.state === "play"
+    && !props.busy && !props.isSeeking && !props.hostingError && !props.controlFailed && !playbackNotice;
+  return <NowPlayingImmersive enabled={Boolean(immersive)} className={`np-shell np-look-${layout} text-[color:var(--theme-fg-primary,#ffffff)]${props.embedded ? " np-embedded" : ""}`}
+    data-now-playing-layout={layout} data-psycho-placement={layout === "psycho" ? psychoPlacement : undefined} aria-busy={props.busy}>
     <div className="np-ambient" aria-hidden="true">{hasTrack && status && <TrackArtwork track={status} />}</div>
     <div className="np-layout">
       <header className="np-header">
         <div className="np-brand"><span>SONANTE</span><h1>{t("nowPlaying.title")}</h1></div>
+        <NowPlayingLayoutPicker layout={layout} placement={psychoPlacement} onLayout={props.onLayoutChange} onPlacement={props.onPsychoPlacementChange} />
         <div className="np-header-actions">
           <button type="button" id="now-playing-queue-toggle" onClick={props.onQueue} aria-label={queueLabel} title={queueLabel} aria-expanded={props.queueOpen} aria-controls="now-playing-queue"><ListMusic size={19} /></button>
+          <SleepTimerControl />
           {props.embedded ? <button type="button" disabled={props.busy} onClick={props.onDetach} aria-label={t("nowPlaying.detach")} title={t("nowPlaying.detach")}><ArrowUpRight size={18} /></button>
             : <button type="button" disabled={props.busy || props.controlsDisabled} onClick={props.onReincorporate} aria-label={t("nowPlaying.reincorporate")} title={t("nowPlaying.reincorporate")}><ArrowDownLeft size={18} /></button>}
-          {!props.embedded && <button type="button" onClick={props.onFullscreen} aria-label={fullscreenLabel} title={fullscreenLabel}><>{props.fullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}</></button>}
+          <button type="button" disabled={props.busy || props.controlsDisabled} onClick={props.onFullscreen} aria-label={fullscreenLabel} title={fullscreenLabel}><>{props.fullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}</></button>
           <button type="button" autoFocus={props.embedded} disabled={props.busy && props.embedded} onClick={props.onClose} aria-label={t(props.embedded ? "nowPlaying.collapse" : "nowPlaying.close")} title={t(props.embedded ? "nowPlaying.collapse" : "nowPlaying.close")}>{props.embedded ? <ArrowDownLeft size={19} /> : <X size={19} />}</button>
         </div>
       </header>
       <div className={`np-body${props.queueOpen ? " np-with-queue" : ""}`}>
         {props.queue}
         <section className="np-media" aria-label={t("nowPlaying.title")}>
-          <div className="np-cover">{status && hasTrack ? <TrackArtwork track={status} alt={status.album || status.title} /> : <TrackArtwork track={{}} />}</div>
+          {layout === "psycho" && <PsychoVisualizer levels={props.levels} active={Boolean(props.analyzerAvailable && available && status?.state === "play")}
+            inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} />}
+          {layout === "sleeve" && <div className="np-sleeve-caption" aria-hidden="true"><span>{t("nowPlaying.layouts.sleeve")}</span><span>SONANTE</span></div>}
+          {layout === "poster" && <div className="np-poster-caption" aria-hidden="true"><span>{t("nowPlaying.look.posterCaption")}</span><span>{hasTrack && status ? status.artist : "SONANTE"}</span></div>}
+          <div className="np-cover" data-fullscreen-action={!props.busy && !props.controlsDisabled} data-fullscreen={props.fullscreen}
+            title={t("nowPlaying.coverFullscreen")} onDoubleClick={event => {
+              if (event.button !== 0 || props.busy || props.controlsDisabled) return;
+              event.preventDefault(); props.onFullscreen();
+            }}>{status && hasTrack ? <TrackArtwork track={status} alt={status.album || status.title} /> : <TrackArtwork track={{}} />}</div>
           <div className="np-details">
             {props.hostingError && <p role="alert" className="np-error">{t("nowPlaying.transitionFailed")}</p>}
             {!status ? <p role="status">{t("nowPlaying.waitingForStatus")}</p> : <>
               <div className="np-track-heading">
-                <h2 title={status.title}>{hasTrack ? status.title : t("player.noTrack")}</h2>
+                {layout !== "audiophile" && <div className="np-track-eyebrow">{t(`nowPlaying.look.${layout}Eyebrow`)}</div>}
+                <h2 className={layout === "poster" && (status.title?.length ?? 0) > 54 ? "np-title-long" : undefined} title={status.title}>{hasTrack ? status.title : t("player.noTrack")}</h2>
                 <p title={status.artist}>{props.onNavigate && hasTrack && status.current_media?.kind !== "upnp" && !isRadio ? <button type="button" onClick={() => props.onNavigate?.("artist")} disabled={props.busy}>{status.artist || "Sonante"}</button> : hasTrack ? status.artist || "Sonante" : "Sonante"}</p>
                 {hasTrack && status.album && <span title={status.album}>{props.onNavigate && status.current_media?.kind !== "upnp" && !isRadio ? <button type="button" onClick={() => props.onNavigate?.("album")} disabled={props.busy}>{status.album}</button> : status.album}</span>}
               </div>
-                {hasTrack && available && props.snapshot?.sourceInfo && currentMediaKey(props.snapshot.sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={props.snapshot.sourceInfo.info} />}
+                {layout === "audiophile" && hasTrack && available && props.snapshot?.sourceInfo && currentMediaKey(props.snapshot.sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={props.snapshot.sourceInfo.info} />}
               {!available && <p role="status" className="np-notice">{t(health?.state === "unavailable" ? "player.engineUnavailable" : "player.engineTransitioning")}{hasTrack && ` · ${t("player.lastKnown")}`}</p>}
               {playbackNotice && <p role="alert" className="np-error">{t(isRadio && playbackNotice.code === "format_unsupported" ? "radio.directError" : `player.playbackError.${playbackNotice.code}`)}</p>}
               {props.controlFailed && <p role="alert" className="np-error">{t("nowPlaying.controlFailed")}</p>}
-              <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
-                inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} fullscreen={props.fullscreen} />
+              {layout === "sleeve" && hasTrack && <div className="np-sleeve-notes">
+                <span className="np-notes-label">{t("nowPlaying.look.recordDetails")}</span>
+                <dl>
+                  <div><dt>{t("nowPlaying.look.artist")}</dt><dd>{status.artist || "—"}</dd></div>
+                  <div><dt>{t("nowPlaying.look.album")}</dt><dd>{status.album || "—"}</dd></div>
+                  <div><dt>{t("nowPlaying.look.source")}</dt><dd>{status.current_media ? t(`player.source.${status.current_media.kind}`) : "—"}</dd></div>
+                  <div><dt>{t("nowPlaying.look.duration")}</dt><dd>{isRadio ? t("radio.live") : status.duration > 0 ? formatTime(status.duration) : "—"}</dd></div>
+                </dl>
+              </div>}
+              {layout === "audiophile" && <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
+                inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} fullscreen={props.fullscreen} />}
               <div className="np-progress">
                 <input type="range" aria-label={t("nowPlaying.seek")} min={0} max={available && status.duration > 0 ? status.duration : 100} step={0.5}
                   value={available ? props.isSeeking ? props.seekValue : status.elapsed : 0} disabled={!interactive || isRadio || status.duration <= 0}
@@ -136,7 +170,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
           </div>
         </section>
       </div>
-      {status && <footer className="np-signal"><SignalPath route={props.snapshot?.route ?? null} status={status} health={health ?? { state: "starting" }} horizontal /></footer>}
+      {layout === "audiophile" && status && <footer className="np-signal"><SignalPath route={props.snapshot?.route ?? null} status={status} health={health ?? { state: "starting" }} horizontal /></footer>}
     </div>
-  </main>;
+  </NowPlayingImmersive>;
 };
