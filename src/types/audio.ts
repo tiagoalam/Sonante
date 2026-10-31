@@ -2,6 +2,7 @@ import type { DspSnapshot } from "./equalizer";
 import type { PlexImageRef } from "./plex";
 
 export type MediaLocator =
+  | { kind: "upnp"; session_id: string }
   | { kind: "local"; uri: string }
   | {
       kind: "plex";
@@ -12,6 +13,7 @@ export type MediaLocator =
     };
 
 export type CurrentMedia =
+  | { kind: "upnp"; session_id: string; queue_index: number }
   | { kind: "local"; uri: string; queue_index: number }
   | { kind: "plex"; server_id: string; part_key: string; queue_index: number };
 

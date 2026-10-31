@@ -250,7 +250,9 @@
     "playAlbum": "Tocar Álbum",
     "addFavorite": "Adicionar aos favoritos",
     "loadingTracks": "Carregando faixas...",
-    "noTracks": "Nenhuma faixa encontrada."
+    "noTracks": "Nenhuma faixa encontrada.",
+    "filteredAlbumsCount": "{{count}} de {{total}} álbuns",
+    "filteredArtistsCount": "{{count}} de {{total}} artistas"
   },
   "player": {
     "repeat": {
@@ -286,7 +288,8 @@
     "formatReportedByMpd": "Formato reportado pelo MPD; não confirma a saída efetiva no ALSA/DAC.",
     "source": {
       "local": "LOCAL",
-      "plex": "PLEX"
+      "plex": "PLEX",
+      "upnp": "UPnP"
     },
     "openNowPlaying": "Abrir Em Reprodução",
     "queue": "Fila de Reprodução",
@@ -377,6 +380,18 @@
     }
   },
   "queue": {
+    "filterLabel": "Filtrar a fila atual",
+    "filterPlaceholder": "Música, artista ou álbum…",
+    "clearFilter": "Limpar filtro da fila",
+    "filteredCount": "{{count}} de {{total}} faixas",
+    "jumpToCurrent": "Ir para a faixa atual",
+    "noMatches": "Nenhuma faixa corresponde ao filtro.",
+    "clearAll": "Limpar a fila inteira",
+    "timeAtLeast": "pelo menos {{time}}",
+    "timeUnknown": "desconhecido",
+    "totalTime": "Total: {{time}}",
+    "remainingTime": "Restante: {{time}}",
+    "remainingHint": "Estimativa a partir da posição atual na fila inteira, independentemente deste filtro. Indisponível com aleatório, repetição, modo de faixa única ou posição não confirmada; durações ausentes aparecem como um mínimo conhecido.",
     "title": "Fila de Reprodução",
     "empty": "A fila de reprodução está vazia.",
     "clear": "Limpar Fila"
@@ -437,6 +452,7 @@
     "title": "Álbuns Favoritos",
     "count_one": "{{count}} álbum favoritado nesta fonte",
     "count_other": "{{count}} álbuns favoritados nesta fonte",
+    "sourceTabs": "Fonte dos favoritos",
     "filterPlaceholder": "Filtrar favoritos...",
     "tabLocal": "Locais",
     "tabPlex": "Plex",
@@ -863,8 +879,18 @@
     "dopRequirement": "Requer MPD, ALSA e DAC compatíveis.",
     "appearance": "Aparência",
     "appearanceDark": "Escuro",
+    "appearanceDarkDescription": "Grafite e dourado",
     "appearanceLight": "Claro",
-    "appearanceHelp": "Aplicado imediatamente às janelas do Sonante. Não altera a reprodução."
+    "appearanceLightDescription": "Branco e tons frios",
+    "appearanceHelp": "Aplicado imediatamente às janelas do Sonante. Não altera a reprodução.",
+    "appearanceCyber": "Cyber",
+    "appearanceCyberDescription": "Azul profundo e verde neon",
+    "appearanceSummer": "Verão",
+    "appearanceSummerDescription": "Areia clara, amarelo e laranja",
+    "appearanceZen": "Zen",
+    "appearanceZenDescription": "Sálvia suave e verde floresta",
+    "appearanceNocturne": "Noturno",
+    "appearanceNocturneDescription": "Ameixa e lavanda"
   },
   "wizard": {
     "appearanceTitle": "Escolha a aparência",
@@ -1207,8 +1233,10 @@
     "title": "Explorar",
     "shelf": "Álbuns para ouvir",
     "noLibrary": "nenhuma biblioteca selecionada",
+    "sourceTabs": "Fonte para explorar",
     "sources": {
-      "local": "Local"
+      "local": "Local",
+      "plex": "Plex"
     },
     "states": {
       "ready": "Catálogo disponível",
@@ -1571,7 +1599,13 @@
     "failed": "A indexação não pôde ser confirmada: uma fonte ou arquivo selecionado mudou, o catálogo era inválido ou itens antes catalogados estão ausentes sem remoção confirmada. As referências foram mantidas. Confira as fontes e tente novamente após o fim das alterações."
   },
   "libraryRecovery": {
-    "progress": {"checking": "Verificando a recuperação…", "protecting": "Backup de segurança preparado…", "restoring": "Restaurando a biblioteca anterior…", "validating": "Validando a biblioteca recuperada…", "finalizing": "Concluindo a recuperação…"},
+    "progress": {
+      "checking": "Verificando a recuperação…",
+      "protecting": "Backup de segurança preparado…",
+      "restoring": "Restaurando a biblioteca anterior…",
+      "validating": "Validando a biblioteca recuperada…",
+      "finalizing": "Concluindo a recuperação…"
+    },
     "title": "Recuperar biblioteca",
     "explanation": "O Sonante precisa verificar a biblioteca antes de continuar. Esta verificação não altera seus dados nem inicia a reprodução.",
     "analyze": "Verificar recuperação",
@@ -1742,5 +1776,78 @@
       },
       "scope": "Esta explicação se limita à inspeção da oferta e não valida a observação inteira nem permite executar ou reabrir."
     }
+  },
+  "unifiedSearch": {
+    "menu": "Buscar",
+    "title": "Buscar na sua música",
+    "description": "Álbuns, artistas e faixas de Local e Plex, juntos.",
+    "inputLabel": "Buscar em toda a sua música",
+    "placeholder": "Um álbum, artista ou faixa…",
+    "clear": "Limpar busca",
+    "sourceFilter": "Fontes da busca",
+    "allSources": "Todas as fontes",
+    "everything": "Tudo",
+    "searching": "Buscando…",
+    "unavailable": "Indisponível",
+    "partial": "Resultados parciais",
+    "ready": "Pronto",
+    "retry": "Tentar novamente",
+    "startTitle": "Encontre e vá direto à música",
+    "startHint": "Digite de 2 a 160 caracteres. Busque entre as fontes, abra um álbum ou artista, ou toque uma faixa diretamente.",
+    "configureHint": "Configure uma biblioteca Local ou Plex nas Preferências para buscar sua música.",
+    "partialError": "Não foi possível obter parte dos resultados. Os resultados das fontes que responderam continuam disponíveis; tente novamente quando a fonte estiver pronta.",
+    "open": "Abrir",
+    "artistAction": "Abrir álbuns do artista",
+    "empty": "Nenhum resultado correspondente nas fontes consultadas.",
+    "previewHint": "Exibindo uma seleção dos resultados. Refine a busca para encontrar um álbum, artista ou faixa específica.",
+    "back": "Voltar à busca",
+    "playTrack": "Tocar faixa",
+    "shortcut": "Ctrl+K",
+    "keyboardHint": "↑ ↓ percorrem os resultados · Enter abre ou toca · Esc volta ou limpa"
+  },
+  "upnp": {
+    "title": "Receptor UPnP",
+    "help": "Controle o Sonante pelo BubbleUPnP ou outro controlador na mesma rede local. Uma música enviada pelo controlador substitui a fila atual. O volume continua sujeito à saída de áudio escolhida.",
+    "enable": "Permitir controle pela rede local",
+    "name": "Nome exibido nos controladores",
+    "apply": "Aplicar",
+    "retry": "Tentar novamente",
+    "applying": "Aplicando…",
+    "active": "Receptor ativo. Procure este nome na lista de dispositivos do controlador.",
+    "inactive": "Receptor desativado.",
+    "error": "Não foi possível confirmar o receptor. Confira a conexão com a rede local e tente novamente."
+  },
+  "shortcuts": {
+    "title": "Atalhos de teclado",
+    "close": "Fechar atalhos",
+    "navigation": "Navegação",
+    "searchResults": "Resultados da busca",
+    "playback": "Reprodução na biblioteca principal",
+    "space": "Espaço",
+    "search": "Abrir a busca unificada",
+    "filter": "Focar o campo de busca atual",
+    "back": "Voltar, fechar ou limpar a tela atual",
+    "results": "Percorrer os resultados",
+    "edges": "Primeiro ou último resultado",
+    "activate": "Abrir resultado ou tocar faixa",
+    "playPause": "Reproduzir ou pausar",
+    "previousNext": "Faixa anterior ou seguinte",
+    "volume": "Volume, quando disponível",
+    "mute": "Mudo, quando disponível",
+    "contextHint": "As teclas de reprodução funcionam fora de campos de texto e painéis de navegação. Busca, EQ, fila e diálogos têm suas próprias teclas. Tab percorre os controles; no filtro da fila, Esc limpa o filtro antes de fechar a fila."
+  },
+  "queueActions": {
+    "receiver": "Encerre a sessão UPnP antes de adicionar faixas Local ou Plex à fila.",
+    "title": "Adicionar à fila",
+    "forTrack": "Opções de fila para {{title}}",
+    "next": "Adicionar como próxima",
+    "end": "Adicionar ao final da fila",
+    "album": "Adicionar álbum inteiro ao final",
+    "albumUnavailable": "Não foi possível identificar o álbum desta faixa.",
+    "added_one": "1 faixa adicionada à fila.",
+    "added_other": "{{count}} faixas adicionadas à fila.",
+    "failed": "Não foi possível adicionar à fila. Confira se a biblioteca e o player estão disponíveis.",
+    "uncertain": "Não foi possível confirmar a fila. Confira o estado do player antes de tentar novamente.",
+    "persistence": "A fila mudou, mas não foi possível confirmar a gravação. Não repita a adição."
   }
 }

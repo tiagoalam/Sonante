@@ -1,8 +1,10 @@
+import { useQueueInsertion } from "./QueueInsertionMenu";
+import { plexQueueTrack } from "../utils/queueActions";
 import {plexTrackDurationSeconds} from '../utils/plexTrackMetadata';
 import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { logError } from "../utils/frontendDiagnostics";
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Play, Pause, Disc3, ChevronDown, ChevronUp, User, ListPlus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlexAlbum, PlexTrack, SelectedArtist } from "../types/plex";
@@ -46,6 +48,10 @@ export const ArtistView: React.FC<Props> = ({
   const request = usePlaybackAttempt(key + String(active), "player.request", requestIdentity);
   const current = loadedFor?.key === key && loadedFor.identity === requestIdentity;
   const failed = loadError?.key === key && loadError.identity === requestIdentity;
+  const queueContext = useMemo(() => ({}), [key, requestIdentity, loadedTracks, active, current, isPlaybackAvailable]);
+  const queueActions = useQueueInsertion(queueContext, active && current && isPlaybackAvailable);
+  const queueRequest = (track: PlexTrack) => ({ track: plexQueueTrack(track),
+    album: track.album_rating_key ? async () => (await plexService.getAlbumTracks(track.album_rating_key!)).map(item => plexQueueTrack(item)) : undefined });
   const albums = current ? loadedAlbums : [], topTracks = current ? loadedTracks : [];
   const viewport = useRef<HTMLElement>(null), scroll = useRef(0), returnAlbum = useRef<HTMLButtonElement | null>(null);
   const lastContext = useRef({ key, identity: requestIdentity });
@@ -133,6 +139,7 @@ export const ArtistView: React.FC<Props> = ({
       onKeyDown={event => { if ((event.target as HTMLElement).closest?.("[data-artist-album]")) event.stopPropagation(); }}
       className="flex-1 flex min-h-0 flex-col overflow-y-auto bg-gradient-to-b from-[var(--theme-surface-panel,#1C1812)] via-[var(--theme-surface-base,#121212)] to-[var(--theme-surface-base,#121212)] select-none p-8">
       <PlaybackRequestNotice failure={request.failure} />
+      {queueActions.notice}{queueActions.menu}
       {/* Botão de Retorno */}
       <button
         onClick={onBack}
@@ -193,8 +200,9 @@ export const ArtistView: React.FC<Props> = ({
                     <div
                       key={track.rating_key}
                       onClick={() => handlePlayTrack(idx)}
+                      onContextMenu={event => queueActions.open(event, queueRequest(track))}
                       aria-disabled={!isPlaybackAvailable}
-                      className={`group grid grid-cols-[40px_48px_1fr_110px] items-center px-4 py-2.5 rounded-lg text-xs transition-colors ${
+                      className={`group grid grid-cols-[40px_48px_minmax(0,1fr)_140px] items-center px-4 py-2.5 rounded-lg text-xs transition-colors ${
                         isPlaybackAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-60"
                       } ${
                         active ? "bg-[var(--theme-surface-accent,#251E10)] text-[color:var(--theme-fg-accent,#E5A00D)]" : "hover:bg-[var(--theme-surface-panel,#1A1A1A)] text-[color:var(--theme-fg-secondary,#CCCCCC)]"
@@ -244,6 +252,7 @@ export const ArtistView: React.FC<Props> = ({
                         <span className={`font-mono text-[11px] ${active ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#777777)]"}`}>
                           {formatTime(track.duration_ms || 0)}
                         </span>
+                        {queueActions.trigger(queueRequest(track))}
                         <button
                           type="button"
                           disabled={!active || !current}

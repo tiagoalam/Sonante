@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync,writeFileSync} from 'node:fs';
-const css=readFileSync(new URL('../src/index.css',import.meta.url),'utf8');const block=css.split(':root[data-theme="light"] {')[1].split('}')[0];const tokens=Object.fromEntries([...block.matchAll(/(--[\w-]+):\s*(#[\da-fA-F]{6})\s*;/g)].map(m=>[m[1],m[2]]));
+const css=readFileSync(new URL('../src/index.css',import.meta.url),'utf8');const block=css.split(':root:is([data-theme="light"], [data-theme="summer"], [data-theme="zen"]) {')[1].split('}')[0];const tokens=Object.fromEntries([...block.matchAll(/(--[\w-]+):\s*(#[\da-fA-F]{6})\s*;/g)].map(m=>[m[1],m[2]]));
 const luminance=h=>[1,3,5].map(i=>parseInt(h.slice(i,i+2),16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((n,v,i)=>n+v*[.2126,.7152,.0722][i],0);
 const contrast=(a,b)=>{const[x,y]=[luminance(a),luminance(b)].sort((a,b)=>a-b);return(y+.05)/(x+.05)};
 test('light text/state/band pairs retain distinct meanings and sufficient sampled contrast',()=>{

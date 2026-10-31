@@ -1,3 +1,4 @@
+import { passiveQueueInsertion } from "./support/passiveQueueInsertion.mjs";
 import * as plexMetadata from '../src/utils/plexTrackMetadata.ts';
 import test from 'node:test';
 import { discoverPush } from '../src/utils/discoverNavigation.ts';
@@ -18,10 +19,11 @@ const equal=(a,b)=>a?.length===b?.length&&a.every((v,i)=>Object.is(v,b[i]));
 const hooks={
  useState(initial){const index=host.cursor++,h=host;const slot=h.slots[index]??={state:typeof initial==='function'?initial():initial};return[slot.state,value=>{h.writes++;slot.state=typeof value==='function'?value(slot.state):value;}];},
  useRef(initial){const index=host.cursor++;return(host.slots[index]??={current:initial});},
+ useMemo(fn,deps){const i=host.cursor++;const old=host.slots[i];if(!old||!equal(old.deps,deps))host.slots[i]={deps,value:fn()};return host.slots[i].value;},
  useEffect(fn,deps){effect(fn,deps,false);},useLayoutEffect(fn,deps){effect(fn,deps,true);}
 };
 function effect(fn,deps,layout){const index=host.cursor++,h=host,slot=h.slots[index]??={};if(!equal(slot.deps,deps)){(layout?h.layouts:h.effects).push(()=>{slot.cleanup?.();slot.deps=deps;slot.cleanup=fn();});}}
-const deps={'../utils/plexTrackMetadata':plexMetadata,react:{__esModule:true,...React,...hooks,default:React},'react/jsx-runtime':await import('react/jsx-runtime'),'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,
+const deps={...passiveQueueInsertion,'../utils/plexTrackMetadata':plexMetadata,react:{__esModule:true,...React,...hooks,default:React},'react/jsx-runtime':await import('react/jsx-runtime'),'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,
   '../utils/usePlaybackAttempt':{usePlaybackAttempt:()=>({failure:null,run:action=>action({current:()=>true})})},'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},
  '../utils/frontendDiagnostics':{logError(){}},'../services/plex':{plexService:service},'../services/audio':{audioService:{playTracks:async(...args)=>{plays++;playPayloads.push(args)},togglePlay:async()=>plays++}},
  './PlexImage':{PlexImage:()=>React.createElement('div',{'data-synthetic-image':true})},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null}};

@@ -250,7 +250,9 @@
     "playAlbum": "Play Album",
     "addFavorite": "Add to favorites",
     "loadingTracks": "Loading tracks...",
-    "noTracks": "No tracks found."
+    "noTracks": "No tracks found.",
+    "filteredAlbumsCount": "{{count}} of {{total}} albums",
+    "filteredArtistsCount": "{{count}} of {{total}} artists"
   },
   "player": {
     "repeat": {
@@ -286,7 +288,8 @@
     "formatReportedByMpd": "Format reported by MPD; it does not confirm the effective ALSA/DAC output.",
     "source": {
       "local": "LOCAL",
-      "plex": "PLEX"
+      "plex": "PLEX",
+      "upnp": "UPnP"
     },
     "openNowPlaying": "Open Now Playing",
     "queue": "Play Queue",
@@ -377,6 +380,18 @@
     }
   },
   "queue": {
+    "filterLabel": "Filter the current queue",
+    "filterPlaceholder": "Track, artist or album…",
+    "clearFilter": "Clear queue filter",
+    "filteredCount": "{{count}} of {{total}} tracks",
+    "jumpToCurrent": "Go to current track",
+    "noMatches": "No tracks match this filter.",
+    "clearAll": "Clear the entire queue",
+    "timeAtLeast": "at least {{time}}",
+    "timeUnknown": "unknown",
+    "totalTime": "Total: {{time}}",
+    "remainingTime": "Remaining: {{time}}",
+    "remainingHint": "Estimated from the current position in the full queue, regardless of this filter. Unavailable with shuffle, repeat, single mode or an unconfirmed position; missing durations are shown as a lower bound.",
     "title": "Play Queue",
     "empty": "Play queue is empty.",
     "clear": "Clear Queue"
@@ -437,6 +452,7 @@
     "title": "Favorite Albums",
     "count_one": "{{count}} album favorited in this source",
     "count_other": "{{count}} albums favorited in this source",
+    "sourceTabs": "Favorites source",
     "filterPlaceholder": "Filter favorites...",
     "tabLocal": "Local",
     "tabPlex": "Plex",
@@ -863,8 +879,18 @@
     "dopRequirement": "Requires compatible MPD, ALSA and DAC.",
     "appearance": "Appearance",
     "appearanceDark": "Dark",
+    "appearanceDarkDescription": "Graphite and gold",
     "appearanceLight": "Light",
-    "appearanceHelp": "Applies immediately across Sonante windows. Playback is unchanged."
+    "appearanceLightDescription": "White and cool neutrals",
+    "appearanceHelp": "Applies immediately across Sonante windows. Playback is unchanged.",
+    "appearanceCyber": "Cyber",
+    "appearanceCyberDescription": "Deep blue and neon green",
+    "appearanceSummer": "Summer",
+    "appearanceSummerDescription": "Light sand, yellow and orange",
+    "appearanceZen": "Zen",
+    "appearanceZenDescription": "Soft sage and forest green",
+    "appearanceNocturne": "Nocturne",
+    "appearanceNocturneDescription": "Plum and lavender"
   },
   "wizard": {
     "appearanceTitle": "Choose your appearance",
@@ -1207,8 +1233,10 @@
     "title": "Explore",
     "shelf": "Albums to listen to",
     "noLibrary": "no library selected",
+    "sourceTabs": "Explore source",
     "sources": {
-      "local": "Local"
+      "local": "Local",
+      "plex": "Plex"
     },
     "states": {
       "ready": "Catalog available",
@@ -1571,7 +1599,13 @@
     "failed": "Indexing could not be confirmed: a source or selected file changed, the catalog was invalid, or previously indexed items are missing without a confirmed removal. References were kept. Review the sources and try again when changes have finished."
   },
   "libraryRecovery": {
-    "progress": {"checking": "Checking recovery…", "protecting": "Safety backup prepared…", "restoring": "Restoring the previous library…", "validating": "Validating the recovered library…", "finalizing": "Finishing recovery…"},
+    "progress": {
+      "checking": "Checking recovery…",
+      "protecting": "Safety backup prepared…",
+      "restoring": "Restoring the previous library…",
+      "validating": "Validating the recovered library…",
+      "finalizing": "Finishing recovery…"
+    },
     "title": "Recover library",
     "explanation": "Sonante needs to check the library before continuing. This check does not change your data or start playback.",
     "analyze": "Check recovery",
@@ -1742,5 +1776,78 @@
       },
       "scope": "This explanation is limited to offer inspection. It neither validates the entire observation nor enables execution or reopening."
     }
+  },
+  "unifiedSearch": {
+    "menu": "Search",
+    "title": "Search your music",
+    "description": "Albums, artists and tracks from Local and Plex, together.",
+    "inputLabel": "Search across your music",
+    "placeholder": "An album, artist or track…",
+    "clear": "Clear search",
+    "sourceFilter": "Search sources",
+    "allSources": "All sources",
+    "everything": "Everything",
+    "searching": "Searching…",
+    "unavailable": "Unavailable",
+    "partial": "Partial results",
+    "ready": "Ready",
+    "retry": "Try again",
+    "startTitle": "Find it, then go straight to the music",
+    "startHint": "Enter 2–160 characters. Search across sources, open an album or artist, or play a track directly.",
+    "configureHint": "Configure a Local or Plex library in Preferences to search your music.",
+    "partialError": "Some results could not be retrieved. Results from the sources that responded remain available; try again when the source is ready.",
+    "open": "Open",
+    "artistAction": "Open artist albums",
+    "empty": "No matching results in the sources searched.",
+    "previewHint": "Showing a selection of matches. Refine the search to find a particular album, artist or track.",
+    "back": "Back to search",
+    "playTrack": "Play track",
+    "shortcut": "Ctrl+K",
+    "keyboardHint": "↑ ↓ navigate results · Enter opens or plays · Esc returns or clears"
+  },
+  "upnp": {
+    "title": "UPnP receiver",
+    "help": "Control Sonante with BubbleUPnP or another controller on the same local network. A track sent by the controller replaces the current queue. Volume control follows the selected audio output.",
+    "enable": "Allow control from the local network",
+    "name": "Name shown in controllers",
+    "apply": "Apply",
+    "retry": "Try again",
+    "applying": "Applying…",
+    "active": "Receiver active. Select this name in your controller’s device list.",
+    "inactive": "Receiver disabled.",
+    "error": "Could not confirm the receiver. Check your local network connection and try again."
+  },
+  "shortcuts": {
+    "title": "Keyboard shortcuts",
+    "close": "Close shortcuts",
+    "navigation": "Navigation",
+    "searchResults": "Search results",
+    "playback": "Playback in the main library",
+    "space": "Space",
+    "search": "Open unified search",
+    "filter": "Focus the current search field",
+    "back": "Return, close or clear the current view",
+    "results": "Move through results",
+    "edges": "First or last result",
+    "activate": "Open a result or play a track",
+    "playPause": "Play or pause",
+    "previousNext": "Previous or next track",
+    "volume": "Volume, when available",
+    "mute": "Mute, when available",
+    "contextHint": "Playback keys apply outside text fields and navigation panels. Search, EQ, queue and dialogs own their keys. Tab moves between controls; in the queue filter, Esc clears the filter before closing the queue."
+  },
+  "queueActions": {
+    "receiver": "Finish the UPnP session before adding Local or Plex tracks to the queue.",
+    "title": "Add to queue",
+    "forTrack": "Queue options for {{title}}",
+    "next": "Add as next track",
+    "end": "Add to end of queue",
+    "album": "Add entire album to end",
+    "albumUnavailable": "The album could not be identified for this track.",
+    "added_one": "1 track added to the queue.",
+    "added_other": "{{count}} tracks added to the queue.",
+    "failed": "Could not add to the queue. Check that the library and player are available.",
+    "uncertain": "The queue could not be confirmed. Check the player state before trying again.",
+    "persistence": "The queue changed, but saving it could not be confirmed. Do not repeat the addition."
   }
 }

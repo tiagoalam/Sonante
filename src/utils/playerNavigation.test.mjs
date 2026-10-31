@@ -204,8 +204,8 @@ test("IPC is read-only and player links use guarded identity resolution with a m
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const browser = readFileSync(new URL("../components/LocalBrowserView.tsx", import.meta.url), "utf8");
   const service = readFileSync(new URL("../services/plex.ts", import.meta.url), "utf8");
-  assert.ok(app.includes('onNavigateToAlbum={() => navigateFromPlayer("album")}'));
-  assert.ok(app.includes('onNavigateToArtist={() => navigateFromPlayer("artist")}'));
+  assert.ok(app.includes('onNavigateToAlbum={playerSourceKind === "upnp" ? undefined : () => navigateFromPlayer("album")}'));
+  assert.ok(app.includes('onNavigateToArtist={playerSourceKind === "upnp" ? undefined : () => navigateFromPlayer("artist")}'));
   assert.ok(app.includes('className={playerTarget ? "hidden" : "contents"}'));
   assert.ok(app.includes("const centralSection = playerReturnSection ?? (mediaSource === \"equalizer\" ? eqReturnSectionRef.current : mediaSource)"));
   assert.match(app, /else if \(playerTarget\) \{\s*closePlayerNavigation\(\)/);

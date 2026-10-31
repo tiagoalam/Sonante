@@ -37,7 +37,7 @@ body {
 /* Semantic light palette. Dark uses each existing color as its CSS fallback,
    preserving the accepted dark appearance rather than flattening its shades.
    Artwork/colored cards and technical instruments opt into contrast islands. */
-:root[data-theme="light"] {
+:root:is([data-theme="light"], [data-theme="summer"], [data-theme="zen"]) {
   color-scheme: light;
   --color-plex-dark: #f3f5f8;
   --color-plex-surface: #ffffff;
@@ -88,7 +88,7 @@ body {
   --theme-scroll-thumb: #a5b1c0;
 }
 
-:root[data-theme="light"] :is([data-theme-surface="contrast"], [data-theme-surface="instrument"]) {
+:root:is([data-theme="light"], [data-theme="cyber"], [data-theme="summer"], [data-theme="zen"], [data-theme="nocturne"]) :is([data-theme-surface="contrast"], [data-theme-surface="instrument"]) {
   color-scheme: dark;
   color: #e0e0e0;
   --theme-surface-base: initial; --theme-surface-panel: initial;
@@ -106,7 +106,7 @@ body {
   --theme-border-warning: initial; --theme-border-error: initial;
   --theme-border-success: initial; --theme-border-info: initial;
   --theme-border-purple: initial; --theme-border-pink: initial;
-  --theme-control-accent: initial;
+  --theme-control-accent: initial; --theme-control-fg: initial;
 }
 
 /* Native controls inherit the active palette, including dialogs and optgroups. */
@@ -126,3 +126,123 @@ select option:checked {
 }
 
 :root[data-theme="light"] { scrollbar-color: var(--theme-scroll-thumb) transparent; }
+
+:root[data-theme="cyber"] {
+  color-scheme: dark;
+  --theme-surface-base: #050e25;
+  --theme-surface-panel: #091d3c;
+  --theme-surface-raised: #102e53;
+  --theme-surface-hover: #173b60;
+  --theme-surface-accent: #113b3c;
+  --theme-fg-primary: #e5faff;
+  --theme-fg-secondary: #c1e5f4;
+  --theme-fg-muted: #a0c6dc;
+  --theme-fg-accent: #73efb2;
+  --theme-border-soft: #477192;
+  --theme-control-accent: #73efb2;
+  --theme-control-fg: #06241a;
+  --color-plex-dark: #050e25; --color-plex-surface: #091d3c;
+  --color-plex-card: #102e53; --color-plex-hover: #173b60;
+  --color-plex-muted: #a0c6dc; --color-plex-gold: #73efb2; --color-plex-gold-hover: #73efb2;
+  --theme-fg-faint: #a0c6dc; --theme-border-accent: #73efb2;
+  --theme-surface-subtle: #102e53; --theme-play-bg: #73efb2; --theme-play-fg: #06241a;
+  --theme-np-shade-start: #050e25b8; --theme-np-shade-end: #050e25eb;
+  --theme-scroll-thumb: #477192;
+  --theme-surface-warning: #352919; --theme-surface-error: #381d26;
+  --theme-surface-success: #18332b; --theme-surface-info: #1b2a40;
+  --theme-surface-purple: #2e2340; --theme-surface-pink: #392334;
+  --theme-fg-warning: #f5c779; --theme-fg-error: #ff9ba7;
+  --theme-fg-success: #83d7ad; --theme-fg-info: #9dc6f5;
+  --theme-fg-purple: #c9adf1; --theme-fg-pink: #f2acd1;
+}
+
+:root[data-theme="summer"] {
+  color-scheme: light;
+  --theme-surface-base: #fff2d6;
+  --theme-surface-panel: #fffaf0;
+  --theme-surface-raised: #ffe2ac;
+  --theme-surface-hover: #ffd58d;
+  --theme-surface-accent: #ffdf99;
+  --theme-fg-primary: #452713;
+  --theme-fg-secondary: #634019;
+  --theme-fg-muted: #795024;
+  --theme-fg-accent: #934200;
+  --theme-border-soft: #a87839;
+  --theme-control-accent: #a94b00;
+  --theme-control-fg: #ffffff;
+  --color-plex-dark: #fff2d6; --color-plex-surface: #fffaf0;
+  --color-plex-card: #ffe2ac; --color-plex-hover: #ffd58d;
+  --color-plex-muted: #795024; --color-plex-gold: #a94b00; --color-plex-gold-hover: #a94b00;
+  --theme-fg-faint: #795024; --theme-border-accent: #a94b00;
+  --theme-surface-subtle: #ffe2ac; --theme-play-bg: #a94b00; --theme-play-fg: #ffffff;
+  --theme-np-shade-start: #fff2d6b8; --theme-np-shade-end: #fff2d6eb;
+  --theme-scroll-thumb: #a87839;
+}
+
+:root[data-theme="zen"] {
+  color-scheme: light;
+  --theme-surface-base: #dae6de;
+  --theme-surface-panel: #eef4ed;
+  --theme-surface-raised: #cbdccd;
+  --theme-surface-hover: #c0d4c2;
+  --theme-surface-accent: #c8dece;
+  --theme-fg-primary: #233c32;
+  --theme-fg-secondary: #354f3f;
+  --theme-fg-muted: #405846;
+  --theme-fg-accent: #255c44;
+  --theme-border-soft: #728c76;
+  --theme-control-accent: #2e604b;
+  --theme-control-fg: #ffffff;
+  --color-plex-dark: #dae6de; --color-plex-surface: #eef4ed;
+  --color-plex-card: #cbdccd; --color-plex-hover: #c0d4c2;
+  --color-plex-muted: #405846; --color-plex-gold: #2e604b; --color-plex-gold-hover: #2e604b;
+  --theme-fg-faint: #405846; --theme-border-accent: #2e604b;
+  --theme-surface-subtle: #cbdccd; --theme-play-bg: #2e604b; --theme-play-fg: #ffffff;
+  --theme-np-shade-start: #dae6deb8; --theme-np-shade-end: #dae6deeb;
+  --theme-scroll-thumb: #728c76;
+}
+
+:root[data-theme="nocturne"] {
+  color-scheme: dark;
+  --theme-surface-base: #21102e;
+  --theme-surface-panel: #301942;
+  --theme-surface-raised: #452454;
+  --theme-surface-hover: #553063;
+  --theme-surface-accent: #503064;
+  --theme-fg-primary: #f5eafb;
+  --theme-fg-secondary: #e0cbed;
+  --theme-fg-muted: #cdb4df;
+  --theme-fg-accent: #d1b0ff;
+  --theme-border-soft: #876391;
+  --theme-control-accent: #d1b0ff;
+  --theme-control-fg: #250c36;
+  --color-plex-dark: #21102e; --color-plex-surface: #301942;
+  --color-plex-card: #452454; --color-plex-hover: #553063;
+  --color-plex-muted: #cdb4df; --color-plex-gold: #d1b0ff; --color-plex-gold-hover: #d1b0ff;
+  --theme-fg-faint: #cdb4df; --theme-border-accent: #d1b0ff;
+  --theme-surface-subtle: #452454; --theme-play-bg: #d1b0ff; --theme-play-fg: #250c36;
+  --theme-np-shade-start: #21102eb8; --theme-np-shade-end: #21102eeb;
+  --theme-scroll-thumb: #876391;
+  --theme-surface-warning: #352919; --theme-surface-error: #381d26;
+  --theme-surface-success: #18332b; --theme-surface-info: #1b2a40;
+  --theme-surface-purple: #2e2340; --theme-surface-pink: #392334;
+  --theme-fg-warning: #f5c779; --theme-fg-error: #ff9ba7;
+  --theme-fg-success: #83d7ad; --theme-fg-info: #9dc6f5;
+  --theme-fg-purple: #c9adf1; --theme-fg-pink: #f2acd1;
+}
+
+/* Legacy gold controls participate in the semantic palette as well. */
+:root:is([data-theme="cyber"], [data-theme="summer"], [data-theme="zen"], [data-theme="nocturne"]) .bg-\[\#E5A00D\] {
+  background-color: var(--theme-control-accent, #E5A00D);
+  color: var(--theme-control-fg, #000000);
+}
+:root:is([data-theme="cyber"], [data-theme="summer"], [data-theme="zen"], [data-theme="nocturne"]) { scrollbar-color: var(--theme-scroll-thumb) transparent; }
+
+/* Programmatic arrow navigation must remain visible in WebKit regardless of
+   the browser's focus-visible modality heuristic. No selection state to drift. */
+[data-unified-search] [data-search-result]:focus {
+  background-color: var(--theme-surface-accent, #332b15);
+  border-color: var(--theme-border-accent, #E5A00D);
+  outline: 2px solid var(--theme-border-accent, #E5A00D);
+  outline-offset: -2px;
+}

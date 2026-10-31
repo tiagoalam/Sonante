@@ -14,10 +14,12 @@ const localMedia = (item: TrackMetadata) => item.media_locator?.kind === "plex" 
 
 export function useLocalQueueArtwork(items: TrackMetadata[], start: number, end: number,
   open: boolean, available: boolean, status: PlaybackStatus | undefined,
-  context: QueueArtworkContext | undefined, detached: boolean) {
+  context: QueueArtworkContext | undefined, detached: boolean, visibleIndices?: readonly number[]) {
   const catalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
   const blocked = !open || !available || !context || context.blocked || !!status?.is_updating;
-  const visible = items.slice(start, end).map((item, offset) => queueItemArtwork(item, start + offset, status));
+  const visible = visibleIndices
+    ? visibleIndices.map(index => queueItemArtwork(items[index], index, status))
+    : items.slice(start, end).map((item, offset) => queueItemArtwork(item, start + offset, status));
   const hasLocal = visible.some(item => !item.thumb && !item.plex_image && !!localMedia(item)?.uri);
   const revision = context?.generation;
   const detachedRevision = useRef<number | undefined>(undefined);

@@ -8,7 +8,7 @@ The assembler rejects changed downloads, mismatched descriptors, missing or extr
 
 The complete artifact includes:
 
-- DEB, Fedora-profile RPM and native Arch installers for the current application version and the package revision selected by the assembly command (currently revision 3 in CI).
+- DEB, Fedora-profile RPM and native Arch installers for the current application version and the package revision selected by the assembly command (revision 1 for 0.5.7 in CI).
 - Standard and Fedora-overlay application source archives from the exact clean Git commit.
 - The two checksum-pinned runtime corresponding-source archives, as separate downloads.
 - `BUILD-RECEIPT.json` and `SHA256SUMS.txt` covering the package/source outputs.

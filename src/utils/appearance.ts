@@ -1,5 +1,16 @@
 /** Appearance only. No audio, catalog, navigation or backend configuration. */
-export type Appearance = 'dark' | 'light';
+export const APPEARANCES = ['dark', 'light', 'cyber', 'summer', 'zen', 'nocturne'] as const;
+export type Appearance = typeof APPEARANCES[number];
+export const isAppearance = (value: unknown): value is Appearance => APPEARANCES.includes(value as Appearance);
+export const appearanceScheme = (value: Appearance): 'light' | 'dark' => value === 'light' || value === 'summer' || value === 'zen' ? 'light' : 'dark';
+export const appearancePalettes: Record<Appearance, {base:string;panel:string;card:string;text:string;muted:string;gold:string}> = {
+ dark:{base:'#121212',panel:'#181818',card:'#282828',text:'#e0e0e0',muted:'#999999',gold:'#e5a00d'},
+ light:{base:'#f3f5f8',panel:'#ffffff',card:'#eaf0f6',text:'#1d2734',muted:'#596675',gold:'#946200'},
+ cyber:{base:'#050e25',panel:'#091d3c',card:'#102e53',text:'#e5faff',muted:'#a0c6dc',gold:'#73efb2'},
+ summer:{base:'#fff2d6',panel:'#fffaf0',card:'#ffe2ac',text:'#452713',muted:'#795024',gold:'#a94b00'},
+ zen:{base:'#dae6de',panel:'#eef4ed',card:'#cbdccd',text:'#233c32',muted:'#405846',gold:'#2e604b'},
+ nocturne:{base:'#21102e',panel:'#301942',card:'#452454',text:'#f5eafb',muted:'#cdb4df',gold:'#d1b0ff'},
+};
 export const APPEARANCE_KEY = 'sonante_appearance_v1';
 export const APPEARANCE_CHANGED = 'sonante:appearance-changed';
 export const APPEARANCE_REQUEST = 'sonante:appearance-request';
@@ -14,7 +25,7 @@ interface Environment {
 export function appearanceRecord(value:unknown):AppearanceRecord|null {
  if(!value||typeof value!=='object')return null;
  const v=value as Partial<AppearanceRecord>;
- return v.version===1&&(v.value==='dark'||v.value==='light')&&v.revision&&Number.isSafeInteger(v.revision.counter)&&v.revision.counter>=0&&typeof v.revision.origin==='string'&&v.revision.origin.length<=96&&/^[\w-]*$/.test(v.revision.origin)
+ return v.version===1&&isAppearance(v.value)&&v.revision&&Number.isSafeInteger(v.revision.counter)&&v.revision.counter>=0&&typeof v.revision.origin==='string'&&v.revision.origin.length<=96&&/^[\w-]*$/.test(v.revision.origin)
   ?{version:1,value:v.value,revision:{counter:v.revision.counter,origin:v.revision.origin}}:null;
 }
 const compare=(a:AppearanceRecord,b:AppearanceRecord)=>a.revision.counter-b.revision.counter||(a.revision.origin<b.revision.origin?-1:a.revision.origin>b.revision.origin?1:0);
@@ -31,7 +42,7 @@ export function createAppearance(env:Environment){
   getSnapshot:()=>record.value,
   subscribe:(fn:()=>void)=>{subscribers.add(fn);return()=>{subscribers.delete(fn)}},
   set(value:Appearance){
-   if(value!=='dark'&&value!=='light')return;
+   if(!isAppearance(value))return;
    const saved=read();if(saved&&compare(saved,record)>0)record=saved;
    record={version:1,value,revision:{counter:Math.max(0,record.revision.counter)+1,origin:env.origin}};
    persist();publish();emit(APPEARANCE_CHANGED,record);

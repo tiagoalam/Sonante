@@ -1,3 +1,5 @@
+import { useQueueInsertion } from "./components/QueueInsertionMenu";
+import { plexQueueTrack } from "./utils/queueActions";
 import {plexTrackArtist,plexTrackDurationSeconds} from './utils/plexTrackMetadata';
 import { canToggleMute, directMuteRequest, sharedMuteRequest } from "./utils/signalPath";
 import { SlidersHorizontal } from "lucide-react";
@@ -44,6 +46,9 @@ import { AlbumView } from "./components/AlbumView";
 import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
 import { ExploreView } from "./components/ExploreView";
+import { UnifiedSearchView } from "./components/UnifiedSearchView";
+import { ExploreSourceTabs } from "./components/ExploreSourceTabs";
+import { configuredExploreSources, exploreSourceFor, type ExploreSource } from "./utils/exploreNavigation";
 import { discoverPush, type DiscoverPage } from "./utils/discoverNavigation";
 import { playPlexAlbum } from "./utils/plexAlbumPlayback";
 import { PlexDiscoverView } from "./components/PlexDiscoverView";
@@ -66,6 +71,7 @@ import { PlaylistPickerModal } from "./components/PlaylistPickerModal";
 import type { SettingsPage } from "./components/SettingsPages";
 import { SettingsModal, QueueClearConfirmationDialog, formatConfigError } from "./components/SettingsModal";
 import { AboutModal } from "./components/AboutModal";
+import { KeyboardShortcutsHelp } from "./components/KeyboardShortcutsHelp";
 import { WelcomeWizard } from "./components/WelcomeWizard";
 import { PlexImage } from "./components/PlexImage";
 import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./components/VirtualAlbumGrid";
@@ -97,6 +103,7 @@ import {
   PlexCollection,
   SelectedArtist,
   PlexSearchResults,
+  PlexTrack,
   PlexImageRef,
 } from "./types/plex";
 import { PlaybackStatus, AudioDevice, MpdHealth } from "./types/audio";
@@ -368,6 +375,7 @@ export function App() {
   const [playerNavigation, setPlayerNavigation] = useState<PlayerNavigationSession | null>(null);
   const playerTarget = playerNavigation?.target ?? null;
   const [exploreDetail, setExploreDetail] = useState<ExploreEntry | null>(null);
+  const [exploreSource, setExploreSource] = useState<ExploreSource>("local");
   const [exploreSourceId, setExploreSourceId] = useState<string | null>(null);
   const exploreDetailReturnRef = useRef<HTMLElement | null>(null);
   const [exploreLocalSubview, setExploreLocalSubview] = useState<LocalSubview>("browser");
@@ -1037,8 +1045,19 @@ export function App() {
   // Atalhos de Teclado Globais
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
+        if (!config || config.first_run || e.defaultPrevented || showSettings || showAbout || document.querySelector('dialog[open], [role="dialog"], [role="alertdialog"], [data-local-tag-dialog-open]')) return;
+        e.preventDefault();
+        const openSearch = () => { resetAllNavigation(); mainSectionPreference.navigate("search"); window.dispatchEvent(new Event("sonante:focus-unified-search")); };
+        if (nowPlayingHosting.getSnapshot().busy) return;
+        if (nowPlayingHosting.getSnapshot().mode === "embedded") void nowPlayingHosting.collapse().then(openSearch).catch(error => logError("now-playing.open", error));
+        else openSearch();
+        return;
+      }
       // EQ owns its editing keys, including SVG points and its native dialog.
       if ((e.target as Element | null)?.closest?.("[data-equalizer]")) return;
+      if ((e.target as Element | null)?.closest?.("[data-source-navigation]")) return;
+      if ((e.target as Element | null)?.closest?.("[data-unified-search]")) return;
       if (nowPlayingHosting.getSnapshot().mode === "embedded" && !showSettings && !showAbout) return;
       if ((showSettings || showAbout) && e.key === "Escape") e.preventDefault();
       const activeEl = document.activeElement;
@@ -1049,7 +1068,7 @@ export function App() {
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
-        if (playerTarget || (centralSection === "plex" && plexArea === "discover")) return; // The library search field is hidden in these views.
+        if (playerTarget || centralSection === "search" || (centralSection === "plex" && plexArea === "discover")) return; // The library search field is hidden in these views.
         searchInputRef.current?.focus();
         searchInputRef.current?.select();
         return;
@@ -1130,7 +1149,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showSettings, showAbout, showQueue, searchQuery, playerTarget, exploreDetail, discoverAlbum, discoverArtist, closeDiscoverArtist, centralSection, plexArea, plexDiscover]);
+  }, [config, showSettings, showAbout, showQueue, searchQuery, playerTarget, exploreDetail, discoverAlbum, discoverArtist, closeDiscoverArtist, centralSection, plexArea, plexDiscover]);
 
   // Carregar ou Limpar Bibliotecas do Plex
   useEffect(() => {
@@ -1297,6 +1316,10 @@ export function App() {
   };
 
   const appPlayback = usePlaybackAttempt(JSON.stringify([centralSection, mediaSource, selectedLibrary?.key, searchQuery, plexArea, activeAlbum?.rating_key, showSettings, showAbout, !!playerTarget]));
+  const queueSearchContext = useMemo(() => ({}), [plexConnectionIdentity, centralSection, selectedLibrary?.key, searchQuery, searchResults, showSettings, showAbout, nowPlayingEmbedded, isPlaybackAvailable]);
+  const searchQueueActions = useQueueInsertion(queueSearchContext, isPlaybackAvailable && centralSection === "plex" && !showSettings && !showAbout && !nowPlayingEmbedded && !playerTarget);
+  const searchQueueRequest = (track: PlexTrack) => ({ track: plexQueueTrack(track), album: track.album_rating_key
+    ? async () => (await plexService.getAlbumTracks(track.album_rating_key!)).map(item => plexQueueTrack(item)) : undefined });
   const handlePlayQuick = useCallback(async (e: React.MouseEvent, album: PlexAlbum) => {
     e.stopPropagation();
     if (!playbackAvailableRef.current) return;
@@ -1411,6 +1434,17 @@ export function App() {
 
   const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
   const localExploreConfigured = Boolean(config?.local_folders.length);
+  const exploreSources = config ? configuredExploreSources(config) : [];
+  const isExploreSection = centralSection === "explore" || centralSection === "plex" && plexArea === "discover";
+  const showExploreTabs = isExploreSection && exploreSources.length === 2;
+  const activeExploreSource: ExploreSource = centralSection === "explore" ? "local" : "plex";
+  const navigateExplore = (preferred: ExploreSource = exploreSource) => {
+    const source = exploreSourceFor(exploreSources, preferred);
+    resetAllNavigation();
+    setExploreSource(source);
+    setPlexArea(source === "plex" ? "discover" : "library");
+    mainSectionPreference.navigate(source === "plex" ? "plex" : "explore");
+  };
   const { state: localExploreState, activity: exploreLoadingActivity } = localExplorePresentation({
     configured: localExploreConfigured, starting: mpdHealth.state === "starting", available: isPlaybackAvailable,
     updating: playbackStatus.is_updating, catalog: localCatalog,
@@ -1523,6 +1557,11 @@ export function App() {
   const selectedPlexDecadeSummary = selectedPlexDecade === null
     ? undefined
     : plexYearNavigation.decades.find((item) => item.decade === selectedPlexDecade);
+  const plexCountsReady = plexAlbumLoad?.identity === plexBrowserIdentity && plexAlbumLoad.phase === "ready";
+  const plexCounts = {
+    albums: albums.length, artists: plexArtists.length, genres: plexGenreOptions.length, collections: collections.length,
+    years: plexYearNavigation.decades.reduce((n, decade) => n + decade.years.length, 0) + Number(plexYearNavigation.unknownCount > 0),
+  };
   const hasPlexSubview = Boolean(
     activeCollection
     || fallbackPlexArtist
@@ -1601,6 +1640,8 @@ export function App() {
                 {t("sidebar.musicGroup")}
               </h2>
               <nav aria-label={t("sidebar.musicGroup")} className="space-y-1">
+                <SidebarNavItem diagnosticAction="search" icon={Search} label={t("unifiedSearch.menu")} trailing={<kbd className="text-[10px] opacity-60">{t("unifiedSearch.shortcut")}</kbd>}
+                  active={mediaSource === "search"} onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("search"); }} />
                 <SidebarNavItem diagnosticAction="local"
                   icon={Folder}
                   label={t("sidebar.local")}
@@ -1623,10 +1664,6 @@ export function App() {
                     </span>
                   )}
                 />
-                <div className="ml-6 border-l border-[color:var(--theme-border-soft,#333333)] pl-2">
-                  <SidebarNavItem diagnosticAction="explore" icon={Compass} label={t("explore.title")} active={mediaSource === "explore"}
-                    onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("explore"); }} />
-                </div>
                 <SidebarNavItem diagnosticAction="plex"
                   icon={Server}
                   label={t("sidebar.plex")}
@@ -1637,10 +1674,9 @@ export function App() {
                     mainSectionPreference.navigate("plex");
                   }}
                 />
-                <div className="ml-6 border-l border-[color:var(--theme-border-soft,#333333)] pl-2">
-                  <SidebarNavItem diagnosticAction="plex" icon={Compass} label={t("discover.menu")} active={mediaSource === "plex" && plexArea === "discover"}
-                    onClick={() => { resetAllNavigation(); setPlexArea("discover"); mainSectionPreference.navigate("plex"); }} />
-                </div>
+                <SidebarNavItem diagnosticAction="explore" icon={Compass} label={t("explore.title")}
+                  active={mediaSource !== "equalizer" && !playerTarget && isExploreSection}
+                  onClick={() => navigateExplore()} />
 
               </nav>
             </section>
@@ -1685,6 +1721,7 @@ export function App() {
               label={t("sidebar.preferences")}
               onClick={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("general"); setShowSettings(true); } }}
             />
+            <KeyboardShortcutsHelp />
             <SidebarNavItem diagnosticAction="about"
               icon={Info}
               label={t("sidebar.about")}
@@ -1697,7 +1734,17 @@ export function App() {
         {(mediaSource !== "equalizer" || eqReturnViewRef.current) && <div ref={previousPageRef} data-now-playing-previous-page className={nowPlayingEmbedded || mediaSource === "equalizer" ? "hidden" : "contents"} inert={nowPlayingEmbedded || mediaSource === "equalizer" ? true : undefined}>
         {/* Painel Central */}
         <div className={playerTarget ? "hidden" : "contents"}>
-        {centralSection === "explore" ? (
+        <div className={isExploreSection ? "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" : "contents"}>
+        {showExploreTabs && <ExploreSourceTabs source={activeExploreSource} onChange={navigateExplore} />}
+        <div id={showExploreTabs ? "explore-source-panel" : undefined} role={showExploreTabs ? "tabpanel" : undefined}
+          aria-labelledby={showExploreTabs ? `explore-source-${activeExploreSource}` : undefined}
+          className={isExploreSection ? "flex min-h-0 min-w-0 flex-1" : "contents"}>
+        {centralSection === "search" ? (
+          <UnifiedSearchView config={config} plexIdentity={plexConnectionIdentity} status={playbackStatus}
+            isPlaybackAvailable={isPlaybackAvailable} catalogRefreshRevision={localCatalogRevision}
+            active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded}
+            onFavoritesChanged={refreshPlexFavorites} />
+        ) : centralSection === "explore" ? (
           <div className="contents">
             <div className={exploreDetail ? "hidden" : "contents"}>
               <ExploreView context={exploreContext} active={mediaSource !== "equalizer" && !exploreDetail && !playerTarget}
@@ -1876,7 +1923,7 @@ export function App() {
                     plexViewMode === "albums" ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                   }`}
                 >
-                  {t("plex.tabAlbums")}
+                  {t("plex.tabAlbums")} {plexCountsReady && <span className="tabular-nums opacity-75">({plexCounts.albums})</span>}
                 </button>
                 <button
                   type="button"
@@ -1885,7 +1932,7 @@ export function App() {
                     plexViewMode === "artists" ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                   }`}
                 >
-                  {t("plex.tabArtists")}
+                  {t("plex.tabArtists")} {plexCountsReady && <span className="tabular-nums opacity-75">({plexCounts.artists})</span>}
                 </button>
                 <button
                   type="button"
@@ -1894,7 +1941,7 @@ export function App() {
                     plexViewMode === "years" ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                   }`}
                 >
-                  {t("plex.tabYears")}
+                  {t("plex.tabYears")} {plexCountsReady && <span className="tabular-nums opacity-75">({plexCounts.years})</span>}
                 </button>
                 <button
                   type="button"
@@ -1903,7 +1950,7 @@ export function App() {
                     plexViewMode === "genres" ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                   }`}
                 >
-                  {t("common.genresLabel")}
+                  {t("common.genresLabel")} {plexCountsReady && <span className="tabular-nums opacity-75">({plexCounts.genres})</span>}
                 </button>
                 {hasCollections && (
                   <button
@@ -1913,7 +1960,7 @@ export function App() {
                       plexViewMode === "collections" ? "bg-[#E5A00D] text-black shadow" : "text-[color:var(--theme-fg-secondary,#999999)] hover:bg-[var(--theme-surface-raised,#1E1E1E)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
                     }`}
                   >
-                    {t("plex.tabCollections")}
+                    {t("plex.tabCollections")} {plexCountsReady && <span className="tabular-nums opacity-75">({plexCounts.collections})</span>}
                   </button>
                 )}
               </div>
@@ -2020,7 +2067,7 @@ export function App() {
                     {searchResults.artists.length > 0 && (
                       <div>
                         <h3 className="text-sm font-bold text-[color:var(--theme-fg-muted,#888888)] uppercase tracking-wider mb-3">
-                          {t("plex.artists")}
+                          {t("plex.artists")} <span className="tabular-nums">({searchResults.artists.length})</span>
                         </h3>
                         <div className="flex flex-wrap gap-3">
                           {searchResults.artists.map((art) => (
@@ -2048,7 +2095,7 @@ export function App() {
                     {visibleSearchAlbums.length > 0 && (
                       <div>
                         <h3 className="text-sm font-bold text-[color:var(--theme-fg-muted,#888888)] uppercase tracking-wider mb-3">
-                          {t("plex.albums")}
+                          {t("plex.albums")} <span className="tabular-nums">({visibleSearchAlbums.length})</span>
                         </h3>
                         <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
                           {visibleSearchAlbums.map((album) => {
@@ -2075,13 +2122,15 @@ export function App() {
 
                     {searchResults.tracks.length > 0 && (
                       <div>
+                        {searchQueueActions.notice}{searchQueueActions.menu}
                         <h3 className="text-sm font-bold text-[color:var(--theme-fg-muted,#888888)] uppercase tracking-wider mb-3">
-                          {t("plex.tracks")}
+                          {t("plex.tracks")} <span className="tabular-nums">({searchResults.tracks.length})</span>
                         </h3>
                         <div className="divide-y divide-[color:var(--theme-border-soft,#1A1A1A)] bg-[var(--theme-surface-base,#141414)] rounded-xl border border-[color:var(--theme-border-soft,#222222)] p-2">
                           {searchResults.tracks.map((track) => (
                             <div
                               key={track.rating_key}
+                              onContextMenu={event => searchQueueActions.open(event, searchQueueRequest(track))}
                               onClick={() => {
                                 if (!isPlaybackAvailable) return;
                                 const meta = [
@@ -2148,6 +2197,7 @@ export function App() {
                                 >
                                   <ListPlus size={15} />
                                 </button>
+                                {searchQueueActions.trigger(searchQueueRequest(track))}
                                 <Play size={14} className="text-[color:var(--theme-fg-muted,#888888)] group-hover:text-[color:var(--theme-fg-primary,#ffffff)] shrink-0 mr-2" />
                               </div>
                             </div>
@@ -2384,6 +2434,8 @@ export function App() {
           </main>
         )}
         </div>
+        </div>
+        </div>
         {playerTarget && (
           <div className="contents">
             {playerTarget.kind === "local" ? (
@@ -2454,8 +2506,8 @@ export function App() {
         onOpenNowPlaying={showNowPlaying}
         onToggleQueue={() => setShowQueue(!showQueue)}
         isQueueOpen={showQueue}
-        onNavigateToArtist={() => navigateFromPlayer("artist")}
-        onNavigateToAlbum={() => navigateFromPlayer("album")}
+        onNavigateToArtist={playerSourceKind === "upnp" ? undefined : () => navigateFromPlayer("artist")}
+        onNavigateToAlbum={playerSourceKind === "upnp" ? undefined : () => navigateFromPlayer("album")}
       />
       </div>
       {(configSavePhase || configSaveNotice) && (

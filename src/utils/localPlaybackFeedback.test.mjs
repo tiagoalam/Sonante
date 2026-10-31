@@ -1,3 +1,4 @@
+import { passiveQueueInsertion } from "../../tests/support/passiveQueueInsertion.mjs";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,existsSync} from 'node:fs';
@@ -30,7 +31,7 @@ const groups=[{disc:album.discs[0],tracks:[track]}];
 const catalog={subscribe:()=>()=>{},getSnapshot:()=>snapshot,getConfirmedRevision:()=>confirmedRevision,setUpdating(){},requestRefresh(){},waitForMpd(){}};
 const audioService={playTracks:(...args)=>{const d=deferred();requests.push({...d,args});return d.promise;},getLocalAlbumTracks:async()=>groups,resolveLocalLibraryPath:async()=>'/synthetic/folder',listLocalDirectory:async()=>[track,{name:'Subfolder',path:'Synthetic/Subfolder',item_type:'directory'}],getLocalCover:async()=>null};
 const artwork={get:()=>null,subscribe:()=>()=>{},resolveLocalOnly:(...a)=>coverRead(...a),resolve:async()=>null};
-const replacements={
+const replacements={...passiveQueueInsertion,
  react:{__esModule:true,...React,...hooks,default:React},'react/jsx-runtime':await import('react/jsx-runtime'),'react-i18next':{useTranslation:()=>({t:language.t.bind(language),i18n:language})},'lucide-react':icons,
  '../services/audio':{audioService},'../services/favorites':{favoritesService:{getFavorites:async()=>[]}},
  '../utils/frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})}, './frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})},
@@ -229,4 +230,22 @@ test('compound cleanup failure is not reduced to an ordinary unavailable-source 
   assert.ok(markup(h.tree).includes(language.t('localBrowser.checkLibrary.failed')));
   assert.ok(!markup(h.tree).includes(language.t('localBrowser.checkLibrary.otherSourceUnavailable')));
  }finally{h.close();}
+});
+
+test('Local track context menu and ellipsis prepare exact album metadata without invoking playback or artwork',async()=>{
+ const saved=passiveQueueInsertion['./QueueInsertionMenu'].useQueueInsertion;
+ const dictionary=i18next.createInstance();await dictionary.init({lng:'en',resources:{en:{translation:JSON.parse(readFileSync(resolve(root,'src/locales/en.json'),'utf8'))}}});language=dictionary;
+ const opened=[];
+ passiveQueueInsertion['./QueueInsertionMenu'].useQueueInsertion=(_context,available)=>({notice:null,menu:null,open:(event,request)=>{event.preventDefault();event.stopPropagation();if(available)opened.push(request)},trigger:request=>React.createElement('button',{'data-test-queue-trigger':true,onClick:event=>{event.preventDefault();event.stopPropagation();if(available)opened.push(request)}})});
+ const h=setup();coverRead=()=>assert.fail('queue metadata must not read artwork');
+ try{
+  // Existing view loading may resolve its optional cover; keep that path neutral.
+  coverRead=async()=>null;await h.settle();const baseline=requests.length;
+  const row=nodes(h.tree,n=>n.props?.onContextMenu&&markup(n).includes('Fixture track'))[0];assert.ok(row);
+  const event=()=>({preventDefault(){this.prevented=true},stopPropagation(){this.stopped=true}});
+  let e=event();row.props.onContextMenu(e);assert.equal(e.prevented,true);assert.equal(e.stopped,true);
+  const trigger=nodes(row,n=>n.props?.['data-test-queue-trigger'])[0];e=event();trigger.props.onClick(e);assert.equal(e.stopped,true);assert.equal(opened.length,2);
+  assert.deepEqual(opened[0].track.media_locator,{kind:'local',uri:track.path});assert.equal(opened[0].track.duration,track.duration);
+  const full=await opened[0].album();assert.deepEqual(full.map(item=>item.media_locator.uri),groups.flatMap(group=>group.tracks.map(item=>item.path)));assert.equal(requests.length,baseline);
+ }finally{h.close();passiveQueueInsertion['./QueueInsertionMenu'].useQueueInsertion=saved;}
 });

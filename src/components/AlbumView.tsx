@@ -1,7 +1,9 @@
+import { useQueueInsertion } from "./QueueInsertionMenu";
+import { plexQueueTrack } from "../utils/queueActions";
 import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { logError } from "../utils/frontendDiagnostics";
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Play,
@@ -108,6 +110,9 @@ export const AlbumView: React.FC<Props> = ({
   };
 
   const request = usePlaybackAttempt(infoAlbumKey + String(active), "plex.album-play");
+  const queueContext = useMemo(() => ({}), [infoAlbumKey, tracks, active, loading, isPlaybackAvailable]);
+  const queueActions = useQueueInsertion(queueContext, active && !loading && isPlaybackAvailable);
+  const queueRequest = (track: PlexTrack) => ({ track: plexQueueTrack(track, album), album: async () => tracks.map(item => plexQueueTrack(item, album)) });
   const handlePlayTracks = (startIndex: number = 0) => {
     if (!active || !isPlaybackAvailable) return;
     const metaTracks = tracks.map((t) => ({
@@ -148,6 +153,7 @@ export const AlbumView: React.FC<Props> = ({
   return (
     <div className="flex-1 flex flex-col h-full bg-[var(--theme-surface-base,#121212)] overflow-hidden select-none">
       <PlaybackRequestNotice failure={request.failure} />
+      {queueActions.notice}{queueActions.menu}
       <div className="p-8 pb-4 border-b border-[color:var(--theme-border-soft,#222222)] flex items-center">
         <button
           onClick={onBack}
@@ -269,6 +275,7 @@ export const AlbumView: React.FC<Props> = ({
               <div
                 key={track.rating_key}
                 onClick={() => handlePlayTracks(idx)}
+                onContextMenu={event => queueActions.open(event, queueRequest(track))}
                 aria-disabled={!isPlaybackAvailable}
                 className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
                   isPlaybackAvailable
@@ -303,6 +310,7 @@ export const AlbumView: React.FC<Props> = ({
                   >
                     <ListPlus size={15} />
                   </button>
+                  {queueActions.trigger(queueRequest(track))}
                   <button type="button" data-plex-file-info onClick={event => { event.stopPropagation(); setFileInfoTrack({ albumKey: infoAlbumKey, track }); }}
                     onKeyDown={event => event.stopPropagation()} title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: track.title })}
                     className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]">

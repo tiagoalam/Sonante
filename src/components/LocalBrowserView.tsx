@@ -1,3 +1,6 @@
+import { useQueueInsertion } from "./QueueInsertionMenu";
+import { localQueueTrack } from "../utils/queueActions";
+import { loadQueuedAlbum } from "../utils/queueAlbumLoader";
 import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useEffect, useLayoutEffect, useMemo, useState, useRef, useSyncExternalStore } from "react";
@@ -390,6 +393,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       initialCatalogMountHandled.current = true;
       // A player destination uses the already loaded catalogue; it must not rebuild it.
       if (initialAlbumId) return;
+      // Artist destinations also come from the shared catalog. Load only if
+      // missing, preserving the same readiness and source-admission checks.
+      if (initialArtist) {
+        localAlbumCatalog.ensureLoaded(isLibraryUpdating, isPlaybackAvailable);
+        return;
+      }
       if (metadataMode && localAlbumCatalog.getSnapshot().loaded) return;
       if (!playerTarget) localAlbumCatalog.setUpdating(isLibraryUpdating, true);
     }
@@ -562,6 +571,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const localPlayback = usePlaybackAttempt(playbackContext, "local.album-play");
   const runLocalPlayback = localPlayback.run;
   const playbackFailure = localPlayback.failure;
+  const queueActions = useQueueInsertion(playbackContext, isPlaybackAvailable && catalogConfirmed && !isLibraryUpdating && !catalog.manualCheckPlayback);
+  const queueRequest = (track: LocalItem, album?: LocalAlbum | null) => ({
+    track: localQueueTrack(track, album, album ? albumCover : folderCover),
+    album: album && tracksReady ? async () => albumTracks.map(item => localQueueTrack(item, album, albumCover)) : () => loadQueuedAlbum(localQueueTrack(track, album)),
+  });
 
   const handlePlayEntireAlbum = (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => runLocalPlayback(async intent => {
     if (!isPlaybackAvailable || !catalogConfirmed || (trackItems && !tracksReady)) return;
@@ -806,6 +820,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           : viewMode === "genres"
             ? t("common.genresLabel")
             : t("localBrowser.foldersTitle"));
+  const tabCounts = {
+    albums: scopedAlbums.length, artists: artists.length, genres: genreOptions.length,
+    years: yearNavigation.decades.reduce((n, decade) => n + decade.years.length, 0) + Number(yearNavigation.unknownCount > 0),
+    folders: currentPath === "" ? sourceOptions.length : null,
+  };
   const headerCount = selectedAlbum
     ? selectedAlbum.artist
     : selectedArtist
@@ -817,9 +836,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         : selectedDecadeSummary
           ? t("localBrowser.albumsCount", { count: selectedDecadeSummary.albumCount })
           : viewMode === "albums"
-            ? t("localBrowser.albumsCount", { count: filteredAlbums.length })
+            ? albumSearch.trim() ? t("common.filteredAlbumsCount", { count: filteredAlbums.length, total: scopedAlbums.length }) : t("localBrowser.albumsCount", { count: filteredAlbums.length })
             : viewMode === "artists"
-              ? t("localBrowser.artistsCount", { count: visibleArtists.length })
+              ? artistSearch.trim() ? t("common.filteredArtistsCount", { count: visibleArtists.length, total: artists.length }) : t("localBrowser.artistsCount", { count: visibleArtists.length })
               : viewMode === "years" || viewMode === "genres"
                 ? t("localBrowser.albumsCount", { count: scopedAlbums.length })
                 : localLibraryPathLabel(currentPath, sourceOptions) || t("localBrowser.root");
@@ -883,6 +902,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 
   return (
     <main className="flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)] select-none">
+      {queueActions.notice}{queueActions.menu}
       {detailUnavailable && <div role="status" className="space-y-3 p-6 text-sm text-[color:var(--theme-fg-secondary,#BBBBBB)]">
         <p>{t("explore.detailUnavailable")}</p>
         <button type="button" disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)}
@@ -942,7 +962,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               }`}
             >
               <Icon size={14} />
-              <span>{label}</span>
+              <span>{label} {catalog.loaded && !catalog.error && tabCounts[mode] !== null && <span className="tabular-nums opacity-75">({tabCounts[mode]})</span>}</span>
             </button>
           ))}
         </div>
@@ -1195,10 +1215,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   {catalogConfirmed && trackState.albumId === selectedAlbum.id && trackState.phase === "error" ? trackState.error : t(catalogConfirmed && trackState.phase === "loading" ? "localBrowser.loadingTracks" : "localBrowser.waitingTracks")}
                 </div>
               )}
-              <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[color:var(--theme-fg-muted,#666666)] uppercase tracking-wider bg-[var(--theme-surface-panel,#181818)]">
-                <span className="col-span-1 text-center">#</span>
-                <span className="col-span-8">{t("plex.tracks")}</span>
-                <span className="col-span-3 text-right flex items-center justify-end space-x-1">
+              <div className="grid grid-cols-[2rem_minmax(0,1fr)_auto] px-4 py-2.5 text-[11px] font-bold text-[color:var(--theme-fg-muted,#666666)] uppercase tracking-wider bg-[var(--theme-surface-panel,#181818)]">
+                <span className="text-center">#</span>
+                <span className="min-w-0">{t("plex.tracks")}</span>
+                <span className="text-right flex items-center justify-end space-x-1">
                   <Clock size={12} />
                   <span>{t("localBrowser.duration")}</span>
                 </span>
@@ -1215,17 +1235,18 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     <div
                       key={track.path}
                       onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks, section.startIndex + idx)}
+                      onContextMenu={event => queueActions.open(event, queueRequest(track, selectedAlbum))}
                   aria-disabled={!isPlaybackAvailable}
-                  className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
+                  className={`grid grid-cols-[2rem_minmax(0,1fr)_auto] px-4 py-3 text-xs items-center transition-colors group ${
                     isPlaybackAvailable
                       ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                       : "opacity-60 cursor-not-allowed"
                   }`}
                 >
-                  <span className="col-span-1 text-center font-mono text-[color:var(--theme-fg-muted,#666666)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
+                  <span className="text-center font-mono text-[color:var(--theme-fg-muted,#666666)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
                     {idx + 1}
                   </span>
-                  <div className="col-span-8 flex flex-col pr-2">
+                  <div className="min-w-0 flex flex-col pr-2">
                     <span className="font-semibold text-[color:var(--theme-fg-primary,#ffffff)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate">
                       {track.title || track.name}
                     </span>
@@ -1233,7 +1254,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       {track.artist || selectedAlbum.artist}
                     </span>
                   </div>
-                  <div className="col-span-3 flex items-center justify-end gap-3">
+                  <div className="flex items-center justify-end gap-1.5">
                     <span className="font-mono text-[color:var(--theme-fg-muted,#888888)]">
                       {formatDuration(track.duration)}
                     </span>
@@ -1248,6 +1269,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     >
                       <ListPlus size={15} />
                     </button>
+                    {queueActions.trigger(queueRequest(track, selectedAlbum))}
                     <button type="button" disabled={!catalogInspectionAllowed} onClick={(event) => { event.stopPropagation(); setFileInfoTrack({ track: track, catalog: localAlbumCatalog.getSnapshot() }); }}
                       title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: track.title || track.name })}
                       className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
@@ -1527,6 +1549,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   return (
                     <div
                       key={item.path}
+                      onContextMenu={isDir ? undefined : event => queueActions.open(event, queueRequest(item))}
                       onClick={() => {
                         if (isDir) {
                           setCurrentPath(item.path);
@@ -1578,6 +1601,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                           >
                             <ListPlus size={15} />
                           </button>
+                          {queueActions.trigger(queueRequest(item))}
                           <button type="button" disabled={!catalogInspectionAllowed} onClick={(event) => { event.stopPropagation(); setFileInfoTrack({ track: item, catalog: localAlbumCatalog.getSnapshot() }); }}
                             title={t("fileInfo.title")} aria-label={t("fileInfo.forTrack", { title: item.title || item.name })}
                             className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]">

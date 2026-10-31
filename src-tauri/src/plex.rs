@@ -1389,6 +1389,20 @@ mod tests {
         assert!(!serialized.contains("route.invalid"));
     }
 
+    #[test]
+    fn queue_album_identity_uses_only_safe_optional_pms_parent_without_rejecting_tracks() {
+        let client = media_client_for_test(&manager_config("http://route.invalid", Some("server-1")));
+        let connection = ResolvedPlexConnection { server_id: "server-1".into(), base_url: "http://route.invalid".into(), token: "123456".into(), generation: 0 };
+        let mut item = serde_json::json!({"ratingKey":"track-1","title":"Synthetic", "Media":[{"Part":[{"key":"/library/parts/1/file.flac"}]}]});
+        for (parent, expected) in [(serde_json::json!("42"), Some("42")), (serde_json::Value::Null, None), (serde_json::json!("../42"),None), (serde_json::json!("42?token=private"),None), (serde_json::json!("123456"),None)] {
+            item["parentRatingKey"] = parent;
+            let track = client.parse_track_item(&connection, &item).unwrap();
+            assert_eq!(track.album_rating_key.as_deref(), expected);
+            let dto = serde_json::to_string(&track).unwrap();
+            assert!(!dto.contains("123456") && !dto.contains("private"));
+        }
+    }
+
     fn navigation_metadata() -> serde_json::Value {
         serde_json::json!({"MediaContainer": {"Metadata": [{
             "type": "track", "ratingKey": "track-1",
@@ -3347,6 +3361,8 @@ pub struct PlexCollection {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlexTrack {
     pub rating_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_rating_key: Option<String>,
     pub title: String,
     pub album_title: Option<String>,
     pub artist: Option<String>,
@@ -3975,6 +3991,7 @@ impl PlexClient {
         else {
             return match locator {
                 MediaLocator::Local { uri } => Ok(uri.clone()),
+                MediaLocator::Upnp { session_id } => crate::upnp_bridge::resolve(session_id),
                 MediaLocator::Plex { .. } => unreachable!(),
             };
         };
@@ -4065,6 +4082,7 @@ impl PlexClient {
         let part_key = part["key"].as_str().filter(|key| !key.is_empty())?;
 
         Some(PlexTrack {
+            album_rating_key: item["parentRatingKey"].as_str().filter(|key| navigation_rating_key(key) && (connection.token.is_empty() || !key.contains(&connection.token))).map(str::to_owned),
             audio_info: source_info::track_file_info(item, &rating_key, part_key),
             rating_key: rating_key.clone(),
             title,

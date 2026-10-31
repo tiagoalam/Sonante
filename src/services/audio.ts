@@ -94,6 +94,14 @@ export const audioService = {
   },
   setSharedMute: (request: {muted:boolean;token:string}): Promise<void> => invoke<void>("set_shared_mute", request),
   setVolume: (volume: number): Promise<void> => invoke<void>("set_volume", { volume }),
+  enqueueTracks: async (tracks: TrackMetadata[], placement: "next" | "end", intent: PlaybackIntent): Promise<number> => {
+    const token = await playbackIntentToken(intent);
+    return runLocalSourceRead.control(() => {
+      if (!intent.current()) throw "PLAYBACK_SUPERSEDED";
+      // Insertion does not open the DAC or request Direct gain-policy changes.
+      return invoke<number>("enqueue_tracks", { tracks, placement, intent: token });
+    });
+  },
   getQueue: (): Promise<TrackMetadata[]> => invoke<TrackMetadata[]>("get_queue"),
   playQueueIndex: async (index: number, intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> => requestedPlayback<void>("play_queue_index", { index },intent),
   clearQueue: async (intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> => {
@@ -123,6 +131,8 @@ export const audioService = {
     if (!observation) throw new Error("LOCAL_SOURCE_AVAILABILITY_UNCONFIRMED");
     return observation;
   }),
+  searchLocalTracks: (query: string): Promise<{ tracks: LocalItem[]; limited: boolean }> =>
+    runLocalSourceRead(() => invoke<{ tracks: LocalItem[]; limited: boolean }>("search_local_tracks", { query })),
   getLocalAlbums: (): Promise<LocalAlbum[]> => runLocalSourceRead(() => invoke<LocalAlbum[]>("get_local_albums")),
   getLocalAlbumTracks: (albumId: string): Promise<LocalAlbumDiscTracks[]> =>
     invoke<LocalAlbumDiscTracks[]>("get_local_album_tracks", { albumId }),

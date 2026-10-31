@@ -1,3 +1,5 @@
+import { passiveQueueInsertion } from "./support/passiveQueueInsertion.mjs";
+import * as queuePresentationHelpers from "../src/utils/queuePresentation.ts";
 import { LocalPlaybackThumbnail } from "../src/utils/localPlaybackThumbnail.ts";
 import { createLocalCoverBatch } from "../src/utils/localCoverBatch.ts";
 import { createLocalSourceReadQueue } from "../src/utils/localSourceReadQueue.ts";
@@ -18,7 +20,7 @@ import { routeConditions } from '../src/utils/routeConditions.ts';
 import { signalPathInformation, requiresDeviceVolumeControl } from '../src/utils/signalPath.ts';
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(l=>[l,{translation:JSON.parse(readFileSync(new URL(`../src/locales/${l}.json`,import.meta.url)))}]))});
 globalThis.window={localStorage:{getItem:()=>null,setItem(){}},screen:{availWidth:1920,availHeight:1040},crypto:{randomUUID:()=> 'synthetic-session'},setTimeout,clearTimeout,addEventListener(){},removeEventListener(){}};
-const dependencies={'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
+const dependencies={...passiveQueueInsertion,'../utils/queuePresentation':queuePresentationHelpers,'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
 const compile=(file,extra={})=>{const js=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',js)(name=>{assert.ok(name in extra||name in dependencies,name);return extra[name]??dependencies[name];},ex);return ex;};
 dependencies['./PlexImage']={PlexImage:({alt,className})=>React.createElement('div',{'data-plex-artwork':true,'aria-label':alt,className})};
 dependencies['./TrackArtwork']=compile('components/TrackArtwork.tsx');
@@ -56,7 +58,7 @@ test('unavailable playback disables seek, transport and volume and shows neutral
 test('virtual queue shares artwork/actions and retains duplicate positions/current paused identity',async()=>{
  const local={title:'Duplicated song',artist:'Artist',media_locator:{kind:'local',uri:'same.flac'}};
  let stateIndex=0;const calls=[],states=[{items:[local,local],phase:'ready'},{top:0,height:480},false,false];
- const hooks={...React,default:React,useState:initial=>[states[stateIndex++]??initial,()=>{}],useEffect(){},useRef:initial=>({current:initial})};
+ const hooks={...React,default:React,useState:initial=>[states[stateIndex++]??initial,()=>{}],useEffect(){},useLayoutEffect(){},useId:()=> "queue-filter-test",useMemo:fn=>fn(),useRef:initial=>({current:initial})};
  const {NowPlayingQueue}=compile('components/NowPlayingQueue.tsx',{'react':hooks,'../services/audio':{audioService:{getQueue:async()=>{calls.push('read');return[local,local];},playQueueIndex:async index=>calls.push(['play',index]),clearQueue:async()=>calls.push('clear')}}});
  const tree=NowPlayingQueue({open:true,available:true,status:{...snapshot.playback,state:'pause',current_media:{kind:'local',uri:'same.flac',queue_index:1}}});
  const rows=nodes(tree,n=>n.type==='li');assert.equal(rows.length,2);assert.equal(rows[0].props['aria-current'],undefined);assert.equal(rows[1].props['aria-current'],'true');assert.equal(rows[1].props['aria-posinset'],2);assert.deepEqual(calls,[]);
@@ -265,7 +267,7 @@ test('late readiness listener registration after timeout is immediately cleaned,
 });
 test('queue clear failure stays visible and preserves the displayed items',async()=>{
  const local={title:'Preserved',artist:'Artist',media_locator:{kind:'local',uri:'fixture.flac'}};let cursor=0;const slots=[{items:[local],phase:'ready'},{top:0,height:480},false,false],refs=[];
- const hooks={...React,default:React,useState:initial=>{const i=cursor++;if(!(i in slots))slots[i]=initial;return[slots[i],v=>slots[i]=v];},useEffect(){},useRef:initial=>{const i=cursor++;return refs[i]??={current:initial};}};
+ const hooks={...React,default:React,useState:initial=>{const i=cursor++;if(!(i in slots))slots[i]=initial;return[slots[i],v=>slots[i]=v];},useEffect(){},useLayoutEffect(){},useId:()=> 'queue-filter-test',useMemo:fn=>fn(),useRef:initial=>{const i=cursor++;return refs[i]??={current:initial};}};
  const {NowPlayingQueue}=compile('components/NowPlayingQueue.tsx',{'react':hooks,'../services/audio':{audioService:{clearQueue:async()=>{throw Error('private backend message');}}}});
  const render=()=>{cursor=0;return NowPlayingQueue({open:true,available:true,status:snapshot.playback});};let tree=render();nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('queue.clear'))[0].props.onClick();await flush();tree=render();assert.equal(slots[0].items[0],local);const alerts=nodes(tree,n=>n.props?.role==='alert');assert.equal(alerts.length,1);assert.equal(alerts[0].props.children,i18n.t('nowPlaying.queueActionFailed'));
 });
@@ -340,7 +342,7 @@ test('recovered current Local artwork reaches PlayerBar, both Now Playing hosts 
  }
  const items=[{title:'One',artist:'Fixture',album:'Album',uri:'Source/Album/one.flac',thumb:null},{title:'Plex',artist:'Fixture',album:'Other',media_locator:{kind:'plex',server_id:'s',part_key:'p'},plex_image:{server_id:'s',path:'/thumb'}}];
  const before=structuredClone(items);let state=0;
- const queueHooks={...hooks,useState:v=>[[{items,phase:'ready'},{top:0,height:600},false,false][state++]??v,()=>{}]};
+ const queueHooks={...hooks,useId:()=> "queue-filter-test",useLayoutEffect(){},useMemo:fn=>fn(),useState:v=>[[{items,phase:'ready'},{top:0,height:600},false,false][state++]??v,()=>{}]};
  const {NowPlayingQueue}=compile('components/NowPlayingQueue.tsx',{'react':queueHooks,'../services/audio':{audioService:{}}});
  const queue=NowPlayingQueue({open:true,available:true,status:current});const art=nodes(queue,n=>n.type===dependencies['./TrackArtwork'].TrackArtwork);
  assert.equal(art[0].props.track.thumb,cover);assert.equal(art[1].props.track,items[1]);assert.deepEqual(items,before);

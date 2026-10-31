@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import ts from 'typescript';
 import {createMainSectionPreference} from '../src/utils/appBootstrap.ts';
+import {exploreSourceFor} from '../src/utils/exploreNavigation.ts';
 const root=process.env.SONANTE_NAV_BASE??new URL('../',import.meta.url).pathname;
 const source=readFileSync(root+'/src/App.tsx','utf8');
 const ast=ts.createSourceFile('App.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
@@ -16,6 +17,7 @@ function setup(origin,target=null){
  const returnRef={current:origin};
  const section=()=>evaluate(initializer('centralSection'),{mediaSource:ctx.section,playerReturnSection:ctx.target?origin:null,eqReturnSectionRef:returnRef});
  const env={mediaSource:'equalizer',playerTarget:target,centralSection:origin,eqReturnSectionRef:returnRef,eqReturnViewRef:{current:true},setLocalSubview:v=>ctx.subview=v,changePlayerLocalSubview:v=>ctx.playerSubview=v,resetAllNavigation:()=>{ctx.reset++;ctx.target=null},mainSectionPreference:pref};
+ env.navigateExplore=evaluate(initializer('navigateExplore'),{...env,exploreSource:'local',exploreSources:['local','plex'],exploreSourceFor,setExploreSource:v=>ctx.exploreSource=v,setPlexArea:v=>ctx.plexArea=v});
  ctx.section='equalizer';return {ctx,env,section,saved};
 }
 test('actual Local handler exits EQ from Local/Explore/Plex/Playlists; Local return retains context',()=>{

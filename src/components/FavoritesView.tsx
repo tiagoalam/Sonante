@@ -8,8 +8,6 @@ import {
   Play,
   Disc3,
   Search,
-  HardDrive,
-  Server,
   ArrowLeft,
   Clock,
   AlertTriangle,
@@ -22,6 +20,7 @@ import { audioService } from "../services/audio";
 import { plexService } from "../services/plex";
 import { PlexImage } from "./PlexImage";
 import { PlaylistPickerModal } from "./PlaylistPickerModal";
+import { LibrarySourceTabs } from "./LibrarySourceTabs";
 import type { NewPlaylistItem } from "../types/playlist";
 
 
@@ -166,9 +165,9 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
   );
 
   return (
-    <main className="flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)] select-none">
+    <main className="min-h-0 min-w-0 flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)] select-none">
       <PlaybackRequestNotice failure={request.failure} />
-      <div className="flex items-center justify-between p-8 pb-4 border-b border-[color:var(--theme-border-soft,#222222)]">
+      <div className="flex shrink-0 items-center justify-between p-8 pb-4 border-b border-[color:var(--theme-border-soft,#222222)]">
         <div className="flex items-center space-x-3">
           {selectedAlbum && (
             <button
@@ -205,43 +204,17 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
                 className="w-full bg-[var(--theme-surface-panel,#1A1A1A)] border border-[color:var(--theme-border-soft,#2B2B2B)] rounded-lg pl-9 pr-3 py-1.5 text-xs text-[color:var(--theme-fg-primary,#ffffff)] placeholder-[color:var(--theme-fg-muted,#666666)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)] transition-colors"
               />
             </div>
-
-            <div className="flex bg-[var(--theme-surface-raised,#1E1E1E)] p-1 rounded-lg border border-[color:var(--theme-border-soft,#333333)]">
-              <button
-                onClick={() => {
-                  setActiveTab("local");
-                  closeAlbum();
-                }}
-                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
-                  activeTab === "local"
-                    ? "bg-[#E5A00D] text-black shadow"
-                    : "text-[color:var(--theme-fg-secondary,#999999)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
-                }`}
-              >
-                <HardDrive size={13} />
-                <span>{t("favorites.tabLocal")}</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setActiveTab("plex");
-                  closeAlbum();
-                }}
-                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all cursor-pointer ${
-                  activeTab === "plex"
-                    ? "bg-[#E5A00D] text-black shadow"
-                    : "text-[color:var(--theme-fg-secondary,#999999)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
-                }`}
-              >
-                <Server size={13} />
-                <span>{t("favorites.tabPlex")}</span>
-              </button>
-            </div>
           </div>
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto p-8">
+      {!selectedAlbum && <LibrarySourceTabs source={activeTab} idPrefix="favorites-source"
+        label={t("favorites.sourceTabs")} labels={{ local: `${t("favorites.tabLocal")}${loading ? "" : ` (${favorites.filter(item => item.source === "local" && item.id).length})`}`, plex: `${t("favorites.tabPlex")}${loading ? "" : ` (${favorites.filter(item => item.source === "plex" && item.id).length})`}` }}
+        onChange={source => { setActiveTab(source); closeAlbum(); }} />}
+
+      <div id={!selectedAlbum ? "favorites-source-panel" : undefined} role={!selectedAlbum ? "tabpanel" : undefined}
+        aria-labelledby={!selectedAlbum ? `favorites-source-${activeTab}` : undefined}
+        className="flex-1 overflow-y-auto p-8">
         {selectedAlbum ? (
           <div className="space-y-8 animate-in fade-in duration-100">
             <div className="flex items-end space-x-6">

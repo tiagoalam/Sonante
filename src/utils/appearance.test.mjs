@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';import {createAppearance,APPEARANCE_KEY,APPEARANCE_CHANGED,APPEARANCE_REQUEST} from './appearance.ts';
+import {readFileSync} from 'node:fs';import {createAppearance,APPEARANCES,appearanceScheme,APPEARANCE_KEY,APPEARANCE_CHANGED,APPEARANCE_REQUEST} from './appearance.ts';
 const flush=async()=>{for(let i=0;i<30;i++)await Promise.resolve()};
 const record=(value,counter=1,origin='fixture')=>({version:1,value,revision:{counter,origin}});
 function fixture(raw=null,extra={}){let saved=raw;const applied=[],handlers=new Set();const storage={getItem:()=>saved,setItem:(k,v)=>{assert.equal(k,APPEARANCE_KEY);saved=v}};const env={origin:'fixture',storage:()=>storage,apply:v=>applied.push(v),onStorage:fn=>{handlers.add(fn);return()=>handlers.delete(fn)},...extra};return {env,applied,handlers,store:createAppearance(env),raw:()=>saved};}
@@ -30,6 +30,12 @@ test('bootstrap and appearance service have no audio/catalog/config commands or 
 test('pre-paint HTML uses the same validation as the model, including storage failures',()=>{
  const html=readFileSync(new URL('../../index.html',import.meta.url),'utf8');const boot=html.match(/<script>([\s\S]*?)<\/script>/)[1];assert.ok(html.indexOf('<script>')<html.indexOf('type="module"'));
  for(const raw of [null,'bad','"light"',JSON.stringify(record('light')),JSON.stringify(record('dark')),JSON.stringify(record('system')),JSON.stringify(record('light',-1)),JSON.stringify(record('light',1,'bad origin')),JSON.stringify({...record('light'),version:2})]){
-  const f=fixture(raw),doc={documentElement:{dataset:{},style:{}}};new Function('localStorage','document',boot)({getItem:()=>raw},doc);assert.equal(doc.documentElement.dataset.theme,f.store.getSnapshot());assert.equal(doc.documentElement.style.colorScheme,f.store.getSnapshot());
+  const f=fixture(raw),doc={documentElement:{dataset:{},style:{}}};new Function('localStorage','document',boot)({getItem:()=>raw},doc);assert.equal(doc.documentElement.dataset.theme,f.store.getSnapshot());assert.equal(doc.documentElement.style.colorScheme,appearanceScheme(f.store.getSnapshot()));
  }const doc={documentElement:{dataset:{},style:{}}};new Function('localStorage','document',boot)({getItem(){throw Error('blocked')}},doc);assert.equal(doc.documentElement.dataset.theme,'dark');
+});
+
+test('all six palettes persist, synchronize and bootstrap with a valid native color scheme', () => {
+ const html=readFileSync(new URL('../../index.html',import.meta.url),'utf8'); const boot=html.match(/<script>([\s\S]*?)<\/script>/)[1];
+ assert.equal(APPEARANCES.length,6);
+ for(const theme of APPEARANCES){const f=fixture();f.store.start();f.store.set(theme);const doc={documentElement:{dataset:{},style:{}}};new Function('localStorage','document',boot)({getItem:()=>f.raw()},doc);assert.equal(doc.documentElement.dataset.theme,theme);assert.equal(doc.documentElement.style.colorScheme,appearanceScheme(theme));assert.equal(fixture(f.raw()).store.getSnapshot(),theme);}
 });
