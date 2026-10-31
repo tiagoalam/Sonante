@@ -16,6 +16,12 @@ use std::time::{Duration, Instant};
 pub enum QueueInsertPlacement { Next, End }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QueueEditSnapshot { pub tracks: Vec<TrackMetadata>, pub revision: String }
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QueueEditAction { Move { from: usize, to: usize }, Next { index: usize }, Remove { index: usize } }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AudioDevice {
     pub id: String,
     pub name: String,
@@ -24,6 +30,7 @@ pub struct AudioDevice {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MediaLocator {
+    Radio { station_id: String },
     Upnp { session_id: String },
     Local {
         uri: String,
@@ -41,6 +48,7 @@ pub enum MediaLocator {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CurrentMedia {
+    Radio { station_id: String, queue_index: usize },
     Upnp { session_id: String, queue_index: usize },
     Local {
         uri: String,
@@ -370,7 +378,14 @@ impl PlaybackDiagnostic {
     fn from_mpd_error(error: &str) -> Self {
         // Match ALSA output context AND a known terminal error, not arbitrary
         // "busy" / "not found" text which could describe a media source.
-        if error.contains("Sonante Direct strict:") { return Self::FormatUnsupported; }
+        // A prefix alone is not evidence of a format refusal (it may even be
+        // media metadata). Only known terminal reasons from the strict engine
+        // qualify; all other errors retain a cause-neutral playback code.
+        if error.rsplit_once("Sonante Direct strict: ").is_some_and(|(context, reason)| {
+            (context.is_empty() || context.ends_with(": ")) && matches!(reason,
+                "unsupported sample format" | "unsupported channel count" | "unsupported sample rate"
+                | "forced output format is incompatible" | "allowed_formats is incompatible")
+        }) { return Self::FormatUnsupported; }
         let alsa_open = error.contains("Failed to open ALSA device ");
         if alsa_open && error.ends_with(": Device or resource busy") {
             Self::OutputBusy
@@ -1602,6 +1617,7 @@ impl AudioEngine {
         let track = self.queue.get(queue_index)?;
 
         match &track.media_locator {
+            Some(MediaLocator::Radio { station_id }) => Some(CurrentMedia::Radio { station_id: station_id.clone(), queue_index }),
             Some(MediaLocator::Upnp { session_id }) => Some(CurrentMedia::Upnp { session_id: session_id.clone(), queue_index }),
             Some(MediaLocator::Plex {
                 server_id,
@@ -2681,7 +2697,7 @@ impl AudioEngine {
         resume: Option<&PlaybackResumeSnapshot>,
     ) -> Result<Vec<u8>, String> {
         if queue.iter().any(|track| match &track.media_locator {
-            Some(MediaLocator::Plex { .. } | MediaLocator::Upnp { .. }) => false,
+            Some(MediaLocator::Plex { .. } | MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }) => false,
             Some(MediaLocator::Local { uri }) => {
                 Self::contains_plex_token(uri) || Self::contains_plex_token(&track.uri)
             }
@@ -2690,14 +2706,14 @@ impl AudioEngine {
             return Err("Cache da fila contém uma URI autenticada inválida.".to_string());
         }
         let durable_resume = resume.filter(|cursor| cursor.valid_for(queue.len())
-            && !matches!(queue[cursor.queue_index].media_locator, Some(MediaLocator::Upnp { .. })))
+            && !matches!(queue[cursor.queue_index].media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. })))
             .map(|cursor| PlaybackResumeSnapshot {
-                queue_index: queue[..cursor.queue_index].iter().filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. }))).count(),
+                queue_index: queue[..cursor.queue_index].iter().filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }))).count(),
                 elapsed: cursor.elapsed, state: cursor.state,
             });
         let tracks = queue
             .iter()
-            .filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. })))
+            .filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. })))
             .map(|track| PersistedTrackRef {
                 title: &track.title,
                 artist: &track.artist,
@@ -2735,7 +2751,7 @@ impl AudioEngine {
                 changed |= Self::sanitize_track_artwork(&mut track);
                 changed |= track.thumb.take().is_some();
                 match &track.media_locator {
-                    Some(MediaLocator::Upnp { .. }) => { changed = true; None },
+                    Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }) => { changed = true; None },
                     Some(MediaLocator::Plex {
                         server_id,
                         part_key,
@@ -4129,6 +4145,19 @@ impl AudioEngine {
         Ok(())
     }
 
+    pub(crate) fn stop_radio(&mut self, station_id: &str) -> Result<(), String> {
+        let socket = self.socket_path.clone(); let gate = self.direct_playback.clone();
+        self.stop_radio_with_io(station_id, |command| Self::send_with_gate(&socket, gate.as_deref(), command))
+    }
+    fn stop_radio_with_io(&mut self, station_id: &str, send: impl FnMut(&str) -> Result<Vec<String>, String>) -> Result<(), String> {
+        self.note_eq_intervention(); self.ensure_startup_queue_ready()?;
+        let send = std::cell::RefCell::new(send);
+        let status = self.get_status_with_io(false, false, |_| None, |command| send.borrow_mut()(command)).map_err(|_| "RADIO_PLAYBACK_UNAVAILABLE")?;
+        if !matches!(status.current_media, Some(CurrentMedia::Radio { station_id: current, .. }) if current == station_id) { return Err("RADIO_STATION_CHANGED".into()); }
+        let stopped = send.borrow_mut()("stop");
+        stopped.map(|_| ()).map_err(|_| "RADIO_PLAYBACK_UNAVAILABLE".into())
+    }
+
     pub(crate) fn stop_upnp(&mut self) -> Result<(), String> {
         self.note_eq_intervention(); self.invalidate_playback_intents();
         self.send_command("stop").map(|_| ())
@@ -4174,7 +4203,7 @@ impl AudioEngine {
         Self::validate_queue_insert_tracks(&tracks)?;
         // The receiver currently owns a single-item session. Do not invalidate
         // that established UPnP contract by extending its queue behind its back.
-        if self.queue.iter().any(|track| matches!(track.media_locator, Some(MediaLocator::Upnp { .. }))) {
+        if self.queue.iter().any(|track| matches!(track.media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }))) {
             return Err("QUEUE_INSERT_UPNP_ACTIVE".into());
         }
         if tracks.len() != uris.len() { return Err("QUEUE_INSERT_INVALID".into()); }
@@ -4235,6 +4264,87 @@ impl AudioEngine {
         Ok(count)
     }
 
+    fn queue_edit_guard(&self) -> Result<(), String> {
+        self.ensure_queue_structure_available()?; self.ensure_startup_queue_ready()?; self.ensure_queue_persisted()?;
+        if self.queue.iter().any(|track| matches!(track.media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }))) { return Err("QUEUE_INSERT_UPNP_ACTIVE".into()); }
+        Ok(())
+    }
+    fn queue_revision(status: &MpdQueueStatus, entries: &[MpdQueueEntry]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new(); hash.update(status.playlist_version.to_le_bytes());
+        for entry in entries { hash.update(entry.id.to_le_bytes()); hash.update((entry.uri.len() as u64).to_le_bytes()); hash.update(entry.uri.as_bytes()); }
+        format!("q1:{:x}", hash.finalize())
+    }
+    fn queue_edit_alignment(&mut self, entries: &[MpdQueueEntry]) -> Result<(), String> {
+        if entries.len() != self.queue.len() || self.queue.iter().zip(entries).any(|(track, entry)| match &track.media_locator {
+            Some(MediaLocator::Local { uri }) => uri != &entry.uri, None => track.uri != entry.uri, _ => false,
+        }) { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        Ok(())
+    }
+    pub(crate) fn queue_edit_snapshot(&mut self) -> Result<QueueEditSnapshot, String> {
+        self.queue_edit_guard()?;
+        let socket = self.socket_path.clone(); let gate = self.direct_playback.clone();
+        let (status, entries) = Self::queue_insert_snapshot(&mut |cmd| Self::send_with_gate(&socket, gate.as_deref(), cmd))?;
+        self.queue_edit_alignment(&entries)?;
+        Ok(QueueEditSnapshot { tracks: self.queue.clone(), revision: Self::queue_revision(&status, &entries) })
+    }
+    pub(crate) fn edit_queue(&mut self, revision: &str, action: QueueEditAction) -> Result<(), String> {
+        self.note_eq_intervention();
+        let socket = self.socket_path.clone(); let gate = self.direct_playback.clone();
+        self.edit_queue_with_io(revision, action, |cmd| Self::send_with_gate(&socket, gate.as_deref(), cmd), |audio| audio.save_queue_cache())
+    }
+    fn edit_queue_with_io(&mut self, revision: &str, action: QueueEditAction,
+        mut send: impl FnMut(&str) -> Result<Vec<String>, String>, mut persist: impl FnMut(&Self) -> Result<(), String>) -> Result<(), String> {
+        self.queue_edit_guard()?;
+        let (before, entries) = Self::queue_insert_snapshot(&mut send)?;
+        self.queue_edit_alignment(&entries)?;
+        if Self::queue_revision(&before, &entries) != revision { return Err("QUEUE_EDIT_CHANGED".into()); }
+        let cursor = before.current_index.or_else(|| self.restored_resume.as_ref().map(|s| s.queue_index));
+        let (index, destination) = match action {
+            QueueEditAction::Move { from, to } => (from, Some(to)),
+            QueueEditAction::Next { index } => (index, Some(match cursor {
+                Some(current) if current == index => index,
+                Some(current) => if index < current { current } else { current + 1 }, None => 0,
+            })),
+            QueueEditAction::Remove { index } => (index, None),
+        };
+        let selected = entries.get(index).ok_or("QUEUE_EDIT_CHANGED")?;
+        if destination.is_some_and(|to| to >= entries.len()) { return Err("QUEUE_EDIT_CHANGED".into()); }
+        if destination.is_none() && before.current_index == Some(index) && before.state != PlaybackState::Stopped { return Err("QUEUE_EDIT_CURRENT".into()); }
+        if destination == Some(index) { return Ok(()); }
+        let resume_id = self.restored_resume.as_ref().and_then(|s| entries.get(s.queue_index)).map(|entry| entry.id);
+        let mut expected = entries.clone(); let removed = expected.remove(index);
+        let mut queue = self.queue.clone(); let track = queue.remove(index);
+        let command = if let Some(to) = destination { expected.insert(to, removed); queue.insert(to, track); format!("moveid {} {to}", selected.id) }
+            else { format!("deleteid {}", selected.id) };
+        for (pos, entry) in expected.iter_mut().enumerate() { entry.pos = pos; }
+        if let Err(error) = send(&command) {
+            if crate::direct_playback::is_admission_refusal(&error) { return Err(error); }
+            self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+        }
+        let proof = (|| {
+            let (after, actual) = Self::queue_insert_snapshot(&mut send).map_err(|_| ())?;
+            if actual != expected || (before.state != PlaybackState::Playing && before.state != after.state) { return Err(()); }
+            if before.state != PlaybackState::Playing {
+                if let Some(old) = before.current_index.and_then(|i| entries.get(i)).filter(|old| expected.iter().any(|e| e.id == old.id)) {
+                    let current = after.current_index.and_then(|i| actual.get(i)).ok_or(())?;
+                    if old.id != current.id || (before.elapsed - after.elapsed).abs() > 0.25 { return Err(()); }
+                }
+            }
+            Ok(())
+        })();
+        if proof.is_err() { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        self.queue = queue;
+        if let Some(saved) = &mut self.restored_resume {
+            if let Some(pos) = resume_id.and_then(|id| expected.iter().position(|entry| entry.id == id)) { saved.queue_index = pos; }
+            else { self.restored_resume = None; }
+        }
+        self.cache_persistence_pending = true;
+        persist(self).map_err(|_| "PLAYBACK_PERSISTENCE_FAILED".to_string())?;
+        self.cache_persistence_pending = false;
+        Ok(())
+    }
+
     pub fn play_tracks(&mut self, tracks: Vec<TrackMetadata>, playback_uris: Vec<String>, start_index: usize) -> Result<(), String> {
         self.note_eq_intervention();
         let socket = self.socket_path.clone();
@@ -4272,7 +4382,7 @@ impl AudioEngine {
 
         for (track, playback_uri) in tracks.iter_mut().zip(&playback_uris) {
             Self::sanitize_track_artwork(track);
-            if track.thumb.is_none() {
+            if track.thumb.is_none() && !matches!(track.media_locator, Some(MediaLocator::Radio { .. })) {
                 track.thumb = self.resolve_cover(playback_uri);
             }
         }
@@ -4380,6 +4490,7 @@ impl AudioEngine {
         self.invalidate_playback_intents();
         if !self.queue_coherent { return self.send_command("pause 1").map(|_| ()); }
         self.ensure_startup_queue_ready()?;
+        if self.queue.len() == 1 && matches!(self.queue[0].media_locator, Some(MediaLocator::Radio { .. })) { return self.send_command("stop").map(|_| ()); }
         if self.restored_resume.is_some() {
             return Ok(());
         }
@@ -4420,7 +4531,7 @@ impl AudioEngine {
         } else {
             let status = self.get_status()?;
             match status.state.as_str() {
-                "play" => return self.send_command("pause 1").map(|_| ()),
+                "play" => return self.send_command(if matches!(status.current_media, Some(CurrentMedia::Radio { .. })) { "stop" } else { "pause 1" }).map(|_| ()),
                 "pause" => self.send_command("pause 0")?,
                 _ => self.send_command("play")?,
             };
@@ -4780,6 +4891,7 @@ impl AudioEngine {
     }
 
     pub fn seek(&mut self, seconds: f64, is_shared: bool) -> Result<(), String> {
+        if self.queue.iter().any(|track| matches!(track.media_locator, Some(MediaLocator::Radio { .. }))) && matches!(self.get_telemetry_status()?.current_media, Some(CurrentMedia::Radio { .. })) { return Err("RADIO_LIVE_NOT_SEEKABLE".into()); }
         self.note_eq_intervention();
         let socket_path = self.socket_path.clone();
         let started = Instant::now();
@@ -4811,8 +4923,10 @@ impl AudioEngine {
     // Catalog backup validation compares that exact projection, not a claim
     // that the live remote stream can be reconstructed after process restart.
     pub(crate) fn durable_queue_tracks(&self) -> Vec<TrackMetadata> {
-        self.queue.iter().filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. }))).cloned().collect()
+        self.queue.iter().filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }))).cloned().collect()
     }
+
+    pub(crate) fn history_track(&self, status: &PlaybackStatus) -> Option<TrackMetadata> { crate::listening_history::observed_track(status, &self.queue) }
 
     pub fn get_queue(&self) -> Vec<TrackMetadata> {
         if self.queue_coherent { self.queue.clone() } else { Vec::new() }
@@ -5118,7 +5232,7 @@ impl AudioEngine {
                     let track = &self.queue[resume.queue_index];
                     let local_uri = match &track.media_locator {
                         Some(MediaLocator::Local { uri }) => Some(uri.as_str()),
-                        Some(MediaLocator::Plex { .. } | MediaLocator::Upnp { .. }) => None,
+                        Some(MediaLocator::Plex { .. } | MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }) => None,
                         None if !track.uri.starts_with("http://") && !track.uri.starts_with("https://") => Some(track.uri.as_str()),
                         None => None,
                     };
@@ -5152,7 +5266,7 @@ impl AudioEngine {
             }
             // SetAVTransportURI prepares a stopped queue without opening the DAC.
             // Keep that confirmed logical destination visible until Play arrives.
-            if queue.len() == 1 && matches!(queue[0].media_locator, Some(MediaLocator::Upnp { .. })) {
+            if queue.len() == 1 && matches!(queue[0].media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. })) {
                 let track = &queue[0];
                 return Ok(PlaybackStatus {
                     snapshot_consistent: true, processing: self.queue_coherent.then_some(processing), options, state,
@@ -5275,6 +5389,11 @@ impl AudioEngine {
             }
         }
 
+        if song_index.and_then(|i| queue.get(i)).is_some_and(|track| matches!(track.media_locator, Some(MediaLocator::Radio { .. }))) {
+            duration = 0.0;
+            if !tag_title.trim().is_empty() { title = tag_title.chars().filter(|c| !c.is_control()).take(300).collect(); }
+            if !tag_artist.trim().is_empty() { album = tag_artist.chars().filter(|c| !c.is_control()).take(200).collect(); }
+        }
         if title.is_empty() {
             title = if !tag_title.is_empty() {
                 tag_title
@@ -5293,7 +5412,8 @@ impl AudioEngine {
             album = tag_album;
         }
 
-        if self.queue_coherent && include_artwork && thumb.is_none() && !current_file.is_empty() {
+        if self.queue_coherent && include_artwork && thumb.is_none() && !current_file.is_empty()
+            && !song_index.and_then(|i| queue.get(i)).is_some_and(|track| matches!(track.media_locator, Some(MediaLocator::Radio { .. }))) {
             thumb = cover(&current_file);
         }
 
@@ -9509,6 +9629,122 @@ mod tests {
             assert!(!String::from_utf8(AudioEngine::encode_queue_cache(&audio.queue).unwrap()).unwrap().contains("synthetic"));Err("disk full".into())}).unwrap_err(),"PLAYBACK_PERSISTENCE_FAILED");
         assert!(audio.queue_coherent);assert_eq!(audio.queue.len(),2);assert!(audio.cache_persistence_pending);
         assert!(audio.enqueue_tracks_with_io(vec![qi_track("new/b.flac")],vec!["new/b.flac".into()],QueueInsertPlacement::End,|_|panic!("no duplicate retry"),|_|Ok(())).is_err());
+    }
+
+    #[test]
+    fn queue_edit_moves_exact_duplicate_ids_and_preserves_playing_paused_and_stopped_cursor() {
+        for state in ["play","pause","stop"] {
+            let mut audio=engine_with_track("Source/a.flac");audio.queue=vec![qi_track("Source/a.flac"),qi_track("Source/a.flac"),qi_track("Source/b.flac")];
+            let old=qi_entries(&[("Source/a.flac",10),("Source/a.flac",11),("Source/b.flac",12)]);
+            let before=qi_status(3,3,state,Some(0),13.);
+            let revision=AudioEngine::queue_revision(&AudioEngine::parse_mpd_queue_status(&before).unwrap(),&AudioEngine::parse_mpd_queue_entries(&old).unwrap());
+            let after=qi_status(4,3,state,Some(2),13.);
+            let mut script=qi_script(before,old,Ok(vec![]),after,qi_entries(&[("Source/a.flac",11),("Source/b.flac",12),("Source/a.flac",10)]));let mut commands=vec![];
+            audio.edit_queue_with_io(&revision,QueueEditAction::Move{from:0,to:2},|cmd|{commands.push(cmd.to_owned());script.pop_front().unwrap()},|_|Ok(())).unwrap();
+            assert_eq!(commands[3],"moveid 10 2"); assert_eq!(audio.queue[1].title,qi_track("Source/b.flac").title); assert!(script.is_empty());
+            assert!(!commands.iter().any(|c|c=="clear"||c.starts_with("play ")||c.starts_with("seek ")||c=="stop"));
+        }
+    }
+    #[test]
+    fn queue_edit_stale_revision_and_current_removal_refuse_without_effect() {
+        for mode in 0..3 {
+            let mut audio=engine_with_track("Source/a.flac");let status=qi_status(1,1,if mode==2{"play"}else{"pause"},Some(0),3.);let entries=qi_entries(&[("Source/a.flac",50)]);
+            let revision=if mode==0{"obsolete".into()}else{AudioEngine::queue_revision(&AudioEngine::parse_mpd_queue_status(&status).unwrap(),&AudioEngine::parse_mpd_queue_entries(&entries).unwrap())};
+            let mut script:std::collections::VecDeque<_>=vec![Ok(status.clone()),Ok(entries),Ok(status)].into();
+            let error=audio.edit_queue_with_io(&revision,QueueEditAction::Remove{index:0},|_|script.pop_front().expect("no effect"),|_|panic!("no cache change")).unwrap_err();
+            assert_eq!(error,if mode==0{"QUEUE_EDIT_CHANGED"}else{"QUEUE_EDIT_CURRENT"}); assert!(audio.queue_coherent);assert!(script.is_empty());
+        }
+    }
+    #[test]
+    fn queue_edit_remove_remaps_saved_resume_and_next_uses_actual_cursor() {
+        for next in [false,true] {
+            let mut audio=engine_with_track("Source/a.flac");audio.queue=vec![qi_track("Source/a.flac"),qi_track("Source/b.flac"),qi_track("Source/c.flac")];
+            audio.restored_resume=Some(PlaybackResumeSnapshot{queue_index:1,elapsed:32.,state:PlaybackState::Paused});
+            let before=qi_status(1,3,"stop",None,0.);let old=qi_entries(&[("Source/a.flac",10),("Source/b.flac",11),("Source/c.flac",12)]);
+            let revision=AudioEngine::queue_revision(&AudioEngine::parse_mpd_queue_status(&before).unwrap(),&AudioEngine::parse_mpd_queue_entries(&old).unwrap());
+            let expected=if next{vec![("Source/b.flac",11),("Source/a.flac",10),("Source/c.flac",12)]}else{vec![("Source/b.flac",11),("Source/c.flac",12)]};
+            let mut script=qi_script(before,old,Ok(vec![]),qi_status(2,expected.len(),"stop",None,0.),qi_entries(&expected));
+            let action=if next{QueueEditAction::Next{index:0}}else{QueueEditAction::Remove{index:0}};
+            audio.edit_queue_with_io(&revision,action,|_|script.pop_front().unwrap(),|_|Ok(())).unwrap();
+            assert_eq!(audio.restored_resume.unwrap().queue_index,0);
+        }
+    }
+    #[test]
+    fn queue_edit_partial_effect_or_unproved_identity_keeps_cache_and_blocks_replay() {
+        for ack in [false,true] {
+            let mut audio=engine_with_track("Source/a.flac");audio.queue.push(qi_track("Source/b.flac"));let original=audio.queue.clone();
+            let before=qi_status(1,2,"pause",Some(0),4.);let old=qi_entries(&[("Source/a.flac",10),("Source/b.flac",11)]);
+            let revision=AudioEngine::queue_revision(&AudioEngine::parse_mpd_queue_status(&before).unwrap(),&AudioEngine::parse_mpd_queue_entries(&old).unwrap());
+            let mut script=qi_script(before,old,if ack{Err("ACK private".into())}else{Ok(vec![])},qi_status(2,1,"play",Some(0),0.),qi_entries(&[("Source/a.flac",10)]));
+            assert_eq!(audio.edit_queue_with_io(&revision,QueueEditAction::Remove{index:1},|_|script.pop_front().unwrap(),|_|panic!("retain cache")).unwrap_err(),"PLAYBACK_QUEUE_UNCERTAIN");
+            assert_eq!(audio.queue,original);assert!(!audio.queue_coherent);
+            assert!(audio.edit_queue_with_io(&revision,QueueEditAction::Remove{index:1},|_|panic!("no replay"),|_|Ok(())).is_err());
+        }
+    }
+    #[test]
+    fn queue_edit_persistence_failure_keeps_proved_live_order_and_pending_guard() {
+        let mut audio=engine_with_track("Source/a.flac");audio.queue.push(qi_track("Source/b.flac"));
+        let before=qi_status(1,2,"play",Some(0),4.);let old=qi_entries(&[("Source/a.flac",10),("Source/b.flac",11)]);
+        let revision=AudioEngine::queue_revision(&AudioEngine::parse_mpd_queue_status(&before).unwrap(),&AudioEngine::parse_mpd_queue_entries(&old).unwrap());
+        let mut script=qi_script(before,old,Ok(vec![]),qi_status(2,1,"play",Some(0),5.),qi_entries(&[("Source/a.flac",10)]));
+        assert_eq!(audio.edit_queue_with_io(&revision,QueueEditAction::Remove{index:1},|_|script.pop_front().unwrap(),|_|Err("disk full".into())).unwrap_err(),"PLAYBACK_PERSISTENCE_FAILED");
+        assert!(audio.cache_persistence_pending);assert!(audio.queue_coherent);assert_eq!(audio.queue.len(),1);
+    }
+
+    fn radio_track_fixture() -> TrackMetadata {
+        TrackMetadata { title:"Synthetic Station".into(),artist:"Synthetic Station".into(),album:String::new(),thumb:None,plex_image:None,
+            media_locator:Some(MediaLocator::Radio{station_id:"rb:01234567-89ab-cdef-0123-456789abcdef".into()}),uri:"https://stream.fixture.invalid/live?credential=PRIVATE".into(),duration:None }
+    }
+    #[test]
+    fn radio_play_uses_escaped_url_only_after_admission_and_never_persists_live_source() {
+        let mut engine=engine_with_track("old.flac");let radio=radio_track_fixture();let uri=radio.uri.clone();let mut commands=vec![];let mut saved=vec![];
+        engine.play_tracks_with_io(vec![radio.clone()],vec![uri.clone()],0,|cmd|{commands.push(cmd.to_string());Ok(vec![])},|audio|{saved=AudioEngine::encode_queue_cache(&audio.queue)?;Ok(())}).unwrap();
+        assert_eq!(commands,vec![format!("command_list_begin\nclear\nadd {}\nplay 0\ncommand_list_end",AudioEngine::quote_mpd_argument(&uri).unwrap())]);
+        let cache=String::from_utf8(saved).unwrap();assert!(!cache.contains("PRIVATE"));assert!(!cache.contains("radio"));assert!(engine.durable_queue_tracks().is_empty());
+        let (migrated,changed)=AudioEngine::migrate_loaded_queue(vec![radio]);assert!(changed);assert!(migrated.is_empty());
+    }
+    #[test]
+    fn radio_ack_timeout_and_gate_refusal_never_publish_false_success_or_replay() {
+        for error in ["ACK private stream", "timeout"] {
+            let mut engine=engine_with_track("old.flac");let old=engine.queue.clone();let radio=radio_track_fixture();let mut sent=0;
+            assert_eq!(engine.play_tracks_with_io(vec![radio.clone()],vec![radio.uri],0,|_|{sent+=1;Err(error.into())},|_|panic!("no false cache")).unwrap_err(),"PLAYBACK_QUEUE_UNCERTAIN");
+            assert_eq!(sent,1);assert_eq!(engine.queue,old);assert!(!engine.queue_coherent);
+        }
+        let mut engine=engine_with_track("old.flac");engine.queue_structure_reserved.store(1,Ordering::SeqCst);
+        let radio=radio_track_fixture();assert!(engine.play_tracks_with_io(vec![radio.clone()],vec![radio.uri],0,|_|panic!("guard before transport"),|_|panic!("no cache")).is_err());
+    }
+    #[test]
+    fn radio_icy_metadata_is_live_bounded_and_never_queries_local_artwork() {
+        let mut engine=engine_with_track("old.flac");engine.queue=vec![radio_track_fixture()];
+        let status=engine.get_status_with_io(true,true,|_|panic!("radio must not read local artwork"),|cmd|Ok(if cmd=="status"{vec!["state: play","song: 0","songid: 19","elapsed: 12.0","duration: 999","audio: 44100:16:2"]}else{vec!["file: https://stream.fixture.invalid/live?credential=PRIVATE","Pos: 0","Id: 19","Title: Current Song","Artist: Current Artist"]}.into_iter().map(str::to_owned).collect())).unwrap();
+        assert_eq!(status.title,"Current Song");assert_eq!(status.artist,"Synthetic Station");assert_eq!(status.album,"Current Artist");assert_eq!(status.duration,0.);assert!(matches!(status.current_media,Some(CurrentMedia::Radio{queue_index:0,..})));
+        let stopped=engine.get_status_with_io(true,true,|_|panic!("no local cover"),|cmd|{assert_eq!(cmd,"status");Ok(vec!["state: stop".into()])}).unwrap();
+        assert_eq!(stopped.state,"stop");assert_eq!(stopped.title,"Synthetic Station");assert_eq!(stopped.duration,0.);assert!(matches!(stopped.current_media,Some(CurrentMedia::Radio{..})));
+    }
+    #[test]
+    fn radio_stop_is_idempotent_source_bound_and_reports_transport_failure_without_toggle() {
+        for mode in ["play","stopped","changed","ack"] {
+            let mut engine=engine_with_track("old.flac");let station_id="rb:01234567-89ab-cdef-0123-456789abcdef";engine.queue=vec![radio_track_fixture()];
+            let mut commands=vec![];
+            let result=engine.stop_radio_with_io(if mode=="changed"{"other"}else{station_id},|cmd|{commands.push(cmd.to_owned());match cmd {
+                "status" if mode=="stopped"=>Ok(vec!["state: stop".into()]),
+                "status"=>Ok(vec!["state: play".into(),"song: 0".into()]),
+                "currentsong"=>Ok(vec!["Pos: 0".into()]),
+                "stop" if mode=="ack"=>Err("private ACK".into()),"stop"=>Ok(vec![]),_=>panic!("unexpected transport"),
+            }});
+            assert!(!commands.iter().any(|c|c=="play"||c.starts_with("pause")||c.starts_with("seek")));
+            if mode=="changed"{assert_eq!(result.unwrap_err(),"RADIO_STATION_CHANGED");assert!(!commands.contains(&"stop".into()));}
+            else if mode=="ack"{assert_eq!(result.unwrap_err(),"RADIO_PLAYBACK_UNAVAILABLE");}
+            else{result.unwrap();assert_eq!(commands.last().unwrap(),"stop");}
+        }
+    }
+    #[test]
+    fn radio_projection_preserves_existing_local_plex_cache_cursor_and_recovery_proofs() {
+        let mut engine=engine_with_track("Source/local.flac");let local=engine.queue[0].clone();let radio=radio_track_fixture();engine.queue=vec![radio,local];
+        let resume=PlaybackResumeSnapshot{queue_index:1,elapsed:15.,state:PlaybackState::Paused};
+        let bytes=AudioEngine::encode_queue_cache_with_resume(&engine.queue,Some(&resume)).unwrap();let json:serde_json::Value=serde_json::from_slice(&bytes).unwrap();assert_eq!(json["tracks"].as_array().unwrap().len(),1);assert_eq!(json["resume"]["queue_index"],0);assert_eq!(json["resume"]["elapsed"],15.);
+        crate::recovery_set::validate_queue_capture(Some(&bytes),&engine.durable_queue_tracks()).unwrap();assert!(crate::recovery_set::validate_queue_capture(Some(&bytes),&engine.queue).is_err());
+        let radio_resume=PlaybackResumeSnapshot{queue_index:0,..resume};let radio_cache=AudioEngine::encode_queue_cache_with_resume(&engine.queue,Some(&radio_resume)).unwrap();let json:serde_json::Value=serde_json::from_slice(&radio_cache).unwrap();assert!(json.get("resume").is_none());
     }
 
     fn engine_with_two_tracks() -> AudioEngine {

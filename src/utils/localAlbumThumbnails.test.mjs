@@ -149,8 +149,8 @@ function renderCard({ confirmed, resolved, thumbnail }) {
   const a = album("a"), effects = []; let reductions = 0, lookups = 0, reads = 0, captures = 0, forgotten = 0; const triggers = [];
   const state = { albums: confirmed ? [a] : [], loaded: confirmed, loading: false, error: null, mpdBusy: false, saveBlocked: false };
   let stateIndex = 0;
-  const component = new Function("React", "useTranslation", "useState", "useRef", "useEffect", "localArtworkResolver", "localAlbumThumbnails", "localAlbumCatalog", "artworkReadBlocked", "getLocalAlbumCover", "logError", "AlbumArtworkPlaceholder", "Heart", "Play", cardBody + "return LocalAlbumCard;")(
-    React, () => ({ t: key => key }), initial => { const index = stateIndex++; return [index === 2 ? true : typeof initial === "function" ? initial() : initial, () => {}]; }, () => ({ current: null }), task => effects.push(task),
+  const component = new Function("useMemo", "useQueueInsertion", "loadLocalAlbumQueue", "React", "useTranslation", "useState", "useRef", "useEffect", "localArtworkResolver", "localAlbumThumbnails", "localAlbumCatalog", "artworkReadBlocked", "getLocalAlbumCover", "logError", "AlbumArtworkPlaceholder", "Heart", "Play", cardBody + "return LocalAlbumCard;")(
+    fn => fn(), () => ({ open() {}, trigger: () => null, menu: null, notice: null }), async () => { throw new Error("unexpected album load"); }, React, () => ({ t: key => key }), initial => { const index = stateIndex++; return [index === 2 ? true : typeof initial === "function" ? initial() : initial, () => {}]; }, () => ({ current: null }), task => effects.push(task),
     { get: () => { lookups++; return resolved; }, subscribe: () => () => {} },
     { get: () => thumbnail, capture: (_album, _image, current, trigger) => { captures++; triggers.push(trigger); if (current()) reductions++; }, observeInitialCard() {}, forget: (_album, current) => { if (current()) forgotten++; } },
     { getSnapshot: () => state }, artworkReadBlocked, () => { reads++; return Promise.resolve(null); }, () => {}, () => null, () => null, () => null);

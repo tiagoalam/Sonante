@@ -246,3 +246,12 @@ select option:checked {
   outline: 2px solid var(--theme-border-accent, #E5A00D);
   outline-offset: -2px;
 }
+
+.track-selection-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:12px; padding:10px 16px; background:var(--theme-surface-raised,#252525); border-block:1px solid var(--theme-border-soft,#444); font-size:12px; }
+.track-selection-toolbar button { padding:5px 8px; border-radius:6px; }
+.track-selection-toolbar button:hover { background:var(--theme-surface-hover,#333); }
+.track-selection-check { width:15px; height:15px; flex-shrink:0; accent-color:var(--theme-fg-accent,#e5a00d); cursor:pointer; }
+.track-selected { background:var(--theme-surface-accent,#332b15) !important; outline:1px solid var(--theme-border-accent,#66551c); outline-offset:-1px; }
+.album-queue-trigger { position:absolute; bottom:6px; right:6px; z-index:22; border-radius:8px; background:var(--theme-surface-panel,#181818); opacity:0; }
+.group:hover .album-queue-trigger, .album-queue-trigger:focus-within { opacity:1; }
+@media (hover:none) { .album-queue-trigger { opacity:1; } }

@@ -1,3 +1,4 @@
+import { useTrackSelection } from "./TrackSelection";
 import { useQueueInsertion } from "./QueueInsertionMenu";
 import { plexQueueTrack } from "../utils/queueActions";
 import {plexTrackDurationSeconds} from '../utils/plexTrackMetadata';
@@ -18,6 +19,7 @@ import type { NewPlaylistItem } from "../types/playlist";
 interface Props {
   artist: SelectedArtist;
   onBack: () => void;
+  backLabel?: string;
   onSelectAlbum: (album: PlexAlbum) => void;
   status: PlaybackStatus;
   isPlaybackAvailable: boolean;
@@ -29,6 +31,7 @@ interface Props {
 export const ArtistView: React.FC<Props> = ({
   artist,
   onBack,
+  backLabel,
   onSelectAlbum,
   status,
   isPlaybackAvailable,
@@ -53,6 +56,7 @@ export const ArtistView: React.FC<Props> = ({
   const queueRequest = (track: PlexTrack) => ({ track: plexQueueTrack(track),
     album: track.album_rating_key ? async () => (await plexService.getAlbumTracks(track.album_rating_key!)).map(item => plexQueueTrack(item)) : undefined });
   const albums = current ? loadedAlbums : [], topTracks = current ? loadedTracks : [];
+  const selection = useTrackSelection(queueContext, topTracks.slice(0, visibleTracksCount).map(track => plexQueueTrack(track)), active && current && isPlaybackAvailable);
   const viewport = useRef<HTMLElement>(null), scroll = useRef(0), returnAlbum = useRef<HTMLButtonElement | null>(null);
   const lastContext = useRef({ key, identity: requestIdentity });
   useLayoutEffect(() => {
@@ -139,14 +143,14 @@ export const ArtistView: React.FC<Props> = ({
       onKeyDown={event => { if ((event.target as HTMLElement).closest?.("[data-artist-album]")) event.stopPropagation(); }}
       className="flex-1 flex min-h-0 flex-col overflow-y-auto bg-gradient-to-b from-[var(--theme-surface-panel,#1C1812)] via-[var(--theme-surface-base,#121212)] to-[var(--theme-surface-base,#121212)] select-none p-8">
       <PlaybackRequestNotice failure={request.failure} />
-      {queueActions.notice}{queueActions.menu}
+      {queueActions.notice}{queueActions.menu}{selection.toolbar}
       {/* Botão de Retorno */}
       <button
         onClick={onBack}
         className="flex items-center space-x-2 text-xs font-bold text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors mb-6 cursor-pointer w-fit"
       >
         <ArrowLeft size={16} />
-        <span>{t("artistView.back")}</span>
+        <span>{backLabel ?? t("artistView.back")}</span>
       </button>
 
       {/* Cabeçalho do Artista */}
@@ -199,16 +203,17 @@ export const ArtistView: React.FC<Props> = ({
                   return (
                     <div
                       key={track.rating_key}
-                      onClick={() => handlePlayTrack(idx)}
+                      onClick={event => { if (!selection.click(event, idx)) handlePlayTrack(idx); }}
                       onContextMenu={event => queueActions.open(event, queueRequest(track))}
                       aria-disabled={!isPlaybackAvailable}
-                      className={`group grid grid-cols-[40px_48px_minmax(0,1fr)_140px] items-center px-4 py-2.5 rounded-lg text-xs transition-colors ${
+                      className={`${selection.checked(idx) ? "track-selected " : ""}group grid grid-cols-[40px_48px_minmax(0,1fr)_140px] items-center px-4 py-2.5 rounded-lg text-xs transition-colors ${
                         isPlaybackAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-60"
                       } ${
                         active ? "bg-[var(--theme-surface-accent,#251E10)] text-[color:var(--theme-fg-accent,#E5A00D)]" : "hover:bg-[var(--theme-surface-panel,#1A1A1A)] text-[color:var(--theme-fg-secondary,#CCCCCC)]"
                       }`}
                     >
-                      <div className="flex items-center justify-center">
+                      <div className="flex items-center justify-center gap-1">
+                        {selection.checkbox(idx)}
                         {isPlaying ? (
                           <div className="flex items-end space-x-0.5 h-3.5 w-3.5">
                             <span className="w-0.5 h-3 bg-[#E5A00D] animate-pulse rounded-full" />
@@ -305,6 +310,7 @@ export const ArtistView: React.FC<Props> = ({
                 <button type="button" data-artist-album={alb.rating_key}
                   key={alb.rating_key}
                   disabled={!active || !current}
+                  onContextMenu={event => queueActions.open(event, { track: { title: alb.title, artist: alb.artist, album: alb.title }, scope: "album", load: async () => (await plexService.getAlbumTracks(alb.rating_key)).map(track => plexQueueTrack(track, alb)) })}
                   onClick={event => { if (!active || !current) return; returnAlbum.current = event.currentTarget; onSelectAlbum(alb); }}
                   className="group flex flex-col cursor-pointer text-left rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
                 >

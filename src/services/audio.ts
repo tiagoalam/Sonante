@@ -94,6 +94,11 @@ export const audioService = {
   },
   setSharedMute: (request: {muted:boolean;token:string}): Promise<void> => invoke<void>("set_shared_mute", request),
   setVolume: (volume: number): Promise<void> => invoke<void>("set_volume", { volume }),
+  getQueueEditSnapshot: () => runLocalSourceRead.control(() => invoke<{ tracks: TrackMetadata[]; revision: string }>("get_queue_edit_snapshot")),
+  editQueue: async (revision: string, action: { kind: "move"; from: number; to: number } | { kind: "next" | "remove"; index: number }, intent: PlaybackIntent): Promise<void> => {
+    const token = await playbackIntentToken(intent);
+    return runLocalSourceRead.control(() => { if (!intent.current()) throw "PLAYBACK_SUPERSEDED"; return invoke<void>("edit_queue", { revision, action, intent: token }); });
+  },
   enqueueTracks: async (tracks: TrackMetadata[], placement: "next" | "end", intent: PlaybackIntent): Promise<number> => {
     const token = await playbackIntentToken(intent);
     return runLocalSourceRead.control(() => {

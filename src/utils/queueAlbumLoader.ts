@@ -22,3 +22,8 @@ export async function loadQueuedAlbum(track: TrackMetadata, queueIndex?: number)
   if (!album) throw "QUEUE_INSERT_ALBUM_UNAVAILABLE";
   return flattenAlbumDiscs(await audioService.getLocalAlbumTracks(album.id)).tracks.map(item => localQueueTrack(item, album));
 }
+
+export async function loadLocalAlbumQueue(album: import("../types/local").LocalAlbum): Promise<TrackMetadata[]> {
+  const discs = await audioService.getLocalAlbumTracks(album.id);
+  return flattenAlbumDiscs(discs).tracks.map(track => localQueueTrack(track, album));
+}

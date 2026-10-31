@@ -7,7 +7,7 @@ import { beginPlaybackIntent, isPlaybackSuperseded, playbackIntentToken, type Pl
 import { logError } from "../utils/frontendDiagnostics";
 import type { QueueMenuRequest } from "../utils/queueActions";
 
-type Action = "next" | "end" | "album";
+type Action = string;
 interface Target { request: QueueMenuRequest; x: number; y: number; origin: HTMLElement; visit: object }
 function QueueMenu({ target, close, choose }: { target: Target; close: () => void; choose: (action: Action) => void }) {
   const { t } = useTranslation();
@@ -23,7 +23,9 @@ function QueueMenu({ target, close, choose }: { target: Target; close: () => voi
     window.addEventListener("resize", close); window.addEventListener("scroll", scroll, true);
     return () => { window.removeEventListener("resize", close); window.removeEventListener("scroll", scroll, true); if (target.origin.isConnected) target.origin.focus({ preventScroll: true }); };
   }, [target]);
-  const choices = [{ action: "next" as const, label: t("queueActions.next"), Icon: ListStart }, { action: "end" as const, label: t("queueActions.end"), Icon: ListEnd }, { action: "album" as const, label: t("queueActions.album"), Icon: Disc3 }];
+  const choices: { action: string; label: string; Icon: typeof ListStart; disabled?: boolean }[] = [{ action: "next" as const, label: t("queueActions.next"), Icon: ListStart }, { action: "end" as const, label: t("queueActions.end"), Icon: ListEnd }, { action: "album" as const, label: t("queueActions.album"), Icon: Disc3 }];
+  if (target.request.scope) choices.pop();
+  for (const action of target.request.actions ?? []) choices.push({ action: action.id, label: action.label, Icon: ListStart, disabled: action.disabled });
   return createPortal(<div data-queue-actions-menu className="fixed inset-0 z-[80]" onMouseDown={event => { event.stopPropagation(); if (event.target === event.currentTarget) { event.preventDefault(); close(); } }} onClick={event => event.stopPropagation()} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); close(); }}>
     <div ref={menu} role="menu" aria-label={t("queueActions.title")} style={{ position: "fixed", left: position.x, top: position.y }}
       className="w-72 max-w-[calc(100vw-16px)] rounded-xl border border-[color:var(--theme-border-soft,#444444)] bg-[var(--theme-surface-panel,#181818)] p-1.5 text-[color:var(--theme-fg-primary,#e0e0e0)] shadow-2xl"
@@ -37,7 +39,7 @@ function QueueMenu({ target, close, choose }: { target: Target; close: () => voi
         if (next !== null) { event.preventDefault(); buttons[next]?.focus(); }
       }}>
       <p className="truncate px-3 py-2 text-xs text-[color:var(--theme-fg-muted,#999999)]" title={target.request.track.title}>{target.request.track.title}</p>
-      {choices.map(({ action, label, Icon }) => <button key={action} role="menuitem" type="button" disabled={action === "album" && !target.request.album}
+      {choices.map(({ action, label, Icon, disabled }) => <button key={action} role="menuitem" type="button" disabled={disabled || (action === "album" && !target.request.album)}
         title={action === "album" && !target.request.album ? t("queueActions.albumUnavailable") : undefined}
         onClick={event => { event.stopPropagation(); choose(action); }}
         className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm hover:bg-[var(--theme-surface-raised,#282828)] focus:bg-[var(--theme-surface-accent,#332b15)] focus:outline focus:outline-[color:var(--theme-border-accent,#e5a00d)] disabled:opacity-40"><Icon size={16} aria-hidden="true" />{label}</button>)}
@@ -77,7 +79,9 @@ export function useQueueInsertion(context: unknown, available: boolean) {
     try {
       await playbackIntentToken(intent);
       if (!current()) return;
-      const tracks = action === "album" ? await request.album!() : [request.track];
+      const custom = request.actions?.find(item => item.id === action);
+      if (custom) { if (!custom.disabled) await custom.run(intent); return; }
+      const tracks = action === "album" ? await request.album!() : request.load ? await request.load() : [request.track];
       if (!current()) return;
       const count = await audioService.enqueueTracks(tracks, action === "next" ? "next" : "end", intent);
       if (await intent.confirmCurrent() && current()) setResult({ visit, count });

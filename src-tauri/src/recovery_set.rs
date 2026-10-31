@@ -2025,7 +2025,7 @@ pub(crate) fn validate_queue_capture(
                         uri: track.uri.clone(),
                     });
             match &locator {
-                crate::audio::MediaLocator::Upnp { .. } => return Err("LIBRARY_RECOVERY_QUEUE_INVALID".into()),
+                crate::audio::MediaLocator::Upnp { .. } | crate::audio::MediaLocator::Radio { .. } => return Err("LIBRARY_RECOVERY_QUEUE_INVALID".into()),
                 crate::audio::MediaLocator::Local { uri } => {
                     if !crate::local_media::is_safe_relative_mpd_uri(uri) {
                         return Err(INCOMPLETE.into());

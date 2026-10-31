@@ -83,6 +83,7 @@ fn stable_identity_hash(parts: &[&str]) -> u64 {
 
 fn track_id_for(media: &CurrentMedia) -> Result<TrackId, String> {
     let (kind, queue_index, hash) = match media {
+        CurrentMedia::Radio { station_id, queue_index } => ("radio", *queue_index, stable_identity_hash(&[station_id])),
         CurrentMedia::Upnp { session_id, queue_index } => ("upnp", *queue_index, stable_identity_hash(&[session_id])),
         CurrentMedia::Local { uri, queue_index } => {
             ("local", *queue_index, stable_identity_hash(&[uri]))
@@ -225,6 +226,8 @@ fn query_audio_snapshot(app: &AppHandle) -> Result<MprisSnapshot, String> {
         .lock()
         .map_err(|error| format!("Falha ao acessar o estado de áudio via MPRIS: {error}"))?;
     let status = audio.get_mpris_status()?;
+    drop(audio);
+    crate::listening_history::observe(app, &status);
     crate::upnp_bridge::publish(app, &status, false);
     MprisSnapshot::from_audio(status)
 }

@@ -70,6 +70,8 @@ const plexImageUrl = dataModule('export const PlexImage = () => null;');
 const genreSliceUrl = dataModule('export const ExploreGenreSlice = () => null;');
 const placeholderUrl = dataModule('export const AlbumArtworkPlaceholder = () => null;');
 const componentUrl = dataModule(compile(source("../components/ExploreView.tsx"))
+  .replace('from "./QueueInsertionMenu"', `from ${JSON.stringify(dataModule('export const useQueueInsertion = () => ({open(){},trigger:()=>null,menu:null,notice:null});'))}`)
+  .replace('from "../utils/queueAlbumLoader"', `from ${JSON.stringify(dataModule('export const loadLocalAlbumQueue = async () => { throw new Error("unexpected album read in Explore fixture"); };'))}`)
   .replace('from "react"', `from ${JSON.stringify(hooksUrl)}`)
   .replace(/from "(react\/jsx-runtime|lucide-react)"/g, (_, name) => `from ${JSON.stringify(import.meta.resolve(name))}`)
   .replace('from "react-i18next"', `from ${JSON.stringify(translationUrl)}`)

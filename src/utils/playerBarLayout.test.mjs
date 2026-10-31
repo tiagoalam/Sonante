@@ -333,3 +333,15 @@ test('DAC output diagnostics stop appearing after confirmed playback but remain 
   assert.ok(stopped.includes(t(`player.playbackError.${code}`)));
  }
 });
+
+test('Radio Direct refusals use a cause-neutral station message; Local and Plex keep their format notice',async()=>{
+ for(const language of ['en','pt-BR']) {
+  const {render,t}=await fixture(language);
+  for(const kind of ['radio','local','plex']) {
+   const tree=render({status:{...status,state:'stop',current_media:{kind},playback_error:{code:'format_unsupported'}}});
+   const expected=kind==='radio'?'radio.directError':'player.playbackError.format_unsupported';
+   assert.ok(renderToStaticMarkup(tree).includes(t(expected)));
+   if(kind==='radio')assert.ok(!renderToStaticMarkup(tree).includes(t('player.playbackError.format_unsupported')));
+  }
+ }
+});

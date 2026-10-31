@@ -9,6 +9,7 @@ import React, { useEffect, useState, useRef } from "react";
 import {
   Play,
   Pause,
+  Square,
   SkipBack,
   SkipForward,
   Volume2,
@@ -60,11 +61,16 @@ export const PlayerBar: React.FC<Props> = ({
   }, [isSeeking]);
 
   const isAvailable = health.state === "available";
+  const isRadio = status.current_media?.kind === "radio";
+  const canNavigate = !isRadio;
   const playbackDiagnostic = status.playback_error;
   const playbackNotice = playbackDiagnostic?.code === "playback_error"
     || (isAvailable && status.state === "play"
       && (playbackDiagnostic?.code === "output_busy" || playbackDiagnostic?.code === "output_unavailable"))
     ? null : playbackDiagnostic;
+  const playbackNoticeText = playbackNotice
+    ? t(isRadio && playbackNotice.code === "format_unsupported" ? "radio.directError" : `player.playbackError.${playbackNotice.code}`)
+    : "";
 
   useEffect(() => {
     if (isAvailable && !isSeekingRef.current) {
@@ -139,7 +145,7 @@ export const PlayerBar: React.FC<Props> = ({
 
   const isNoTrack =
     !status.title ||
-    status.state === "stop" ||
+    (status.state === "stop" && !isRadio) ||
     status.title.toLowerCase().includes("nenhuma") ||
     status.title.toLowerCase().includes("no track");
 
@@ -165,14 +171,14 @@ export const PlayerBar: React.FC<Props> = ({
         <div data-player-area="metadata" className="flex min-w-0 flex-1 items-center gap-2">
           <div
             onClick={() => {
-              if (!isNoTrack && onNavigateToAlbum) onNavigateToAlbum();
+              if (!isNoTrack && onNavigateToAlbum && canNavigate) onNavigateToAlbum();
             }}
             className={`w-[76px] h-[76px] rounded-xl bg-[var(--theme-surface-raised,#202020)] border border-[color:var(--theme-border-soft,#303030)] overflow-hidden shrink-0 flex items-center justify-center shadow-lg group/cover transition-all ${
-              !isNoTrack && onNavigateToAlbum
+              !isNoTrack && onNavigateToAlbum && canNavigate
                 ? "cursor-pointer hover:border-[color:var(--theme-border-accent,#E5A00D)] hover:shadow-[0_0_12px_rgba(229,160,13,0.2)]"
                 : ""
             }`}
-            title={!isNoTrack && onNavigateToAlbum ? (status.album || displayTitle) : undefined}
+            title={!isNoTrack && onNavigateToAlbum && canNavigate ? (status.album || displayTitle) : undefined}
           >
             {status.plex_image && !isNoTrack ? (
               <PlexImage
@@ -200,7 +206,7 @@ export const PlayerBar: React.FC<Props> = ({
           </div>
 
           <div className="flex flex-col min-w-0 pr-2 gap-0.5">
-            {!isNoTrack && onNavigateToAlbum ? (
+            {!isNoTrack && onNavigateToAlbum && canNavigate ? (
               <button
                 type="button"
                 onClick={onNavigateToAlbum}
@@ -215,7 +221,7 @@ export const PlayerBar: React.FC<Props> = ({
               </span>
             )}
 
-            {!isNoTrack && status.artist && onNavigateToArtist ? (
+            {!isNoTrack && status.artist && onNavigateToArtist && canNavigate ? (
               <button
                 type="button"
                 onClick={onNavigateToArtist}
@@ -230,7 +236,7 @@ export const PlayerBar: React.FC<Props> = ({
               </span>
             )}
 
-            {!isNoTrack && status.album && onNavigateToAlbum ? (
+            {!isNoTrack && status.album && onNavigateToAlbum && canNavigate ? (
               <button
                 type="button"
                 onClick={onNavigateToAlbum}
@@ -255,12 +261,10 @@ export const PlayerBar: React.FC<Props> = ({
           role="status"
           aria-live="polite"
           aria-atomic="true"
-          title={playbackNotice ? t(`player.playbackError.${playbackNotice.code}`) : undefined}
+          title={playbackNoticeText || undefined}
           className={playbackNotice ? "w-full truncate text-[10px] leading-tight text-[color:var(--theme-fg-accent,#C9A45D)] text-center" : "sr-only"}
         >
-          {playbackNotice
-            ? t(`player.playbackError.${playbackNotice.code}`)
-            : ""}
+          {playbackNoticeText}
         </span>
         {!isAvailable && (
           <span title={health.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")} className="w-full truncate text-center text-[10px] leading-tight font-semibold text-[color:var(--theme-fg-accent,#C9A45D)]">
@@ -283,10 +287,10 @@ export const PlayerBar: React.FC<Props> = ({
             onClick={handlePlayToggle}
             disabled={!isAvailable}
             className="col-start-3 w-10 h-10 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
-            title={isAvailable && status.state === "play" ? t("player.pause") : t("player.play")}
+            title={isAvailable && status.state === "play" ? t(isRadio ? "radio.stop" : "player.pause") : t("player.play")}
           >
             {isAvailable && status.state === "play" ? (
-              <Pause size={17} fill="black" />
+              isRadio ? <Square size={15} fill="black" /> : <Pause size={17} fill="black" />
             ) : (
               <Play size={17} className="ml-0.5" fill="black" />
             )}
@@ -301,14 +305,14 @@ export const PlayerBar: React.FC<Props> = ({
             <SkipForward size={18} />
           </button>
           <div className="col-start-5 flex min-w-0 items-center justify-start">
-            <PlaybackOptionsControls options={status.options} disabled={!isAvailable} />
+            <PlaybackOptionsControls options={status.options} disabled={!isAvailable || isRadio} />
           </div>
         </div>
 
         {/* Barra de Progresso (Seek) */}
         <div className="w-full flex items-center gap-3 text-[10px] font-mono text-[color:var(--theme-fg-muted,#888888)]">
-          <span className="w-8 text-right">
-            {isAvailable ? formatTime(isSeeking ? seekValue : status.elapsed) : "--:--"}
+          <span className={isRadio ? "min-w-12 whitespace-nowrap text-right" : "w-8 text-right"}>
+            {isRadio ? t("radio.live") : isAvailable ? formatTime(isSeeking ? seekValue : status.elapsed) : "--:--"}
           </span>
 
           <input
@@ -317,7 +321,7 @@ export const PlayerBar: React.FC<Props> = ({
             max={isAvailable && status.duration > 0 ? status.duration : 100}
             step={0.5}
             value={isAvailable ? (isSeeking ? seekValue : status.elapsed) : 0}
-            disabled={!isAvailable || status.duration <= 0}
+            disabled={!isAvailable || isRadio || status.duration <= 0}
             onMouseDown={() => setIsSeeking(true)}
             onChange={(e) => setSeekValue(parseFloat(e.target.value))}
             onMouseUp={(e) => handleSeekCommit(parseFloat((e.target as HTMLInputElement).value))}
@@ -325,7 +329,7 @@ export const PlayerBar: React.FC<Props> = ({
           />
 
           <span className="w-8 text-left">
-            {isAvailable ? formatTime(status.duration) : "--:--"}
+            {isRadio ? "" : isAvailable ? formatTime(status.duration) : "--:--"}
           </span>
         </div>
       </div>

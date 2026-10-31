@@ -1,3 +1,4 @@
+import { useTrackSelection } from "./TrackSelection";
 import { useQueueInsertion } from "./QueueInsertionMenu";
 import { plexQueueTrack } from "../utils/queueActions";
 import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
@@ -30,6 +31,7 @@ interface Props {
   album: PlexAlbum;
   active?: boolean;
   onBack: () => void;
+  backLabel?: string;
   onSelectArtist?: (artist: SelectedArtist) => void;
   onToggleFavorite?: () => void;
   isPlaybackAvailable: boolean;
@@ -39,6 +41,7 @@ export const AlbumView: React.FC<Props> = ({
   album,
   active = true,
   onBack,
+  backLabel,
   onSelectArtist,
   onToggleFavorite,
   isPlaybackAvailable,
@@ -113,6 +116,7 @@ export const AlbumView: React.FC<Props> = ({
   const queueContext = useMemo(() => ({}), [infoAlbumKey, tracks, active, loading, isPlaybackAvailable]);
   const queueActions = useQueueInsertion(queueContext, active && !loading && isPlaybackAvailable);
   const queueRequest = (track: PlexTrack) => ({ track: plexQueueTrack(track, album), album: async () => tracks.map(item => plexQueueTrack(item, album)) });
+  const selection = useTrackSelection(queueContext, tracks.map(track => plexQueueTrack(track, album)), active && !loading && isPlaybackAvailable);
   const handlePlayTracks = (startIndex: number = 0) => {
     if (!active || !isPlaybackAvailable) return;
     const metaTracks = tracks.map((t) => ({
@@ -153,14 +157,14 @@ export const AlbumView: React.FC<Props> = ({
   return (
     <div className="flex-1 flex flex-col h-full bg-[var(--theme-surface-base,#121212)] overflow-hidden select-none">
       <PlaybackRequestNotice failure={request.failure} />
-      {queueActions.notice}{queueActions.menu}
+      {queueActions.notice}{queueActions.menu}{selection.toolbar}
       <div className="p-8 pb-4 border-b border-[color:var(--theme-border-soft,#222222)] flex items-center">
         <button
           onClick={onBack}
           className="flex items-center space-x-2 text-xs font-semibold text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer"
         >
           <ArrowLeft size={16} />
-          <span>{t("common.backToLibrary")}</span>
+          <span>{backLabel ?? t("common.backToLibrary")}</span>
         </button>
       </div>
 
@@ -274,17 +278,17 @@ export const AlbumView: React.FC<Props> = ({
             tracks.map((track, idx) => (
               <div
                 key={track.rating_key}
-                onClick={() => handlePlayTracks(idx)}
+                onClick={event => { if (!selection.click(event, idx)) handlePlayTracks(idx); }}
                 onContextMenu={event => queueActions.open(event, queueRequest(track))}
                 aria-disabled={!isPlaybackAvailable}
-                className={`grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
+                className={`${selection.checked(idx) ? "track-selected " : ""}grid grid-cols-12 px-4 py-3 text-xs items-center transition-colors group ${
                   isPlaybackAvailable
                     ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                     : "opacity-60 cursor-not-allowed"
                 }`}
               >
                 <span className="col-span-1 text-center font-mono text-[color:var(--theme-fg-muted,#666666)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)]">
-                  {track.index || idx + 1}
+                  {selection.checkbox(idx)}<span className="ml-1">{track.index || idx + 1}</span>
                 </span>
 
                 <div className="col-span-7 flex flex-col pr-2">

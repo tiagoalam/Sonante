@@ -7,6 +7,9 @@ export interface QueueMenuRequest {
   track: TrackMetadata;
   album?: () => Promise<TrackMetadata[]>;
   current?: () => boolean;
+  load?: () => Promise<TrackMetadata[]>;
+  scope?: "album" | "selection";
+  actions?: { id: string; label: string; disabled?: boolean; run: (intent: import("./playbackIntent").PlaybackIntent) => Promise<void> }[];
 }
 export function localQueueTrack(track: LocalItem, album?: LocalAlbum | null, cover?: string | null): TrackMetadata {
   return { title: track.title || track.name, artist: track.artist || album?.artist || "", album: track.album || album?.title || "",

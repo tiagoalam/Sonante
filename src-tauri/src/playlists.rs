@@ -383,7 +383,7 @@ fn validate_loaded_playlists(playlists: &[Playlist]) -> Result<(), String> {
 
 fn validate_media_locator(locator: &MediaLocator) -> Result<(), String> {
     let valid = match locator {
-        MediaLocator::Upnp { .. } => false,
+        MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } => false,
         MediaLocator::Local { uri } => {
             !uri.trim().is_empty()
                 && !uri.contains(['\0', '\r', '\n'])

@@ -277,7 +277,7 @@ test("every message resolves and interpolates independently in each language", a
 });
 
 // Brands, format names, units, language autonyms and address examples stay literal.
-const technicalText = new Set(["SONANTE", "Sonante", `v${JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version}`, "Linux • MPD • ALSA", "Português (Brasil)", "English (US)", "PT", "EN", "hw:CARD,DEV • ALSA Direct", "PipeWire / PulseAudio / dmix", "PipeWire / PulseAudio", "4 MB", "8 MB", "16 MB", "32 MB"]);
+const technicalText = new Set(["Radio Browser", "SONANTE", "Sonante", `v${JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version}`, "Linux • MPD • ALSA", "Português (Brasil)", "English (US)", "PT", "EN", "hw:CARD,DEV • ALSA Direct", "PipeWire / PulseAudio / dmix", "PipeWire / PulseAudio", "4 MB", "8 MB", "16 MB", "32 MB"]);
 
 test("frontend translation calls resolve, including conditional and dynamic key groups", async () => {
   const keys = new Set(), untranslated = [];

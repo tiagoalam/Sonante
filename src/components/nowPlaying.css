@@ -122,3 +122,8 @@
 
 .np-queue-row .np-queue-track { flex: 1; min-width: 0; }
 .np-queue-row [data-queue-trigger] { margin-right: 5px; }
+
+.np-queue-drag { flex-shrink:0; padding:4px 2px; cursor:grab; color:var(--theme-fg-muted,#888); }
+.np-queue-drag:active { cursor:grabbing; }
+.np-queue-drag:disabled { opacity:.3; cursor:default; }
+.np-queue-row .np-queue-track { min-width:0; flex:1; }

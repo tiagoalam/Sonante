@@ -1,7 +1,7 @@
 import { SourceAudioBadges } from "./SourceAudioBadges";
 import { currentMediaKey } from "../utils/playerNavigation";
 import React from "react";
-import { ArrowDownLeft, ArrowUpRight, ListMusic, Maximize2, Minimize2, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, ListMusic, Maximize2, Minimize2, Pause, Play, SkipBack, SkipForward, Square, Volume2, VolumeX, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AudioLevelFrame, NowPlayingSnapshot } from "../types/audio";
 import { TrackArtwork } from "./TrackArtwork";
@@ -59,6 +59,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
       && (playbackDiagnostic?.code === "output_busy" || playbackDiagnostic?.code === "output_unavailable"))
     ? null : playbackDiagnostic;
   const interactive = available && !props.controlsDisabled;
+  const isRadio = status?.current_media?.kind === "radio";
   const hasTrack = Boolean(status?.current_media && status.title);
   const deviceVolume = requiresDeviceVolumeControl(props.snapshot?.route, status);
   const volumeAvailable = Boolean(interactive && canToggleMute(status));
@@ -99,27 +100,27 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
             {!status ? <p role="status">{t("nowPlaying.waitingForStatus")}</p> : <>
               <div className="np-track-heading">
                 <h2 title={status.title}>{hasTrack ? status.title : t("player.noTrack")}</h2>
-                <p title={status.artist}>{props.onNavigate && hasTrack && status.current_media?.kind !== "upnp" ? <button type="button" onClick={() => props.onNavigate?.("artist")} disabled={props.busy}>{status.artist || "Sonante"}</button> : hasTrack ? status.artist || "Sonante" : "Sonante"}</p>
-                {hasTrack && status.album && <span title={status.album}>{props.onNavigate && status.current_media?.kind !== "upnp" ? <button type="button" onClick={() => props.onNavigate?.("album")} disabled={props.busy}>{status.album}</button> : status.album}</span>}
+                <p title={status.artist}>{props.onNavigate && hasTrack && status.current_media?.kind !== "upnp" && !isRadio ? <button type="button" onClick={() => props.onNavigate?.("artist")} disabled={props.busy}>{status.artist || "Sonante"}</button> : hasTrack ? status.artist || "Sonante" : "Sonante"}</p>
+                {hasTrack && status.album && <span title={status.album}>{props.onNavigate && status.current_media?.kind !== "upnp" && !isRadio ? <button type="button" onClick={() => props.onNavigate?.("album")} disabled={props.busy}>{status.album}</button> : status.album}</span>}
               </div>
                 {hasTrack && available && props.snapshot?.sourceInfo && currentMediaKey(props.snapshot.sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={props.snapshot.sourceInfo.info} />}
               {!available && <p role="status" className="np-notice">{t(health?.state === "unavailable" ? "player.engineUnavailable" : "player.engineTransitioning")}{hasTrack && ` · ${t("player.lastKnown")}`}</p>}
-              {playbackNotice && <p role="alert" className="np-error">{t(`player.playbackError.${playbackNotice.code}`)}</p>}
+              {playbackNotice && <p role="alert" className="np-error">{t(isRadio && playbackNotice.code === "format_unsupported" ? "radio.directError" : `player.playbackError.${playbackNotice.code}`)}</p>}
               {props.controlFailed && <p role="alert" className="np-error">{t("nowPlaying.controlFailed")}</p>}
               <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
                 inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} fullscreen={props.fullscreen} />
               <div className="np-progress">
                 <input type="range" aria-label={t("nowPlaying.seek")} min={0} max={available && status.duration > 0 ? status.duration : 100} step={0.5}
-                  value={available ? props.isSeeking ? props.seekValue : status.elapsed : 0} disabled={!interactive || status.duration <= 0}
+                  value={available ? props.isSeeking ? props.seekValue : status.elapsed : 0} disabled={!interactive || isRadio || status.duration <= 0}
                   onPointerDown={props.onSeekStart} onChange={event => { props.onSeekStart(); props.onSeekChange(Number(event.target.value)); }}
                   onPointerUp={event => props.onSeekCommit(Number(event.currentTarget.value))}
                   onKeyUp={event => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) props.onSeekCommit(Number(event.currentTarget.value)); }} />
-                <div><span>{available ? formatTime(props.isSeeking ? props.seekValue : status.elapsed) : "--:--"}</span><span>{available ? formatTime(status.duration) : "--:--"}</span></div>
+                <div><span>{isRadio ? t("radio.live") : available ? formatTime(props.isSeeking ? props.seekValue : status.elapsed) : "--:--"}</span><span>{isRadio ? "" : available ? formatTime(status.duration) : "--:--"}</span></div>
               </div>
               <div className="np-controls">
                 <button type="button" disabled={!interactive} onClick={props.onPrevious} aria-label={t("player.previous")} title={t("player.previous")}><SkipBack size={25} /></button>
-                <button type="button" disabled={!interactive} onClick={props.onTogglePlay} className="np-play" aria-label={t(status.state === "play" ? "player.pause" : "player.play")} title={t(status.state === "play" ? "player.pause" : "player.play")}>
-                  {status.state === "play" ? <Pause size={25} fill="currentColor" /> : <Play size={25} fill="currentColor" className="ml-1" />}
+                <button type="button" disabled={!interactive} onClick={props.onTogglePlay} className="np-play" aria-label={t(status.state === "play" ? isRadio ? "radio.stop" : "player.pause" : "player.play")} title={t(status.state === "play" ? isRadio ? "radio.stop" : "player.pause" : "player.play")}>
+                  {status.state === "play" ? isRadio ? <Square size={22} fill="currentColor" /> : <Pause size={25} fill="currentColor" /> : <Play size={25} fill="currentColor" className="ml-1" />}
                 </button>
                 <button type="button" disabled={!interactive} onClick={props.onNext} aria-label={t("player.next")} title={t("player.next")}><SkipForward size={25} /></button>
                 {props.optionsControls}

@@ -1,4 +1,7 @@
-import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useQueueInsertion } from "./QueueInsertionMenu";
+import { plexQueueTrack } from "../utils/queueActions";
+import { plexService } from "../services/plex";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { MixChoiceCard } from "./MixChoiceCard";
 import { useTranslation } from "react-i18next";
 import { ArrowLeft, ArrowRight, Compass, RefreshCw, Server, Library, Disc3, Shuffle, Play } from "lucide-react";
@@ -12,7 +15,13 @@ import { AlbumArtworkPlaceholder } from "./AlbumArtworkPlaceholder";
 const button = "rounded-lg px-3 py-2 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)] hover:bg-[var(--theme-surface-hover,#282828)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-40";
 const DiscoverCard: React.FC<{ item: PlexDiscoverItem; active: boolean; identity: object; showOrigin?: boolean; onPlay?: (item: PlexDiscoverItem) => void; playDisabled?: boolean; onOpen: (target: HTMLButtonElement) => void }> = ({ item, active, identity, showOrigin, onPlay, playDisabled, onOpen }) => {
   const { t } = useTranslation();
-  return <div className="group relative w-40 shrink-0 sm:w-44">
+  const queueContext = useMemo(() => ({}), [item, identity, active]);
+  const queueActions = useQueueInsertion(queueContext, active && !playDisabled);
+  const album = item.kind === "album" ? item.album : undefined;
+  const albumRequest = album ? { track: { title: album.title, artist: album.artist, album: album.title }, scope: "album" as const,
+    load: async () => (await plexService.getAlbumTracks(album.rating_key)).map(track => plexQueueTrack(track, album)) } : null;
+  return <div onContextMenu={albumRequest ? event => queueActions.open(event, albumRequest) : undefined} className="group relative w-40 shrink-0 sm:w-44">
+    {queueActions.menu}{queueActions.notice}{albumRequest && <span className="album-queue-trigger">{queueActions.trigger(albumRequest)}</span>}
     <button type="button" data-discover-item={item.presentation_key ?? discoverItemKey(item)} disabled={!active} onClick={event => onOpen(event.currentTarget)}
     aria-label={item.kind === "track" ? t("discover.openTrackAlbum", { title: item.title, album: item.album?.title }) : t("discover.openItem", { title: item.title })}
     className="group w-40 shrink-0 rounded-xl p-2 text-left hover:bg-[var(--theme-surface-raised,#242424)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] sm:w-44">

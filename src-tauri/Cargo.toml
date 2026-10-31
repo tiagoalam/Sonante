@@ -1,6 +1,6 @@
 [package]
 name = "sonante"
-version = "0.5.7"
+version = "0.5.8"
 description = "Linux desktop audio player for local and Plex libraries"
 authors = ["Tiago Alam"]
 license = "GPL-3.0-only"

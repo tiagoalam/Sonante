@@ -3992,6 +3992,7 @@ impl PlexClient {
             return match locator {
                 MediaLocator::Local { uri } => Ok(uri.clone()),
                 MediaLocator::Upnp { session_id } => crate::upnp_bridge::resolve(session_id),
+                MediaLocator::Radio { .. } => Err("RADIO_STATION_EXPIRED".into()),
                 MediaLocator::Plex { .. } => unreachable!(),
             };
         };

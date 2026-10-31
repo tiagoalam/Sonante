@@ -46,7 +46,7 @@ export function signalPathInformation(status: PlaybackStatus, health: MpdHealth)
     : status.state === "pause" ? "paused" : "stopped";
   return {
     state,
-    source: available && (status.current_media?.kind === "local" || status.current_media?.kind === "plex" || status.current_media?.kind === "upnp")
+    source: available && (status.current_media?.kind === "local" || status.current_media?.kind === "plex" || status.current_media?.kind === "upnp" || status.current_media?.kind === "radio")
       ? status.current_media.kind : null,
     format: available && state !== "stopped" ? parseReportedMpdFormat(status.audio_format) : { kind: "absent" } as ReportedMpdFormat,
     volumeBackend: available ? status.volume.backend : "unavailable",
