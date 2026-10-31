@@ -707,6 +707,15 @@ mod tests {
         for scene in 0..8 {
             let f = Fixture::new(false);
             let b = f.id(&f.b);
+            // Identical writes within one filesystem timestamp tick need not
+            // change the stamp. Start this marker in the past so scene 5 also
+            // exercises a real, observable change for the original algorithm.
+            let marker = f.library.join(local_media::mirror::MANIFEST_NAME);
+            let old_modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+            if scene == 5 {
+                fs::File::open(&marker).unwrap()
+                    .set_times(fs::FileTimes::new().set_modified(old_modified)).unwrap();
+            }
             let original = ReadonlyMirrorSnapshot::open(&f.library).unwrap();
             let watched = ReadonlyMirrorSnapshot::open_cached(&f.library).unwrap();
             assert!(watched.has_change_watch());
@@ -718,7 +727,11 @@ mod tests {
                 2 => {fs::remove_file(&link).unwrap();symlink(f.a.join("a.flac"), &link).unwrap();},
                 3 => fs::rename(f.library.join(&b), f.library.join("moved-source")).unwrap(),
                 4 => fs::hard_link(&link, f.root.join("external-link")).unwrap(),
-                5 => {let marker=f.library.join(local_media::mirror::MANIFEST_NAME);let bytes=fs::read(&marker).unwrap();fs::write(&marker, bytes).unwrap();},
+                5 => {
+                    let bytes=fs::read(&marker).unwrap();fs::write(&marker, bytes).unwrap();
+                    assert_ne!(fs::metadata(&marker).unwrap().modified().unwrap(), old_modified,
+                        "fixture must change the marker stamp independently of timestamp resolution");
+                },
                 6 => watched.remove_change_watch(),
                 7 => {let marker=f.library.join(local_media::mirror::MANIFEST_NAME);let bytes=fs::read(&marker).unwrap();fs::remove_file(&marker).unwrap();fs::write(&marker, bytes).unwrap();},
                 _ => unreachable!(),

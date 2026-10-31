@@ -741,7 +741,21 @@ mod tests {
             roots: &[PathBuf],
             current: &BTreeMap<String, Option<PathBuf>>,
         ) -> (BTreeMap<String, PathBuf>, String) {
-            reserve(&self.library(), roots, current, None).unwrap()
+            // The API deliberately refuses a transient lock holder. Parallel
+            // test processes may briefly retain inherited file descriptions;
+            // fixture setup may wait for that holder, never bypass the lock.
+            // Refusal tests below call reserve directly and remain immediate.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            loop {
+                match reserve(&self.library(), roots, current, None) {
+                    Ok(value) => return value,
+                    Err(error) if error == "LOCAL_SOURCE_IDENTITY_UNCONFIRMED: registro de identidades ocupado; tente novamente"
+                        && std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("owned fixture reservation failed: {error}"),
+                }
+            }
         }
         fn prepare(&self, roots: &[PathBuf], id: &str) -> mirror::MirrorBuildResult {
             mirror::build_filtered_staging(&self.0.join("library.next"), &self.library(), roots, id)
