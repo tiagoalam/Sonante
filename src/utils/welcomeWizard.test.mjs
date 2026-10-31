@@ -1,3 +1,4 @@
+import * as appearanceModel from './appearance.ts';
 import * as frontendDiagnostics from "./frontendDiagnostics.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -44,7 +45,7 @@ function wizard(overrides = {}) {
   const stopAppearance = appearance.start();
   const appearanceCode = ts.transpileModule(readFileSync(new URL("../components/AppearanceSetting.tsx",import.meta.url),"utf8"),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
   const appearanceExports = {};
-  const appearanceDeps = {react:{...React,useId:()=>"wizard-appearance-fixture",useSyncExternalStore:(_subscribe,get)=>get()},"react/jsx-runtime":jsx,"react-i18next":{useTranslation:()=>({t})},"../services/appearance":{appearance}};
+  const appearanceDeps = {react:{...React,useId:()=>"wizard-appearance-fixture",useSyncExternalStore:(_subscribe,get)=>get()},"react/jsx-runtime":jsx,"react-i18next":{useTranslation:()=>({t})},"../services/appearance":{appearance}, "../utils/appearance":appearanceModel};
   new Function("require","exports",appearanceCode)(id=>{assert.ok(id in appearanceDeps,id);return appearanceDeps[id];},appearanceExports);
   const previousWindow = globalThis.window, previousClear = globalThis.clearInterval;
   globalThis.window = { setInterval(callback, delay) { assert.equal(delay, 1500); timers.set(++timerSequence, callback); return timerSequence; } };

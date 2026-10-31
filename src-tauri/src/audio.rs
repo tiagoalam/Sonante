@@ -11,6 +11,10 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueInsertPlacement { Next, End }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AudioDevice {
     pub id: String,
@@ -20,6 +24,7 @@ pub struct AudioDevice {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MediaLocator {
+    Upnp { session_id: String },
     Local {
         uri: String,
     },
@@ -36,6 +41,7 @@ pub enum MediaLocator {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CurrentMedia {
+    Upnp { session_id: String, queue_index: usize },
     Local {
         uri: String,
         queue_index: usize,
@@ -270,6 +276,12 @@ pub struct LocalItem {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub duration: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct LocalSearchTracks {
+    pub tracks: Vec<LocalItem>,
+    pub limited: bool,
 }
 
 /// Presence of raw values in accepted MPD index rows, not a physical/semantic inspection.
@@ -1590,6 +1602,7 @@ impl AudioEngine {
         let track = self.queue.get(queue_index)?;
 
         match &track.media_locator {
+            Some(MediaLocator::Upnp { session_id }) => Some(CurrentMedia::Upnp { session_id: session_id.clone(), queue_index }),
             Some(MediaLocator::Plex {
                 server_id,
                 part_key,
@@ -2668,7 +2681,7 @@ impl AudioEngine {
         resume: Option<&PlaybackResumeSnapshot>,
     ) -> Result<Vec<u8>, String> {
         if queue.iter().any(|track| match &track.media_locator {
-            Some(MediaLocator::Plex { .. }) => false,
+            Some(MediaLocator::Plex { .. } | MediaLocator::Upnp { .. }) => false,
             Some(MediaLocator::Local { uri }) => {
                 Self::contains_plex_token(uri) || Self::contains_plex_token(&track.uri)
             }
@@ -2676,8 +2689,15 @@ impl AudioEngine {
         }) {
             return Err("Cache da fila contém uma URI autenticada inválida.".to_string());
         }
+        let durable_resume = resume.filter(|cursor| cursor.valid_for(queue.len())
+            && !matches!(queue[cursor.queue_index].media_locator, Some(MediaLocator::Upnp { .. })))
+            .map(|cursor| PlaybackResumeSnapshot {
+                queue_index: queue[..cursor.queue_index].iter().filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. }))).count(),
+                elapsed: cursor.elapsed, state: cursor.state,
+            });
         let tracks = queue
             .iter()
+            .filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. })))
             .map(|track| PersistedTrackRef {
                 title: &track.title,
                 artist: &track.artist,
@@ -2695,7 +2715,7 @@ impl AudioEngine {
         serde_json::to_vec(&PersistedQueueRef {
             version: QUEUE_CACHE_VERSION,
             tracks,
-            resume: resume.filter(|cursor| cursor.valid_for(queue.len())),
+            resume: durable_resume.as_ref(),
         })
         .map_err(|e| format!("Falha ao serializar o cache da fila: {}", e))
     }
@@ -2715,6 +2735,7 @@ impl AudioEngine {
                 changed |= Self::sanitize_track_artwork(&mut track);
                 changed |= track.thumb.take().is_some();
                 match &track.media_locator {
+                    Some(MediaLocator::Upnp { .. }) => { changed = true; None },
                     Some(MediaLocator::Plex {
                         server_id,
                         part_key,
@@ -4080,6 +4101,140 @@ impl AudioEngine {
         })
     }
 
+    pub(crate) fn prepare_upnp(&mut self, track: TrackMetadata, uri: &str) -> Result<(), String> {
+        let socket = self.socket_path.clone(); let gate = self.direct_playback.clone();
+        self.prepare_upnp_with_io(track, uri,
+            |command| Self::send_with_gate(&socket, gate.as_deref(), command), |audio| audio.save_queue_cache())
+    }
+
+    fn prepare_upnp_with_io(&mut self, track: TrackMetadata, uri: &str,
+        mut send: impl FnMut(&str) -> Result<Vec<String>, String>,
+        mut persist: impl FnMut(&Self) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.ensure_queue_structure_available()?;
+        if !matches!(track.media_locator, Some(MediaLocator::Upnp { .. })) || crate::upnp_protocol::media_url(uri).is_err() {
+            return Err("UPNP_MEDIA_INVALID".into());
+        }
+        self.note_eq_intervention();
+        let command = format!("command_list_begin\nclear\nadd {}\ncommand_list_end", Self::quote_mpd_argument(uri)?);
+        if let Err(error) = send(&command) {
+            if crate::direct_playback::is_admission_refusal(&error) { return Err(error); }
+            self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+        }
+        self.queue = vec![track]; self.restored_resume = None;
+        self.startup_restore = StartupQueueRestore::Ready; self.queue_coherent = true;
+        self.cache_persistence_pending = true;
+        persist(self).map_err(|_| "PLAYBACK_PERSISTENCE_FAILED".to_string())?;
+        self.cache_persistence_pending = false;
+        Ok(())
+    }
+
+    pub(crate) fn stop_upnp(&mut self) -> Result<(), String> {
+        self.note_eq_intervention(); self.invalidate_playback_intents();
+        self.send_command("stop").map(|_| ())
+    }
+
+    pub(crate) fn validate_queue_insert_tracks(tracks: &[TrackMetadata]) -> Result<(), String> {
+        if tracks.is_empty() || tracks.len() > 10_000 { return Err("QUEUE_INSERT_INVALID".into()); }
+        for track in tracks {
+            match &track.media_locator {
+                Some(MediaLocator::Local { uri }) if local_media::is_safe_relative_mpd_uri(uri) && local_media::is_catalog_track_uri(uri) => {}
+                Some(MediaLocator::Plex { server_id, part_key, .. }) if !server_id.trim().is_empty()
+                    && part_key.starts_with('/') && !part_key.contains(['?', '#', '\0', '\r', '\n'])
+                    && !Self::contains_plex_token(part_key) => {}
+                _ => return Err("QUEUE_INSERT_INVALID".into()),
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn enqueue_tracks(&mut self, tracks: Vec<TrackMetadata>, uris: Vec<String>, placement: QueueInsertPlacement) -> Result<usize, String> {
+        self.note_eq_intervention();
+        let socket = self.socket_path.clone();
+        let gate = self.direct_playback.clone();
+        self.enqueue_tracks_with_io(tracks, uris, placement,
+            |command| Self::send_with_gate(&socket, gate.as_deref(), command), |audio| audio.save_queue_cache())
+    }
+
+    fn queue_insert_snapshot(send: &mut impl FnMut(&str) -> Result<Vec<String>, String>) -> Result<(MpdQueueStatus, Vec<MpdQueueEntry>), String> {
+        let before = Self::parse_mpd_queue_status(&send("status")?).map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
+        let entries = Self::parse_mpd_queue_entries(&send("playlistinfo")?).map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
+        let after = Self::parse_mpd_queue_status(&send("status")?).map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
+        if before.playlist_version != after.playlist_version || before.playlist_length != after.playlist_length
+            || entries.len() != after.playlist_length { return Err("QUEUE_INSERT_CHANGED".into()); }
+        Self::validate_mpd_playback_cursor(&after).map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
+        Ok((after, entries))
+    }
+
+    fn enqueue_tracks_with_io(&mut self, mut tracks: Vec<TrackMetadata>, uris: Vec<String>, placement: QueueInsertPlacement,
+        mut send: impl FnMut(&str) -> Result<Vec<String>, String>, mut persist: impl FnMut(&Self) -> Result<(), String>) -> Result<usize, String> {
+        self.ensure_queue_structure_available()?;
+        self.ensure_startup_queue_ready()?;
+        self.ensure_queue_persisted()?;
+        Self::validate_queue_insert_tracks(&tracks)?;
+        // The receiver currently owns a single-item session. Do not invalidate
+        // that established UPnP contract by extending its queue behind its back.
+        if self.queue.iter().any(|track| matches!(track.media_locator, Some(MediaLocator::Upnp { .. }))) {
+            return Err("QUEUE_INSERT_UPNP_ACTIVE".into());
+        }
+        if tracks.len() != uris.len() { return Err("QUEUE_INSERT_INVALID".into()); }
+        let quoted = uris.iter().map(|uri| Self::quote_mpd_argument(uri).map_err(|_| "QUEUE_INSERT_INVALID".to_string())).collect::<Result<Vec<_>, _>>()?;
+        for (track, uri) in tracks.iter_mut().zip(&uris) {
+            match &track.media_locator {
+                Some(MediaLocator::Local { uri: expected }) if expected != uri => return Err("QUEUE_INSERT_INVALID".into()),
+                Some(MediaLocator::Plex { .. }) => track.uri.clear(),
+                _ => {}
+            }
+            Self::sanitize_track_artwork(track);
+        }
+        // Read-only preflight. No artwork/filesystem scan and no transport command.
+        let (before, entries) = Self::queue_insert_snapshot(&mut send).map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
+        if entries.len() != self.queue.len() || self.queue.iter().zip(&entries).any(|(track, entry)| match &track.media_locator {
+            Some(MediaLocator::Local { uri }) => uri != &entry.uri,
+            None => track.uri != entry.uri,
+            _ => false,
+        }) { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        let cursor = before.current_index.or_else(|| self.restored_resume.as_ref().map(|saved| saved.queue_index));
+        let position = match placement { QueueInsertPlacement::End => entries.len(), QueueInsertPlacement::Next => cursor.map_or(0, |index| index + 1) };
+        if position > entries.len() { return Err("QUEUE_INSERT_CHANGED".into()); }
+        let count = tracks.len();
+        let mut command = String::from("command_list_begin\n");
+        for (offset, uri) in quoted.iter().enumerate() { command.push_str(&format!("addid {uri} {}\n", position + offset)); }
+        command.push_str("command_list_end");
+        let response = match send(&command) {
+            Ok(response) => response,
+            Err(error) if crate::direct_playback::is_admission_refusal(&error) => return Err(error),
+            Err(_) => { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        };
+        // A command list is not a transaction. Never clear/replay on partial ACK,
+        // timeout, bad IDs or an unproved postcondition; retain the durable cache.
+        let proof = (|| {
+            let ids = response.iter().map(|line| line.strip_prefix("Id: ").and_then(|value| value.parse::<u64>().ok()).ok_or(()))
+                .collect::<Result<Vec<_>, _>>()?;
+            if ids.len() != count || ids.iter().collect::<HashSet<_>>().len() != count
+                || ids.iter().any(|id| entries.iter().any(|entry| entry.id == *id)) { return Err(()); }
+            let (after, actual) = Self::queue_insert_snapshot(&mut send).map_err(|_| ())?;
+            let mut expected = entries.clone();
+            expected.splice(position..position, uris.iter().zip(&ids).map(|(uri, id)| MpdQueueEntry { uri: uri.clone(), id: *id, pos: 0 }));
+            for (index, entry) in expected.iter_mut().enumerate() { entry.pos = index; }
+            if actual != expected { return Err(()); }
+            if before.state != PlaybackState::Playing && after.state != before.state { return Err(()); }
+            if before.state != PlaybackState::Playing && before.current_index.is_some() {
+                let old = before.current_index.and_then(|index| entries.get(index)).ok_or(())?;
+                let current = after.current_index.and_then(|index| actual.get(index)).ok_or(())?;
+                if old.id != current.id || (before.elapsed - after.elapsed).abs() > 0.25 { return Err(()); }
+            }
+            Ok(())
+        })();
+        if proof.is_err() { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        self.queue.splice(position..position, tracks);
+        if let Some(saved) = &mut self.restored_resume { if saved.queue_index >= position { saved.queue_index += count; } }
+        self.cache_persistence_pending = true;
+        persist(self).map_err(|_| "PLAYBACK_PERSISTENCE_FAILED".to_string())?;
+        self.cache_persistence_pending = false;
+        Ok(count)
+    }
+
     pub fn play_tracks(&mut self, tracks: Vec<TrackMetadata>, playback_uris: Vec<String>, start_index: usize) -> Result<(), String> {
         self.note_eq_intervention();
         let socket = self.socket_path.clone();
@@ -4652,6 +4807,13 @@ impl AudioEngine {
         })
     }
 
+    // The durable cache deliberately excludes temporary receiver occurrences.
+    // Catalog backup validation compares that exact projection, not a claim
+    // that the live remote stream can be reconstructed after process restart.
+    pub(crate) fn durable_queue_tracks(&self) -> Vec<TrackMetadata> {
+        self.queue.iter().filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. }))).cloned().collect()
+    }
+
     pub fn get_queue(&self) -> Vec<TrackMetadata> {
         if self.queue_coherent { self.queue.clone() } else { Vec::new() }
     }
@@ -4691,6 +4853,64 @@ impl AudioEngine {
     #[cfg(test)]
     pub fn list_directory(&self, path: &str) -> Result<Vec<LocalItem>, String> {
         Self::list_directory_at(&self.socket_path, path)
+    }
+
+    pub(crate) fn validate_local_search_query(query: &str) -> Result<&str, String> {
+        if query.len() > 640 || query.contains(['\0', '\r', '\n']) { return Err("LOCAL_SEARCH_QUERY_INVALID".into()); }
+        let query = query.trim();
+        if !(2..=160).contains(&query.chars().count()) { return Err("LOCAL_SEARCH_QUERY_INVALID".into()); }
+        Ok(query)
+    }
+
+    // Indexed metadata only: no directory walking, update, queue or playback command.
+    // The 41st row indicates a truncated preview; it is never silently called complete.
+    pub(crate) fn search_local_tracks_at(socket: &str, query: &str, sources: &HashSet<String>) -> Result<LocalSearchTracks, String> {
+        let query = Self::validate_local_search_query(query)?;
+        let available = |lines: &[String]| !lines.iter().any(|line| line.starts_with("updating_db: "));
+        if !available(&Self::send_command_to_socket(socket, "status")?) { return Err("LOCAL_SEARCH_UPDATING".into()); }
+        let command = format!("search any {} window 0:41", Self::quote_mpd_argument(query)?);
+        let lines = Self::send_command_to_socket(socket, &command)?;
+        let result = Self::parse_local_search_tracks(lines, sources)?;
+        if !available(&Self::send_command_to_socket(socket, "status")?) { return Err("LOCAL_SEARCH_UPDATING".into()); }
+        Ok(result)
+    }
+
+    fn parse_local_search_tracks(lines: Vec<String>, sources: &HashSet<String>) -> Result<LocalSearchTracks, String> {
+        const INVALID: &str = "LOCAL_SEARCH_RESPONSE_INVALID";
+        if lines.len() > 8192 || lines.iter().map(String::len).sum::<usize>() > 1024 * 1024 { return Err(INVALID.into()); }
+        let mut tracks = Vec::new();
+        let mut current: Option<LocalItem> = None;
+        let mut seen = HashSet::new();
+        for line in lines {
+            let (key, value) = line.split_once(": ").ok_or(INVALID)?;
+            match key {
+                "file" => {
+                    if let Some(item) = current.take() { tracks.push(item); }
+                    if tracks.len() >= 41 || !local_media::is_structurally_valid_local_uri(value)
+                        || !local_media::is_catalog_track_uri(value)
+                        || !value.split('/').next().is_some_and(|root| sources.contains(root))
+                        || !seen.insert(value.to_owned()) { return Err(INVALID.into()); }
+                    current = Some(LocalItem { item_type: "file".into(), path: value.into(),
+                        name: value.rsplit('/').next().unwrap_or(value).into(), title: None, artist: None, album: None, duration: None });
+                }
+                "directory" | "playlist" => return Err(INVALID.into()),
+                "Title" | "Artist" | "Album" => {
+                    let item = current.as_mut().ok_or(INVALID)?;
+                    match key { "Title" => item.title = Some(value.into()), "Artist" => item.artist = Some(value.into()), _ => item.album = Some(value.into()) }
+                }
+                "duration" | "Time" => {
+                    let item = current.as_mut().ok_or(INVALID)?;
+                    let duration = value.parse::<f64>().map_err(|_| INVALID)?;
+                    if !duration.is_finite() || duration < 0.0 { return Err(INVALID.into()); }
+                    if key == "duration" || item.duration.is_none() { item.duration = Some(duration); }
+                }
+                _ => { if current.is_none() { return Err(INVALID.into()); } }
+            }
+        }
+        if let Some(item) = current { tracks.push(item); }
+        let limited = tracks.len() > 40;
+        tracks.truncate(40);
+        Ok(LocalSearchTracks { tracks, limited })
     }
 
     pub(crate) fn list_directory_at(socket_path: &str, path: &str) -> Result<Vec<LocalItem>, String> {
@@ -4898,7 +5118,7 @@ impl AudioEngine {
                     let track = &self.queue[resume.queue_index];
                     let local_uri = match &track.media_locator {
                         Some(MediaLocator::Local { uri }) => Some(uri.as_str()),
-                        Some(MediaLocator::Plex { .. }) => None,
+                        Some(MediaLocator::Plex { .. } | MediaLocator::Upnp { .. }) => None,
                         None if !track.uri.starts_with("http://") && !track.uri.starts_with("https://") => Some(track.uri.as_str()),
                         None => None,
                     };
@@ -4929,6 +5149,19 @@ impl AudioEngine {
                         playback_error,
                     });
                 }
+            }
+            // SetAVTransportURI prepares a stopped queue without opening the DAC.
+            // Keep that confirmed logical destination visible until Play arrives.
+            if queue.len() == 1 && matches!(queue[0].media_locator, Some(MediaLocator::Upnp { .. })) {
+                let track = &queue[0];
+                return Ok(PlaybackStatus {
+                    snapshot_consistent: true, processing: self.queue_coherent.then_some(processing), options, state,
+                    elapsed: 0.0, duration: track.duration.unwrap_or(0.0), audio_format,
+                    current_media: self.current_media_for_queue_index(Some(0)), title: track.title.clone(),
+                    artist: track.artist.clone(), album: track.album.clone(),
+                    thumb: include_artwork.then(|| track.thumb.clone()).flatten(), plex_image: None,
+                    volume: VolumeStatus::from_mpd(volume), is_updating, playback_error,
+                });
             }
             return Ok(PlaybackStatus {
                 snapshot_consistent: true,
@@ -6784,6 +7017,61 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn local_search_is_bounded_index_only_and_preserves_cue_and_duration() {
+        let (path, server) = fake_album_mpd(vec![
+            ("status", "state: play\nOK\n"),
+            ("search any \"live\" window 0:41", "file: Source/Album/song.flac\nTitle: Live\nArtist: Artist\nAlbum: Album\nduration: 123.456\nTime: 123\nfile: Source/Album/image.cue/track0001\nTitle: Cue\nOK\n"),
+            ("status", "state: play\nOK\n"),
+        ]);
+        let result = AudioEngine::search_local_tracks_at(&path, "live", &HashSet::from(["Source".into()])).unwrap();
+        server.join().unwrap();
+        assert_eq!(result.tracks.len(), 2); assert!(!result.limited);
+        assert_eq!(result.tracks[0].duration, Some(123.456));
+        assert_eq!(result.tracks[1].path, "Source/Album/image.cue/track0001");
+    }
+
+    #[test]
+    fn local_search_query_rejects_empty_oversized_and_protocol_control_before_io() {
+        for query in ["", " ", "a", "ok\nclear", "ok\rplay", "ok\0stop"] {
+            assert!(AudioEngine::search_local_tracks_at("/not-a-socket", query, &HashSet::new()).unwrap_err().contains("QUERY_INVALID"));
+        }
+        assert!(AudioEngine::validate_local_search_query(&"á".repeat(160)).is_ok());
+        assert!(AudioEngine::validate_local_search_query(&"á".repeat(161)).is_err());
+        assert_eq!(AudioEngine::quote_mpd_argument(r#"á "mix" \ live"#).unwrap(), r#""á \"mix\" \\ live""#);
+    }
+
+    #[test]
+    fn local_search_rows_reject_unknown_source_unsafe_duplicate_and_invalid_duration() {
+        let sources = HashSet::from(["Source".into()]);
+        for rows in [
+            vec!["file: Other/one.flac"], vec!["file: Source/../one.flac"], vec!["file: /Source/one.flac"],
+            vec!["file: Source/one.flac", "file: Source/one.flac"], vec!["directory: Source"],
+            vec!["Title: detached"], vec!["file: Source/one.flac", "duration: NaN"],
+        ] {
+            assert!(AudioEngine::parse_local_search_tracks(rows.into_iter().map(str::to_owned).collect(), &sources).is_err());
+        }
+    }
+
+    #[test]
+    fn local_search_preview_marks_limit_and_rejects_excess_rows() {
+        let sources = HashSet::from(["Source".into()]);
+        let rows = |n| (0..n).map(|i| format!("file: Source/{i}.flac")).collect();
+        let result = AudioEngine::parse_local_search_tracks(rows(41), &sources).unwrap();
+        assert_eq!(result.tracks.len(), 40); assert!(result.limited);
+        assert!(AudioEngine::parse_local_search_tracks(rows(42), &sources).is_err());
+    }
+
+    #[test]
+    fn local_search_update_and_ack_fail_without_queue_or_retry_commands() {
+        let (path, server) = fake_album_mpd(vec![("status", "updating_db: 7\nOK\n")]);
+        assert!(AudioEngine::search_local_tracks_at(&path, "live", &HashSet::new()).unwrap_err().contains("UPDATING"));
+        server.join().unwrap();
+        let (path, server) = fake_album_mpd(vec![("status", "state: stop\nOK\n"), ("search any \"live\" window 0:41", "ACK [5@0] {search} failure\n")]);
+        assert!(AudioEngine::search_local_tracks_at(&path, "live", &HashSet::new()).is_err());
+        server.join().unwrap();
     }
 
     #[test]
@@ -9064,6 +9352,163 @@ mod tests {
             queue_structure_reserved: Arc::new(AtomicU8::new(0)),
             queue_coherent: true, cache_persistence_pending: false, playback_intent: 0, eq_intervention:Arc::new(AtomicU64::new(0)), direct_playback:None,
         }
+    }
+
+    #[test]
+    fn upnp_prepare_is_stopped_and_never_persists_network_urls_or_stale_identity() {
+        let mut engine = engine_with_track("old.flac");
+        let track = TrackMetadata { title: "Remote".into(), artist: "Artist".into(), album: "Album".into(),
+            thumb: Some("http://192.168.1.2/cover?credential=secret".into()), plex_image: None,
+            media_locator: Some(MediaLocator::Upnp { session_id: "fixture".into() }), uri: String::new(), duration: Some(8.0) };
+        let mut cache = Vec::new(); let mut commands = Vec::new();
+        engine.prepare_upnp_with_io(track.clone(), "http://192.168.1.2/audio?credential=secret",
+            |command| { commands.push(command.to_string()); Ok(vec![]) },
+            |audio| { cache = AudioEngine::encode_queue_cache(&audio.queue)?; Ok(()) }).unwrap();
+        assert_eq!(commands.len(), 1); assert!(!commands[0].contains("\nplay ")); assert!(!commands[0].contains("\npause "));
+        assert!(String::from_utf8(cache.clone()).unwrap().contains("\"tracks\":[]"));
+        assert!(!String::from_utf8(cache).unwrap().contains("secret"));
+        let status = engine.get_status_with_io(true,true, |_|panic!("remote must not inspect a local file"),
+            |command| { assert_eq!(command,"status"); Ok(vec!["state: stop".into(),"playlistlength: 1".into()]) }).unwrap();
+        assert_eq!(status.state,"stop"); assert_eq!(status.title,"Remote");
+        assert!(matches!(status.current_media,Some(CurrentMedia::Upnp { .. })));
+        let mut failed = engine_with_track("old.flac");
+        assert_eq!(failed.prepare_upnp_with_io(track,"http://192.168.1.2/audio", |_|Err("ACK private URL".into()), |_|panic!("failed effects cannot persist")),Err("PLAYBACK_QUEUE_UNCERTAIN".into()));
+        assert!(!failed.queue_coherent); assert_eq!(failed.queue[0].uri,"old.flac");
+    }
+
+    #[test]
+    fn upnp_stale_session_refuses_before_intent_admission_and_before_effect() {
+        let transactions = crate::ConfigTransactionState::new();
+        let audio = Mutex::new(engine_with_track("local.flac"));
+        let previous = crate::admit_or_validate_playback(&audio, &transactions, None).unwrap();
+        let refused = crate::admit_or_validate_playback_checked(&audio, &transactions, None,
+            |audio| crate::upnp_bridge::require_session(audio,"old-session"));
+        assert_eq!(refused.unwrap_err(),"UPNP_SESSION_CHANGED");
+        audio.lock().unwrap().validate_playback_intent(&previous).unwrap();
+        {
+            let mut engine=audio.lock().unwrap();
+            engine.queue[0].media_locator=Some(MediaLocator::Upnp{session_id:"current".into()});
+        }
+        let current=crate::admit_or_validate_playback_checked(&audio,&transactions,None,
+            |audio|crate::upnp_bridge::require_session(audio,"current")).unwrap();
+        audio.lock().unwrap().queue[0].media_locator=Some(MediaLocator::Local{uri:"new-local.flac".into()});
+        let result=crate::finish_playback_intent(&audio,&transactions,&current,|audio|{
+            crate::upnp_bridge::require_session(audio,"current")?;
+            panic!("stale remote request must never reach a transport effect")
+        });
+        assert_eq!(result,Err::<(),_>("UPNP_SESSION_CHANGED".into()));
+    }
+
+    #[test]
+    fn upnp_durable_projection_preserves_local_plex_and_strict_catalog_backup_proof() {
+        let mut engine=engine_with_track("Source/local.flac");
+        let local=engine.queue[0].clone();
+        let mut plex=local.clone();plex.uri="https://private/?X-Plex-Token=PRIVATE_TOKEN".into();
+        plex.media_locator=Some(MediaLocator::Plex{server_id:"server".into(),part_key:"/library/parts/1/file.flac".into(),rating_key:None,file_path:None});
+        let mut remote=local.clone();remote.uri="http://private/?token=REMOTE_SECRET".into();
+        remote.media_locator=Some(MediaLocator::Upnp{session_id:"ephemeral".into()});
+        engine.queue=vec![remote,local,plex];
+        let cursor=PlaybackResumeSnapshot{queue_index:1,elapsed:12.5,state:PlaybackState::Paused};
+        let cache=AudioEngine::encode_queue_cache_with_resume(&engine.queue,Some(&cursor)).unwrap();
+        let json:serde_json::Value=serde_json::from_slice(&cache).unwrap();
+        assert_eq!(json["tracks"].as_array().unwrap().len(),2);assert_eq!(json["tracks"][0]["uri"],"Source/local.flac");
+        assert_eq!(json["resume"]["queue_index"],0);assert_eq!(json["resume"]["elapsed"],12.5);
+        let raw=String::from_utf8(cache.clone()).unwrap();assert!(!raw.contains("REMOTE_SECRET"));assert!(!raw.contains("PRIVATE_TOKEN"));
+        crate::recovery_set::validate_queue_capture(Some(&cache),&engine.durable_queue_tracks()).unwrap();
+        assert!(crate::recovery_set::validate_queue_capture(Some(&cache),&engine.get_queue()).is_err(),"durable proof must not claim the volatile occurrence");
+        let remote_cursor=PlaybackResumeSnapshot{queue_index:0,..cursor};
+        let cache=AudioEngine::encode_queue_cache_with_resume(&engine.queue,Some(&remote_cursor)).unwrap();
+        let json:serde_json::Value=serde_json::from_slice(&cache).unwrap();assert!(json.get("resume").is_none());
+    }
+
+    fn qi_status(version: u64, count: usize, state: &str, song: Option<usize>, elapsed: f64) -> Vec<String> {
+        let mut lines = vec![format!("playlist: {version}"), format!("playlistlength: {count}"), format!("state: {state}"), format!("elapsed: {elapsed}")];
+        if let Some(song) = song { lines.push(format!("song: {song}")); }
+        lines
+    }
+    fn qi_entries(values: &[(&str, u64)]) -> Vec<String> {
+        values.iter().enumerate().flat_map(|(index, (uri, id))| vec![format!("file: {uri}"), format!("Pos: {index}"), format!("Id: {id}")]).collect()
+    }
+    fn qi_track(uri: &str) -> TrackMetadata {
+        let mut track = engine_with_track(uri).queue.remove(0);
+        track.media_locator = Some(MediaLocator::Local { uri: uri.into() }); track
+    }
+    fn qi_script(before: Vec<String>, old: Vec<String>, response: Result<Vec<String>, String>, after: Vec<String>, new: Vec<String>) -> std::collections::VecDeque<Result<Vec<String>, String>> {
+        vec![Ok(before.clone()), Ok(old), Ok(before), response, Ok(after.clone()), Ok(new), Ok(after)].into()
+    }
+    #[test]
+    fn queue_insert_preserves_play_pause_stop_and_original_duplicate_occurrences_without_transport() {
+        for state in ["play", "pause", "stop"] { for placement in [QueueInsertPlacement::Next, QueueInsertPlacement::End] {
+            let mut audio = engine_with_track("old/one.flac"); audio.queue = vec![qi_track("old/one.flac"), qi_track("old/one.flac")];
+            let position = if placement == QueueInsertPlacement::Next { 1 } else { 2 };
+            let mut expected = vec![("old/one.flac", 10), ("old/one.flac", 11)];
+            expected.splice(position..position, [("new/Álbum a.flac", 20), ("new/Álbum a.flac", 21)]);
+            let before = qi_status(7, 2, state, Some(0), 13.25);
+            let after = qi_status(9, 4, state, Some(0), if state == "play" { 13.5 } else { 13.25 });
+            let mut responses = qi_script(before, qi_entries(&[("old/one.flac",10),("old/one.flac",11)]), Ok(vec!["Id: 20".into(),"Id: 21".into()]), after, qi_entries(&expected));
+            let mut commands = Vec::new(); let mut persisted = 0;
+            let count = audio.enqueue_tracks_with_io(vec![qi_track("new/Álbum a.flac"),qi_track("new/Álbum a.flac")], vec!["new/Álbum a.flac".into();2], placement,
+                |cmd| { commands.push(cmd.to_owned()); responses.pop_front().unwrap() }, |_| { persisted += 1; Ok(()) }).unwrap();
+            assert_eq!(count,2); assert_eq!(persisted,1); assert_eq!(audio.queue.len(),4); assert!(responses.is_empty());
+            assert_eq!(audio.queue[position].media_locator, Some(MediaLocator::Local { uri:"new/Álbum a.flac".into() }));
+            assert_eq!(commands[3],format!("command_list_begin\naddid \"new/Álbum a.flac\" {position}\naddid \"new/Álbum a.flac\" {}\ncommand_list_end",position+1));
+            assert!(!commands.iter().flat_map(|c| c.lines()).any(|line| matches!(line.split_whitespace().next(),Some("clear"|"play"|"pause"|"seek"|"seekcur"|"stop"|"next"))));
+        }}
+    }
+    #[test]
+    fn queue_insert_empty_prepares_stopped_and_stored_resume_is_preserved() {
+        let mut audio = engine_with_track("old/one.flac"); audio.queue.clear();
+        let before=qi_status(1,0,"stop",None,0.);let after=qi_status(2,1,"stop",None,0.);
+        let mut script=qi_script(before,vec![],Ok(vec!["Id: 50".into()]),after,qi_entries(&[("new/a.flac",50)]));
+        audio.enqueue_tracks_with_io(vec![qi_track("new/a.flac")],vec!["new/a.flac".into()],QueueInsertPlacement::Next,|_|script.pop_front().unwrap(),|_|Ok(())).unwrap();
+        assert_eq!(audio.queue.len(),1);assert!(audio.restored_resume.is_none());
+        let mut audio=engine_with_track("old/one.flac");audio.queue=vec![qi_track("old/one.flac"),qi_track("old/two.flac")];
+        audio.restored_resume=Some(PlaybackResumeSnapshot{queue_index:1,elapsed:41.,state:PlaybackState::Paused});
+        let before=qi_status(1,2,"stop",None,0.);let after=qi_status(2,3,"stop",None,0.);
+        let mut script=qi_script(before,qi_entries(&[("old/one.flac",1),("old/two.flac",2)]),Ok(vec!["Id: 3".into()]),after,qi_entries(&[("old/one.flac",1),("old/two.flac",2),("new/a.flac",3)]));
+        audio.enqueue_tracks_with_io(vec![qi_track("new/a.flac")],vec!["new/a.flac".into()],QueueInsertPlacement::Next,|_|script.pop_front().unwrap(),|_|Ok(())).unwrap();
+        assert_eq!(audio.restored_resume.unwrap().elapsed,41.);
+    }
+    #[test]
+    fn queue_insert_failed_ack_timeout_or_malformed_id_never_publishes_or_replays() {
+        for response in [Err("ACK [50@1] private URI".into()),Err("timeout private URI".into()),Ok(vec!["Id: invalid".into()]),Ok(vec!["Id: 10".into()])] {
+            let mut audio=engine_with_track("old/one.flac");let original=audio.queue.clone();
+            let before=qi_status(1,1,"pause",Some(0),13.);
+            let mut script=qi_script(before,qi_entries(&[("old/one.flac",10)]),response,vec![],vec![]);let mut commands=Vec::new();
+            assert_eq!(audio.enqueue_tracks_with_io(vec![qi_track("new/a.flac")],vec!["new/a.flac".into()],QueueInsertPlacement::End,|cmd|{commands.push(cmd.to_owned());script.pop_front().unwrap()},|_|panic!("must retain old cache")).unwrap_err(),"PLAYBACK_QUEUE_UNCERTAIN");
+            assert_eq!(audio.queue[0].uri,original[0].uri);assert!(!audio.queue_coherent);assert_eq!(commands.len(),4);
+        }
+    }
+    #[test]
+    fn queue_insert_postcondition_and_pause_identity_must_be_proved_before_persisting() {
+        for mode in 0..5 {
+            let mut audio=engine_with_track("old/one.flac");
+            let before=qi_status(1,1,if mode==4{"stop"}else{"pause"},Some(0),13.);
+            let after=qi_status(2,2,if mode==1{"play"}else if mode==4{"stop"}else{"pause"},Some(if mode==2||mode==4{1}else{0}),if mode==3{14.}else{13.});
+            let new=qi_entries(&[(if mode==0{"changed.flac"}else{"old/one.flac"},10),("new/a.flac",20)]);
+            let mut script=qi_script(before,qi_entries(&[("old/one.flac",10)]),Ok(vec!["Id: 20".into()]),after,new);
+            assert!(audio.enqueue_tracks_with_io(vec![qi_track("new/a.flac")],vec!["new/a.flac".into()],QueueInsertPlacement::End,|_|script.pop_front().unwrap(),|_|panic!("unproved cache")).is_err());
+            assert!(!audio.queue_coherent);assert_eq!(audio.queue.len(),1);
+        }
+    }
+    #[test]
+    fn queue_insert_validates_before_io_and_respects_existing_queue_guards() {
+        for mode in 0..7 {
+            let mut audio=engine_with_track("old/one.flac");let mut track=qi_track("new/a.flac");
+            match mode {0=>track.media_locator=None,1=>track.media_locator=Some(MediaLocator::Local{uri:"../bad.flac".into()}),2=>track.media_locator=Some(MediaLocator::Upnp{session_id:"private".into()}),3=>audio.cache_persistence_pending=true,4=>audio.startup_restore=StartupQueueRestore::Pending,5=>audio.queue_structure_reserved.store(1,Ordering::SeqCst),_=>audio.queue[0].media_locator=Some(MediaLocator::Upnp{session_id:"active".into()})}
+            assert!(audio.enqueue_tracks_with_io(vec![track],vec!["new/a.flac".into()],QueueInsertPlacement::End,|_|panic!("guard before I/O"),|_|panic!("no persistence")).is_err());
+        }
+    }
+    #[test]
+    fn queue_insert_persistence_failure_keeps_confirmed_live_queue_and_blocks_retries() {
+        let mut audio=engine_with_track("old/one.flac");let before=qi_status(1,1,"play",Some(0),13.);let after=qi_status(2,2,"play",Some(1),0.);
+        let mut track=qi_track("new/a.flac");track.media_locator=Some(MediaLocator::Plex{server_id:"s".into(),part_key:"/library/parts/p".into(),rating_key:None,file_path:None});
+        let uri="http://fixture.invalid/a?X-Plex-Token=synthetic";
+        let mut script=qi_script(before,qi_entries(&[("old/one.flac",10)]),Ok(vec!["Id: 20".into()]),after,qi_entries(&[("old/one.flac",10),(uri,20)]));
+        assert_eq!(audio.enqueue_tracks_with_io(vec![track],vec![uri.into()],QueueInsertPlacement::End,|_|script.pop_front().unwrap(),|audio|{
+            assert!(!String::from_utf8(AudioEngine::encode_queue_cache(&audio.queue).unwrap()).unwrap().contains("synthetic"));Err("disk full".into())}).unwrap_err(),"PLAYBACK_PERSISTENCE_FAILED");
+        assert!(audio.queue_coherent);assert_eq!(audio.queue.len(),2);assert!(audio.cache_persistence_pending);
+        assert!(audio.enqueue_tracks_with_io(vec![qi_track("new/b.flac")],vec!["new/b.flac".into()],QueueInsertPlacement::End,|_|panic!("no duplicate retry"),|_|Ok(())).is_err());
     }
 
     fn engine_with_two_tracks() -> AudioEngine {

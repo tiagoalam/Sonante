@@ -1,3 +1,4 @@
+import { passiveQueueInsertion } from "../../tests/support/passiveQueueInsertion.mjs";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -8,7 +9,7 @@ import * as icons from 'lucide-react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import i18next from 'i18next';
 const read=file=>readFileSync(new URL(file,import.meta.url),'utf8');
-function compile(file,deps){const ex={};new Function('require','exports',ts.transpileModule(read(file),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2020}}).outputText)(name=>{assert.ok(name in deps,name);return deps[name]},ex);return ex;}
+function compile(file,deps){const ex={};new Function('require','exports',ts.transpileModule(read(file),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2020}}).outputText)(name=>{if(name in passiveQueueInsertion)return passiveQueueInsertion[name];assert.ok(name in deps,name);return deps[name]},ex);return ex;}
 const nodes=tree=>React.isValidElement(tree)?[tree,...nodes(tree.props.children)]:Array.isArray(tree)?tree.flatMap(nodes):[];
 const info={container:'FLAC',codec:'FLAC',compression:'lossless',sample_type:'integer',sample_rate:96000,bit_depth:24,dsd_level:null,channels:2,bitrate_kbps:3000};
 const track={rating_key:'42',title:'Synthetic track',duration_ms:123000,media_locator:{kind:'plex',server_id:'server',part_key:'/private-part'},audio_info:info};
@@ -35,7 +36,7 @@ test('Plex info uses native focus/escape behavior and does not fetch or trigger 
 test('both Plex album hosts expose per-track info without playing or making an additional request',async()=>{
  for(const name of ['AlbumView','AlbumDetailModal']){
   let cursor=0,values=[],reads=0,plays=0;
-  const hooks={useState:initial=>{const i=cursor++;if(!(i in values))values[i]=i===0?[track]:i===1?false:initial;return[values[i],v=>{values[i]=v}]},useRef:v=>({current:v}),useEffect(){},useLayoutEffect(){}};
+  const hooks={useState:initial=>{const i=cursor++;if(!(i in values))values[i]=i===0?[track]:i===1?false:initial;return[values[i],v=>{values[i]=v}]},useMemo:fn=>fn(),useRef:v=>({current:v}),useEffect(){},useLayoutEffect(){}};
   const {deps}=await dependencies('en',hooks);const Modal=()=>null;
   const extra={...deps, '../utils/usePlaybackAttempt':{usePlaybackAttempt:()=>({failure:null,run:action=>action({current:()=>true})})},'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},
  '../utils/frontendDiagnostics':{logError(){}},'../services/plex':{plexService:{getAlbumTracks(){reads++;return Promise.resolve([track])}}},'../services/audio':{audioService:{playTracks(){plays++}}},'../services/favorites':{favoritesService:{}},'./PlexImage':{PlexImage:()=>null},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null},'./PlexFileInfoModal':{PlexFileInfoModal:Modal}};

@@ -5,18 +5,19 @@ export function initialMediaSource(config: Pick<AppConfig, "plex_token"> | null)
   return config.plex_token?.trim() ? "plex" : "local";
 }
 
-export type MainSection = "local" | "plex" | "favorites" | "playlists" | "explore" | "equalizer";
+export type MainSection = "search" | "local" | "plex" | "favorites" | "playlists" | "explore" | "equalizer";
 export const MAIN_SECTION_STORAGE_KEY = "sonante.lastMainSection";
 type SectionStorage = Pick<Storage, "getItem" | "setItem">;
 
 function isMainSection(value: unknown): value is MainSection {
-  return value === "local" || value === "plex" || value === "favorites" || value === "playlists" || value === "explore" || value === "equalizer";
+  return value === "search" || value === "local" || value === "plex" || value === "favorites" || value === "playlists" || value === "explore" || value === "equalizer";
 }
 
 function browserStorage(): SectionStorage | null {
   try { return globalThis.localStorage ?? null; } catch { return null; }
 }
 
+// Explore restores its principal library; legacy saved Explore values also map to Local.
 // Only explicit navigation writes. Bootstrap, wizard and availability fallback
 // publish a section without overwriting a saved preference.
 export function createMainSectionPreference(
@@ -34,7 +35,7 @@ export function createMainSectionPreference(
       }
       const initial = initialMediaSource(config);
       const section = navigationEnabled && isMainSection(preferred)
-        ? preferred === "plex" && initial !== "plex" ? "local" : preferred
+        ? preferred === "explore" ? "local" : preferred === "plex" && initial !== "plex" ? "local" : preferred
         : initial;
       restoringPlex = navigationEnabled && preferred === "plex" && section === "plex";
       publish(section);
@@ -48,7 +49,7 @@ export function createMainSectionPreference(
       if (!navigationEnabled || !isMainSection(section)) return;
       restoringPlex = false;
       publish(section);
-      try { storage()?.setItem(MAIN_SECTION_STORAGE_KEY, section); } catch { /* Navigation still works. */ }
+      try { storage()?.setItem(MAIN_SECTION_STORAGE_KEY, section === "explore" ? "local" : section); } catch { /* Navigation still works. */ }
     },
     plexDiscoveryFinished(available: boolean) {
       if (!restoringPlex) return;

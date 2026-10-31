@@ -87,6 +87,7 @@ async function modal(overrides = {}) {
   const h = component("SettingsModal", {
     "./SettingsPages": { SettingsPages: function SettingsPages() {} },
     "./AppearanceSetting": { AppearanceSetting: function AppearanceSetting() {} },
+    "./UpnpSetting": { UpnpSetting: function UpnpSetting() {} },
     "./LocalIndexCoverage": { LocalIndexCoverageStatus: function LocalIndexCoverageStatus() {} },
     "./AudioSignalDiagram": { AudioSignalDiagram: function AudioSignalDiagram() {} },
     "../services/config": { configService }, "../services/audio": { audioService }, "../services/plex": { plexService },

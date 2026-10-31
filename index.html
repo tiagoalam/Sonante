@@ -8,12 +8,12 @@
         let value = "dark";
         try {
           const r = JSON.parse(localStorage.getItem("sonante_appearance_v1") || "null");
-          if (r && r.version === 1 && (r.value === "dark" || r.value === "light") && r.revision &&
+          if (r && r.version === 1 && ["dark", "light", "cyber", "summer", "zen", "nocturne"].includes(r.value) && r.revision &&
             Number.isSafeInteger(r.revision.counter) && r.revision.counter >= 0 &&
             typeof r.revision.origin === "string" && r.revision.origin.length <= 96 && /^[\w-]*$/.test(r.revision.origin)) value = r.value;
         } catch { /* Storage is optional; Dark is the default. */ }
         document.documentElement.dataset.theme = value;
-        document.documentElement.style.colorScheme = value;
+        document.documentElement.style.colorScheme = value === "light" || value === "summer" || value === "zen" ? "light" : "dark";
       })();
     </script>
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />

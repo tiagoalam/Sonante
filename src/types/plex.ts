@@ -61,6 +61,7 @@ export interface PlexFileInfo {
   bitrate_kbps: number | null;
 }
 export interface PlexTrack {
+  album_rating_key?: string | null;
   audio_info?: PlexFileInfo | null;
   rating_key: string;
   title: string;

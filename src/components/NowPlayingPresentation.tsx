@@ -99,8 +99,8 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
             {!status ? <p role="status">{t("nowPlaying.waitingForStatus")}</p> : <>
               <div className="np-track-heading">
                 <h2 title={status.title}>{hasTrack ? status.title : t("player.noTrack")}</h2>
-                <p title={status.artist}>{props.onNavigate && hasTrack ? <button type="button" onClick={() => props.onNavigate?.("artist")} disabled={props.busy}>{status.artist || "Sonante"}</button> : hasTrack ? status.artist || "Sonante" : "Sonante"}</p>
-                {hasTrack && status.album && <span title={status.album}>{props.onNavigate ? <button type="button" onClick={() => props.onNavigate?.("album")} disabled={props.busy}>{status.album}</button> : status.album}</span>}
+                <p title={status.artist}>{props.onNavigate && hasTrack && status.current_media?.kind !== "upnp" ? <button type="button" onClick={() => props.onNavigate?.("artist")} disabled={props.busy}>{status.artist || "Sonante"}</button> : hasTrack ? status.artist || "Sonante" : "Sonante"}</p>
+                {hasTrack && status.album && <span title={status.album}>{props.onNavigate && status.current_media?.kind !== "upnp" ? <button type="button" onClick={() => props.onNavigate?.("album")} disabled={props.busy}>{status.album}</button> : status.album}</span>}
               </div>
                 {hasTrack && available && props.snapshot?.sourceInfo && currentMediaKey(props.snapshot.sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={props.snapshot.sourceInfo.info} />}
               {!available && <p role="status" className="np-notice">{t(health?.state === "unavailable" ? "player.engineUnavailable" : "player.engineTransitioning")}{hasTrack && ` · ${t("player.lastKnown")}`}</p>}

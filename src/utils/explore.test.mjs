@@ -679,15 +679,21 @@ test('Explore has no Plex context/query/portrait; preserved browser loader is in
  const s=createExploreSession(()=>.5);s.syncContext(c,true);assert.equal(s.candidateCount(),1);assert.equal(s.visibleEntries()[0].source,'local');
 });
 
-test('Explore sidebar is under Local, preserves section preference and leaves Discover under Plex',()=>{
- const ast=ts.createSourceFile('App.tsx',appSource,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let explore,discover;
- const visit=node=>{if(ts.isJsxSelfClosingElement(node)&&node.tagName.getText(ast)==='SidebarNavItem'){
-  const label=node.attributes.properties.find(p=>p.name?.getText(ast)==='label')?.initializer?.getText(ast);
-  if(label?.includes('explore.title'))explore=node;if(label?.includes('discover.menu'))discover=node;
+test('Explore is one principal sidebar entry with source tabs and the existing Plex session',()=>{
+ const ast=ts.createSourceFile('App.tsx',appSource,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);const explore=[],discover=[];let tabs;
+ const visit=node=>{if(ts.isJsxSelfClosingElement(node)){
+  if(node.tagName.getText(ast)==='ExploreSourceTabs')tabs=node;
+  if(node.tagName.getText(ast)==='SidebarNavItem'){
+   const label=node.attributes.properties.find(p=>p.name?.getText(ast)==='label')?.initializer?.getText(ast);
+   if(label?.includes('explore.title'))explore.push(node);if(label?.includes('discover.menu'))discover.push(node);
+  }
  }ts.forEachChild(node,visit);};visit(ast);
- assert.ok(explore&&discover);assert.equal(explore.parent.openingElement.tagName.getText(ast),'div');assert.match(explore.parent.openingElement.getText(ast),/ml-6 border-l/);
- assert.match(explore.parent.parent.getText(ast),/navigateLocalSubview\("browser"\)/);assert.match(explore.getText(ast),/mainSectionPreference.navigate\("explore"\)/);
- assert.match(discover.getText(ast),/setPlexArea\("discover"\).*navigate\("plex"\)/);
+ assert.equal(explore.length,1);assert.equal(discover.length,0);
+ assert.equal(explore[0].parent.openingElement.tagName.getText(ast),'nav');
+ assert.match(explore[0].parent.getText(ast),/navigateLocalSubview\("browser"\)/);
+ assert.match(explore[0].parent.getText(ast),/mainSectionPreference.navigate\("plex"\)/);
+ assert.match(explore[0].getText(ast),/navigateExplore\(\)/);
+ assert.ok(tabs);assert.match(tabs.getText(ast),/source=\{activeExploreSource\}/);assert.match(tabs.getText(ast),/onChange=\{navigateExplore\}/);
  assert.match(appSource,/new PlexDiscoverSession\(plexService.getDiscover, plexService.getDiscoverChildren, plexService.getDiscoverRecent/);
 });
 

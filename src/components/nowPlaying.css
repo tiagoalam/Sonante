@@ -102,3 +102,23 @@
 @container (max-width: 760px) { .np-body { flex-direction: column; }.np-queue { order: 2; }.np-media { order: 1; } }
 
 .np-signal-format { min-width: 0; max-width: 100%; }
+
+/* Queue tools filter presentation only; original occurrence positions stay intact. */
+.np-queue-tools { flex: none; display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--theme-border-soft,#ffffff12); }
+.np-queue-filter { display: flex; align-items: center; gap: 7px; padding: 7px 9px; border: 1px solid var(--theme-border-soft,#ffffff20); border-radius: 8px; background: var(--theme-surface-base,#121212); color: var(--theme-fg-muted,#999); }
+.np-queue-filter:focus-within { outline: 2px solid var(--theme-border-accent,#e5a00d); outline-offset: 1px; }
+.np-queue-filter input { min-width: 0; width: 100%; background: transparent; font-size: 12px; color: var(--theme-fg-primary,#e0e0e0); outline: none; }
+.np-queue-filter input::placeholder { color: var(--theme-fg-muted,#999); }
+.np-queue-filter input:focus-visible { outline: none; }
+.np-queue-filter button { flex: none; padding: 2px; }
+.np-queue-jump { display: flex; align-items: center; align-self: flex-start; gap: 6px; padding: 4px 2px; font-size: 11px; color: var(--theme-fg-accent,#e5a00d); }
+.np-queue-jump:disabled { opacity: .4; }
+.np-queue-times { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 10px; color: var(--theme-fg-muted,#999); font-variant-numeric: tabular-nums; }
+.np-queue-heading button:focus-visible, .np-queue-tools button:focus-visible { outline: 2px solid var(--theme-border-accent,#e5a00d); outline-offset: 2px; }
+.np-queue-current { background: var(--theme-surface-accent,#e5a00d15); }
+
+.np-queue-label { flex: 1; }
+.np-queue-duration { flex: none; margin-left: auto; padding-left: 4px; color: var(--theme-fg-muted,#999); font: 10px ui-monospace,monospace; font-variant-numeric: tabular-nums; }
+
+.np-queue-row .np-queue-track { flex: 1; min-width: 0; }
+.np-queue-row [data-queue-trigger] { margin-right: 5px; }

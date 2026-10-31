@@ -3793,7 +3793,7 @@ dependencies = [
 
 [[package]]
 name = "sonante"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "alsa",
  "base64 0.22.1",
@@ -3802,12 +3802,14 @@ dependencies = [
  "libc",
  "lofty",
  "mpris-server",
+ "quick-xml 0.42.0",
  "reqwest 0.12.28",
  "rfd",
  "rustfft",
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",

@@ -163,7 +163,7 @@ export const PlexDiscoverView: React.FC<Props> = ({ session, scope, active, sele
   const mix = state.mix;
   return <main data-plex-discover className="flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--theme-surface-base,#121212)]">
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[color:var(--theme-border-soft,#262626)] px-6 py-4 sm:px-8">
-      <div className="flex items-center gap-2 text-sm font-semibold"><Compass size={18} className="text-[color:var(--theme-fg-accent,#E5A00D)]" />{t("sidebar.plex")} <span className="text-[color:var(--theme-fg-faint,#555555)]">/</span> {t("discover.menu")}</div>
+      <div className="flex items-center gap-2 text-sm font-semibold"><Compass size={18} className="text-[color:var(--theme-fg-accent,#E5A00D)]" />{t("sidebar.plex")} <span className="text-[color:var(--theme-fg-faint,#555555)]">/</span> {t("explore.title")}</div>
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <label className="flex min-w-0 items-center gap-2 text-xs text-[color:var(--theme-fg-secondary,#999999)]"><Library size={15} /><span className="sr-only">{t("discover.library")}</span>
           <select aria-label={t("discover.library")} value={selection} disabled={!active || librariesLoading || !libraries.length} onChange={event => onLibraryChange(event.target.value)} className="max-w-64 min-w-0 rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-raised,#202020)] px-3 py-2 text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]">

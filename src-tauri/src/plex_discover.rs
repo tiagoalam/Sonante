@@ -601,6 +601,9 @@ fn parse_mix_observed(
             continue;
         }
         let album = safe.as_ref().and_then(|item| item.album.as_ref());
+        // The flattened mix DTO owns the separately validated navigation key.
+        // Do not serialize a duplicate field from the generic track parser.
+        track.album_rating_key = None;
         tracks.push(PlexMixTrack {
             server_id: connection.server_id.clone(),
             library_id: section.into(),

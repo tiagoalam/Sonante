@@ -23,6 +23,7 @@ export function visitPlayerTarget(
 
 export function currentMediaKey(media: CurrentMedia | null): string {
   if (!media) return "none";
+  if (media.kind === "upnp") return JSON.stringify([media.kind, media.session_id, media.queue_index]);
   return JSON.stringify(media.kind === "local"
     ? [media.kind, media.uri, media.queue_index]
     : [media.kind, media.server_id, media.part_key, media.queue_index]);

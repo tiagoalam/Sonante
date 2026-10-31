@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { SettingsPages, type SettingsPage } from "./SettingsPages";
+import { UpnpSetting } from "./UpnpSetting";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
 import { AppConfig, ConfigSaveOperation, ConfigSaveWarning } from "../types/config";
@@ -448,6 +449,7 @@ export const SettingsModal: React.FC<Props> = ({
           initialPage={initialPage}
           general={<>
             <AppearanceSetting />
+            <UpnpSetting />
             {/* Idioma da interface */}
             <div className="space-y-3">
               <h3 className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider flex items-center space-x-1.5">

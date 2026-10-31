@@ -44,6 +44,9 @@ mod first_run_managed;
 #[cfg(test)]
 mod initial_background_tests;
 mod mpris;
+mod upnp;
+mod upnp_protocol;
+mod upnp_bridge;
 mod mpris_shutdown;
 mod online_artwork;
 mod system_tray;
@@ -2619,7 +2622,7 @@ fn run_experimental_local_folders_save_inner(
     let coverage_report = std::cell::RefCell::new(None);
     let coverage_catalog = std::cell::RefCell::new(None);
     let queue_capture = (|| -> Result<(), String> {
-        let queue_tracks = audio_state.0.lock().map_err(|_|"LIBRARY_RECOVERY_QUEUE_UNPROVEN")?.get_queue();
+        let queue_tracks = audio_state.0.lock().map_err(|_|"LIBRARY_RECOVERY_QUEUE_UNPROVEN")?.durable_queue_tracks();
         let queue_cache = profile_owner.root().read("queue_cache.json",16*1024*1024,&||operation.shutdown_requested())?;
         recovery_set::validate_queue_capture(queue_cache.as_deref(),&queue_tracks)
     })();
@@ -3200,6 +3203,7 @@ async fn get_playback_status(app: AppHandle, diagnostic_id: Option<u64>) -> Resu
             diagnostic.phase("volume.read");
             apply_volume_context(&mut playback, &before, &after);
             attach_shared_mute(&mut playback,&app.state::<SupervisorState>().0,shared_before)?;
+            upnp_bridge::publish(&app, &playback, true);
             Ok(playback)
         })();
         diagnostic.result(&result);
@@ -3272,6 +3276,7 @@ async fn get_mpd_status_snapshot(app: AppHandle, diagnostic_id: Option<u64>) -> 
                         evidence
                     },
                 );
+                if let Some(playback) = &snapshot.playback { upnp_bridge::publish(&app, playback, true); }
                 snapshot
             });
         diagnostic.result(&result);
@@ -3561,7 +3566,14 @@ fn initial_playback_context(transactions: &ConfigTransactionState, token: Option
 fn admit_or_validate_playback(
     audio: &Mutex<AudioEngine>, transactions: &ConfigTransactionState, token: Option<String>,
 ) -> Result<String, String> {
+    admit_or_validate_playback_checked(audio, transactions, token, |_| Ok(()))
+}
+fn admit_or_validate_playback_checked(
+    audio: &Mutex<AudioEngine>, transactions: &ConfigTransactionState, token: Option<String>,
+    check: impl FnOnce(&AudioEngine) -> Result<(), String>,
+) -> Result<String, String> {
     let mut audio = audio.lock().map_err(|_| "Playback unavailable")?;
+    check(&audio)?;
     if token.is_none() { audio.note_eq_intervention(); }
     let context = initial_playback_context(transactions, token.as_deref())?;
     if let Some(token) = token { audio.validate_playback_intent(&token)?; Ok(token) }
@@ -3581,6 +3593,7 @@ fn initial_queue_uris(audio: &AudioEngine, context: &initial_plex_playback::Sess
     let queue = audio.get_queue();
     if (!allow_empty && queue.is_empty()) || audio.startup_queue_pending()
         || queue.iter().any(|track| match &track.media_locator {
+            Some(MediaLocator::Upnp { .. }) => true,
             Some(MediaLocator::Plex { server_id, part_key, .. }) => server_id.is_empty() || part_key.is_empty(),
             Some(MediaLocator::Local { uri }) => !context.accepts_local(uri),
             None => !context.accepts_local(&track.uri),
@@ -3871,6 +3884,31 @@ async fn complete_startup_after_ready(app: AppHandle) {
     // queue must not register a recursive watcher, enumerate source contents,
     // rebuild the mirror or schedule an MPD update/rescan.
     restore_cached_queue_after_ready(app).await;
+}
+
+// Queue edits prepare media outside locks, then enter the existing nonblocking
+// lifecycle reservation. They never authorize initial/addition playback or gain.
+#[tauri::command]
+async fn enqueue_tracks(app: AppHandle, tracks: Vec<TrackMetadata>, placement: audio::QueueInsertPlacement, intent: Option<String>) -> Result<usize, String> {
+    AudioEngine::validate_queue_insert_tracks(&tracks)?;
+    let token = admit_or_validate_playback(&app.state::<AudioState>().0, &app.state::<ConfigTransactionState>(), intent)?;
+    if initial_playback_context(&app.state::<ConfigTransactionState>(), Some(&token))?.is_some() { return Err(initial_plex_playback::WAIT.into()); }
+    let client = app.state::<PlexState>().0.lock().map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?.clone();
+    let resolved = resolve_playback_uris(&tracks, &client).await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let transactions = app.state::<ConfigTransactionState>();
+        let _permit = begin_volume_transaction(&transactions)?;
+        if transactions.shutdown_requested() || transactions.shutdown_started() { return Err("PLAYBACK_SUPERSEDED".into()); }
+        transactions.manual_check_playback.admit()?;
+        // Check current server selection before taking Audio; no lock crosses HTTP.
+        { let plex = app.state::<PlexState>(); let plex = plex.0.lock().map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
+          if tracks.iter().any(|track| matches!(track.media_locator, Some(MediaLocator::Plex { .. }))
+              && !plex.playback_references_match(std::slice::from_ref(track))) { return Err("QUEUE_INSERT_CONTEXT_CHANGED".into()); } }
+        let state = app.state::<AudioState>();
+        let mut audio = state.0.lock().map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
+        audio.validate_playback_intent(&token)?;
+        audio.enqueue_tracks(tracks, resolved.map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?, placement)
+    }).await.map_err(|_| "QUEUE_INSERT_UNAVAILABLE".to_string())?
 }
 
 #[tauri::command]
@@ -4729,6 +4767,7 @@ async fn resolve_playlist_items(
     let mut statuses = Vec::with_capacity(playlist.items.len());
     for item in playlist.items {
         let status = match &item.media_locator {
+            MediaLocator::Upnp { .. } => local_playlist_item_availability(item.id, Err("UPNP_SESSION_EXPIRED".into())),
             MediaLocator::Local { uri } => {
                 let result = audio_state
                     .0
@@ -4795,7 +4834,7 @@ fn prepare_playlist_playback(
                 media_locator: Some(item.media_locator.clone()),
                 uri: match &item.media_locator {
                     MediaLocator::Local { uri } => uri.clone(),
-                    MediaLocator::Plex { .. } => String::new(),
+                    MediaLocator::Plex { .. } | MediaLocator::Upnp { .. } => String::new(),
                 },
                 duration: item.metadata.duration,
             });
@@ -4880,6 +4919,7 @@ async fn play_playlist(
     let mut resolved_uris = Vec::with_capacity(playlist.items.len());
     for item in &playlist.items {
         let uri = match &item.media_locator {
+            MediaLocator::Upnp { .. } => None,
             MediaLocator::Local { uri } => {
                 let exists = audio_state
                     .0
@@ -6282,6 +6322,32 @@ async fn get_local_albums(app: AppHandle, diagnostic_id: Option<u64>) -> Result<
 }
 
 #[tauri::command]
+async fn search_local_tracks(query: String, app: AppHandle) -> Result<audio::LocalSearchTracks, String> {
+    AudioEngine::validate_local_search_query(&query)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        // The same owner/config/source/transaction admission and final recheck
+        // used by get_local_albums; no playback capability is inferred from rows.
+        let (result, _) = with_local_source_context(&app, |before, recheck, _context| {
+            if before.observed_conflict { return Err("LOCAL_CATALOG_IDENTITY_CONFLICT".into()); }
+            let source_ids = before.sources.iter().map(|row| row.source_id.clone()).collect();
+            let read_socket = || -> Result<String, String> {
+                Ok(app.state::<AudioState>().0.try_lock()
+                    .map_err(|_| "LOCAL_SEARCH_UNAVAILABLE")?.local_album_socket_path())
+            };
+            let socket = read_socket()?;
+            let expected = MpdSupervisor::socket_path();
+            if Path::new(&socket) != expected.as_path() { return Err("LOCAL_CATALOG_CONTEXT_CHANGED".into()); }
+            let result = AudioEngine::search_local_tracks_at(&socket, &query, &source_ids)?;
+            let after = recheck()?;
+            if after.observed_conflict || before.sources != after.sources || read_socket()? != socket
+                || MpdSupervisor::socket_path() != expected { return Err("LOCAL_CATALOG_CONTEXT_CHANGED".into()); }
+            Ok(result)
+        })?;
+        Ok(result)
+    }).await.map_err(|_| "LOCAL_SEARCH_UNAVAILABLE".to_string())?
+}
+
+#[tauri::command]
 async fn get_plex_libraries(state: State<'_, PlexState>) -> Result<Vec<PlexLibrary>, String> {
     let client = state.0.lock().unwrap().clone();
     client.get_music_libraries().await
@@ -6554,6 +6620,7 @@ async fn get_plex_image(
 }
 
 fn shutdown_controlled_resources(app_handle: &AppHandle) {
+    app_handle.state::<upnp::State>().shutdown();
     mpris::shutdown(app_handle);
     if app_handle.state::<library_recovery::State>().should_persist_shutdown_queue() {
     if let Some(audio_state) = app_handle.try_state::<AudioState>() {
@@ -6869,6 +6936,7 @@ pub fn run() {
         .manage(shared_dsp::State::new())
         .manage(PlaylistState(Mutex::new(PlaylistStore::default())))
         .manage(mpris::MprisState::default())
+        .manage(upnp::State::default())
         .invoke_handler(tauri::generate_handler![
             analyze_library_recovery,
             cancel_library_recovery_analysis,
@@ -6888,7 +6956,10 @@ pub fn run() {
             previous_track,
             seek_playback,
             play_uris,
+            upnp_bridge::get_upnp_receiver,
+            upnp_bridge::set_upnp_receiver,
             play_tracks,
+            enqueue_tracks,
             admit_playback_intent,
             cancel_playback_intent,
             playback_intent_current,
@@ -6921,6 +6992,7 @@ pub fn run() {
             get_artwork_enrichment_progress,
             save_artwork_enrichment_progress,
             get_local_albums,
+            search_local_tracks,
             get_favorites,
             toggle_favorite,
             list_playlists,
@@ -7007,6 +7079,7 @@ pub fn run() {
                 }
                 if managed_startup_allowed || resume_initial {
                     mpris::start(app_handle.clone());
+                    upnp_bridge::restore(app_handle);
                 }
                 if mpd_started && !restore_started.swap(true, Ordering::SeqCst) {
                     let app = app_handle.clone();

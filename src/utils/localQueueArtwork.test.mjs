@@ -1,3 +1,5 @@
+import { passiveQueueInsertion } from "../../tests/support/passiveQueueInsertion.mjs";
+import * as queuePresentationHelpers from "./queuePresentation.ts";
 import { createLocalCoverBatch } from "./localCoverBatch.ts";
 import { createLocalSourceReadQueue } from "./localSourceReadQueue.ts";
 import * as signalPathHelpers from "./signalPath.ts";
@@ -24,7 +26,7 @@ const defer=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{prom
 const album=(id,folder)=>({id,title:"Same title",artist:"Same artist",folder_path:folder,discs:[],source_id:folder.split("/")[0],track_count:2});
 const a=album("a","Source/Album"),b=album("b","Other/Album");
 const track=(uri)=>({title:"Same title",artist:"Same artist",album:"Same title",uri,media_locator:{kind:"local",uri}});
-const common={"react/jsx-runtime":jsx,"lucide-react":icons,"react-i18next":{useTranslation:()=>({t:key=>key})},"./nowPlaying.css":{}};
+const common={...passiveQueueInsertion,"../utils/queuePresentation":queuePresentationHelpers,"react/jsx-runtime":jsx,"lucide-react":icons,"react-i18next":{useTranslation:()=>({t:key=>key})},"./nowPlaying.css":{}};
 const {TrackArtwork}=compile("components/TrackArtwork.tsx",{...common,react:{...React,default:React},"./PlexImage":{PlexImage:()=>null}});
 const nodes=(tree,pred)=>Array.isArray(tree)?tree.flatMap(n=>nodes(n,pred)):!tree||typeof tree!=="object"?[]:[...(pred(tree)?[tree]:[]),...nodes(tree.props?.children,pred)];
 const fixtures=new Set();
@@ -32,7 +34,7 @@ test.afterEach(()=>{for(const f of fixtures)f.dispose();fixtures.clear();});
 function mount({items=[track("Source/Album/1.flac"),track("Source/Album/2.flac"),track("Other/Album/3.flac")],inventory=[a,b],cover=async path=>`cover:${path}`,cache=async()=>null,detached=false}={}){
  const calls=[],slots=[],effects=[],layouts=[];let cursor=0,disposed=false,late=0,reader;
  const effect=(list,fn,deps)=>{const i=cursor++,old=slots[i];if(!old||deps.some((v,n)=>!Object.is(v,old.deps[n])))list.push(()=>{old?.cleanup?.();slots[i]={deps,cleanup:fn()};});};
- const react={...React,default:React,
+ const react={...React,default:React,useId:()=> "queue-filter-test",
   useState(initial){const i=cursor++;if(!(i in slots))slots[i]=initial;return[slots[i],value=>{if(disposed)late++;slots[i]=typeof value==="function"?value(slots[i]):value;}];},
   useRef(initial){const i=cursor++;return slots[i]??(slots[i]={current:initial});},
   useMemo(fn,deps){const i=cursor++,old=slots[i];if(!old||deps.some((v,n)=>!Object.is(v,old.deps[n])))slots[i]={deps,value:fn()};return slots[i].value;},
@@ -151,4 +153,17 @@ test("pending image recovery is canceled by Save/indexing/unavailable and resume
 
 test("an already projected current cover does not trigger redundant queue artwork/catalog reads",async()=>{
  const f=mount({detached:true,items:[track("Source/Album/only.flac")]});await f.ready();assert.deepEqual(f.thumbs(),["current-cover"]);assert.deepEqual(f.calls.map(c=>c[0]),["get_queue"]);f.dispose();
+});
+
+
+test("filtering virtual rows uses original queue indices for current artwork and does not mutate the queue",async()=>{
+ const items=Array.from({length:50},(_,i)=>({...track(`Source/Album/${i}.flac`),title:i===40?"Needle":"Other"}));
+ const f=mount({items});f.props.status={...f.props.status,current_media:{kind:"local",uri:items[40].uri,queue_index:40},thumb:"current-cover"};
+ await f.ready();const original=structuredClone(f.items);
+ const field=nodes(f.tree,n=>n.type==="input"&&n.props.type==="search")[0];field.props.onChange({target:{value:"Needle"}});await f.ready();
+ const rows=nodes(f.tree,n=>n.props?.["data-queue-index"]!==undefined);
+ assert.equal(rows.length,1);assert.equal(rows[0].props["data-queue-index"],40);assert.equal(rows[0].props["aria-current"],"true");
+ assert.deepEqual(f.thumbs(),["current-cover"]);assert.deepEqual(f.items,original);
+ assert.equal(f.calls.filter(call=>!['get_queue','get_local_albums','get_local_covers','get_online_album_cover'].includes(call[0])).length,0);
+ f.dispose();
 });

@@ -2,7 +2,7 @@ import type { ThumbnailDiagnostic } from "./localAlbumThumbnails";
 
 // DevTools diagnostics only. UI errors remain unchanged.
 const operations = [
-  "player.request", "plex.album-play",
+  "player.request", "plex.album-play", "search.local", "search.plex",
   "libraryRecovery.cancel", "app.bootstrap", "app.now-playing-listener", "app.window-title",
   "artist.load", "artist.play", "artwork.album-load",
   "artwork.folder-load", "artwork.local-enrich", "audio.health",
@@ -28,6 +28,8 @@ const operations = [
 ] as const;
 export type DiagnosticOperation = typeof operations[number];
 const safeCodes = new Set([
+  "LOCAL_SEARCH_QUERY_INVALID", "LOCAL_SEARCH_RESPONSE_INVALID", "LOCAL_SEARCH_UPDATING", "LOCAL_SEARCH_UNAVAILABLE",
+  "SEARCH_CONTEXT_CHANGED", "SEARCH_CONTEXT_UNAVAILABLE",
   "LOCAL_INCREMENTAL_CHECK_OTHER_SOURCE_UNAVAILABLE",
   "LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_REQUIRED",
   "LOCAL_SOURCE_REMOVAL_PREVIOUS_GENERATION_UNCONFIRMED",
@@ -207,7 +209,7 @@ export function exploreDiagnosticText(value: string): string {
 
 const correlatedCommands = ["get_playback_status", "get_mpd_status_snapshot", "get_queue", "set_window_title",
   "list_local_directory", "get_local_album_tracks", "get_local_cover", "get_local_albums", "get_favorites", "toggle_favorite"] as const;
-const actionTargets = ["local", "plex", "explore", "favorites", "playlists", "settings", "about"] as const;
+const actionTargets = ["search", "local", "plex", "explore", "favorites", "playlists", "settings", "about"] as const;
 export type InteractionAction = typeof actionTargets[number];
 export interface InteractionState {
   section: string | null; health: string; bootstrap: boolean; settings: boolean; about: boolean;

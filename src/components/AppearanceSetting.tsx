@@ -1,14 +1,11 @@
 import {useId, useSyncExternalStore} from 'react';
 import {useTranslation} from 'react-i18next';
 import {appearance} from '../services/appearance';
-import type {Appearance} from '../utils/appearance';
+import {APPEARANCES, appearancePalettes, type Appearance} from '../utils/appearance';
 
 /** Local, synthetic library preview. It never loads artwork or a media source. */
 function AppearancePreview({mode}: {mode: Appearance}) {
-  const light = mode === 'light';
-  const c = light
-    ? {base: '#f3f5f8', panel: '#ffffff', card: '#eaf0f6', text: '#1d2734', muted: '#a5b1c0', gold: '#946200'}
-    : {base: '#121212', panel: '#181818', card: '#282828', text: '#e0e0e0', muted: '#666666', gold: '#e5a00d'};
+  const c = appearancePalettes[mode];
   const covers = ['#466d76', '#976c69', '#776987', '#767c51', '#667d9b', '#a07845'];
   return <svg viewBox="0 0 320 192" aria-hidden="true" focusable="false" className="block w-full rounded-lg">
     <rect width="320" height="192" rx="8" fill={c.base}/>
@@ -49,14 +46,17 @@ export function AppearanceSetting() {
   const value = useSyncExternalStore(appearance.subscribe, appearance.getSnapshot, () => 'dark' as const);
   return <fieldset className="min-w-0 space-y-3" aria-describedby={`${id}-help`}>
     <legend className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider">{t('settings.appearance')}</legend>
-    <div className="grid gap-3" style={{gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 10rem), 1fr))'}}>
-      {(['dark', 'light'] as const).map(mode => <label key={mode} className="relative min-w-0 cursor-pointer">
+    <div className="flex flex-col gap-2">
+      {APPEARANCES.map(mode => <label key={mode} className="relative min-w-0 cursor-pointer">
         <input type="radio" name={id} value={mode} checked={value === mode}
           onChange={() => appearance.set(mode)} className="peer sr-only"/>
-        <span className="block rounded-xl border-2 border-[color:var(--theme-border-soft,#383838)] p-2 transition-colors peer-checked:border-[color:var(--theme-control-accent,#E5A00D)] peer-focus-visible:outline-2 peer-focus-visible:outline-offset-4 peer-focus-visible:outline-[color:var(--theme-control-accent,#E5A00D)]">
-          <AppearancePreview mode={mode}/>
-          <span className="mt-2 flex items-center justify-between gap-2 px-1 pb-1 text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)]">
-            {t(mode === 'dark' ? 'settings.appearanceDark' : 'settings.appearanceLight')}
+        <span className="flex items-center gap-4 rounded-xl border-2 border-[color:var(--theme-border-soft,#383838)] p-2 transition-colors peer-checked:border-[color:var(--theme-control-accent,#E5A00D)] peer-focus-visible:outline-2 peer-focus-visible:outline-offset-4 peer-focus-visible:outline-[color:var(--theme-control-accent,#E5A00D)]">
+          <span className="block w-28 shrink-0 sm:w-32"><AppearancePreview mode={mode}/></span>
+          <span className="flex min-w-0 flex-1 items-center justify-between gap-2 px-1 text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)]">
+            <span className="min-w-0">
+              <span className="block">{t(`settings.appearance${mode[0].toUpperCase()}${mode.slice(1)}`)}</span>
+              <span className="mt-1 block text-xs font-normal leading-relaxed text-[color:var(--theme-fg-muted,#888888)]">{t(`settings.appearance${mode[0].toUpperCase()}${mode.slice(1)}Description`)}</span>
+            </span>
             <span aria-hidden="true" className="flex h-4 w-4 items-center justify-center rounded-full border border-[color:var(--theme-border-soft,#777777)]">
               {value === mode && <span className="h-2 w-2 rounded-full bg-[var(--theme-control-accent,#E5A00D)]"/>}
             </span>
