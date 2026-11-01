@@ -216,3 +216,24 @@ test("IPC is read-only and player links use guarded identity resolution with a m
   assert.ok(browser.includes("if (!playerTarget) localAlbumCatalog.setUpdating(isLibraryUpdating, true)"));
   assert.ok(service.includes('invoke<PlayerPlexNavigation>("resolve_player_plex_navigation", { media })'));
 });
+
+const navMedia={kind:'navidrome',connection_id:'session-nav',song_id:'song-1',queue_index:2};
+const navResult={connection_id:'session-nav',song_id:'song-1',account_id:'a'.repeat(64),album_id:'album-1',artist_id:'artist-1'};
+function openNav(requests,view,lookup,targets,errors){return requests.open(navMedia,view,[],()=>assert.fail('no Plex query'),t=>targets.push(t),()=>errors.push(true),undefined,()=>assert.fail('no local catalog read'),lookup);}
+test('Navidrome player links resolve exact source/song IDs and retain the original return section without playback',async()=>{
+ for(const view of ['album','artist']){const requests=new PlayerNavigationRequests(),targets=[],errors=[],calls=[];
+  await openNav(requests,view,async media=>{calls.push(media);return navResult;},targets,errors);
+  assert.deepEqual(calls,[navMedia]);assert.deepEqual(errors,[]);assert.deepEqual(targets,[{kind:'navidrome',view,accountId:navResult.account_id,albumId:'album-1',artistId:'artist-1'}]);
+  const session=visitPlayerTarget(null,targets[0],'favorites');assert.equal(session.returnSection,'favorites');assert.equal(visitPlayerTarget(session,targets[0],'navidrome').returnSection,'favorites');
+ }
+});
+test('Navidrome player rejects a different session/song or incomplete identity; absent artist does not block the album',async()=>{
+ for(const altered of [{connection_id:'other'},{song_id:'other'},{account_id:'wrong'},{album_id:''},{artist_id:null}]){
+  const requests=new PlayerNavigationRequests(),targets=[],errors=[];
+  await openNav(requests,'artist',async()=>({...navResult,...altered}),targets,errors);assert.deepEqual(targets,[]);assert.deepEqual(errors,[true]);
+ }
+ const targets=[],errors=[];await openNav(new PlayerNavigationRequests(),'album',async()=>({...navResult,artist_id:null}),targets,errors);assert.equal(targets.length,1);assert.deepEqual(errors,[]);
+});
+test('late Navidrome navigation success and failure cannot replace a newer source, track, account or visit',async()=>{
+ for(const failed of [false,true]){const requests=new PlayerNavigationRequests(),targets=[],errors=[],response=deferred();const work=openNav(requests,'album',()=>response.promise,targets,errors);requests.invalidate();if(failed)response.reject('NAVIDROME_CONTEXT_CHANGED');else response.resolve(navResult);await work;assert.deepEqual(targets,[]);assert.deepEqual(errors,[]);}
+});

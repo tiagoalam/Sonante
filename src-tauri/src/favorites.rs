@@ -134,7 +134,7 @@ impl FavoriteAlbum {
 
         for fav in &mut list {
             if fav.source == "local" {
-                if let Some(config) = config {
+                if let Some(config) = config.filter(|c| c.sources.unwrap_or_default().local) {
                     fav.exists = check_local_path_exists(&fav.path_or_key, config)?;
                 }
             } else {

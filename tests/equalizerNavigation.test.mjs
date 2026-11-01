@@ -17,7 +17,7 @@ function setup(origin,target=null){
  const returnRef={current:origin};
  const section=()=>evaluate(initializer('centralSection'),{mediaSource:ctx.section,playerReturnSection:ctx.target?origin:null,eqReturnSectionRef:returnRef});
  const env={mediaSource:'equalizer',playerTarget:target,centralSection:origin,eqReturnSectionRef:returnRef,eqReturnViewRef:{current:true},setLocalSubview:v=>ctx.subview=v,changePlayerLocalSubview:v=>ctx.playerSubview=v,resetAllNavigation:()=>{ctx.reset++;ctx.target=null},mainSectionPreference:pref};
- env.navigateExplore=evaluate(initializer('navigateExplore'),{...env,exploreSource:'local',exploreSources:['local','plex'],exploreSourceFor,setExploreSource:v=>ctx.exploreSource=v,setPlexArea:v=>ctx.plexArea=v});
+ env.navigateExplore=evaluate(initializer('navigateExplore'),{...env,exploreSource:'local',exploreSources:['local','plex'],exploreSourceFor,setExploreSource:v=>ctx.exploreSource=v,setNavidromeArea:v=>ctx.navArea=v,setPlexArea:v=>ctx.plexArea=v});
  ctx.section='equalizer';return {ctx,env,section,saved};
 }
 test('actual Local handler exits EQ from Local/Explore/Plex/Playlists; Local return retains context',()=>{

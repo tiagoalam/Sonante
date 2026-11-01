@@ -1,3 +1,8 @@
+import { AlbumCatalog } from "./AlbumCatalog";
+import { LocalCatalogReadError } from "./LocalCatalogReadError";
+import { AlbumCatalogRow } from "./AlbumCatalogRow";
+import { AlbumViewControls } from "./AlbumViewControls";
+import { readAlbumPresentation, saveAlbumPresentation, type AlbumLayout, type AlbumPresentation } from "../utils/albumPresentation";
 import { useTrackSelection } from "./TrackSelection";
 import { loadLocalAlbumQueue } from "../utils/queueAlbumLoader";
 import { useQueueInsertion } from "./QueueInsertionMenu";
@@ -39,7 +44,7 @@ import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import type { NewPlaylistItem } from "../types/playlist";
 import { flattenAlbumDiscs, type AlbumDiscTracks } from "../utils/localAlbumDiscs";
 import { localAlbumCatalog } from "../utils/localAlbumCatalogSession";
-import { confirmedCatalogPlaybackAllowed, emptyLocalAlbumCatalogState, refreshCatalogAfterSuccessfulCheck, localCatalogActivity, localCatalogErrorKey, localCatalogPresentationAlbums } from "../utils/localAlbumCatalog";
+import { confirmedCatalogPlaybackAllowed, emptyLocalAlbumCatalogState, refreshCatalogAfterSuccessfulCheck, localCatalogActivity, canRetryLocalCatalog, localCatalogPresentationAlbums } from "../utils/localAlbumCatalog";
 import { albumLocationSources } from "../utils/localAlbumLocations";
 import { localArtworkEnrichment, localArtworkResolver, localAlbumThumbnails } from "../utils/localArtworkSession";
 import {
@@ -70,7 +75,7 @@ import {
   filterLocalAlbumsWithoutYear,
   validLocalYearSelection,
 } from "../utils/localYearNavigation";
-import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./VirtualAlbumGrid";
+import { type VirtualAlbumGridHandle } from "./VirtualAlbumGrid";
 import { VirtualList, type VirtualListHandle } from "./VirtualList";
 import { AlbumArtworkPlaceholder } from "./AlbumArtworkPlaceholder";
 import { ToolbarSelect } from "./ToolbarSelect";
@@ -104,6 +109,7 @@ async function loadAlbumDiscTracks(album: LocalAlbum): Promise<AlbumDiscTracks[]
 }
 
 const LocalAlbumCard: React.FC<{
+  layout?: AlbumLayout;
   album: LocalAlbum;
   isFavorite: boolean;
   onToggleFavorite: (e: React.MouseEvent, album: LocalAlbum, cover: string | null) => void;
@@ -113,19 +119,20 @@ const LocalAlbumCard: React.FC<{
   onlineArtworkEnabled: boolean;
   isLibraryUpdating: boolean;
   readEnabled: boolean;
-}> = ({ album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable, onlineArtworkEnabled, isLibraryUpdating, readEnabled }) => {
+}> = ({ layout = "grid", album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable, onlineArtworkEnabled, isLibraryUpdating, readEnabled }) => {
   const { t } = useTranslation();
-  const cardContext = useMemo(() => ({}), [album, readEnabled]);
+  const artworkEnabled = layout !== "details";
+  const cardContext = useMemo(() => ({}), [album, readEnabled, layout]);
   const cardActions = useQueueInsertion(cardContext, readEnabled && isPlaybackAvailable);
   const albumRequest = { track: { title: album.title, artist: album.artist, album: album.title }, scope: "album" as const, load: () => loadLocalAlbumQueue(album) };
-  const [cover, setCover] = useState<string | null>(() => readEnabled ? localArtworkResolver.get(album.id) : null);
+  const [cover, setCover] = useState<string | null>(() => readEnabled && artworkEnabled ? localArtworkResolver.get(album.id) : null);
   const [failedCover, setFailedCover] = useState<string | null>(null);
 
   const cardRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const [visible, setVisible] = useState(false);
   const [coverChecked, setCoverChecked] = useState(false);
-  const displayCover = (readEnabled ? cover : null) || (!readEnabled || !coverChecked ? localAlbumThumbnails.get(album) : null);
+  const displayCover = artworkEnabled ? (readEnabled ? cover : null) || (!readEnabled || !coverChecked ? localAlbumThumbnails.get(album) : null) : null;
   const readEnabledRef = useRef(readEnabled);
   readEnabledRef.current = readEnabled;
   const onlineEnabledRef = useRef(onlineArtworkEnabled);
@@ -135,12 +142,13 @@ const LocalAlbumCard: React.FC<{
 
   useEffect(() => {
     setCoverChecked(false);
-    if (!readEnabled) { setCover(null); return; }
+    if (!readEnabled || !artworkEnabled) { setCover(null); return; }
     setCover(localArtworkResolver.get(album.id));
     return localArtworkResolver.subscribe(album.id, setCover);
-  }, [album, readEnabled]);
+  }, [album, readEnabled, artworkEnabled]);
 
   useEffect(() => {
+    if (!artworkEnabled) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0].isIntersecting) {
@@ -158,10 +166,10 @@ const LocalAlbumCard: React.FC<{
     return () => {
       observer.disconnect();
     };
-  }, [album.folder_path]);
+  }, [album.folder_path, artworkEnabled]);
 
   useEffect(() => {
-    if (!readEnabled || !visible || cover) return;
+    if (!readEnabled || !artworkEnabled || !visible || cover) return;
     let active = true;
     const version = localAlbumCatalog.getSnapshot().albums;
     const current = () => {
@@ -177,10 +185,10 @@ const LocalAlbumCard: React.FC<{
       })
       .catch((error) => logError("artwork.album-load", error));
     return () => { active = false; };
-  }, [album, visible, cover, onlineArtworkEnabled, isLibraryUpdating, readEnabled]);
+  }, [album, visible, cover, onlineArtworkEnabled, isLibraryUpdating, readEnabled, artworkEnabled]);
 
   const captureResolvedImage = (image: HTMLImageElement, trigger: "on_load" | "already_complete") => {
-    if (!readEnabled || !cover || displayCover !== cover || (image.currentSrc || image.src) !== cover) return;
+    if (!artworkEnabled || !readEnabled || !cover || displayCover !== cover || (image.currentSrc || image.src) !== cover) return;
     localAlbumThumbnails.capture(album, image, () => {
       const current = localAlbumCatalog.getSnapshot();
       return current.albums.includes(album) && !artworkReadBlocked(libraryUpdatingRef.current, current);
@@ -194,14 +202,9 @@ const LocalAlbumCard: React.FC<{
     if (image?.complete) captureResolvedImage(image, "already_complete");
   }, [album, cover, displayCover, readEnabled, isLibraryUpdating]);
 
-  useEffect(() => { localAlbumThumbnails.observeInitialCard(album); }, [album]);
+  useEffect(() => { if (artworkEnabled) localAlbumThumbnails.observeInitialCard(album); }, [album, artworkEnabled]);
 
-  return (
-    <div ref={cardRef} onContextMenu={event => cardActions.open(event, albumRequest)} onClick={readEnabled ? onClick : undefined} aria-disabled={!readEnabled} className={`group flex flex-col relative ${readEnabled ? "cursor-pointer" : "cursor-default"}`}>
-      {cardActions.menu}{cardActions.notice}
-      <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md">
-        <span className="album-queue-trigger">{cardActions.trigger(albumRequest)}</span>
-        {displayCover && displayCover !== failedCover ? (
+  const artwork = displayCover && displayCover !== failedCover ? (
           <img
             src={displayCover}
             alt={album.title}
@@ -213,7 +216,22 @@ const LocalAlbumCard: React.FC<{
           />
         ) : (
           <AlbumArtworkPlaceholder />
-        )}
+        );
+  if (layout !== 'grid') return <div ref={cardRef} onContextMenu={event => cardActions.open(event, albumRequest)} className="relative h-full min-w-0">
+    {cardActions.menu}{cardActions.notice && <div className="absolute inset-x-0 bottom-0 z-20">{cardActions.notice}</div>}
+    <AlbumCatalogRow title={album.title} artist={album.artist} year={album.year} trackCount={album.track_count}
+      discCount={album.discs.length} genres={album.genres} library={album.source_label} addedAt={album.added_at}
+      detailed={layout==='details'} artwork={layout==='list'?artwork:undefined} favorite={isFavorite}
+      readable={readEnabled} playable={readEnabled&&isPlaybackAvailable} onOpen={onClick} onPlay={onPlayQuick}
+      onFavorite={event=>onToggleFavorite(event,album,cover)} queueAction={cardActions.trigger(albumRequest)} />
+  </div>;
+
+  return (
+    <div ref={cardRef} onContextMenu={event => cardActions.open(event, albumRequest)} onClick={readEnabled ? onClick : undefined} aria-disabled={!readEnabled} className={`group flex flex-col relative ${readEnabled ? "cursor-pointer" : "cursor-default"}`}>
+      {cardActions.menu}{cardActions.notice}
+      <div className="relative aspect-square w-full rounded-lg bg-[var(--theme-surface-raised,#202020)] overflow-hidden mb-2.5 shadow-md">
+        <span className="album-queue-trigger">{cardActions.trigger(albumRequest)}</span>
+        {artwork}
 
 
         <button data-theme-surface="contrast"
@@ -313,11 +331,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const [viewMode, setViewMode] = useState<"albums" | "artists" | "years" | "genres" | "folders">(playerTarget?.view === "artist" ? "artists" : "albums");
   const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, isLibraryUpdating);
   const catalogActivity = localCatalogActivity(isLibraryUpdating, catalog);
-  const catalogErrorKey = catalog.error ? localCatalogErrorKey(catalog.error) : null;
   const [albumSearch, setAlbumSearch] = useState("");
   const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
   const [artistSearch, setArtistSearch] = useState("");
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(playerAlbum?.source_id ?? initialAlbum?.source_id ?? null);
+  const [albumPresentation, setAlbumPresentation] = useState<AlbumPresentation>(()=>readAlbumPresentation("local"));
+  const changeAlbumPresentation = (next: AlbumPresentation) => { setAlbumPresentation(next); saveAlbumPresentation("local", next); };
   const [albumSortMode, setAlbumSortMode] = useState<LocalAlbumSortMode>("album-asc");
   const [artistSortMode, setArtistSortMode] = useState<LocalArtistSortMode>("artist-asc");
   const [selectedDecade, setSelectedDecade] = useState<number | null>(null);
@@ -1029,6 +1048,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               </div>
             </>
           )}
+          {(viewMode === 'albums' || !!selectedArtist || activeGenre !== null || selectedYear !== null || unknownYearSelected) && <AlbumViewControls value={albumPresentation} onChange={changeAlbumPresentation} />}
           {canSelectLibraryCheck && <div className="ml-auto flex min-w-0 shrink-0 items-center gap-2">
             {checkFeedback?.scope === libraryCheckScope && <span role="status"
               title={checkFeedback.kind === "other-source-unavailable" ? t("localBrowser.checkLibrary.otherSourceUnavailableHelp") : undefined}
@@ -1105,9 +1125,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         </div>
       )}
       {catalog.error && (
-        <div role="alert" className="px-8 py-2 text-xs text-[color:var(--theme-fg-error,var(--color-red-400))] border-b border-[color:var(--theme-border-soft,#222222)]">
-          {catalogErrorKey ? t(catalogErrorKey) : catalog.error}
-        </div>
+        <LocalCatalogReadError catalog={catalog} updating={isLibraryUpdating} available={isPlaybackAvailable} onRetry={() => {
+          if (canRetryLocalCatalog(localAlbumCatalog.getSnapshot(), libraryUpdatingRef.current, isPlaybackAvailable)) localAlbumCatalog.requestRefresh();
+        }} />
       )}
       <div ref={setScrollContainer} className="flex-1 overflow-y-auto p-8">
 
@@ -1317,13 +1337,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
               </div>
             ) : (
-              <VirtualAlbumGrid
+              <AlbumCatalog presentation={albumPresentation}
                 items={artistAlbums}
                 getItemKey={(album) => album.id}
                 scrollContainer={scrollContainer}
                 resetKey={JSON.stringify([activeSourceId, selectedArtist])}
                 renderItem={(album) => (
-                  <LocalAlbumCard
+                  <LocalAlbumCard layout={albumPresentation.layout}
                     readEnabled={!metadataMode && catalog.loaded}
                     album={album}
                     isFavorite={favoriteIds.has(album.folder_path)}
@@ -1354,14 +1374,14 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
               </div>
             ) : (
-              <VirtualAlbumGrid
+              <AlbumCatalog presentation={albumPresentation}
                 ref={albumGridRef}
                 items={sortedAlbums}
                 getItemKey={(album) => album.id}
                 scrollContainer={scrollContainer}
                 resetKey={JSON.stringify([localAlbumNavigationResetKey(activeSourceId, albumSearch, albumSortMode)])}
                 renderItem={(album) => (
-                  <LocalAlbumCard
+                  <LocalAlbumCard layout={albumPresentation.layout}
                     readEnabled={!metadataMode && catalog.loaded}
                     album={album}
                     isFavorite={favoriteIds.has(album.folder_path)}
@@ -1418,13 +1438,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 {t("localBrowser.emptyAlbums")}
               </div>
             ) : (
-              <VirtualAlbumGrid
+              <AlbumCatalog presentation={albumPresentation}
                 items={genreAlbums}
                 getItemKey={(album) => album.id}
                 scrollContainer={scrollContainer}
                 resetKey={JSON.stringify([activeSourceId, "genre", activeGenre, albumSearch, albumSortMode])}
                 renderItem={(album) => (
-                  <LocalAlbumCard
+                  <LocalAlbumCard layout={albumPresentation.layout}
                     readEnabled={!metadataMode && catalog.loaded}
                     album={album}
                     isFavorite={favoriteIds.has(album.folder_path)}
@@ -1457,13 +1477,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 <span className="text-xs">{t("localBrowser.emptyAlbums")}</span>
               </div>
             ) : (
-              <VirtualAlbumGrid
+              <AlbumCatalog presentation={albumPresentation}
                 items={yearAlbums}
                 getItemKey={(album) => album.id}
                 scrollContainer={scrollContainer}
                 resetKey={JSON.stringify([activeSourceId, selectedYear, unknownYearSelected])}
                 renderItem={(album) => (
-                  <LocalAlbumCard
+                  <LocalAlbumCard layout={albumPresentation.layout}
                     readEnabled={!metadataMode && catalog.loaded}
                     album={album}
                     isFavorite={favoriteIds.has(album.folder_path)}

@@ -41,7 +41,7 @@ test("source tabs appear only inside Explore with both configured sources", () =
     ["local", "library", false], ["plex", "library", false], ["plex", "discover", true],
     ["explore", "library", true], ["favorites", "discover", false], ["playlists", "library", false],
   ]) {
-    const isExploreSection = compile(initializer("isExploreSection"), { centralSection, plexArea });
+    const isExploreSection = compile(initializer("isExploreSection"), { centralSection, plexArea, navidromeArea: "library" });
     assert.equal(isExploreSection, exploring);
     for (const exploreSources of [[], ["local"], ["plex"], ["local", "plex"]]) {
       assert.equal(compile(initializer("showExploreTabs"), { isExploreSection, exploreSources }), exploring && exploreSources.length === 2);
@@ -61,7 +61,7 @@ test("actual Explore navigation routes each source and restart restores its prin
       const navigation = () => compile(initializer("navigateExplore"), {
         exploreSources: sources, exploreSource: ctx.source, exploreSourceFor,
         resetAllNavigation() { ctx.resets++; }, setExploreSource(value) { ctx.source = value; },
-        setPlexArea(value) { ctx.area = value; }, mainSectionPreference: preference,
+        setNavidromeArea(value) { ctx.navArea = value; }, setPlexArea(value) { ctx.area = value; }, mainSectionPreference: preference,
       });
       navigation()(preferred);
       const actual = exploreSourceFor(sources, preferred);
@@ -131,4 +131,27 @@ test("visible source tabs have translated labels, selection, and keyboard/click 
     assert.deepEqual(focused, [source === "local" ? "#explore-source-plex" : "#explore-source-local",
       source === "local" ? "#explore-source-plex" : "#explore-source-local", "#explore-source-local", "#explore-source-plex"]);
   }
+});
+
+
+test('optional third source uses the same visible tabs and keyboard order while defaults remain Local/Plex',()=>{
+ const calls=[],focused=[];const labels={local:'Local',plex:'Plex',navidrome:'Navidrome'};
+ const base={source:'navidrome',onChange:value=>calls.push(value),idPrefix:'favorites-source',label:'Sources',labels};
+ const defaults=sharedExports.LibrarySourceTabs({...base,source:'local'});assert.equal(React.Children.toArray(defaults.props.children.props.children).length,2);
+ const tree=sharedExports.LibrarySourceTabs({...base,sources:['local','plex','navidrome']});const buttons=React.Children.toArray(tree.props.children.props.children);assert.equal(buttons.length,3);const selected=buttons.find(button=>button.props['aria-selected']);assert.equal(selected.props.id,'favorites-source-navidrome');
+ for(const key of ['ArrowRight','ArrowLeft','Home','End'])selected.props.onKeyDown({key,preventDefault(){},stopPropagation(){},currentTarget:{parentElement:{querySelector(selector){return{focus(){focused.push(selector)}}}}}});
+ assert.deepEqual(focused,['#favorites-source-local','#favorites-source-plex','#favorites-source-local','#favorites-source-navidrome']);assert.deepEqual(calls,['local','plex','local']);
+});
+
+
+test("Navidrome Explore uses the shared third tab, routes within Navidrome and restarts at its library",()=>{
+ for(const sources of [["navidrome"],["local","navidrome"],["local","plex","navidrome"]]){
+  const ctx={};const preference=createMainSectionPreference(value=>ctx.section=value,()=>({getItem:()=>ctx.saved,setItem:(_key,value)=>ctx.saved=value}));
+  preference.restore({first_run:false,plex_token:""});
+  compile(initializer("navigateExplore"),{exploreSources:sources,exploreSource:"local",exploreSourceFor,resetAllNavigation(){},setExploreSource:value=>ctx.source=value,setPlexArea:value=>ctx.plexArea=value,setNavidromeArea:value=>ctx.navArea=value,mainSectionPreference:preference})("navidrome");
+  assert.equal(ctx.section,"navidrome");assert.equal(ctx.navArea,"explore");assert.equal(ctx.saved,"navidrome");preference.restore({first_run:false,plex_token:""});assert.equal(ctx.section,"navidrome");
+  const isExploreSection=compile(initializer("isExploreSection"),{centralSection:"navidrome",plexArea:"library",navidromeArea:"explore"});assert.equal(isExploreSection,true);
+  assert.equal(compile(initializer("showExploreTabs"),{isExploreSection,exploreSources:sources}),sources.length>1);
+ }
+ for(const language of ["en","pt-BR"]){const tree=tabs(language,{sources:["local","plex","navidrome"],source:"navidrome",onChange(){}});assert.match(renderToStaticMarkup(tree),/>Navidrome</);assert.equal(React.Children.toArray(tree.props.children.props.children).length,3);}
 });

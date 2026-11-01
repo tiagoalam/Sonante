@@ -1,13 +1,15 @@
 import type { CurrentMedia } from "../types/audio";
 import type { LocalAlbum, LocalAlbumDiscTracks } from "../types/local";
 import type { PlayerPlexNavigation, PlexAlbum, SelectedArtist } from "../types/plex";
+import type { NavidromePlayerNavigation } from "../types/navidrome";
 import type { MainSection } from "./appBootstrap";
 import { localArtistIdentity } from "./localArtistNavigation.ts";
 
 export type PlayerNavigationTarget =
   | { kind: "local"; view: "album" | "artist"; albumId: string;
       verified: { groups: LocalAlbumDiscTracks[]; catalog: readonly LocalAlbum[] } }
-  | { kind: "plex"; view: "album" | "artist"; album: PlexAlbum; artist: SelectedArtist; returnToArtist?: boolean };
+  | { kind: "plex"; view: "album" | "artist"; album: PlexAlbum; artist: SelectedArtist; returnToArtist?: boolean }
+  | { kind: "navidrome"; view: "album" | "artist"; accountId: string; albumId: string; artistId: string | null };
 
 export interface PlayerNavigationSession {
   target: PlayerNavigationTarget;
@@ -23,6 +25,7 @@ export function visitPlayerTarget(
 
 export function currentMediaKey(media: CurrentMedia | null): string {
   if (!media) return "none";
+  if (media.kind === "navidrome") return JSON.stringify([media.kind, media.connection_id, media.song_id, media.queue_index]);
   if (media.kind === "radio") return JSON.stringify([media.kind, media.station_id, media.queue_index]);
   if (media.kind === "upnp") return JSON.stringify([media.kind, media.session_id, media.queue_index]);
   return JSON.stringify(media.kind === "local"
@@ -79,6 +82,7 @@ export class PlayerNavigationRequests {
     failed: () => void,
     displayedArtist?: string,
     lookupLocal?: (albumId: string) => Promise<LocalAlbumDiscTracks[]>,
+    lookupNavidrome?: (media: Extract<CurrentMedia, { kind: "navidrome" }>) => Promise<NavidromePlayerNavigation>,
   ): Promise<void> {
     const generation = ++this.generation;
     try {
@@ -105,6 +109,12 @@ export class PlayerNavigationRequests {
           kind: "plex", view, album: result.navigation.album,
           artist: { rating_key: result.navigation.artist_rating_key, name: result.navigation.artist_name },
         };
+      } else if (media?.kind === "navidrome") {
+        if (!lookupNavidrome) throw new Error("unresolved");
+        const result = await lookupNavidrome(media);
+        if (result.connection_id !== media.connection_id || result.song_id !== media.song_id
+          || !/^[a-f0-9]{64}$/.test(result.account_id) || !result.album_id || (view === "artist" && !result.artist_id)) throw new Error("unresolved identity");
+        target = { kind: "navidrome", view, accountId: result.account_id, albumId: result.album_id, artistId: result.artist_id };
       } else { throw new Error("unresolved"); }
       if (generation === this.generation) publish(target);
     } catch {

@@ -1,3 +1,4 @@
+import { sourceEnabled } from "./musicSources.ts";
 import { bindCollectionReset } from "../../tests/helpers/collectionResetFixture.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -188,8 +189,8 @@ test("existing Plex discovery captures library failures and discards responses a
   for (const scenario of ["success", "error", "disposed"]) {
     const pending=deferred(), identity={}, errors=[], libraries=[], loading=[], selected=[]; let calls=0;
     const setters=["setAlbums","setCollections","setActiveAlbum","setActiveCollection","setActiveArtist","setFallbackPlexArtist","setSelectedPlexDecade","setSelectedPlexYear","setSelectedPlexUnknownYear","setSelectedPlexGenre"];
-    const run=new Function("config","mainSectionPreference","setLoadingLibraries","setLibraries","setSelectedLibrary","setPlexLibrariesError","setPlexLibrariesIdentity","plexConnectionIdentity","plexService","logError",...setters,`return (${effect(".getLibraries()")});`)(
-      {plex_token:"SYNTHETIC"},{plexDiscoveryFinished(){}},v=>loading.push(v),v=>libraries.push(v),v=>selected.push(v),v=>errors.push(v),v=>assert.equal(v,identity),identity,{getLibraries(){calls++;return pending.promise;}},()=>{},...setters.map(()=>()=>{}));
+    const run=new Function("sourceEnabled","config","mainSectionPreference","setLoadingLibraries","setLibraries","setSelectedLibrary","setPlexLibrariesError","setPlexLibrariesIdentity","plexConnectionIdentity","plexService","logError",...setters,`return (${effect(".getLibraries()")});`)(
+      sourceEnabled,{plex_token:"SYNTHETIC"},{plexDiscoveryFinished(){}},v=>loading.push(v),v=>libraries.push(v),v=>selected.push(v),v=>errors.push(v),v=>assert.equal(v,identity),identity,{getLibraries(){calls++;return pending.promise;}},()=>{},...setters.map(()=>()=>{}));
     const cleanup=run(); assert.equal(calls,1); assert.equal(loading.at(-1),true);
     if(scenario==="disposed")cleanup();
     if(scenario==="error")pending.reject(Error("DO_NOT_EXPOSE"));else pending.resolve([{key:"exact",title:"Library"}]);
@@ -691,9 +692,9 @@ test('Explore is one principal sidebar entry with source tabs and the existing P
   }
  }ts.forEachChild(node,visit);};visit(ast);
  assert.equal(explore.length,1);assert.equal(discover.length,0);
- assert.equal(explore[0].parent.openingElement.tagName.getText(ast),'nav');
- assert.match(explore[0].parent.getText(ast),/navigateLocalSubview\("browser"\)/);
- assert.match(explore[0].parent.getText(ast),/mainSectionPreference.navigate\("plex"\)/);
+ let nav=explore[0].parent;while(nav&&!ts.isJsxElement(nav))nav=nav.parent;assert.equal(nav.openingElement.tagName.getText(ast),'nav');
+ assert.match(appSource,/navigateLocalSubview\("browser"\)/);
+ assert.match(appSource,/mainSectionPreference.navigate\("plex"\)/);
  assert.match(explore[0].getText(ast),/navigateExplore\(\)/);
  assert.ok(tabs);assert.match(tabs.getText(ast),/source=\{activeExploreSource\}/);assert.match(tabs.getText(ast),/onChange=\{navigateExplore\}/);
  assert.match(appSource,/new PlexDiscoverSession\(plexService.getDiscover, plexService.getDiscoverChildren, plexService.getDiscoverRecent/);

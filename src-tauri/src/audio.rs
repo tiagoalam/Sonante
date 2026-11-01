@@ -30,6 +30,7 @@ pub struct AudioDevice {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MediaLocator {
+    Navidrome { connection_id: String, song_id: String, #[serde(default, skip_serializing_if = "Option::is_none")] account_id: Option<String> },
     Radio { station_id: String },
     Upnp { session_id: String },
     Local {
@@ -48,6 +49,7 @@ pub enum MediaLocator {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CurrentMedia {
+    Navidrome { connection_id: String, song_id: String, queue_index: usize },
     Radio { station_id: String, queue_index: usize },
     Upnp { session_id: String, queue_index: usize },
     Local {
@@ -231,7 +233,7 @@ struct PersistedTrackRef<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     plex_image: Option<&'a PlexImageRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    media_locator: Option<&'a MediaLocator>,
+    media_locator: Option<std::borrow::Cow<'a, MediaLocator>>,
     #[serde(skip_serializing_if = "str::is_empty")]
     uri: &'a str,
     duration: Option<f64>,
@@ -1153,7 +1155,7 @@ struct VirtualCueTrackPath {
 
 // MPD emits Added in UTC at second precision. Unknown/invalid optional
 // metadata must not prevent the rest of the catalog from being displayed.
-fn parse_local_album_added_at(value: &str) -> Option<String> {
+pub(crate) fn parse_local_album_added_at(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     if bytes.len() != 20 || !bytes.iter().enumerate().all(|(i, b)| match i {
         4 | 7 => *b == b'-',
@@ -1617,6 +1619,7 @@ impl AudioEngine {
         let track = self.queue.get(queue_index)?;
 
         match &track.media_locator {
+            Some(MediaLocator::Navidrome { connection_id, song_id, .. }) => Some(CurrentMedia::Navidrome { connection_id: connection_id.clone(), song_id: song_id.clone(), queue_index }),
             Some(MediaLocator::Radio { station_id }) => Some(CurrentMedia::Radio { station_id: station_id.clone(), queue_index }),
             Some(MediaLocator::Upnp { session_id }) => Some(CurrentMedia::Upnp { session_id: session_id.clone(), queue_index }),
             Some(MediaLocator::Plex {
@@ -2697,7 +2700,7 @@ impl AudioEngine {
         resume: Option<&PlaybackResumeSnapshot>,
     ) -> Result<Vec<u8>, String> {
         if queue.iter().any(|track| match &track.media_locator {
-            Some(MediaLocator::Plex { .. } | MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }) => false,
+            Some(MediaLocator::Plex { .. } | MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } | MediaLocator::Navidrome { .. }) => false,
             Some(MediaLocator::Local { uri }) => {
                 Self::contains_plex_token(uri) || Self::contains_plex_token(&track.uri)
             }
@@ -2705,35 +2708,36 @@ impl AudioEngine {
         }) {
             return Err("Cache da fila contém uma URI autenticada inválida.".to_string());
         }
-        let durable_resume = resume.filter(|cursor| cursor.valid_for(queue.len())
-            && !matches!(queue[cursor.queue_index].media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. })))
-            .map(|cursor| PlaybackResumeSnapshot {
-                queue_index: queue[..cursor.queue_index].iter().filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }))).count(),
-                elapsed: cursor.elapsed, state: cursor.state,
-            });
-        let tracks = queue
-            .iter()
-            .filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. })))
-            .map(|track| PersistedTrackRef {
-                title: &track.title,
-                artist: &track.artist,
-                album: &track.album,
-                plex_image: track.plex_image.as_ref(),
-                media_locator: track.media_locator.as_ref(),
-                uri: if matches!(track.media_locator, Some(MediaLocator::Plex { .. })) {
-                    ""
-                } else {
-                    &track.uri
-                },
-                duration: track.duration,
-            })
+        // Keep occurrence indices, rather than comparing song IDs: a queue can
+        // contain the same song more than once and can interleave live streams.
+        let retained: Vec<_> = queue.iter().enumerate()
+            .filter_map(|(index, track)| Self::durable_queue_entry(track).map(|entry| (index, entry)))
             .collect();
+        let durable_resume = resume.filter(|cursor| cursor.valid_for(queue.len()))
+            .and_then(|cursor| retained.iter().position(|(index, _)| *index == cursor.queue_index)
+                .map(|queue_index| PlaybackResumeSnapshot { queue_index, ..*cursor }));
+        let tracks = retained.into_iter().map(|(_, entry)| entry).collect();
         serde_json::to_vec(&PersistedQueueRef {
             version: QUEUE_CACHE_VERSION,
             tracks,
             resume: durable_resume.as_ref(),
         })
         .map_err(|e| format!("Falha ao serializar o cache da fila: {}", e))
+    }
+
+    fn durable_queue_entry(track: &TrackMetadata) -> Option<PersistedTrackRef<'_>> {
+        use std::borrow::Cow;
+        let media_locator = match &track.media_locator {
+            Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }) => return None,
+            Some(locator @ MediaLocator::Navidrome { .. }) => Some(Cow::Owned(crate::navidrome::storage_locator(locator)?)),
+            other => other.as_ref().map(Cow::Borrowed),
+        };
+        let remote = matches!(track.media_locator, Some(MediaLocator::Plex { .. } | MediaLocator::Navidrome { .. }));
+        Some(PersistedTrackRef {
+            title: &track.title, artist: &track.artist, album: &track.album,
+            plex_image: if matches!(track.media_locator, Some(MediaLocator::Navidrome { .. })) { None } else { track.plex_image.as_ref() },
+            media_locator, uri: if remote { "" } else { &track.uri }, duration: track.duration,
+        })
     }
 
     fn save_queue_cache(&self) -> Result<(), String> {
@@ -2743,15 +2747,36 @@ impl AudioEngine {
         crate::persistence::atomic_write_private(&path, &json, "queue_cache.json")
     }
 
+    #[cfg(test)]
     fn migrate_loaded_queue(queue: Vec<TrackMetadata>) -> (Vec<TrackMetadata>, bool) {
+        let (queue, _, changed) = Self::migrate_loaded_queue_with_resume(queue, None);
+        (queue, changed)
+    }
+
+    fn migrate_loaded_queue_with_resume(queue: Vec<TrackMetadata>, resume: Option<PlaybackResumeSnapshot>) -> (Vec<TrackMetadata>, Option<PlaybackResumeSnapshot>, bool) {
+        let resume = resume.filter(|cursor| cursor.valid_for(queue.len()));
+        let mut restored = None;
+        let mut retained = 0;
         let mut changed = false;
         let migrated = queue
             .into_iter()
-            .filter_map(|mut track| {
+            .enumerate()
+            .filter_map(|(index, mut track)| {
                 changed |= Self::sanitize_track_artwork(&mut track);
                 changed |= track.thumb.take().is_some();
-                match &track.media_locator {
+                let track = match &track.media_locator {
                     Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }) => { changed = true; None },
+                    Some(locator @ MediaLocator::Navidrome { .. }) => {
+                        match crate::navidrome::storage_locator(locator) {
+                            Some(saved) => {
+                                changed |= track.media_locator.as_ref() != Some(&saved) || !track.uri.is_empty();
+                                track.media_locator = Some(saved);
+                                track.uri.clear();
+                                Some(track)
+                            }
+                            None => { changed = true; None }
+                        }
+                    },
                     Some(MediaLocator::Plex {
                         server_id,
                         part_key,
@@ -2782,10 +2807,17 @@ impl AudioEngine {
                         changed = true;
                         None
                     }
+                };
+                if track.is_some() {
+                    if let Some(cursor) = resume.filter(|cursor| cursor.queue_index == index) {
+                        restored = Some(PlaybackResumeSnapshot { queue_index: retained, ..cursor });
+                    }
+                    retained += 1;
                 }
+                track
             })
             .collect();
-        (migrated, changed)
+        (migrated, restored, changed)
     }
 
     fn sanitize_track_artwork(track: &mut TrackMetadata) -> bool {
@@ -2873,7 +2905,7 @@ impl AudioEngine {
             b'[' => {
                 let queue: Vec<TrackMetadata> = serde_json::from_reader(reader)
                     .map_err(|_| "Cache antigo da fila inválido.".to_string())?;
-                let (queue, _) = Self::migrate_loaded_queue(queue);
+                let (queue, _, _) = Self::migrate_loaded_queue_with_resume(queue, None);
                 Ok((queue, None, true))
             }
             b'{' => {
@@ -2882,16 +2914,11 @@ impl AudioEngine {
                 if persisted.version != QUEUE_CACHE_VERSION {
                     return Err("Versão do cache da fila não suportada.".to_string());
                 }
-                let (queue, changed) = Self::migrate_loaded_queue(
-                    persisted
-                        .tracks
-                        .into_iter()
-                        .map(TrackMetadata::from)
-                        .collect(),
-                );
                 let resume = persisted.resume
-                    .and_then(|value| serde_json::from_value::<PlaybackResumeSnapshot>(value).ok())
-                    .filter(|cursor| cursor.valid_for(queue.len()));
+                    .and_then(|value| serde_json::from_value::<PlaybackResumeSnapshot>(value).ok());
+                let (queue, resume, changed) = Self::migrate_loaded_queue_with_resume(
+                    persisted.tracks.into_iter().map(TrackMetadata::from).collect(), resume,
+                );
                 Ok((queue, resume, changed))
             }
             _ => Err("Cache da fila inválido.".to_string()),
@@ -3811,6 +3838,26 @@ impl AudioEngine {
         }
     }
 
+    pub(crate) fn restore_startup_queue_references(&mut self, captured: &[TrackMetadata], rebound: Vec<TrackMetadata>, playback_uris: &[String]) -> Result<(), String> {
+        // A newer explicit playback request wins over this late startup work.
+        if !self.startup_queue_pending() { return Ok(()); }
+        let matches = self.queue.len() == captured.len() && captured.len() == rebound.len()
+            && self.queue.iter().zip(captured).all(|(current, before)| current.media_locator == before.media_locator && current.uri == before.uri)
+            && captured.iter().zip(&rebound).all(|(before, after)| match &before.media_locator {
+                Some(locator @ MediaLocator::Navidrome { .. }) => crate::navidrome::storage_locator(locator)
+                    .is_some_and(|saved| after.media_locator.as_ref().and_then(crate::navidrome::storage_locator) == Some(saved)),
+                _ => before.media_locator == after.media_locator && before.uri == after.uri,
+            });
+        if !matches {
+            self.fail_startup_queue_restore();
+            return Err("STARTUP_QUEUE_CONTEXT_CHANGED".into());
+        }
+        self.restore_startup_queue(playback_uris)?;
+        // Only publish the live session references after MPD accepts every add.
+        self.queue = rebound;
+        Ok(())
+    }
+
     pub fn restore_startup_queue(&mut self, playback_uris: &[String]) -> Result<(), String> {
         if !self.startup_queue_pending() {
             return Ok(());
@@ -4174,9 +4221,11 @@ impl AudioEngine {
     }
 
     pub(crate) fn validate_queue_insert_tracks(tracks: &[TrackMetadata]) -> Result<(), String> {
+        crate::music_sources::require_tracks(tracks)?;
         if tracks.is_empty() || tracks.len() > 10_000 { return Err("QUEUE_INSERT_INVALID".into()); }
         for track in tracks {
             match &track.media_locator {
+                Some(locator @ MediaLocator::Navidrome { .. }) if crate::navidrome::storage_locator(locator).is_some() => {}
                 Some(MediaLocator::Local { uri }) if local_media::is_safe_relative_mpd_uri(uri) && local_media::is_catalog_track_uri(uri) => {}
                 Some(MediaLocator::Plex { server_id, part_key, .. }) if !server_id.trim().is_empty()
                     && part_key.starts_with('/') && !part_key.contains(['?', '#', '\0', '\r', '\n'])
@@ -4371,6 +4420,7 @@ impl AudioEngine {
         mut send: impl FnMut(&str) -> Result<Vec<String>, String>,
         mut persist: impl FnMut(&Self) -> Result<(), String>,
     ) -> Result<(), String> {
+        crate::music_sources::require_tracks(&tracks)?;
         self.ensure_queue_structure_available()?;
         if tracks.is_empty() {
             return Err("Não é possível iniciar uma fila vazia.".to_string());
@@ -4392,7 +4442,7 @@ impl AudioEngine {
 
         for (track, playback_uri) in tracks.iter_mut().zip(&playback_uris) {
             Self::sanitize_track_artwork(track);
-            if track.thumb.is_none() && !matches!(track.media_locator, Some(MediaLocator::Radio { .. })) {
+            if track.thumb.is_none() && !matches!(track.media_locator, Some(MediaLocator::Radio { .. } | MediaLocator::Navidrome { .. })) {
                 track.thumb = self.resolve_cover(playback_uri);
             }
         }
@@ -4933,7 +4983,15 @@ impl AudioEngine {
     // Catalog backup validation compares that exact projection, not a claim
     // that the live remote stream can be reconstructed after process restart.
     pub(crate) fn durable_queue_tracks(&self) -> Vec<TrackMetadata> {
-        self.queue.iter().filter(|track| !matches!(track.media_locator, Some(MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }))).cloned().collect()
+        self.queue.iter().filter_map(|track| {
+            let entry = Self::durable_queue_entry(track)?;
+            let mut saved = track.clone();
+            if matches!(track.media_locator, Some(MediaLocator::Navidrome { .. })) {
+                saved.media_locator = entry.media_locator.map(|locator| locator.into_owned());
+                saved.uri.clear(); saved.thumb = None; saved.plex_image = None;
+            }
+            Some(saved)
+        }).collect()
     }
 
     pub(crate) fn history_track(&self, status: &PlaybackStatus) -> Option<TrackMetadata> { crate::listening_history::observed_track(status, &self.queue) }
@@ -5242,7 +5300,7 @@ impl AudioEngine {
                     let track = &self.queue[resume.queue_index];
                     let local_uri = match &track.media_locator {
                         Some(MediaLocator::Local { uri }) => Some(uri.as_str()),
-                        Some(MediaLocator::Plex { .. } | MediaLocator::Upnp { .. } | MediaLocator::Radio { .. }) => None,
+                        Some(MediaLocator::Plex { .. } | MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } | MediaLocator::Navidrome { .. }) => None,
                         None if !track.uri.starts_with("http://") && !track.uri.starts_with("https://") => Some(track.uri.as_str()),
                         None => None,
                     };
@@ -13195,3 +13253,19 @@ mod normal_direct_tests;
 #[cfg(test)]
 #[path="route_save_real_tests.rs"]
 mod route_save_real_tests;
+
+#[cfg(test)]
+mod navidrome_queue_tests {
+ use super::*;
+ #[test]
+ fn session_streams_never_enter_durable_queue_and_do_not_change_local_references() {
+  let track=|name:&str,locator:MediaLocator,uri:&str|TrackMetadata{title:name.into(),artist:"Fixture".into(),album:"Fixture".into(),thumb:None,plex_image:None,media_locator:Some(locator),uri:uri.into(),duration:Some(60.0)};
+  let local=track("Local",MediaLocator::Local{uri:"Music/track.flac".into()},"Music/track.flac");
+  let nav=track("Navidrome",MediaLocator::Navidrome{connection_id:"fixture".into(),song_id:"song".into(),account_id:None},"http://127.0.0.1:1234/nav/SECRET/song?password=PRIVATE");
+  let encoded=AudioEngine::encode_queue_cache(&[local,nav]).unwrap();let json:serde_json::Value=serde_json::from_slice(&encoded).unwrap();assert_eq!(json["tracks"].as_array().unwrap().len(),1);assert_eq!(json["tracks"][0]["media_locator"]["kind"],"local");let text=String::from_utf8(encoded).unwrap();for secret in ["SECRET","PRIVATE","password","127.0.0.1","Navidrome"]{assert!(!text.contains(secret));}
+ }
+}
+
+#[cfg(test)]
+#[path = "audio_navidrome_restore_tests.rs"]
+mod navidrome_restore_tests;

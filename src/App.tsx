@@ -1,21 +1,27 @@
+import {useNavidromeConfiguration} from "./utils/useNavidromeConfiguration";
+import { sourceEnabled } from "./utils/musicSources";
+import { frontendStartup } from './utils/frontendStartup';
+import { useAppWindowTitle } from './utils/useAppWindowTitle';
+import { AboutModal } from './components/AboutModal';
+import { LocalDiagnostics } from './components/LocalDiagnostics';
+import { navidromeService } from './services/navidrome';
+import { RadioView, HistoryView, EqualizerView, NavidromeArtistView, NavidromeView, NavidromeExploreView, PlaylistsView, UnifiedSearchView, ExploreView, PlexDiscoverView } from './components/deferredViews';
 import { PlexBrowserLoadNotice } from "./components/PlexBrowserLoadNotice";
 import { plexBrowserLoadState } from "./utils/plexBrowserLoadState";
-import { RadioView } from "./components/RadioView";
 import { Radio } from "lucide-react";
-import { HistoryView } from "./components/HistoryView";
 import { History } from "lucide-react";
 import { useQueueInsertion } from "./components/QueueInsertionMenu";
 import { plexQueueTrack } from "./utils/queueActions";
 import {plexTrackArtist,plexTrackDurationSeconds} from './utils/plexTrackMetadata';
 import { canToggleMute, directMuteRequest, sharedMuteRequest } from "./utils/signalPath";
 import { SlidersHorizontal } from "lucide-react";
-import { EqualizerView } from "./components/EqualizerView";
 import { LibraryRecoveryPanel } from "./components/LibraryRecoveryPanel";
 import { LocalWatchNotice } from "./components/LocalWatchNotice";
 import { usePlaybackAttempt } from "./utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./components/PlaybackRequestNotice";
 import { usePlayerSourceInfo } from "./utils/usePlayerSourceInfo";
 import { localPlaybackThumbnail } from "./utils/localPlaybackThumbnail";
+import { useNavidromePlaybackArtwork } from "./utils/useNavidromePlaybackArtwork";
 import { useLocalPlaybackArtwork } from "./utils/useLocalPlaybackArtwork";
 import { createLocalAlbumPlayback } from "./utils/localAlbumPlayback";
 import { localLibrarySourceOptions, validLocalLibrarySourceSelection, filterLocalAlbumsByScope } from "./utils/localLibraryScope";
@@ -51,13 +57,10 @@ import { PlayerBar } from "./components/PlayerBar";
 import { AlbumView } from "./components/AlbumView";
 import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
-import { ExploreView } from "./components/ExploreView";
-import { UnifiedSearchView } from "./components/UnifiedSearchView";
 import { ExploreSourceTabs } from "./components/ExploreSourceTabs";
 import { configuredExploreSources, exploreSourceFor, type ExploreSource } from "./utils/exploreNavigation";
 import { discoverPush, type DiscoverPage } from "./utils/discoverNavigation";
 import { playPlexAlbum } from "./utils/plexAlbumPlayback";
-import { PlexDiscoverView } from "./components/PlexDiscoverView";
 import { PlexDiscoverSession } from "./utils/plexDiscover";
 import { mixPlaybackMetadata } from "./utils/plexLibraryMix";
 import { playlistsService, isDuplicatePlaylistNameError } from "./services/playlists";
@@ -72,15 +75,17 @@ import { localArtworkEnrichment, localArtworkResolver, localAlbumThumbnails } fr
 import { artworkReadBlocked } from "./utils/localArtwork";
 import { createMainSectionPreference, type MainSection } from "./utils/appBootstrap";
 import { FavoritesView } from "./components/FavoritesView";
-import { PlaylistsView } from "./components/PlaylistsView";
 import { PlaylistPickerModal } from "./components/PlaylistPickerModal";
 import type { SettingsPage } from "./components/SettingsPages";
 import { SettingsModal, QueueClearConfirmationDialog, formatConfigError } from "./components/SettingsModal";
-import { AboutModal } from "./components/AboutModal";
 import { KeyboardShortcutsHelp } from "./components/KeyboardShortcutsHelp";
 import { WelcomeWizard } from "./components/WelcomeWizard";
 import { PlexImage } from "./components/PlexImage";
-import { VirtualAlbumGrid, type VirtualAlbumGridHandle } from "./components/VirtualAlbumGrid";
+import type { VirtualAlbumGridHandle } from "./components/VirtualAlbumGrid";
+import { AlbumCatalog } from "./components/AlbumCatalog";
+import { AlbumCatalogRow } from "./components/AlbumCatalogRow";
+import { AlbumViewControls } from "./components/AlbumViewControls";
+import { readAlbumPresentation, saveAlbumPresentation, type AlbumPresentation, type AlbumLayout } from "./utils/albumPresentation";
 import { VirtualList, type VirtualListHandle } from "./components/VirtualList";
 import { ToolbarSelect } from "./components/ToolbarSelect";
 import { deriveAlbumGenres, filterAlbumsByGenre, validAlbumGenre } from "./utils/albumGenres";
@@ -281,6 +286,7 @@ const PlexAlbumCard = memo<{
   addFavText: string;
   playAlbumText: string;
   isPlaybackAvailable: boolean;
+  layout?: AlbumLayout;
 }>(({
   album,
   isFav,
@@ -292,11 +298,24 @@ const PlexAlbumCard = memo<{
   addFavText,
   playAlbumText,
   isPlaybackAvailable,
+  layout = "grid",
 }) => {
   const cardContext = useMemo(() => ({}), [album]);
   const cardActions = useQueueInsertion(cardContext, isPlaybackAvailable);
   const albumRequest = { track: { title: album.title, artist: album.artist, album: album.title }, scope: "album" as const,
     load: async () => (await plexService.getAlbumTracks(album.rating_key)).map(track => plexQueueTrack(track, album)) };
+  if (layout !== "grid") {
+    const added = typeof album.added_at === "number" && album.added_at > 0 ? new Date(album.added_at * 1000) : null;
+    return <div className="relative h-full min-w-0" onContextMenu={event => cardActions.open(event, albumRequest)}>
+      {cardActions.menu}<div className="absolute bottom-0 right-2 z-30">{cardActions.notice}</div>
+      <AlbumCatalogRow title={album.title} artist={album.artist} year={album.year ? String(album.year) : undefined}
+        genres={album.genres} library={album.library_title} addedAt={added && Number.isFinite(added.getTime()) ? added.toISOString() : null}
+        detailed={layout === "details"} favorite={isFav} readable playable={isPlaybackAvailable}
+        artwork={layout === "list" ? album.thumb ? <PlexImage image={album.thumb} alt="" className="h-full w-full object-cover" loading="lazy" /> : <Disc3 className="h-full w-full p-4" /> : undefined}
+        onOpen={() => onSelect(album)} onPlay={event => onPlayQuick(event, album)} onFavorite={event => onToggleFav(event, album)}
+        queueAction={cardActions.trigger(albumRequest)} />
+    </div>;
+  }
   return (
     <div onContextMenu={event => cardActions.open(event, albumRequest)}
       onClick={() => onSelect(album)}
@@ -374,10 +393,13 @@ export function App() {
   const { t, i18n } = useTranslation();
   const localCatalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
   const [config, setConfigState] = useState<AppConfig | null>(null);
+  const navidromeConfiguration=useNavidromeConfiguration(sourceEnabled(config,"navidrome"));
+  useLayoutEffect(() => { frontendStartup.mark("shell_committed"); }, []);
+  useLayoutEffect(() => { if (config) frontendStartup.mark("config_committed"); }, [Boolean(config)]);
   const setConfig = useCallback((next: AppConfig) => {
-    localAlbumThumbnails.setContext(next.first_run ? [] : next.local_folders);
-    localPlaybackThumbnail.setContext(next.first_run ? [] : next.local_folders);
-    localAlbumCatalog.setPresentationContext(next.first_run ? [] : next.local_folders);
+    localAlbumThumbnails.setContext(next.first_run || !sourceEnabled(next, "local") ? [] : next.local_folders);
+    localPlaybackThumbnail.setContext(next.first_run || !sourceEnabled(next, "local") ? [] : next.local_folders);
+    localAlbumCatalog.setPresentationContext(next.first_run || !sourceEnabled(next, "local") ? [] : next.local_folders);
     setConfigState(next);
   }, []);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
@@ -387,6 +409,7 @@ export function App() {
   const [playerNavigation, setPlayerNavigation] = useState<PlayerNavigationSession | null>(null);
   const playerTarget = playerNavigation?.target ?? null;
   const [exploreDetail, setExploreDetail] = useState<ExploreEntry | null>(null);
+  const [navidromeArea,setNavidromeArea]=useState<"library"|"explore">("library");
   const [exploreSource, setExploreSource] = useState<ExploreSource>("local");
   const [exploreSourceId, setExploreSourceId] = useState<string | null>(null);
   const exploreDetailReturnRef = useRef<HTMLElement | null>(null);
@@ -429,7 +452,7 @@ export function App() {
   const loadDiscoverArtist = useCallback((artist: SelectedArtist) => plexDiscover.loadArtist(artist), [plexDiscover]);
   const closeDiscoverArtist = useCallback(() => { plexDiscover.cancelArtist(); setDiscoverPages(pages => pages.slice(0, -1)); }, [plexDiscover]);
   // Opaque identities prevent credential values from reaching cards, errors or persisted navigation.
-  const plexConnectionIdentity = useMemo(() => ({}), [config?.plex_server_id, config?.plex_url, config?.plex_token]);
+  const plexConnectionIdentity = useMemo(() => ({}), [config?.plex_server_id, config?.plex_url, config?.plex_token, config?.sources?.plex]);
   const plexBrowserIdentity = useMemo(() => ({}), [plexConnectionIdentity, selectedLibrary?.key]);
   const plexBrowserIdentityRef = useRef(plexBrowserIdentity);
   plexBrowserIdentityRef.current = plexBrowserIdentity;
@@ -441,7 +464,7 @@ export function App() {
     libraryId => plexService.getAlbums(libraryId, "added"), error => logError("plex.albums-load", error)), []);
   const plexBrowserCatalog = useSyncExternalStore(plexCatalog.subscribe, plexCatalog.getSnapshot);
   useEffect(() => {
-    plexCatalog.setContext(plexConnectionIdentity, config?.plex_server_id ?? "");
+    plexCatalog.setContext(plexConnectionIdentity, sourceEnabled(config, "plex") ? config?.plex_server_id ?? "" : "");
     return () => { plexCatalog.invalidate(plexConnectionIdentity); };
   }, [plexCatalog, plexConnectionIdentity]);
 
@@ -458,11 +481,16 @@ export function App() {
 
   const [plexViewMode, setPlexViewMode] = useState<"albums" | "artists" | "years" | "genres" | "collections">("albums");
   const [hasCollections, setHasCollections] = useState(false);
+  const [plexAlbumPresentation, setPlexAlbumPresentation] = useState<AlbumPresentation>(() => readAlbumPresentation("plex"));
+  const changePlexAlbumPresentation = (next: AlbumPresentation) => {
+    setPlexAlbumPresentation(next);
+    saveAlbumPresentation("plex", next);
+  };
   const [plexSortMode, setPlexSortMode] = useState<PlexAlbumSortMode>("added_recent");
   const [selectedPlexGenre, setSelectedPlexGenre] = useState<string | null>(null);
   const [plexArtistSortMode, setPlexArtistSortMode] = useState<PlexArtistSortMode>("artist_asc");
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>("general");
+  const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>("sources");
   const [localFoldersDraft, setLocalFoldersDraft] = useState<AppConfig | null>(null);
   const queueClearFlowRef = useRef(createQueueClearConfirmationFlow());
   const [queueClearConfirmation, setQueueClearConfirmation] = useState<QueueClearConfirmation | null>(null);
@@ -552,23 +580,25 @@ export function App() {
     localArtworkEnrichment.setUpdating(blocked || localCatalog.manualCheckPlayback === true);
   }, [playbackStatus.is_updating, localCatalog]);
   useEffect(() => {
-    localArtworkEnrichment.setOnlineEnabled(config?.online_artwork_enabled ?? false);
-  }, [config?.online_artwork_enabled]);
+    localArtworkEnrichment.setOnlineEnabled((sourceEnabled(config, "local") && config?.online_artwork_enabled) ?? false);
+  }, [config?.online_artwork_enabled, config?.sources?.local]);
   const queueArtworkRevision = useRef({ albums: localCatalog.albums, revision: localCatalogRevision, value: 0 });
   if (queueArtworkRevision.current.albums !== localCatalog.albums || queueArtworkRevision.current.revision !== localCatalogRevision) {
     queueArtworkRevision.current = { albums: localCatalog.albums, revision: localCatalogRevision, value: queueArtworkRevision.current.value + 1 };
   }
   const queueArtwork = useMemo(() => ({
-    blocked: !config || config.first_run || !!configSavePhase || showSettings || showAbout
+    blocked: !sourceEnabled(config, "local") || !config || config.first_run || !!configSavePhase || showSettings || showAbout
       || playbackStatus.is_updating || localCatalog.loading || localCatalog.saveBlocked || localCatalog.mpdBusy || !!localCatalog.error,
-    onlineEnabled: config?.online_artwork_enabled ?? false,
+    onlineEnabled: (sourceEnabled(config, "local") && config?.online_artwork_enabled) ?? false,
     generation: queueArtworkRevision.current.value,
   }), [config?.first_run, !!config, configSavePhase, showSettings, showAbout, playbackStatus.is_updating,
-    localCatalog.loading, localCatalog.saveBlocked, localCatalog.mpdBusy, localCatalog.error, config?.online_artwork_enabled, queueArtworkRevision.current.value]);
-  const ensurePlaybackArtworkCatalog = useCallback(() => localAlbumCatalog.ensureLoaded(false, true), []);
-  const presentationPlayback = useLocalPlaybackArtwork(playbackStatus, localCatalog, isPlaybackAvailable,
-    Boolean(config && !config.first_run && !showSettings && !showAbout),
-    config?.online_artwork_enabled ?? false, ensurePlaybackArtworkCatalog);
+    localCatalog.loading, localCatalog.saveBlocked, localCatalog.mpdBusy, localCatalog.error, config?.sources?.local, config?.online_artwork_enabled, queueArtworkRevision.current.value]);
+  const ensurePlaybackArtworkCatalog = useCallback(() => localAlbumCatalog.ensureLoaded(false, sourceEnabled(config, "local")), [config?.sources?.local]);
+  const sourceArtworkPlayback = useNavidromePlaybackArtwork(playbackStatus, isPlaybackAvailable,
+    Boolean(sourceEnabled(config, "navidrome") && config && !config.first_run && !showSettings && !showAbout));
+  const presentationPlayback = useLocalPlaybackArtwork(sourceArtworkPlayback, localCatalog, isPlaybackAvailable,
+    Boolean(sourceEnabled(config, "local") && config && !config.first_run && !showSettings && !showAbout),
+    (sourceEnabled(config, "local") && config?.online_artwork_enabled) ?? false, ensurePlaybackArtworkCatalog);
   // Source facts depend on the playing origin. Local indexing must not clear
   // Plex labels or invalidate their in-flight read in either player host.
   const playerSourceKind = playbackStatus.current_media?.kind;
@@ -682,7 +712,7 @@ export function App() {
     activeCollection, plexViewMode, searchQuery, config?.plex_server_id, playerNavigationRequests]);
   useLayoutEffect(() => { playerNavigationRequests.invalidate(); }, [localCatalog.albums,
     localCatalog.saveBlocked, localCatalog.loading, localCatalog.mpdBusy, localCatalog.error,
-    playbackStatus.is_updating, mpdHealth.state, config?.plex_token, playerNavigationRequests]);
+    playbackStatus.is_updating, mpdHealth.state, config?.plex_token, navidromeConfiguration.revision, config?.sources?.navidrome, playerNavigationRequests]);
   useEffect(() => () => playerNavigationRequests.invalidate(), [playerNavigationRequests]);
 
   const closePlayerNavigation = () => {
@@ -709,6 +739,7 @@ export function App() {
       () => setPlayerNavigationError(true),
       playbackStatus.artist,
       audioService.getLocalAlbumTracks,
+      navidromeService.resolvePlayerNavigation,
     );
   };
 
@@ -911,7 +942,7 @@ export function App() {
     if (configSaveInProgressRef.current) return;
     if (!queueClearFlowRef.current.cancel(operationId)) return;
     setQueueClearConfirmation(null);
-    setSettingsInitialPage("general");
+    setSettingsInitialPage("sources");
     setShowSettings(true);
   };
 
@@ -1045,17 +1076,7 @@ export function App() {
     };
   }, []);
 
-  // Título Dinâmico da Janela
-  useEffect(() => {
-    if (isPlaybackAvailable && playbackStatus.state === "play" && playbackStatus.title) {
-      const trackLabel = playbackStatus.artist
-        ? `${playbackStatus.artist} — ${playbackStatus.title}`
-        : playbackStatus.title;
-      audioService.setWindowTitle(`Sonante • ${trackLabel}`).catch(error => logError("app.window-title", error));
-    } else {
-      audioService.setWindowTitle("Sonante").catch(error => logError("app.window-title", error));
-    }
-  }, [isPlaybackAvailable, playbackStatus.state, playbackStatus.title, playbackStatus.artist]);
+  useAppWindowTitle(isPlaybackAvailable, playbackStatus);
 
   // Atalhos de Teclado Globais
   useEffect(() => {
@@ -1168,7 +1189,7 @@ export function App() {
 
   // Carregar ou Limpar Bibliotecas do Plex
   useEffect(() => {
-    if (!config?.plex_token || config.plex_token.trim().length === 0) {
+    if (!sourceEnabled(config, "plex") || !config?.plex_token || config.plex_token.trim().length === 0) {
       mainSectionPreference.plexDiscoveryFinished(false);
       setLoadingLibraries(false);
       setLibraries([]);
@@ -1474,18 +1495,23 @@ export function App() {
     setSelectedLibrary(library);
   };
 
-  const isPlexConnected = Boolean(config?.plex_token && config.plex_token.trim().length > 0);
-  const localExploreConfigured = Boolean(config?.local_folders.length);
-  const exploreSources = config ? configuredExploreSources(config) : [];
-  const isExploreSection = centralSection === "explore" || centralSection === "plex" && plexArea === "discover";
-  const showExploreTabs = isExploreSection && exploreSources.length === 2;
-  const activeExploreSource: ExploreSource = centralSection === "explore" ? "local" : "plex";
+  const configureSource = (source: 'local' | 'plex' | 'navidrome') => {
+    if (configSaveInProgressRef.current) return;
+    setSettingsInitialPage(source); setShowSettings(true);
+  };
+  const isPlexConnected = Boolean(sourceEnabled(config, "plex") && config?.plex_token && config.plex_token.trim().length > 0);
+  const localExploreConfigured = Boolean(sourceEnabled(config, "local") && config?.local_folders.length);
+  const exploreSources = config ? configuredExploreSources(config,navidromeConfiguration.configured) : [];
+  const isExploreSection = centralSection === "explore" || centralSection === "plex" && plexArea === "discover" || centralSection === "navidrome" && navidromeArea === "explore";
+  const showExploreTabs = isExploreSection && exploreSources.length > 1;
+  const activeExploreSource: ExploreSource = centralSection === "explore" ? "local" : centralSection === "navidrome" ? "navidrome" : "plex";
   const navigateExplore = (preferred: ExploreSource = exploreSource) => {
     const source = exploreSourceFor(exploreSources, preferred);
     resetAllNavigation();
     setExploreSource(source);
     setPlexArea(source === "plex" ? "discover" : "library");
-    mainSectionPreference.navigate(source === "plex" ? "plex" : "explore");
+    setNavidromeArea(source === "navidrome" ? "explore" : "library");
+    mainSectionPreference.navigate(source === "plex" ? "plex" : source === "navidrome" ? "navidrome" : "explore");
   };
   const { state: localExploreState, activity: exploreLoadingActivity } = localExplorePresentation({
     configured: localExploreConfigured, starting: mpdHealth.state === "starting", available: isPlaybackAvailable,
@@ -1651,6 +1677,7 @@ export function App() {
             {t(managedSavePending ? "app.managedSavePending" : bootstrapError ? "app.bootstrapError" : "wizard.starting")}
           </p>
           {bootstrapError && <LibraryRecoveryPanel />}
+          {bootstrapError && <div className="mt-5 text-left"><LocalDiagnostics /></div>}
         </div>
       </main>
     );
@@ -1676,12 +1703,12 @@ export function App() {
       <div className="min-h-0 flex-1 flex overflow-hidden">
         {/* Barra Lateral */}
         <aside data-sonante-sidebar inert={hosting.busy ? true : undefined} onClickCapture={() => { if (nowPlayingEmbedded && !hosting.busy) void nowPlayingHosting.collapse(); }} className="flex min-h-0 w-56 shrink-0 flex-col overflow-hidden border-r border-[color:var(--theme-border-soft,#262626)] bg-[var(--theme-surface-panel,#181818)] p-3">
-          <div className="mb-7 flex shrink-0 items-center gap-2.5 px-3 py-3">
+          <div className="mb-4 flex shrink-0 items-center gap-2.5 px-3 py-3">
             <Sparkles className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" size={21} />
             <h1 className="truncate text-base font-black tracking-[0.14em] text-[color:var(--theme-fg-accent,#E5A00D)]">SONANTE</h1>
           </div>
 
-          <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pb-3">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pb-3">
             <section aria-labelledby="sidebar-music-group">
               <h2 id="sidebar-music-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[color:var(--theme-fg-muted,#5F5F5F)]">
                 {t("sidebar.musicGroup")}
@@ -1689,12 +1716,22 @@ export function App() {
               <nav aria-label={t("sidebar.musicGroup")} className="space-y-1">
                 <SidebarNavItem diagnosticAction="search" icon={Search} label={t("unifiedSearch.menu")} trailing={<kbd className="text-[10px] opacity-60">{t("unifiedSearch.shortcut")}</kbd>}
                   active={mediaSource === "search"} onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("search"); }} />
+                {exploreSources.length > 0 && <SidebarNavItem diagnosticAction="explore" icon={Compass} label={t("explore.title")}
+                  active={mediaSource !== "equalizer" && !playerTarget && isExploreSection}
+                  onClick={() => navigateExplore()} />}
+
+              </nav>
+            </section>
+
+            <section aria-labelledby="sidebar-sources-group">
+              <h2 id="sidebar-sources-group" className="mb-1 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[color:var(--theme-fg-muted,#5F5F5F)]">{t('sources.title')}</h2>
+              <nav aria-label={t('sources.title')} className="ml-2 space-y-0.5 border-l border-[color:var(--theme-border-soft,#303030)] pl-1">
                 <SidebarNavItem diagnosticAction="local"
                   icon={Folder}
                   label={t("sidebar.local")}
                   active={mediaSource === "local"}
                   onClick={() => navigateLocalSubview("browser")}
-                  trailing={!isPlaybackAvailable ? (
+                  trailing={!sourceEnabled(config, "local") ? undefined : !isPlaybackAvailable ? (
                     <span
                       className="flex items-center text-[color:var(--theme-fg-accent,#C9A45D)]"
                       title={mpdHealth.state === "unavailable" ? t("player.engineUnavailable") : t("player.engineTransitioning")}
@@ -1721,10 +1758,7 @@ export function App() {
                     mainSectionPreference.navigate("plex");
                   }}
                 />
-                <SidebarNavItem diagnosticAction="explore" icon={Compass} label={t("explore.title")}
-                  active={mediaSource !== "equalizer" && !playerTarget && isExploreSection}
-                  onClick={() => navigateExplore()} />
-
+                <SidebarNavItem diagnosticAction="navidrome" icon={Server} label={t('navidrome.title')} active={mediaSource === 'navidrome' && navidromeArea === "library"} onClick={() => { setNavidromeArea("library"); resetAllNavigation(); mainSectionPreference.navigate('navidrome'); }} />
               </nav>
             </section>
 
@@ -1766,11 +1800,11 @@ export function App() {
             </section>
           </div>
 
-          <nav aria-label={t("sidebar.utilitiesGroup")} className="mt-auto shrink-0 space-y-1 pt-4">
+          <nav aria-label={t("sidebar.utilitiesGroup")} className="mt-auto shrink-0 space-y-0.5 pt-2">
             <SidebarNavItem diagnosticAction="settings"
               icon={Settings}
               label={t("sidebar.preferences")}
-              onClick={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("general"); setShowSettings(true); } }}
+              onClick={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("sources"); setShowSettings(true); } }}
             />
             <KeyboardShortcutsHelp />
             <SidebarNavItem diagnosticAction="about"
@@ -1786,12 +1820,12 @@ export function App() {
         {/* Painel Central */}
         <div className={playerTarget ? "hidden" : "contents"}>
         <div className={isExploreSection ? "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" : "contents"}>
-        {showExploreTabs && <ExploreSourceTabs source={activeExploreSource} onChange={navigateExplore} />}
+        {showExploreTabs && <ExploreSourceTabs source={activeExploreSource} sources={exploreSources} onChange={navigateExplore} />}
         <div id={showExploreTabs ? "explore-source-panel" : undefined} role={showExploreTabs ? "tabpanel" : undefined}
           aria-labelledby={showExploreTabs ? `explore-source-${activeExploreSource}` : undefined}
           className={isExploreSection ? "flex min-h-0 min-w-0 flex-1" : "contents"}>
-        {centralSection === "search" ? (
-          <UnifiedSearchView config={config} plexIdentity={plexConnectionIdentity} status={playbackStatus}
+        {centralSection && (centralSection === 'local' || centralSection === 'plex' || centralSection === 'navidrome' || centralSection === 'explore') && !sourceEnabled(config, centralSection === 'explore' ? 'local' : centralSection) ? <main className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center"><p className="text-sm text-[color:var(--theme-fg-secondary,#999)]">{t('sources.disabledNotice')}</p><button type="button" className="rounded-lg bg-[var(--theme-control-accent,#E5A00D)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-control-on-accent,#000)]" onClick={() => configureSource(centralSection === 'explore' ? 'local' : centralSection)}>{t('sources.enableConfigure')}</button></main> : centralSection === "navidrome" && navidromeArea === "explore" ? <NavidromeExploreView available={isPlaybackAvailable} active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} revision={navidromeConfiguration.revision} onConfigure={() => configureSource("navidrome")} /> : centralSection === "navidrome" ? <NavidromeView available={isPlaybackAvailable} active={!playerTarget&&!showSettings&&!showAbout&&!nowPlayingEmbedded} onConfigure={() => configureSource("navidrome")} /> : centralSection === "search" ? (
+          <UnifiedSearchView config={config} navidromeConfigured={navidromeConfiguration.configured} navidromeRevision={navidromeConfiguration.revision} plexIdentity={plexConnectionIdentity} status={playbackStatus}
             isPlaybackAvailable={isPlaybackAvailable} catalogRefreshRevision={localCatalogRevision}
             active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded}
             onFavoritesChanged={refreshPlexFavorites} />
@@ -1803,7 +1837,7 @@ export function App() {
                 loadingActivity={exploreLoadingActivity} onConfigure={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("local"); setShowSettings(true); } }}
                 canRetryLocal={isPlaybackAvailable && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy}
                 retryLocal={() => { if (isPlaybackAvailable && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy) localAlbumCatalog.requestRefresh(); }}
-                onlineArtworkEnabled={config?.online_artwork_enabled ?? false}
+                onlineArtworkEnabled={(sourceEnabled(config, "local") && config?.online_artwork_enabled) ?? false}
                 artworkBlocked={!isPlaybackAvailable || artworkReadBlocked(playbackStatus.is_updating, localCatalog)}
                 sourceSelector={<ToolbarSelect value={activeExploreSourceId ?? ""}
                   options={[{ value: "", label: t("explore.allLibraries") }, ...exploreSourceOptions.map(source => ({ value: source.id, label: source.label }))]}
@@ -1816,7 +1850,7 @@ export function App() {
               subview={exploreLocalSubview} onSubviewChange={setExploreLocalSubview}
               albumNavigationAvailable={exploreEntryCurrent(exploreDetail)} onAlbumNavigationBack={closeExploreAlbum}
               catalogRefreshRevision={localCatalogRevision} isPlaybackAvailable={isPlaybackAvailable} isLibraryUpdating={playbackStatus.is_updating}
-              onlineArtworkEnabled={config?.online_artwork_enabled ?? false} configuredLocalFolders={config?.local_folders ?? []} />}
+              onlineArtworkEnabled={(sourceEnabled(config, "local") && config?.online_artwork_enabled) ?? false} configuredLocalFolders={config?.local_folders ?? []} />}
           </div>
         ) : centralSection === "radio" ? (
           <RadioView available={isPlaybackAvailable} status={playbackStatus}
@@ -1825,9 +1859,9 @@ export function App() {
           <HistoryView config={config} plexIdentity={plexConnectionIdentity} status={playbackStatus} isPlaybackAvailable={isPlaybackAvailable} catalogRefreshRevision={localCatalogRevision}
             active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
         ) : centralSection === "playlists" ? (
-          <PlaylistsView isPlaybackAvailable={isPlaybackAvailable} refreshKey={playlistRevision} />
+          <PlaylistsView config={config} isPlaybackAvailable={isPlaybackAvailable} refreshKey={playlistRevision} />
         ) : centralSection === "favorites" ? (
-          <FavoritesView
+          <FavoritesView key={JSON.stringify(config.sources)} config={config}
             onFavoritesChanged={refreshPlexFavorites}
             isPlaybackAvailable={isPlaybackAvailable}
           />
@@ -1842,7 +1876,7 @@ export function App() {
             catalogRefreshRevision={localCatalogRevision}
             isPlaybackAvailable={isPlaybackAvailable}
             isLibraryUpdating={playbackStatus.is_updating}
-            onlineArtworkEnabled={config?.online_artwork_enabled ?? false}
+            onlineArtworkEnabled={(sourceEnabled(config, "local") && config?.online_artwork_enabled) ?? false}
             configuredLocalFolders={config?.local_folders ?? []}
           />
         ) : !isPlexConnected ? (
@@ -2065,6 +2099,9 @@ export function App() {
                   />
                 </div>
               )}
+              {(searchQuery.trim().length > 0 || hasPlexSubview || plexViewMode === "albums") && (
+                <AlbumViewControls value={plexAlbumPresentation} onChange={changePlexAlbumPresentation} />
+              )}
               {!hasPlexSubview && searchQuery.trim().length === 0 && plexViewMode === "artists" && (
                 <div className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                   <span>{t("plex.sortLabel")}</span>
@@ -2155,11 +2192,14 @@ export function App() {
                         <h3 className="text-sm font-bold text-[color:var(--theme-fg-muted,#888888)] uppercase tracking-wider mb-3">
                           {t("plex.albums")} <span className="tabular-nums">({visibleSearchAlbums.length})</span>
                         </h3>
-                        <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
-                          {visibleSearchAlbums.map((album) => {
+                        <AlbumCatalog presentation={plexAlbumPresentation} items={visibleSearchAlbums}
+                          getItemKey={album => album.rating_key} scrollContainer={plexScrollContainer}
+                          resetKey={JSON.stringify([selectedLibrary?.key, "search", searchQuery])}
+                          renderItem={(album) => {
                             const albumKey = String(album.rating_key || "");
                             return (
                               <PlexAlbumCard
+                                layout={plexAlbumPresentation.layout}
                                 key={albumKey || album.title}
                                 album={album}
                                 isFav={albumKey ? plexFavIds.has(albumKey) : false}
@@ -2173,8 +2213,8 @@ export function App() {
                                 isPlaybackAvailable={isPlaybackAvailable}
                               />
                             );
-                          })}
-                        </div>
+                          }}
+                        />
                       </div>
                     )}
 
@@ -2274,11 +2314,14 @@ export function App() {
                   {t("plex.loading")}
                 </div>
               ) : activeCollection ? (
-                <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">
-                  {collectionAlbums.map((album) => {
+                <AlbumCatalog presentation={plexAlbumPresentation} items={collectionAlbums}
+                  getItemKey={album => album.rating_key} scrollContainer={plexScrollContainer}
+                  resetKey={JSON.stringify([selectedLibrary?.key, "collection", activeCollection.rating_key])}
+                  renderItem={(album) => {
                     const albumKey = String(album.rating_key || "");
                     return (
                       <PlexAlbumCard
+                        layout={plexAlbumPresentation.layout}
                         key={albumKey || album.title}
                         album={album}
                         isFav={albumKey ? plexFavIds.has(albumKey) : false}
@@ -2292,10 +2335,11 @@ export function App() {
                         isPlaybackAvailable={isPlaybackAvailable}
                       />
                     );
-                  })}
-                </div>
+                  }}
+                />
               ) : fallbackPlexArtist ? (
-                <VirtualAlbumGrid
+                <AlbumCatalog
+                  presentation={plexAlbumPresentation}
                   items={fallbackPlexArtistAlbums}
                   getItemKey={(album) => album.rating_key}
                   scrollContainer={plexScrollContainer}
@@ -2304,6 +2348,7 @@ export function App() {
                     const albumKey = String(album.rating_key || "");
                     return (
                       <PlexAlbumCard
+                        layout={plexAlbumPresentation.layout}
                         album={album}
                         isFav={albumKey ? plexFavIds.has(albumKey) : false}
                         onSelect={setActiveAlbum}
@@ -2319,7 +2364,8 @@ export function App() {
                   }}
                 />
               ) : selectedPlexYear !== null || selectedPlexUnknownYear ? (
-                <VirtualAlbumGrid
+                <AlbumCatalog
+                  presentation={plexAlbumPresentation}
                   items={selectedPlexYearAlbums}
                   getItemKey={(album) => album.rating_key}
                   scrollContainer={plexScrollContainer}
@@ -2328,6 +2374,7 @@ export function App() {
                     const albumKey = String(album.rating_key || "");
                     return (
                       <PlexAlbumCard
+                        layout={plexAlbumPresentation.layout}
                         album={album}
                         isFav={albumKey ? plexFavIds.has(albumKey) : false}
                         onSelect={setActiveAlbum}
@@ -2344,7 +2391,8 @@ export function App() {
                 />
               ) : plexViewMode === "genres" ? (
                 activePlexGenre !== null ? (
-                  <VirtualAlbumGrid
+                  <AlbumCatalog
+                    presentation={plexAlbumPresentation}
                     items={selectedPlexGenreAlbums}
                     getItemKey={(album) => album.rating_key}
                     scrollContainer={plexScrollContainer}
@@ -2353,6 +2401,7 @@ export function App() {
                       const albumKey = String(album.rating_key || "");
                       return (
                         <PlexAlbumCard
+                          layout={plexAlbumPresentation.layout}
                           album={album}
                           isFav={albumKey ? plexFavIds.has(albumKey) : false}
                           onSelect={setActiveAlbum}
@@ -2370,7 +2419,8 @@ export function App() {
                 ) : <AlbumGenreGrid genres={plexGenreOptions} onSelect={setSelectedPlexGenre}
                   albumCountLabel={count => t("plex.albumsCount", { count })} />
               ) : plexViewMode === "albums" ? (
-                <VirtualAlbumGrid
+                <AlbumCatalog
+                  presentation={plexAlbumPresentation}
                   ref={plexGridRef}
                   items={sortedPlexAlbums}
                   getItemKey={(album) => album.rating_key}
@@ -2380,6 +2430,7 @@ export function App() {
                     const albumKey = String(album.rating_key || "");
                     return (
                       <PlexAlbumCard
+                        layout={plexAlbumPresentation.layout}
                         album={album}
                         isFav={albumKey ? plexFavIds.has(albumKey) : false}
                         onSelect={(a) => setActiveAlbum(a)}
@@ -2505,9 +2556,16 @@ export function App() {
                 catalogRefreshRevision={localCatalogRevision}
                 isPlaybackAvailable={isPlaybackAvailable}
                 isLibraryUpdating={playbackStatus.is_updating}
-                onlineArtworkEnabled={config?.online_artwork_enabled ?? false}
+                onlineArtworkEnabled={(sourceEnabled(config, "local") && config?.online_artwork_enabled) ?? false}
                 configuredLocalFolders={config?.local_folders ?? []}
               />
+            ) : playerTarget.kind === "navidrome" ? (
+              playerTarget.view === "artist" && playerTarget.artistId ? <NavidromeArtistView
+                key={`${playerNavigation?.revision}:${playerTarget.artistId}`} artist={{account_id:playerTarget.accountId,id:playerTarget.artistId}}
+                onBack={closePlayerNavigation} available={isPlaybackAvailable && sourceEnabled(config,"navidrome")} revision={navidromeConfiguration.revision} />
+                : <NavidromeView key={`${playerNavigation?.revision}:${playerTarget.albumId}`} embedded
+                  initialAlbum={{account_id:playerTarget.accountId,id:playerTarget.albumId}} onAlbumBack={closePlayerNavigation}
+                  available={isPlaybackAvailable && sourceEnabled(config,"navidrome")} />
             ) : playerTarget.view === "album" ? (
               <AlbumView
                 key={`${playerNavigation?.revision}:${playerTarget.album.rating_key}`}
@@ -2550,7 +2608,7 @@ export function App() {
       )}
 
       <PlaybackRequestNotice failure={appPlayback.failure} />
-      <LocalWatchNotice onOpenSettings={() => { setSettingsInitialPage("local"); setShowSettings(true); }} />
+      {sourceEnabled(config, "local") && <LocalWatchNotice onOpenSettings={() => { setSettingsInitialPage("local"); setShowSettings(true); }} />}
       <PlayerBar
         route={configuredSignalRoute(config)}
         status={presentationPlayback}

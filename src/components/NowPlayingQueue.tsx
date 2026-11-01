@@ -1,3 +1,4 @@
+import { useNavidromeQueueArtwork } from "../utils/useNavidromeQueueArtwork";
 import { useTrackSelection } from "./TrackSelection";
 import { useQueueInsertion } from "./QueueInsertionMenu";
 import { loadQueuedAlbum } from "../utils/queueAlbumLoader";
@@ -114,6 +115,7 @@ export const NowPlayingQueue: React.FC<{ open: boolean; available: boolean; stat
   };
   const { start, end } = queueVisibleRange(entries.length, viewport.top, viewport.height);
   const visibleEntries = entries.slice(start, end);
+  const navidromeArtwork = useNavidromeQueueArtwork(state.items, visibleEntries.map(entry => entry.index), open && queueAvailable, status);
   const artwork = useLocalQueueArtwork(state.items, start, end, open, queueAvailable, status, artworkContext, detached, visibleEntries.map(entry => entry.index));
   return <aside data-now-playing-queue-content id="now-playing-queue" hidden={!open} className="np-queue" aria-label={t("queue.title")}>
     {queueActions.notice}{queueActions.menu}{selection.toolbar}
@@ -150,7 +152,7 @@ export const NowPlayingQueue: React.FC<{ open: boolean; available: boolean; stat
         {visibleEntries.map(({ item, index }, offset) => {
           const displayIndex = start + offset;
           const current = available && queueItemIsCurrent(item, index, status?.current_media ?? null);
-          return <li key={index} data-queue-index={index} onContextMenu={item.media_locator?.kind === "upnp" || item.media_locator?.kind === "radio" ? undefined : event => queueActions.open(event, queueRequest(item, index))} aria-current={current ? "true" : undefined} aria-posinset={displayIndex + 1} aria-setsize={entries.length}
+          return <li key={index} data-queue-index={index} onContextMenu={item.media_locator?.kind === "upnp" || item.media_locator?.kind === "radio" || item.media_locator?.kind === "navidrome" ? undefined : event => queueActions.open(event, queueRequest(item, index))} aria-current={current ? "true" : undefined} aria-posinset={displayIndex + 1} aria-setsize={entries.length}
             onDragOver={event => { if (drag.current?.context === queueContext) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
             onDrop={event => { event.preventDefault(); const owner = drag.current; drag.current = null; if (!owner || owner.context !== queueContext) return; const intent = beginPlaybackIntent(); void owner.snapshot.then(snapshot => { if (liveContext.current === owner.context && intent.current()) return edit({ kind: "move", from: owner.from, to: index }, intent, snapshot); }).catch(() => { if (availableRef.current) setActionError("failed"); }); }}
             className={`np-queue-row${selection.checked(index) ? " track-selected" : ""}${current ? " np-queue-current" : ""}`} style={{ top: displayIndex * 64 }}>
@@ -161,10 +163,10 @@ export const NowPlayingQueue: React.FC<{ open: boolean; available: boolean; stat
             {item.media_locator?.kind !== "upnp" && item.media_locator?.kind !== "radio" && selection.checkbox(index)}
             <button type="button" className="np-queue-track" disabled={!queueAvailable || actionBusy} onClick={event => { if (!selection.click(event, index)) void act(index); }} aria-label={t("nowPlaying.playQueueTrack", { title: item.title || t("player.noTrack") })}>
             <span className="np-queue-number">{index + 1}</span>
-            <div className="np-queue-art"><TrackArtwork track={artwork(queueItemArtwork(item, index, status))} /></div>
+            <div className="np-queue-art"><TrackArtwork track={navidromeArtwork(artwork(queueItemArtwork(item, index, status)))} /></div>
             <div className="np-queue-label"><p title={item.title}>{item.title || t("player.noTrack")}</p><span title={[item.artist, item.album].filter(Boolean).join(" · ")}>{[item.artist, item.album].filter(Boolean).join(" · ") || "—"}</span></div>
             <span className="np-queue-duration">{Number.isFinite(item.duration) && item.duration! > 0 ? formatQueueTime(item.duration!) : "—"}</span>
-            </button>{item.media_locator?.kind !== "upnp" && item.media_locator?.kind !== "radio" && queueActions.trigger(queueRequest(item, index))}
+            </button>{item.media_locator?.kind !== "upnp" && item.media_locator?.kind !== "radio" && item.media_locator?.kind !== "navidrome" && queueActions.trigger(queueRequest(item, index))}
           </li>;
         })}
       </ol>

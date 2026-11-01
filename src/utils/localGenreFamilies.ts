@@ -36,16 +36,16 @@ const priority: readonly LocalGenreFamily[] = [...FAMILY_RULES.map(([family]) =>
 const preferred = (families: ReadonlySet<LocalGenreFamily>): LocalGenreFamily =>
   priority.find(family => families.has(family)) ?? "other";
 
-function classifyTag(value: string): LocalGenreFamily {
+function classifyTag(value: string, terms: ReadonlyMap<string, LocalGenreFamily> = aliases, separators = /[/,;]/u): LocalGenreFamily {
   if (!value.trim() || value.length > 4096 || /\p{Cc}/u.test(value)) return "other";
-  const exact = aliases.get(termKey(value));
+  const exact = terms.get(termKey(value));
   if (exact) return exact;
-  const parts = value.split(/[/,;]/u).map(part => termKey(part));
+  const parts = value.split(separators).map(part => termKey(part));
   if (parts.length < 2 || parts.some(part => !part)) return "other";
   const families = new Set<LocalGenreFamily>();
   for (const part of parts) {
     // Only a standalone conjunction before a known list item is allowed.
-    const family = aliases.get(part) ?? (part.startsWith("& ") ? aliases.get(part.slice(2)) : undefined);
+    const family = terms.get(part) ?? (part.startsWith("& ") ? terms.get(part.slice(2)) : undefined);
     if (!family) return "other";
     families.add(family);
   }
@@ -75,4 +75,31 @@ export function deriveLocalGenreFamilies(albums: readonly AlbumGenres[], label: 
 
 export function filterLocalAlbumsByFamily<T extends AlbumGenres>(albums: readonly T[], family: string): T[] {
   return albums.filter(album => classifyLocalAlbumFamily(album) === family);
+}
+
+// Explicit aliases for the smart-playlist filter only. No substring guesses,
+// numeric ID3 reinterpretation, metadata writes or changes to Explore cards.
+const smartAliases = new Map(aliases);
+for (const [family, terms] of [
+  ["brazilian", ["Brazil", "Brasil", "Brazilian Folk", "Brazilian Jazz", "Brazilian Jazz | Fusion", "Brazilian Rock", "Bossa", "Bossanova", "Candomblé Music", "Afoxé"]],
+  ["reggae", ["British Reggae"]],
+  ["hipHop", ["Rap/Hip Hop"]],
+  ["latin", ["Caribbean And Latin American"]],
+] as const) for (const term of terms) smartAliases.set(termKey(term), family);
+
+export function isLocalGenreFamily(value: string): value is LocalGenreFamily {
+  return priority.includes(value as LocalGenreFamily);
+}
+
+export function classifySmartLocalAlbumFamily(album: AlbumGenres): LocalGenreFamily {
+  const families = new Set<LocalGenreFamily>();
+  if (Array.isArray(album.genres)) for (const genre of album.genres) {
+    if (typeof genre === "string") families.add(classifyTag(genre, smartAliases, /[/,;|]/u));
+  }
+  return preferred(families);
+}
+
+export function smartLocalGenreOptions(albums: readonly AlbumGenres[]): LocalGenreFamily[] {
+  const present = new Set(albums.map(classifySmartLocalAlbumFamily));
+  return priority.filter(family => present.has(family));
 }

@@ -1,22 +1,21 @@
 import React, { useId, useRef, useState } from "react";
-import { HardDrive, Languages, Radio, Server } from "lucide-react";
+import { Languages, Radio, Server } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-export type SettingsPage = "general" | "audio" | "local" | "plex";
+export type SettingsPage = "sources" | "general" | "audio" | "local" | "plex" | "navidrome";
 
 // All panels stay mounted: changing pages must not reset drafts or async work.
-export function SettingsPages({ initialPage = "general", general, audio, local, plex }: Record<SettingsPage, React.ReactNode> & { initialPage?: SettingsPage }) {
+export function SettingsPages({ initialPage = "sources", general, audio, sources }: { general: React.ReactNode; audio: React.ReactNode; sources: React.ReactNode; initialPage?: SettingsPage }) {
   const { t } = useTranslation();
   // Consume the destination once on mount; polling must not override user navigation.
-  const [active, setActive] = useState<SettingsPage>(initialPage);
+  const [active, setActive] = useState<SettingsPage>(["local", "plex", "navidrome"].includes(initialPage) ? "sources" : initialPage);
   const id = useId();
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
   const scroll = useRef<HTMLDivElement>(null);
   const pages = [
+    { id: "sources" as const, label: t("sources.title"), icon: Server, content: sources },
     { id: "general" as const, label: t("settings.pages.general"), icon: Languages, content: general },
     { id: "audio" as const, label: t("settings.pages.audio"), icon: Radio, content: audio },
-    { id: "local" as const, label: t("settings.pages.local"), icon: HardDrive, content: local },
-    { id: "plex" as const, label: t("settings.pages.plex"), icon: Server, content: plex },
   ];
   function select(index: number, focus = false) {
     setActive(pages[index].id);

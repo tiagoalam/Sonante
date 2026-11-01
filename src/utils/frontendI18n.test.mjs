@@ -159,7 +159,7 @@ function translationCollector(tree, file, keys, mixSaveKeys) {
       assert.ok(imported, `${file}: muteLabel must bind to its inspected producer`);
       muteLabelKeys(muteLabelProducer).forEach(key => keys.add(key));
     }
-    else if (file === "components/LocalBrowserView.tsx" && ts.isCallExpression(node)
+    else if (["components/LocalBrowserView.tsx", "components/LocalCatalogReadError.tsx"].includes(file) && ts.isCallExpression(node)
       && node.getText(tree) === "localCatalogErrorKey(catalog.error)") {
       const imported = tree.statements.some(statement => ts.isImportDeclaration(statement)
         && statement.moduleSpecifier.text === "../utils/localAlbumCatalog"

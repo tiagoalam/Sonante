@@ -785,7 +785,7 @@ decoder {{
         if let Some(admission)=existing {admission.validate(cfg)?;}
         // Resolve/validate an explicit development engine before stopping
         // the current owned MPD. No override keeps the established path.
-        let engine = crate::diagnostics::startup_stage("engine.resolve", if self.shared_eq_pipe.is_some() { crate::mpd_engine::MpdEngine::resolve_eq() } else { crate::mpd_engine::MpdEngine::resolve() })?;
+        let engine = crate::diagnostics::startup_stage("engine.resolve", crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineResolve, || if self.shared_eq_pipe.is_some() { crate::mpd_engine::MpdEngine::resolve_eq() } else { crate::mpd_engine::MpdEngine::resolve() }))?;
         if self.shared_eq_pipe.is_some() && !crate::is_shared_output(cfg) { return Err("EQ_SHARED_ONLY".into()); }
 
         let is_shared = cfg.audio_output_type == "pipewire"
@@ -826,8 +826,8 @@ decoder {{
         }
 
         let (conf_path, volume_backend, library_sync) =
-            crate::diagnostics::startup_stage("config.ensure", self.ensure_config_file(cfg, shared_volume_backend, &engine, existing))?;
-        crate::diagnostics::startup_stage("runtime.prepare", self.prepare_runtime_files())?;
+            crate::diagnostics::startup_stage("config.ensure", crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineConfig, || self.ensure_config_file(cfg, shared_volume_backend, &engine, existing)))?;
+        crate::diagnostics::startup_stage("runtime.prepare", crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineRuntime, || self.prepare_runtime_files()))?;
 
         if let Some(admission)=existing {
             if let Err(error)=admission.validate(cfg){return Err(self.cleanup_after_start_failure(error));}
@@ -856,13 +856,13 @@ decoder {{
             }
         };
 
-        let engine_identity = engine.verify_child(&child);
+        let engine_identity = crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineVerify, || engine.verify_child(&child));
         self.process = Some(child);
         if let Err(error) = engine_identity {
             return Err(self.cleanup_after_start_failure(error));
         }
 
-        self.wait_for_startup(50, Duration::from_millis(50))?;
+        crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineWait, || self.wait_for_startup(50, Duration::from_millis(50)))?;
         if let Err(error) = crate::analyzer::set_output_enabled(
             &self.socket_path,
             Self::ANALYZER_OUTPUT_NAME,

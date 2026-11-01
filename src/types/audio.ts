@@ -2,6 +2,7 @@ import type { DspSnapshot } from "./equalizer";
 import type { PlexImageRef } from "./plex";
 
 export type MediaLocator =
+  | { kind: "navidrome"; connection_id: string; song_id: string; account_id?: string | null }
   | { kind: "radio"; station_id: string }
   | { kind: "upnp"; session_id: string }
   | { kind: "local"; uri: string }
@@ -14,6 +15,7 @@ export type MediaLocator =
     };
 
 export type CurrentMedia =
+  | { kind: "navidrome"; connection_id: string; song_id: string; queue_index: number }
   | { kind: "radio"; station_id: string; queue_index: number }
   | { kind: "upnp"; session_id: string; queue_index: number }
   | { kind: "local"; uri: string; queue_index: number }

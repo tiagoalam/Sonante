@@ -1,3 +1,4 @@
+import * as musicSources from "../src/utils/musicSources.ts";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -33,7 +34,7 @@ const hooks={useId:()=> 'qa',useState(v){const i=cursor++;if(!(i in slots))slots
 const request=(name,args)=>{const d=deferred();requests[name].push({...d,args});return d.promise};
 const configService={getConfig(){const p=request('config',[]);if(!options.deferLoad)requests.config.at(-1).resolve({...base,...options.config});return p},getAudioDevices(){const p=request('devices',[]);if(!options.deferLoad)requests.devices.at(-1).resolve([]);return p},checkDirectDeviceAvailability:async()=>[]};
 const plexService={createPin:()=>request('pin',[]),openExternalUrl:url=>request('open',[url]),checkPin:id=>request('check',[id]),getServers:token=>request('servers',[token])};
-const deps={'react':{...hooks,default:hooks},'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:k=>k,i18n:{language:'en',changeLanguage(){}}})},'../utils/frontendDiagnostics':{logError:(...a)=>logs.push(a)},'../services/config':{configService},'../services/plex':{plexService},'../services/audio':{audioService:{}},'../utils/deviceAvailability':{createDeviceAvailabilityQuery,newPhysicalOutputChoice,shouldCheckContextualDevice}};
+const deps={'../utils/musicSources':musicSources,'./SourcesSettings':{SourcesSettings:function SourcesSettings(){}},'react':{...hooks,default:hooks},'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:k=>k,i18n:{language:'en',changeLanguage(){}}})},'../utils/frontendDiagnostics':{logError:(...a)=>logs.push(a)},'../services/config':{configService},'../services/plex':{plexService},'../services/audio':{audioService:{}},'../utils/deviceAvailability':{createDeviceAvailabilityQuery,newPhysicalOutputChoice,shouldCheckContextualDevice}};
 const dummy=new Proxy({},{get:()=>()=>null}),exports={};new Function('require','exports',code)(id=>deps[id]??dummy,exports);
 globalThis.window={setInterval(fn,delay){assert.equal(delay,1500);const id=++timer;timers.set(id,fn);return id}};globalThis.clearInterval=id=>timers.delete(id);globalThis.document={activeElement:null};globalThis.HTMLElement=class{};globalThis.alert=v=>alerts.push(v);
 const props={initialPage:'plex',onClose(){},onSaved(){assert.fail('unexpected autosave')},onSaveStarted:()=>true,onSaveFinished(){},onSaveAccepted(){},onStartLocalFoldersSave:()=>true,onLibraryRescanned(){},isLibraryUpdating:false};

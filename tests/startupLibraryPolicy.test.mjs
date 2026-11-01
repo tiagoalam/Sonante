@@ -20,10 +20,16 @@ test('filesystem notifications cannot enter automatic index refresh; explicit ve
 
 test('managed startup reuses a watched original mirror proof without dropping admission boundaries',()=>{
  const initial=section('fn start_initial_mpd(', '#[cfg_attr(mobile');
- assert.match(initial,/ReadonlyMirrorSnapshot::open_cached\(&library_dir\)/);
+ assert.match(initial,/ReadonlyMirrorSnapshot::open_for_startup\(&library_dir\)/);
  assert.match(initial,/admission\.origins=admission\.observe_origins\(\)\?/);
  assert.match(initial,/admission\.validate\(config\)\?/);
  assert.match(initial,/supervisor\.start_initial_existing\(config,&admission\)/);
+ const mirror=readFileSync(new URL('../src-tauri/src/local_media.rs',import.meta.url),'utf8');
+ const capture=mirror.slice(mirror.indexOf('pub(crate) fn open_for_startup('),mirror.indexOf('pub(crate) fn has_change_watch('));
+ assert.match(capture,/let result=Self::capture\(library\)/);
+ assert.match(capture,/Self::finish_startup\(result\?,MirrorChanges::open\)/);
+ assert.ok(capture.indexOf('result.revalidate_full()?') < capture.indexOf('changes.check()?'));
+ assert.match(capture,/if let Ok\(changes\)=changes \{changes.check\(\)\?;result.changes=Some\(changes\);\}/);
  const validation=section("impl InitialManagedGeneration<'_>", 'fn start_initial_mpd(');
  assert.equal((validation.match(/self\.mirror\.revalidate\(\)/g)||[]).length,2);
  for(const guard of ['self.owner.validate()', 'self.profile.validate()', 'self.library.validate()',

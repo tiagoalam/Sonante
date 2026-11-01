@@ -21,6 +21,7 @@ fn sanitized(track: &TrackMetadata) -> Option<TrackMetadata> {
         Some(MediaLocator::Plex { server_id, part_key, rating_key, .. }) if !server_id.is_empty() && server_id.len() <= 256 && part_key.len() <= 4096
             && part_key.starts_with("/library/parts/") && !part_key.contains(['?', '#', '\0', '\r', '\n']) && !crate::plex::contains_plex_token(part_key) =>
             MediaLocator::Plex { server_id: server_id.clone(), part_key: part_key.clone(), rating_key: rating_key.as_ref().filter(|key| !key.is_empty() && key.len() <= 32 && key.bytes().all(|c| c.is_ascii_digit())).cloned(), file_path: None },
+        Some(locator @ MediaLocator::Navidrome { .. }) => crate::navidrome::storage_locator(locator)?,
         None if crate::local_media::is_safe_relative_mpd_uri(&track.uri) && crate::local_media::is_catalog_track_uri(&track.uri) => MediaLocator::Local { uri: track.uri.clone() },
         _ => return None,
     };
@@ -31,6 +32,7 @@ fn identity(track: &TrackMetadata) -> String {
     let key = match track.media_locator.as_ref().unwrap() {
         MediaLocator::Local { uri } => serde_json::json!(["local", uri]),
         MediaLocator::Plex { server_id, part_key, .. } => serde_json::json!(["plex", server_id, part_key]),
+        MediaLocator::Navidrome { account_id, song_id, .. } => serde_json::json!(["navidrome", account_id, song_id]),
         _ => unreachable!(),
     };
     format!("{:x}", Sha256::digest(key.to_string().as_bytes()))
@@ -102,6 +104,10 @@ pub(crate) fn observed_track(status: &PlaybackStatus, queue: &[TrackMetadata]) -
         CurrentMedia::Plex { server_id, part_key, queue_index } => {
             let track = queue.get(*queue_index)?;
             matches!(&track.media_locator, Some(MediaLocator::Plex { server_id: s, part_key: p, .. }) if s == server_id && p == part_key).then(|| track.clone())
+        },
+        CurrentMedia::Navidrome {connection_id,song_id,queue_index} => {
+            let track=queue.get(*queue_index)?;
+            matches!(&track.media_locator,Some(MediaLocator::Navidrome {connection_id:c,song_id:s,..}) if c==connection_id && s==song_id).then(||track.clone())
         }, _ => None,
     }
 }
@@ -109,6 +115,7 @@ pub(crate) fn observe(app: &tauri::AppHandle, status: &PlaybackStatus) {
     use tauri::{Manager, Emitter};
     // Clone only the matching occurrence, release Audio before any file access.
     let track = { let state = app.state::<crate::AudioState>(); let Ok(audio) = state.0.lock() else { return; }; audio.history_track(status) };
+    if crate::scrobbling::is_enabled(app) { crate::scrobbling::observe(app, status, track.clone()); }
     if let Some(state) = app.try_state::<HistoryState>() { if let Ok(mut store) = state.0.lock() {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis() as u64);
         let changed = store.observe(&status.state, track, now);
@@ -173,4 +180,14 @@ mod tests {
         std::fs::rename(&another.path,another.path.with_extension("preserved")).unwrap();std::fs::create_dir(&another.path).unwrap();
         assert!(another.configure(Some(true),false).is_err());assert!(!another.data.as_ref().unwrap().enabled);
     }
+    #[test] fn navidrome_history_is_durable_and_deduplicates_reconnected_sessions() {
+        let mut history=store();let account="a".repeat(64);let mut track=local(1);
+        track.media_locator=Some(MediaLocator::Navidrome{account_id:Some(account.clone()),connection_id:"OLD_SESSION".into(),song_id:"song-a".into()});
+        assert!(history.observe("play",Some(track.clone()),1));
+        track.media_locator=Some(MediaLocator::Navidrome{account_id:Some(account.clone()),connection_id:"NEW_SESSION".into(),song_id:"song-a".into()});
+        assert!(!history.observe("play",Some(track.clone()),2));
+        let raw=std::fs::read_to_string(&history.path).unwrap();assert!(!raw.contains("SESSION"));assert!(!raw.contains("private artwork"));
+        let saved=HistoryStore::new(history.path.clone()).list().unwrap();assert_eq!(saved.entries.len(),1);assert!(matches!(&saved.entries[0].track.media_locator,Some(MediaLocator::Navidrome{connection_id,..}) if connection_id.is_empty()));
+    }
+
 }

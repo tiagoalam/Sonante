@@ -50,8 +50,16 @@ pub struct DirectVolumeChoice {
 
 fn is_false(value: &bool) -> bool { !*value }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub struct EnabledSources { pub local: bool, pub plex: bool, pub navidrome: bool }
+impl Default for EnabledSources {
+    fn default() -> Self { Self { local: true, plex: true, navidrome: true } }
+}
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct AppConfig {
+    // Omission preserves the serialized shape of legacy recovery fingerprints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<EnabledSources>,
     #[serde(default = "default_first_run")]
     pub first_run: bool,
     pub alsa_device: String,
@@ -118,6 +126,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             first_run: true,
+            sources: None,
             alsa_device: "default".to_string(),
             direct_volume_choice: None, direct_muted:false,
             audio_output_type: "pipewire".to_string(),

@@ -1019,6 +1019,13 @@ pub(crate) mod mirror {
             Ok(inventory)
         }
         pub(crate) fn open(library: &Path) -> Result<Self, ReadonlyMirrorOpenError> {
+            let result=Self::capture(library)?;
+            result.revalidate()?;
+            Ok(result)
+        }
+        // An unvalidated capture never escapes this impl. Public open() retains
+        // its strict validation; startup validates after installing its watches.
+        fn capture(library: &Path) -> Result<Self, ReadonlyMirrorOpenError> {
             use crate::source_identity::{ReadonlyBoundedFile, ReadonlyDirectory, readonly_unique_json};
             let directory=ReadonlyDirectory::open(library)?;
             let marker=ReadonlyBoundedFile::open(&directory, MANIFEST_NAME, 16*1024*1024, false)?;
@@ -1035,7 +1042,7 @@ pub(crate) mod mirror {
                 return Err(ReadonlyMirrorOpenError::Unconfirmed);
             }
             let topology=Self::topology(&directory, &manifest)?;
-            let result=Self {directory,marker,manifest,topology,changes:None}; result.revalidate()?; Ok(result)
+            Ok(Self {directory,marker,manifest,topology,changes:None})
         }
         pub(crate) fn open_cached(library:&Path)->Result<Self,ReadonlyMirrorOpenError> {
             let mut result=Self::open(library)?;
@@ -1045,6 +1052,35 @@ pub(crate) mod mirror {
             result.revalidate_full()?;
             if let Ok(changes)=changes {changes.check()?;result.changes=Some(changes);}
             // Unsupported watches keep the original full-scan algorithm.
+            Ok(result)
+        }
+        // Startup needs one complete ORIGINAL capture, registration and one full
+        // post-registration verification. A full pass before registration adds
+        // no authority: mutations in that interval must be refused by the final
+        // verification too. All later admission boundaries remain unchanged.
+        pub(crate) fn open_for_startup(library:&Path)->Result<Self,ReadonlyMirrorOpenError> {
+            let clock=std::time::Instant::now();
+            let result=Self::capture(library);
+            crate::local_diagnostics::record(crate::local_diagnostics::Stage::StartupSourceCapture,clock.elapsed(),
+                result.as_ref().err().map(|_|"SOURCE_STARTUP_UNCONFIRMED"));
+            Self::finish_startup(result?,MirrorChanges::open)
+        }
+        fn finish_startup(mut result:Self,register:impl FnOnce(&Self)->Result<MirrorChanges,()>)->Result<Self,ReadonlyMirrorOpenError> {
+            let clock=std::time::Instant::now();
+            let changes=register(&result);
+            crate::local_diagnostics::record(crate::local_diagnostics::Stage::StartupSourceWatch,clock.elapsed(),
+                changes.as_ref().err().map(|_|"SOURCE_WATCH_UNAVAILABLE"));
+            let clock=std::time::Instant::now();
+            let verified=(|| {
+                result.revalidate_full()?;
+                if let Ok(changes)=changes {changes.check()?;result.changes=Some(changes);}
+                // Unsupported notifications keep full validation at every later
+                // admission; never turn a failed watch into cached authority.
+                Ok(())
+            })();
+            crate::local_diagnostics::record(crate::local_diagnostics::Stage::StartupSourceVerify,clock.elapsed(),
+                verified.as_ref().err().map(|_:&()|"SOURCE_STARTUP_UNCONFIRMED"));
+            verified?;
             Ok(result)
         }
         #[cfg(test)]
@@ -1154,6 +1190,9 @@ pub(crate) mod mirror {
             root.revalidate()?; Ok(result)
         }
     }
+
+    #[cfg(test)]
+    mod startup_snapshot_tests { include!("startup_snapshot_tests.rs"); }
 
     pub(crate) fn build_filtered_staging(
         staging_path: &Path,

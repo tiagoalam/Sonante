@@ -2,8 +2,8 @@ import type { ThumbnailDiagnostic } from "./localAlbumThumbnails";
 
 // DevTools diagnostics only. UI errors remain unchanged.
 const operations = [
-  "player.request", "plex.album-play", "search.local", "search.plex",
-  "libraryRecovery.cancel", "app.bootstrap", "app.now-playing-listener", "app.window-title",
+  "player.request", "plex.album-play", "search.local", "search.plex", "search.navidrome",
+  "libraryRecovery.cancel", "navidrome.catalog", "navidrome.play", "app.bootstrap", "app.view-load", "app.now-playing-listener", "app.window-title",
   "artist.load", "artist.play", "artwork.album-load",
   "artwork.folder-load", "artwork.local-enrich", "audio.health",
   "favorites.load", "favorites.load-tracks", "favorites.quick-play",
@@ -28,6 +28,7 @@ const operations = [
 ] as const;
 export type DiagnosticOperation = typeof operations[number];
 const safeCodes = new Set([
+  "NAVIDROME_DETAILS_EXPIRED", "NAVIDROME_INVALID", "NAVIDROME_AUTH", "NAVIDROME_PROTOCOL", "NAVIDROME_UNAVAILABLE", "NAVIDROME_CONTEXT_CHANGED", "NAVIDROME_STORAGE", "NAVIDROME_RATE_LIMITED",
   "LOCAL_SEARCH_QUERY_INVALID", "LOCAL_SEARCH_RESPONSE_INVALID", "LOCAL_SEARCH_UPDATING", "LOCAL_SEARCH_UNAVAILABLE",
   "SEARCH_CONTEXT_CHANGED", "SEARCH_CONTEXT_UNAVAILABLE",
   "LOCAL_INCREMENTAL_CHECK_OTHER_SOURCE_UNAVAILABLE",
@@ -117,17 +118,24 @@ export function summarizeDiagnostic(error: unknown): Readonly<ErrorDiagnostic> {
   return Object.freeze(result);
 }
 
+// Bounded in-memory, sanitized summaries only. Never retain original errors,
+// arguments, metadata, configuration, paths, URLs or credentials.
+const recentErrors: { operation: string; diagnostic: Readonly<ErrorDiagnostic> }[] = [];
+export function localDiagnosticErrors() { return recentErrors.map(entry => ({ operation: entry.operation, diagnostic: { ...entry.diagnostic } })); }
 let errorWindow = 0, errorLines = 0;
 let suppressedErrors: Record<string, number> = {};
 function report(level: "error" | "warn", operation: DiagnosticOperation, error: unknown): void {
   // The allowlist also protects against unexpected runtime callers bypassing TS types.
   const context = (operations as readonly string[]).includes(operation) ? operation : "unknown-operation";
+  const diagnostic = summarizeDiagnostic(error);
+  if (recentErrors.length === 32) recentErrors.shift();
+  recentErrors.push({ operation: context, diagnostic });
   if (devDiagnosticsEnabled()) {
     const now = Date.now();
     if (now - errorWindow >= 10_000) { errorWindow = now; errorLines = 0; }
     if (errorLines++ >= 16) { suppressedErrors[context] = (suppressedErrors[context] ?? 0) + 1; return; }
   }
-  console[level](`[Sonante] operation=${context}`, summarizeDiagnostic(error));
+  console[level](`[Sonante] operation=${context}`, diagnostic);
 }
 
 export function logError(operation: DiagnosticOperation, error?: unknown): void {
@@ -209,7 +217,7 @@ export function exploreDiagnosticText(value: string): string {
 
 const correlatedCommands = ["get_playback_status", "get_mpd_status_snapshot", "get_queue", "set_window_title",
   "list_local_directory", "get_local_album_tracks", "get_local_cover", "get_local_albums", "get_favorites", "toggle_favorite"] as const;
-const actionTargets = ["search", "local", "plex", "explore", "favorites", "playlists", "settings", "about"] as const;
+const actionTargets = ["navidrome", "search", "local", "plex", "explore", "favorites", "playlists", "settings", "about"] as const;
 export type InteractionAction = typeof actionTargets[number];
 export interface InteractionState {
   section: string | null; health: string; bootstrap: boolean; settings: boolean; about: boolean;

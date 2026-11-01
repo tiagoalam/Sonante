@@ -71,12 +71,32 @@ pub(crate) fn error_summary(error: impl Display) -> String {
         ("unsupported", &["unsupported", "não suportad"][..]),
         ("unavailable", &["unavailable", "indisponível"][..]),
     ];
-    let kind = categories
+    // Exact, fixed application codes add useful context without copying the
+    // surrounding error or changing its IPC/guard semantics.
+    let candidate = text.split(|c: char| c.is_whitespace() || c == ':' || c == ';').next().unwrap_or("");
+    let code_hint = match candidate {
+        "LIBRARY_RECOVERY_PROFILE_BUSY" | "CONFIG_SAVE_BUSY" => Some("busy"),
+        "LIBRARY_RECOVERY_UNSAFE_FILESYSTEM" => Some("unsafe_filesystem"),
+        "LIBRARY_RECOVERY_PLAN_CHANGED" | "NAVIDROME_CONTEXT_CHANGED" => Some("conflict"),
+        "LIBRARY_RECOVERY_CANCELLED" | "LOCAL_FOLDERS_SAVE_INTERRUPTED_FOR_SHUTDOWN" => Some("cancelled"),
+        "LIBRARY_RECOVERY_SET_INCOMPLETE" => Some("incomplete"),
+        "CONFIG_PERSISTENCE_UNCERTAIN" | "MANAGED_FOLDERS_SAVE_PENDING" => Some("uncertain"),
+        "FIRST_RUN_CATALOG_INDEXING" | "LOCAL_ADDITION_INDEXING" => Some("indexing"),
+        "NAVIDROME_AUTH" => Some("authentication"),
+        "NAVIDROME_INVALID" | "SMART_PLAYLIST_INVALID" => Some("invalid_state"),
+        "NAVIDROME_PROTOCOL" => Some("protocol"),
+        "NAVIDROME_STORAGE" | "SMART_PLAYLIST_STORAGE" => Some("storage"),
+        "NAVIDROME_RATE_LIMITED" => Some("rate_limited"),
+        "NAVIDROME_UNAVAILABLE" | "SMART_PLAYLIST_READ" | "SMART_PLAYLIST_SOURCE" => Some("unavailable"),
+        _ => None,
+    };
+    let kind = code_hint.or_else(|| categories
         .iter()
         .find(|(_, terms)| terms.iter().any(|term| lower.contains(term)))
-        .map(|(kind, _)| *kind)
+        .map(|(kind, _)| *kind))
         .unwrap_or("unclassified");
     let mut summary = format!("error_hint={kind}");
+    if code_hint.is_some() { summary.push_str(&format!(" code={candidate}")); }
     if let Some(code) = numeric_code(&text, "(os error ", ")") {
         summary.push_str(&format!(" os_code={code}"));
     }
@@ -947,4 +967,16 @@ mod playback_error_log_tests {
         assert!(line.contains("os_code=19"));
         for private in ["private-host", "secret-track", "private-token", "X-Plex-Token", "/private/music"] { assert!(!line.contains(private)); }
     }
+}
+
+#[cfg(test)]
+mod fixed_application_code_tests {
+ use super::*;
+ #[test] fn known_guard_codes_are_useful_without_exposing_their_details_or_changing_raw_errors() {
+  for (code,hint) in [("LIBRARY_RECOVERY_PROFILE_BUSY","busy"),("LIBRARY_RECOVERY_UNSAFE_FILESYSTEM","unsafe_filesystem"),("NAVIDROME_AUTH","authentication"),("CONFIG_PERSISTENCE_UNCERTAIN","uncertain")] {
+   let error=format!("{code}: https://private/?password=secret /home/private");let summary=error_summary(&error);assert_eq!(summary,format!("error_hint={hint} code={code}"));for secret in ["https", "private", "password", "secret"]{assert!(!summary.contains(secret));}assert!(error.contains("secret"));
+  }
+  assert_eq!(error_summary("UNKNOWN_PRIVATE_CODE: token=private"),"error_hint=unclassified");
+  assert!(!error_summary("NAVIDROME_AUTH_private: private").contains("code="));
+ }
 }

@@ -286,7 +286,7 @@ test("Local UI keeps saved cards inert, and configuration binding precedes React
   assert.equal((source.match(/readEnabled=\{!metadataMode && catalog.loaded\}/g) ?? []).length, 4);
   assert.match(source, /if \(!selectedAlbum \|\| !catalog.loaded \|\| metadataMode/);
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
-  assert.match(app, /localAlbumCatalog.setPresentationContext\(next.first_run \? \[\] : next.local_folders\);\s*setConfigState\(next\)/);
+  assert.match(app, /localAlbumCatalog.setPresentationContext\(next.first_run \|\| !sourceEnabled\(next, "local"\) \? \[\] : next.local_folders\);\s*setConfigState\(next\)/);
 });
 
 

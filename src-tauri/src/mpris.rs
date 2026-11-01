@@ -83,6 +83,7 @@ fn stable_identity_hash(parts: &[&str]) -> u64 {
 
 fn track_id_for(media: &CurrentMedia) -> Result<TrackId, String> {
     let (kind, queue_index, hash) = match media {
+        CurrentMedia::Navidrome { connection_id, song_id, queue_index } => ("navidrome", *queue_index, stable_identity_hash(&[connection_id, song_id])),
         CurrentMedia::Radio { station_id, queue_index } => ("radio", *queue_index, stable_identity_hash(&[station_id])),
         CurrentMedia::Upnp { session_id, queue_index } => ("upnp", *queue_index, stable_identity_hash(&[session_id])),
         CurrentMedia::Local { uri, queue_index } => {

@@ -17,6 +17,7 @@ const CARD_TEXT_HEIGHT = 64;
 const OVERSCAN_ROWS = 3;
 
 export interface VirtualAlbumGridProps<T> {
+  minimumCardWidth?: number;
   items: readonly T[];
   getItemKey: (item: T) => React.Key;
   renderItem: (item: T) => React.ReactNode;
@@ -36,6 +37,7 @@ interface ViewportMeasurement {
 
 function VirtualAlbumGridComponent<T>({
   items,
+  minimumCardWidth = MINIMUM_CARD_WIDTH,
   getItemKey,
   renderItem,
   scrollContainer,
@@ -113,7 +115,7 @@ function VirtualAlbumGridComponent<T>({
   const metrics = virtualGridMetrics({
     itemCount: items.length,
     containerWidth: viewport.width,
-    minimumColumnWidth: MINIMUM_CARD_WIDTH,
+    minimumColumnWidth: minimumCardWidth,
     gap: GRID_GAP,
     cardExtraHeight: CARD_TEXT_HEIGHT,
     scrollOffset: viewport.scrollOffset,

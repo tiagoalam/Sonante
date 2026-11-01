@@ -130,7 +130,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
               </div>
                 {layout === "audiophile" && hasTrack && available && props.snapshot?.sourceInfo && currentMediaKey(props.snapshot.sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={props.snapshot.sourceInfo.info} />}
               {!available && <p role="status" className="np-notice">{t(health?.state === "unavailable" ? "player.engineUnavailable" : "player.engineTransitioning")}{hasTrack && ` · ${t("player.lastKnown")}`}</p>}
-              {playbackNotice && <p role="alert" className="np-error">{t(isRadio && playbackNotice.code === "format_unsupported" ? "radio.directError" : `player.playbackError.${playbackNotice.code}`)}</p>}
+              {playbackNotice && <p role="alert" className="np-error">{t(status.current_media?.kind === "navidrome" && playbackNotice.code === "format_unsupported" ? "navidrome.streamError" : isRadio && playbackNotice.code === "format_unsupported" ? "radio.directError" : `player.playbackError.${playbackNotice.code}`)}</p>}
               {props.controlFailed && <p role="alert" className="np-error">{t("nowPlaying.controlFailed")}</p>}
               {layout === "sleeve" && hasTrack && <div className="np-sleeve-notes">
                 <span className="np-notes-label">{t("nowPlaying.look.recordDetails")}</span>

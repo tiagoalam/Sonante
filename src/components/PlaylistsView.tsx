@@ -1,3 +1,6 @@
+import type { AppConfig } from "../types/config";
+import { sourceLocatorEnabled } from "../utils/musicSources";
+import { SmartPlaylists } from "./SmartPlaylists";
 import { useTrackSelection } from "./TrackSelection";
 import { beginPlaybackIntent, isPlaybackSuperseded, playbackFailure } from "../utils/playbackIntent";
 import { logError, logWarning } from "../utils/frontendDiagnostics";
@@ -28,9 +31,11 @@ import type { Playlist, PlaylistItemAvailability } from "../types/playlist";
 
 type AvailabilityStatus = PlaylistItemAvailability["status"];
 
-export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?: number }> = ({ isPlaybackAvailable, refreshKey = 0 }) => {
+export const PlaylistsView: React.FC<{ config: AppConfig; isPlaybackAvailable: boolean; refreshKey?: number }> = ({ config, isPlaybackAvailable, refreshKey = 0 }) => {
   const { t, i18n } = useTranslation();
-  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [storedPlaylists, setPlaylists] = useState<Playlist[]>([]);
+  const playlists=useMemo(()=>storedPlaylists.map(playlist=>({...playlist,items:playlist.items.filter(item=>sourceLocatorEnabled(config,item.media_locator))})),[storedPlaylists,config.sources]);
+  const [smartCount, setSmartCount] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -104,7 +109,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
     return () => {
       disposed = true;
     };
-  }, [selectedId, t]);
+  }, [selectedId, t, config.sources]);
 
   const createPlaylist = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -192,8 +197,12 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
   const moveItem = async (playlist: Playlist, index: number, offset: -1 | 1) => {
     const target = index + offset;
     if (target < 0 || target >= playlist.items.length) return;
-    const orderedIds = playlist.items.map((item) => item.id);
-    [orderedIds[index], orderedIds[target]] = [orderedIds[target], orderedIds[index]];
+    const visibleIds = playlist.items.map(item => item.id);
+    [visibleIds[index], visibleIds[target]] = [visibleIds[target], visibleIds[index]];
+    const original=storedPlaylists.find(item=>item.id===playlist.id);
+    if (!original) return;
+    let cursor=0;
+    const orderedIds=original.items.map(item=>sourceLocatorEnabled(config,item.media_locator)?visibleIds[cursor++]:item.id);
     setBusy(true);
     setError(null);
     try {
@@ -287,7 +296,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
             <p className="mt-0.5 text-xs text-[color:var(--theme-fg-muted,#888888)]">
               {selected
                 ? t("playlists.itemCount", { count: selected.items.length })
-                : t("playlists.count", { count: playlists.length })}
+                : t("playlists.count", { count: playlists.length + smartCount })}
             </p>
           </div>
         </div>
@@ -327,6 +336,7 @@ export const PlaylistsView: React.FC<{ isPlaybackAvailable: boolean; refreshKey?
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto p-8">
+        {!selected && <SmartPlaylists config={config} isPlaybackAvailable={isPlaybackAvailable} onCount={setSmartCount} onSelectionSaved={playlist => { setPlaylists(current => [...current, playlist]); setSelectedId(playlist.id); }} />}
         {loading ? (
           <div className="flex h-full items-center justify-center text-[color:var(--theme-fg-muted,#777777)]">
             <LoaderCircle size={24} className="animate-spin" />

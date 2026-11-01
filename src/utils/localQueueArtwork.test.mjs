@@ -1,3 +1,4 @@
+import { VisibleNavidromeQueueArtwork, navidromeQueueArtworkKey } from "./visibleNavidromeQueueArtwork.ts";
 import { NowPlayingFullscreen } from "./nowPlayingFullscreen.ts";
 import * as layoutHelpers from "./nowPlayingLayout.ts";
 import { passiveQueueInsertion } from "../../tests/support/passiveQueueInsertion.mjs";
@@ -33,7 +34,7 @@ const {TrackArtwork}=compile("components/TrackArtwork.tsx",{...common,react:{...
 const nodes=(tree,pred)=>Array.isArray(tree)?tree.flatMap(n=>nodes(n,pred)):!tree||typeof tree!=="object"?[]:[...(pred(tree)?[tree]:[]),...nodes(tree.props?.children,pred)];
 const fixtures=new Set();
 test.afterEach(()=>{for(const f of fixtures)f.dispose();fixtures.clear();});
-function mount({items=[track("Source/Album/1.flac"),track("Source/Album/2.flac"),track("Other/Album/3.flac")],inventory=[a,b],cover=async path=>`cover:${path}`,cache=async()=>null,detached=false}={}){
+function mount({items=[track("Source/Album/1.flac"),track("Source/Album/2.flac"),track("Other/Album/3.flac")],inventory=[a,b],cover=async path=>`cover:${path}`,cache=async()=>null,detached=false,navCover=async()=>"data:image/png;base64,bmF2"}={}){
  const calls=[],slots=[],effects=[],layouts=[];let cursor=0,disposed=false,late=0,reader;
  const effect=(list,fn,deps)=>{const i=cursor++,old=slots[i];if(!old||deps.some((v,n)=>!Object.is(v,old.deps[n])))list.push(()=>{old?.cleanup?.();slots[i]={deps,cleanup:fn()};});};
  const react={...React,default:React,useId:()=> "queue-filter-test",
@@ -54,7 +55,8 @@ function mount({items=[track("Source/Album/1.flac"),track("Source/Album/2.flac")
  const catalog=new LocalAlbumCatalog(audioService.getLocalAlbums),resolver=new LocalArtworkResolver(audioService.getLocalCover,async()=>assert.fail("no HTTP"));
  const hook=compile("utils/useLocalQueueArtwork.ts",{react,"./localAlbumCatalogSession":{localAlbumCatalog:catalog},"./localArtworkSession":{localArtworkResolver:resolver},"./localArtwork":{artworkReadBlocked},"./playerNavigation":{localAlbumForMedia},"./nowPlayingPresentation":presentation,"./visibleQueueArtwork":{VisibleQueueArtwork},"../services/audio":{audioService},"./frontendDiagnostics":{logError}}).useLocalQueueArtwork;
  class Reader extends presentation.QueuePreviewReader{constructor(load,publish){super(load,publish,100000);reader=this;}}
- const Queue=compile("components/NowPlayingQueue.tsx",{...common,react,"../utils/useLocalQueueArtwork":{useLocalQueueArtwork:hook},"../services/audio":{audioService},"../utils/nowPlayingPresentation":{...presentation,QueuePreviewReader:Reader},"./TrackArtwork":{TrackArtwork}}).NowPlayingQueue;
+ const navHook=compile("utils/useNavidromeQueueArtwork.ts",{react,"./nowPlayingPresentation":presentation,"./visibleNavidromeQueueArtwork":{VisibleNavidromeQueueArtwork,navidromeQueueArtworkKey},"./navidromeArtwork":{navidromeSongCover:async(...args)=>{calls.push(["nav_cover",...args.slice(0,2)]);return navCover(...args);}},"./frontendDiagnostics":{logError}}).useNavidromeQueueArtwork;
+ const Queue=compile("components/NowPlayingQueue.tsx",{...common,react,"../utils/useNavidromeQueueArtwork":{useNavidromeQueueArtwork:navHook},"../utils/useLocalQueueArtwork":{useLocalQueueArtwork:hook},"../services/audio":{audioService},"../utils/nowPlayingPresentation":{...presentation,QueuePreviewReader:Reader},"./TrackArtwork":{TrackArtwork}}).NowPlayingQueue;
  Object.assign(f,{catalog,resolver,Queue});fixtures.add(f);return f;
 }
 
@@ -168,4 +170,32 @@ test("filtering virtual rows uses original queue indices for current artwork and
  assert.deepEqual(f.thumbs(),["current-cover"]);assert.deepEqual(f.items,original);
  assert.equal(f.calls.filter(call=>!['get_queue','get_local_albums','get_local_covers','get_online_album_cover'].includes(call[0])).length,0);
  f.dispose();
+});
+
+
+const navTrack=(song,connection="nav-session")=>({title:`Nav ${song}`,artist:"Same artist",album:"Same album",media_locator:{kind:"navidrome",connection_id:connection,account_id:"a".repeat(64),song_id:song}});
+test("restored Navidrome queue loads every visible noncurrent cover in drawer and detached host without a Local catalog read",async()=>{
+ for(const detached of [false,true]){
+  const items=[navTrack("one"),navTrack("two"),navTrack("three")];const before=structuredClone(items);
+  const f=mount({items,inventory:[],detached});f.props.status={...f.props.status,current_media:{kind:"navidrome",connection_id:"nav-session",song_id:"one",queue_index:0}};
+  await f.ready();assert.deepEqual(f.thumbs(),["current-cover","data:image/png;base64,bmF2","data:image/png;base64,bmF2"]);assert.deepEqual(items,before);
+  assert.deepEqual(f.calls.filter(call=>call[0]==="nav_cover").map(call=>call.slice(1)),[["nav-session","two"],["nav-session","three"]]);
+  assert.equal(f.calls.some(call=>call[0]==="get_local_albums"||call[0]==="get_local_covers"),false);
+  const reads=f.calls.length;await f.replace(items.map(item=>({...item})));f.props.status={...f.props.status,elapsed:25};await f.ready();assert.equal(f.calls.length,reads+1,"only the explicit queue poll runs again");f.dispose();
+ }
+});
+test("Navidrome covers follow actual filtered queue indices, remain viewport-bounded and cancel on close",async()=>{
+ const pending=[];const items=Array.from({length:40},(_,i)=>navTrack(String(i)));const f=mount({items,inventory:[],navCover:async()=>{const d=defer();pending.push(d);return d.promise;}});
+ f.props.status={...f.props.status,current_media:null,thumb:null};await f.ready();assert.equal(pending.length,2);
+ // Filter to an occurrence far outside the original viewport; no unfiltered index may win.
+ const field=nodes(f.tree,n=>n.type==="input"&&n.props.type==="search")[0];field.props.onChange({target:{value:"Nav 30"}});await f.ready();
+ pending.splice(0).forEach(d=>d.resolve("stale-image"));await f.ready();assert.equal(pending.length,1);assert.deepEqual(f.calls.filter(c=>c[0]==="nav_cover").at(-1).slice(1),["nav-session","30"]);
+ pending.splice(0).forEach(d=>d.resolve("filtered-image"));await f.ready();assert.deepEqual(f.thumbs(),["filtered-image"]);
+ f.props.open=false;await f.ready();const count=f.calls.length;await f.ready();assert.equal(f.calls.length,count);f.dispose();assert.equal(f.late(),0);
+});
+test("a Navidrome connection replacement or hidden queue cannot publish late images or retry missing images on polling",async()=>{
+ const old=defer();const f=mount({items:[navTrack("same")],inventory:[],navCover:async(connection)=>connection==="nav-session"?old.promise:"new-image"});
+ f.props.status={...f.props.status,current_media:null,thumb:null};await f.ready();await f.replace([navTrack("same","replacement")]);old.resolve("old-image");await f.ready();assert.deepEqual(f.thumbs(),["new-image"]);f.dispose();
+ const missing=mount({items:[navTrack("missing")],inventory:[],navCover:async()=>null});missing.props.status={...missing.props.status,current_media:null,thumb:null};await missing.ready();await missing.replace(missing.items.map(item=>({...item})));await missing.ready();assert.equal(missing.calls.filter(c=>c[0]==="nav_cover").length,1);missing.dispose();
+ const hidden=mount({items:[navTrack("hidden")],inventory:[]});hidden.props.open=false;await hidden.ready();assert.equal(hidden.calls.filter(c=>c[0]==="nav_cover").length,0);hidden.dispose();
 });

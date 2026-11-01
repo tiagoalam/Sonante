@@ -1,3 +1,5 @@
+import { navidromeQueueTrack } from "../src/utils/navidromeTracks.ts";
+import * as musicSources from "../src/utils/musicSources.ts";
 import { passiveQueueInsertion } from "./support/passiveQueueInsertion.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -37,6 +39,8 @@ function fixture(language = "en", overrides = {}) {
     catalog: { albums: [localAlbum], loaded: true, loading: false, error: null, saveBlocked: false, mpdBusy: false, ...overrides.catalog },
     props: { config: { local_folders: ["fixture"], plex_token: "fixture", plex_server_id: "server", online_artwork_enabled: false }, plexIdentity: {},
       status: { is_updating: false }, isPlaybackAvailable: true, catalogRefreshRevision: 0, active: true, onFavoritesChanged() {}, ...overrides.props },
+    readNav: overrides.readNav ?? (async () => ({connection_id:"fixture-nav",account_id:"a".repeat(64),artists:[],albums:[],songs:[]})),
+    navStatus: overrides.navStatus ?? (async () => ({connection_id:"fixture-nav",account_id:"a".repeat(64),server:"http://fixture.invalid",username:"fixture"})),
     readLocal: overrides.readLocal ?? (async () => ({ tracks: [], limited: false })), readPlex: overrides.readPlex ?? (async () => empty),
     paint(props = host.props) { host.props = props; let result; for (let i = 0; i < 2; i++) { host.cursor = 0; host.effects = []; current = host; result = View(host.props); current = null; host.effects.splice(0).forEach(effect => effect()); } host.tree = result; return result; },
     async tick() { const scheduled = [...timers.values()]; timers.clear(); scheduled.forEach(fn => fn()); await flush(); return host.paint(); },
@@ -55,9 +59,12 @@ function fixture(language = "en", overrides = {}) {
     "../utils/usePlaybackAttempt": { usePlaybackAttempt: () => ({ failure: null, run: action => action({ current: () => true }) }) },
     "./PlaybackRequestNotice": { PlaybackRequestNotice: () => null }, "./LocalBrowserView": { LocalBrowserView: LocalView },
     "./AlbumView": { AlbumView }, "./ArtistView": { ArtistView },
+    "../services/navidrome": {navidromeService:{status:()=>{calls.push(["nav-status"]);return host.navStatus();},search:(...args)=>{calls.push(["nav-search",...args]);return host.readNav(...args);}}},
+    "../utils/navidromeTracks": {navidromeQueueTrack},
+    "./NavidromeView": {NavidromeView: AlbumView}, "./NavidromeArtistView": {NavidromeArtistView: ArtistView},
   };
   const exports = {};
-  new Function("require", "exports", "setTimeout", "clearTimeout", "window", "requestAnimationFrame", code)(name => { assert.ok(name in dependencies, name); return dependencies[name]; }, exports,
+  new Function("require", "exports", "setTimeout", "clearTimeout", "window", "requestAnimationFrame", code)(name => { if(name==="../utils/musicSources")return musicSources; assert.ok(name in dependencies, name); return dependencies[name]; }, exports,
     fn => { const id = ++timerId; timers.set(id, fn); return id; }, id => timers.delete(id),
     { addEventListener: (name, fn) => events.set(name, fn), removeEventListener: name => events.delete(name) }, fn => fn());
   const View = exports.UnifiedSearchView;
@@ -308,4 +315,40 @@ test('Plex album and artist opened from unified search each expose one Back to s
   }
   f.host.close();
  }
+});
+
+
+const navConnection={connection_id:"fixture-nav",account_id:"a".repeat(64)};
+const navResults={...navConnection,albums:[{id:"nav-album",title:"Live Nav",artist:"Nav Artist"}],artists:[{id:"nav-artist",name:"Nav Artist",album_count:1}],songs:[{id:"nav-song",title:"Live Nav Song",artist:"Nav Artist",album:"Live Nav",duration:120,disc:1,track:1,album_id:"nav-album"}]};
+test("Navidrome search is lazy, source-filtered and keeps typed album/artist destinations and track playback",async()=>{
+ const {host,calls,t,AlbumView,ArtistView}=fixture("en",{props:{navidromeConfigured:true},readNav:async()=>navResults});
+ await host.tick();assert.deepEqual(calls,[]);host.type("Live");
+ nodes(host.tree,n=>n.type==="button"&&n.props.children===t("explore.sources.navidrome"))[0].props.onClick();host.paint();let tree=await host.tick();
+ assert.deepEqual(calls.map(c=>c[0]),["nav-status","nav-search"]);
+ for(const [label,View]of [["Live Nav",AlbumView],["Nav Artist",ArtistView]]){
+  nodes(tree,n=>n.type==="button"&&n.props["aria-label"]===`Open: ${label} · Navidrome`)[0].props.onClick({currentTarget:{}});
+  const detail=nodes(host.paint(),n=>n.type===View)[0];assert.ok(detail);
+  assert.equal((detail.props.initialAlbum??detail.props.artist).account_id,navConnection.account_id);
+  assert.equal(detail.props.backLabel,t("unifiedSearch.back"));
+  (detail.props.onAlbumBack??detail.props.onBack)();tree=host.paint();assert.equal(nodes(tree,n=>n.type==="input")[0].props.value,"Live");
+ }
+ assert.equal(calls.some(c=>c[0]==="play"),false);
+ nodes(tree,n=>n.type==="button"&&n.props["aria-label"]==="Play track: Live Nav Song · Navidrome")[0].props.onClick({currentTarget:{}});await flush();
+ assert.deepEqual(calls.find(c=>c[0]==="play")[1][0].media_locator,{kind:"navidrome",...navConnection,song_id:"nav-song"});host.close();
+});
+test("a Navidrome failure preserves other source results, while disabled or unconfigured Navidrome never reads",async()=>{
+ const f=fixture("en",{props:{navidromeConfigured:true},readNav:async()=>{throw Error("PRIVATE account detail");}});
+ f.host.type("Live");await f.host.tick();const html=renderToStaticMarkup(f.host.tree);assert.match(html,/Open: Live · Local/);assert.doesNotMatch(html,/PRIVATE/);assert.equal(f.errors.length,1);f.host.close();
+ for(const props of [{navidromeConfigured:false},{navidromeConfigured:true,config:{local_folders:[],plex_token:"",sources:{local:false,plex:false,navidrome:false}}}]){
+  const f=fixture("en",{props});f.host.type("Live");await f.host.tick();assert.equal(f.calls.some(c=>c[0].startsWith("nav-")),false);f.host.close();
+ }
+});
+test("Navidrome account revision invalidates pending and opened results without touching the other source lanes",async()=>{
+ const old=deferred();let reads=0;
+ const f=fixture("en",{props:{navidromeConfigured:true},readNav:async()=>++reads===1?old.promise:{...navResults,albums:[{...navResults.albums[0],title:"Live new account"}]}});
+ f.host.type("Live");await f.host.tick();f.host.paint({...f.host.props,navidromeRevision:1});await f.host.tick();assert.equal(reads,1);
+ old.resolve(navResults);await flush();let tree=f.host.paint();assert.equal(reads,2);assert.doesNotMatch(renderToStaticMarkup(tree),/Open: Live Nav · Navidrome/);assert.match(renderToStaticMarkup(tree),/Live new account/);
+ nodes(tree,n=>n.type==="button"&&n.props["aria-label"]==="Open: Live new account · Navidrome")[0].props.onClick({currentTarget:{}});assert.ok(nodes(f.host.paint(),n=>n.type===f.AlbumView).length);
+ f.host.paint({...f.host.props,navidromeRevision:2});assert.equal(nodes(f.host.tree,n=>n.type===f.AlbumView).length,0);
+ f.host.paint({...f.host.props,config:{...f.host.props.config,sources:{local:true,plex:true,navidrome:false}}});assert.doesNotMatch(renderToStaticMarkup(f.host.tree),/Live new account/);f.host.close();
 });
