@@ -2026,6 +2026,13 @@ pub(crate) fn validate_queue_capture(
                     });
             match &locator {
                 crate::audio::MediaLocator::Upnp { .. } | crate::audio::MediaLocator::Radio { .. } => return Err("LIBRARY_RECOVERY_QUEUE_INVALID".into()),
+                crate::audio::MediaLocator::Navidrome { .. } => {
+                    // Queue proof uses the same durable account/song identity as
+                    // the cache, never a revocable proxy URL/session identifier.
+                    if !track.uri.is_empty() || crate::navidrome::storage_locator(&locator).as_ref() != Some(&locator) {
+                        return Err("LIBRARY_RECOVERY_QUEUE_INVALID".into());
+                    }
+                },
                 crate::audio::MediaLocator::Local { uri } => {
                     if !crate::local_media::is_safe_relative_mpd_uri(uri) {
                         return Err(INCOMPLETE.into());

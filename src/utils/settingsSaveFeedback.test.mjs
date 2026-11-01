@@ -48,8 +48,8 @@ test("App keeps local Save pending and confirms success only after backend compl
     assert.equal(page, previousPage); assert.equal(opened, false); assert.deepEqual(effects, [], "a pending Save fences navigation");
     busy.current = false;
     click();
-    assert.equal(page, "general"); assert.equal(opened, true);
-    assert.deepEqual(effects, [["page", "general"], ["open", true]], "a fresh normal opening chooses General before opening");
+    assert.equal(page, "sources"); assert.equal(opened, true);
+    assert.deepEqual(effects, [["page", "sources"], ["open", true]], "a fresh normal opening chooses General before opening");
   }
 });
 

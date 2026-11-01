@@ -914,6 +914,7 @@ fn parse_item(
             return None;
         }
         Some(PlexAlbum {
+            added_at: if kind == "album" { item.get("addedAt").and_then(Value::as_u64).filter(|v| *v > 0 && *v <= 253_402_300_799) } else { None },
             server_id: Some(connection.server_id.clone()),
             library_id: Some(section.to_string()),
             rating_key: album_id.into(),

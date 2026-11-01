@@ -1,3 +1,5 @@
+import type { AppConfig } from "../types/config";
+import { sourceEnabled, MUSIC_SOURCES } from "../utils/musicSources";
 import { useTrackSelection } from "./TrackSelection";
 import { useQueueInsertion } from "./QueueInsertionMenu";
 import type { TrackMetadata } from "../types/audio";
@@ -18,6 +20,8 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { FavoriteAlbum } from "../types/favorite";
+import { navidromeService } from "../services/navidrome";
+import { NavidromeView } from "./deferredViews";
 import { favoritesService } from "../services/favorites";
 import { audioService } from "../services/audio";
 import { plexService } from "../services/plex";
@@ -28,15 +32,18 @@ import type { NewPlaylistItem } from "../types/playlist";
 
 
 interface Props {
+  config: AppConfig;
   onFavoritesChanged?: () => void;
   isPlaybackAvailable: boolean;
 }
 
-export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackAvailable }) => {
+export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isPlaybackAvailable }) => {
   const { t } = useTranslation();
   const [favorites, setFavorites] = useState<FavoriteAlbum[]>([]);
-  const [activeTab, setActiveTab] = useState<"local" | "plex">("local");
+  const [activeTab, setActiveTab] = useState<"local" | "plex" | "navidrome">(() => MUSIC_SOURCES.find(source => sourceEnabled(config, source)) ?? "local");
   const [search, setSearch] = useState("");
+  const [navidromeConfigured, setNavidromeConfigured] = useState(false);
+  const [navidromeCount, setNavidromeCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [selectedAlbum, setSelectedAlbum] = useState<FavoriteAlbum | null>(null);
@@ -61,21 +68,28 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
   const selection = useTrackSelection(queueContext, selectedAlbum ? tracks.map(track => metadata(track, selectedAlbum)) : [], isPlaybackAvailable && !loadingTracks);
   const albumRequest = (fav: FavoriteAlbum) => ({ track: { title: fav.title, artist: fav.artist, album: fav.title }, scope: "album" as const,
     load: async () => (await loadFavoriteTracks(fav)).map(track => metadata(track, fav)) });
-  const loadFavorites = async () => {
+  const loadFavorites = async (current: () => boolean) => {
     try {
       const data = await favoritesService.getFavorites();
-      if(alive.current)setFavorites(data || []);
+      if(current())setFavorites((data || []).filter(item => sourceEnabled(config, item.source)));
     } catch (err) {
-      if(alive.current)logError("favorites.load", err);
+      if(current())logError("favorites.load", err);
     } finally {
-      if(alive.current)setLoading(false);
+      if(current())setLoading(false);
     }
   };
 
   useEffect(() => {
-    alive.current=true;void loadFavorites();
-    return()=>{alive.current=false;albumGeneration.current++;};
-  }, []);
+    let live=true;alive.current=true;setLoading(true);setNavidromeConfigured(false);setNavidromeCount(null);
+    void loadFavorites(() => live);
+    if (sourceEnabled(config, "navidrome")) void navidromeService.status().then(status => { if (live) setNavidromeConfigured(!!status.connection_id); })
+      .catch(error => { if (live) logError("navidrome.catalog", error); });
+    return()=>{live=false;alive.current=false;albumGeneration.current++;};
+  }, [config.sources]);
+
+  useEffect(() => {
+    if (!sourceEnabled(config, activeTab)) { closeAlbum(); setActiveTab(MUSIC_SOURCES.find(source => sourceEnabled(config, source)) ?? 'local'); }
+  }, [config.sources, activeTab]);
 
   const handleToggleFav = async (e: React.MouseEvent, fav: FavoriteAlbum) => {
     e.stopPropagation();
@@ -94,6 +108,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
 
   const handleOpenAlbum = async (fav: FavoriteAlbum) => {
     if(!alive.current)return;
+    if (!sourceEnabled(config, fav.source)) return;
     if (fav.source === "local" && fav.exists === false) {
       alert(t("favorites.missingDiskAlert"));
       return;
@@ -127,6 +142,7 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
   const handleQuickPlayCard = async (e: React.MouseEvent, fav: FavoriteAlbum) => {
     e.stopPropagation();
     if (!isPlaybackAvailable) return;
+    if (!sourceEnabled(config, fav.source)) return;
     if (fav.source === "local" && fav.exists === false) {
       alert(t("favorites.missingDiskAlert"));
       return;
@@ -196,12 +212,12 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
             <p className="text-xs text-[color:var(--theme-fg-muted,#888888)] mt-0.5">
               {selectedAlbum
                 ? selectedAlbum.artist
-                : t("favorites.count", { count: filtered.length })}
+                : activeTab === "navidrome" && navidromeCount === null ? t("navidrome.subtitle") : t("favorites.count", { count: activeTab === "navidrome" ? navidromeCount : filtered.length })}
             </p>
           </div>
         </div>
 
-        {!selectedAlbum && (
+        {!selectedAlbum && activeTab !== "navidrome" && (
           <div className="flex items-center space-x-4">
             <div className="relative flex items-center w-64">
               <Search size={14} className="absolute left-3 text-[color:var(--theme-fg-muted,#666666)]" />
@@ -217,14 +233,15 @@ export const FavoritesView: React.FC<Props> = ({ onFavoritesChanged, isPlaybackA
         )}
       </div>
 
-      {!selectedAlbum && <LibrarySourceTabs source={activeTab} idPrefix="favorites-source"
-        label={t("favorites.sourceTabs")} labels={{ local: `${t("favorites.tabLocal")}${loading ? "" : ` (${favorites.filter(item => item.source === "local" && item.id).length})`}`, plex: `${t("favorites.tabPlex")}${loading ? "" : ` (${favorites.filter(item => item.source === "plex" && item.id).length})`}` }}
+      {!selectedAlbum && MUSIC_SOURCES.some(source => sourceEnabled(config, source) && (source !== "navidrome" || navidromeConfigured)) && <LibrarySourceTabs source={activeTab} idPrefix="favorites-source"
+        label={t("favorites.sourceTabs")} sources={MUSIC_SOURCES.filter(source => sourceEnabled(config, source) && (source !== "navidrome" || navidromeConfigured))}
+        labels={{ ...(navidromeConfigured ? { navidrome: `${t("navidrome.title")}${navidromeCount === null ? "" : ` (${navidromeCount})`}` } : {}), local: `${t("favorites.tabLocal")}${loading ? "" : ` (${favorites.filter(item => item.source === "local" && item.id).length})`}`, plex: `${t("favorites.tabPlex")}${loading ? "" : ` (${favorites.filter(item => item.source === "plex" && item.id).length})`}` }}
         onChange={source => { setActiveTab(source); closeAlbum(); }} />}
 
       <div id={!selectedAlbum ? "favorites-source-panel" : undefined} role={!selectedAlbum ? "tabpanel" : undefined}
         aria-labelledby={!selectedAlbum ? `favorites-source-${activeTab}` : undefined}
-        className="flex-1 overflow-y-auto p-8">
-        {selectedAlbum ? (
+        className={activeTab === "navidrome" ? "min-h-0 flex-1 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8"}>
+        {activeTab === "navidrome" && navidromeConfigured ? <NavidromeView available={isPlaybackAvailable} favoritesOnly embedded onFavoritesChange={setNavidromeCount} /> : selectedAlbum ? (
           <div className="space-y-8 animate-in fade-in duration-100">
             <div className="flex items-end space-x-6">
               <div className="w-52 h-52 rounded-xl bg-[var(--theme-surface-raised,#202020)] border border-[color:var(--theme-border-soft,#2B2B2B)] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">

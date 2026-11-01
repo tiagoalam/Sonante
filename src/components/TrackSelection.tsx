@@ -12,7 +12,7 @@ export function useTrackSelection(context: unknown, tracks: TrackMetadata[], ava
   const live = useRef(visit); live.current = visit;
   const [state, setState] = useState<{ visit: object; indices: Set<number>; anchor: number | null }>({ visit, indices: new Set(), anchor: null });
   const [picker, setPicker] = useState<{ visit: object; items: NewPlaylistItem[] } | null>(null);
-  const selectable = (index: number) => tracks[index]?.media_locator?.kind !== "radio" && tracks[index]?.media_locator?.kind !== "upnp";
+  const selectable = (index: number) => tracks[index]?.media_locator?.kind !== "radio" && tracks[index]?.media_locator?.kind !== "upnp" && (tracks[index]?.media_locator?.kind !== "navidrome" || !!(tracks[index]?.media_locator as {account_id?:string})?.account_id);
   const indices = state.visit === visit ? state.indices : new Set<number>();
   const queue = useQueueInsertion(visit, available);
   const toggle = (index: number, range: boolean) => setState(previous => {
@@ -35,7 +35,7 @@ export function useTrackSelection(context: unknown, tracks: TrackMetadata[], ava
     toolbar: <>{queue.notice}{queue.menu}{indices.size > 0 && <div className="track-selection-toolbar" role="region" aria-label={t("selection.title")}>
       <strong aria-live="polite">{t("selection.count", { count: indices.size })}</strong>
       {queue.trigger({ track: { title: t("selection.count", { count: indices.size }), artist: "", album: "" }, scope: "selection", load: async () => chosen(), current: () => live.current === visit })}
-      <button type="button" onClick={() => { const items = chosen().filter(track => track.media_locator && track.media_locator.kind !== "upnp" && track.media_locator.kind !== "radio").map(track => ({ media_locator: track.media_locator!, metadata: { title: track.title, artist: track.artist, album: track.album, duration: track.duration ?? undefined } })); if (items.length) setPicker({ visit, items }); }}>{t("selection.playlist")}</button>
+      <button type="button" onClick={() => { const items = chosen().filter(track => track.media_locator && track.media_locator.kind !== "upnp" && track.media_locator.kind !== "radio" && (track.media_locator.kind !== "navidrome" || !!track.media_locator.account_id)).map(track => ({ media_locator: track.media_locator!, metadata: { title: track.title, artist: track.artist, album: track.album, duration: track.duration ?? undefined } })); if (items.length) setPicker({ visit, items }); }}>{t("selection.playlist")}</button>
       <button type="button" onClick={() => setState({ visit, indices: new Set(tracks.map((_, i) => i).filter(selectable)), anchor: 0 })}>{t("selection.all")}</button>
       <button type="button" onClick={() => setState({ visit, indices: new Set(), anchor: null })}>{t("selection.clear")}</button>
     </div>}{picker?.visit === visit && <PlaylistPickerModal items={picker.items} title={t("selection.title")} onClose={() => setPicker(null)} />}</>,

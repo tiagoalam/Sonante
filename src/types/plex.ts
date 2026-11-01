@@ -20,6 +20,7 @@ export interface PlexLibrary {
 }
 
 export interface PlexAlbum {
+  added_at?: number | null;
   rating_key: string;
   title: string;
   artist: string;

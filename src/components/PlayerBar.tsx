@@ -70,7 +70,7 @@ export const PlayerBar: React.FC<Props> = ({
       && (playbackDiagnostic?.code === "output_busy" || playbackDiagnostic?.code === "output_unavailable"))
     ? null : playbackDiagnostic;
   const playbackNoticeText = playbackNotice
-    ? t(isRadio && playbackNotice.code === "format_unsupported" ? "radio.directError" : `player.playbackError.${playbackNotice.code}`)
+    ? t(status.current_media?.kind === "navidrome" && playbackNotice.code === "format_unsupported" ? "navidrome.streamError" : isRadio && playbackNotice.code === "format_unsupported" ? "radio.directError" : `player.playbackError.${playbackNotice.code}`)
     : "";
 
   useEffect(() => {

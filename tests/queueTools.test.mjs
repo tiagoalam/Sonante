@@ -24,6 +24,7 @@ function fixture(items,language='en') {
   rows(){return nodes(f.tree,n=>n.props?.['data-queue-index']!==undefined);},calls,artworkScopes,viewport,t};
  const deps={'./QueueInsertionMenu':{useQueueInsertion:()=>({open:(_event,request)=>f.requests.push(request),trigger:()=>null,menu:null,notice:null})},react:hooks,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t})},'lucide-react':icons,'../utils/queuePresentation':model,'../utils/nowPlayingPresentation':presentation,'./TrackArtwork':{TrackArtwork:()=>null},
   '../utils/playbackIntent':{beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true}),isPlaybackSuperseded:()=>false},
+  '../utils/useNavidromeQueueArtwork':{useNavidromeQueueArtwork:()=>item=>item},
   '../utils/useLocalQueueArtwork':{useLocalQueueArtwork:(...args)=>{artworkScopes.push(args[8]);return item=>item;}},
   '../services/audio':{audioService:{getQueueEditSnapshot:async()=>{calls.push('snapshot');return f.snapshot ? await f.snapshot : {tracks:f.backendItems,revision:'synthetic-revision'};},editQueue:async(...args)=>{calls.push(['edit',...args]);if(f.editFailure)throw f.editFailure;},getQueue:async()=>{calls.push('read');return f.backendItems;},playQueueIndex:async index=>calls.push(['play',index]),clearQueue:async()=>calls.push('clear')}}};
  const View=compile('src/components/NowPlayingQueue.tsx',deps).NowPlayingQueue;f.paint();return f;

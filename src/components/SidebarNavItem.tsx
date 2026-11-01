@@ -26,7 +26,7 @@ export const SidebarNavItem: React.FC<SidebarNavItemProps> = ({
     onClick={() => traceInteractionAction(diagnosticAction, onClick)}
     aria-current={active ? "page" : undefined}
     title={title}
-    className={`group relative flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] ${
+    className={`group relative flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] font-medium transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] ${
       active
         ? "bg-[var(--theme-surface-raised,#242424)] text-[color:var(--theme-fg-primary,#ffffff)]"
         : "text-[color:var(--theme-fg-muted,#8A8A8A)] hover:bg-[var(--theme-surface-raised,#202020)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"

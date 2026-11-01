@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SearchLane, searchQuery, localSearchIndex, localTrackRows, plexSearchPreview, searchTrackMetadata, sortSearchRows } from "./unifiedSearch.ts";
+import { navidromeSearchPreview, SearchLane, searchQuery, localSearchIndex, localTrackRows, plexSearchPreview, searchTrackMetadata, sortSearchRows } from "./unifiedSearch.ts";
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 const album = (id, title, artist = "Artist") => ({ id, title, artist, folder_path: `Source/${id}`, source_id: "Source", track_count: 1, discs: [] });
@@ -60,4 +60,20 @@ test("one unavailable source never prevents the other lane from publishing its r
   local.request("live", async () => "Local matches"); plex.request("live", async () => { throw Error("network unavailable"); });
   await flush(); assert.equal(local.getSnapshot().value, "Local matches"); assert.equal(plex.getSnapshot().phase, "error");
   assert.equal(plex.getSnapshot().value, null);
+});
+
+
+test("Navidrome preview bounds each kind, keeps editions/account identities, and preserves typed playback", () => {
+  const connection={connection_id:"session-a",account_id:"a".repeat(64)};
+  const result={...connection,albums:Array.from({length:21},(_,i)=>({id:String(i),title:"Live",artist:"Artist"})),artists:[{id:"0",name:"Artist",album_count:21}],songs:[{id:"0",title:"Song",artist:"Artist",album:"Live",duration:120,disc:1,track:1,album_id:"0"}]};
+  const preview=navidromeSearchPreview(result,connection);
+  assert.equal(preview.rows.filter(row=>row.kind==="album").length,20);assert.equal(preview.limited,true);
+  assert.equal(new Set(preview.rows.map(row=>row.key)).size,22);
+  const track=searchTrackMetadata(preview.rows.find(row=>row.kind==="track"));
+  assert.deepEqual(track.media_locator,{kind:"navidrome",connection_id:"session-a",account_id:connection.account_id,song_id:"0"});
+  assert.equal(track.duration,120);
+  for(const changed of [{...connection,connection_id:"session-b"},{...connection,account_id:"b".repeat(64)}])assert.throws(()=>navidromeSearchPreview(result,changed),/SEARCH_CONTEXT_CHANGED/);
+  const next=navidromeSearchPreview({...result,account_id:"b".repeat(64)},{...connection,account_id:"b".repeat(64)});
+  assert.notEqual(next.rows[0].key,preview.rows[0].key);
+  assert.equal(navidromeSearchPreview({...result,albums:[result.albums[0],result.albums[0]]},connection).rows.length,3);
 });

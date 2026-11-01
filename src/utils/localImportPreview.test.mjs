@@ -234,7 +234,7 @@ const layoutJs = ts.transpileModule(`function Layout(props) {
   const LocalAlbumCard = ({album, readEnabled, isLibraryUpdating, isPlaybackAvailable}) => React.createElement("div", {"data-confirmed": album.id, "data-read-enabled": readEnabled, "data-artwork-blocked": isLibraryUpdating, "data-playback-enabled": isPlaybackAvailable}, album.title);
   return (${expression});
 }`, { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2020 } }).outputText;
-const Layout = new Function("React", "VirtualAlbumGrid", "LocalImportPreviewSection", `${layoutJs}; return Layout;`)(React, gridMock.VirtualAlbumGrid, LocalImportPreviewSection);
+const Layout = new Function("React", "AlbumCatalog", "albumPresentation", "LocalImportPreviewSection", `${layoutJs}; return Layout;`)(React, gridMock.VirtualAlbumGrid, {layout:"grid",coverSize:"medium"}, LocalImportPreviewSection);
 const renderLayout = (confirmed, preview, state = "indexing", scrollContainer = {}, catalog = {
   albums: confirmed, loaded: confirmed.length > 0, loading: false, error: null, mpdBusy: true, saveBlocked: true,
 }) => renderToStaticMarkup(React.createElement(Layout, {

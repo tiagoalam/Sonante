@@ -2,6 +2,7 @@ import type { CurrentMedia, TrackMetadata, PlaybackStatus } from "../types/audio
 
 export const queueItemIsCurrent = (item: TrackMetadata, index: number, current: CurrentMedia | null): boolean => {
   if (!current || current.queue_index !== index) return false;
+  if (current.kind === "navidrome") return item.media_locator?.kind === "navidrome" && current.connection_id === item.media_locator.connection_id && current.song_id === item.media_locator.song_id;
   if (current.kind === "radio") return item.media_locator?.kind === "radio" && current.station_id === item.media_locator.station_id;
   if (current.kind === "upnp") return item.media_locator?.kind === "upnp" && current.session_id === item.media_locator.session_id;
   if (current.kind === "plex") return item.media_locator?.kind === "plex" &&
@@ -9,9 +10,9 @@ export const queueItemIsCurrent = (item: TrackMetadata, index: number, current: 
   return (item.media_locator?.kind === "local" ? item.media_locator.uri : item.uri) === current.uri;
 };
 
-// Only decorate the exact current Local row; mixed/Plex identities and queue data stay intact.
+// Decorate only the exact current Local/Navidrome row; other identities and queue data stay intact.
 export function queueItemArtwork(item: TrackMetadata, index: number, status?: PlaybackStatus): TrackMetadata {
-  return status?.current_media?.kind === "local" && item.media_locator?.kind !== "plex"
+  return (status?.current_media?.kind === "local" || status?.current_media?.kind === "navidrome") && item.media_locator?.kind !== "plex"
     && !item.thumb && !item.plex_image && status.thumb && queueItemIsCurrent(item, index, status.current_media)
     ? { ...item, thumb: status.thumb } : item;
 }
@@ -103,7 +104,8 @@ export const nowPlayingWindowBounds = (area: WorkArea, scaleFactor: number) => {
     minWidth: Math.min(640, innerWidth), minHeight: Math.min(480, innerHeight) };
 };
 
-const trackIdentity = (item: TrackMetadata) => item.media_locator?.kind === "radio"
+const trackIdentity = (item: TrackMetadata) => item.media_locator?.kind === "navidrome"
+  ? JSON.stringify(["navidrome", item.media_locator.connection_id, item.media_locator.song_id]) : item.media_locator?.kind === "radio"
   ? JSON.stringify(["radio", item.media_locator.station_id]) : item.media_locator?.kind === "upnp"
   ? JSON.stringify(["upnp", item.media_locator.session_id]) : item.media_locator?.kind === "plex"
   ? JSON.stringify(["plex", item.media_locator.server_id, item.media_locator.part_key])

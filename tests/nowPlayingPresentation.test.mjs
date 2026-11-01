@@ -1,3 +1,4 @@
+import { sourceEnabled } from "../src/utils/musicSources.ts";
 import { NowPlayingFullscreen } from "../src/utils/nowPlayingFullscreen.ts";
 import { NowPlayingIdle } from "../src/utils/nowPlayingIdle.ts";
 import * as layoutHelpers from "../src/utils/nowPlayingLayout.ts";
@@ -24,7 +25,7 @@ import { routeConditions } from '../src/utils/routeConditions.ts';
 import { signalPathInformation, requiresDeviceVolumeControl } from '../src/utils/signalPath.ts';
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(l=>[l,{translation:JSON.parse(readFileSync(new URL(`../src/locales/${l}.json`,import.meta.url)))}]))});
 globalThis.window={localStorage:{getItem:()=>null,setItem(){}},screen:{availWidth:1920,availHeight:1040},crypto:{randomUUID:()=> 'synthetic-session'},setTimeout,clearTimeout,addEventListener(){},removeEventListener(){}};
-const dependencies={'../utils/nowPlayingFullscreen':{NowPlayingFullscreen},'./TrackLyrics':{TrackLyrics:()=>null},'./SleepTimerControl':{SleepTimerControl:()=>null},'../utils/nowPlayingLayout':layoutHelpers,'../../utils/psychoScene':psychoScene,...passiveQueueInsertion,'../utils/queuePresentation':queuePresentationHelpers,'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
+const dependencies={'../utils/nowPlayingFullscreen':{NowPlayingFullscreen},'./TrackLyrics':{TrackLyrics:()=>null},'./SleepTimerControl':{SleepTimerControl:()=>null},'../utils/nowPlayingLayout':layoutHelpers,'../../utils/psychoScene':psychoScene,...passiveQueueInsertion,'../utils/queuePresentation':queuePresentationHelpers,'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useNavidromeQueueArtwork':{useNavidromeQueueArtwork:()=>item=>item},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/routeConditions':{routeConditions},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
 const compile=(file,extra={})=>{const js=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',js)(name=>{assert.ok(name in extra||name in dependencies,name);return extra[name]??dependencies[name];},ex);return ex;};
 dependencies['./PlexImage']={PlexImage:({alt,className})=>React.createElement('div',{'data-plex-artwork':true,'aria-label':alt,className})};
 dependencies['./TrackArtwork']=compile('components/TrackArtwork.tsx');
@@ -458,7 +459,7 @@ test('actual App and PlayerBar callbacks retain a decoded cover across reopening
  const storage={getItem:()=>value,setItem:(_key,next)=>{value=next},removeItem:()=>{value=null}};
  const cache=new LocalPlaybackThumbnail(()=>storage,()=>{reductions++;return jpeg});
  const configFn=ts.transpileModule('exports.configure = '+configure,{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
- const configExports={};new Function('exports','localPlaybackThumbnail','localAlbumThumbnails','localAlbumCatalog','setConfigState',configFn)(configExports,cache,{setContext(){}},{setPresentationContext(){}},()=>{});
+ const configExports={};new Function('sourceEnabled','exports','localPlaybackThumbnail','localAlbumThumbnails','localAlbumCatalog','setConfigState',configFn)(sourceEnabled,configExports,cache,{setContext(){}},{setPresentationContext(){}},()=>{});
  configExports.configure({first_run:false,local_folders:['/music']});
  const callback=name=>new Function('localPlaybackThumbnail','return ('+player.attributes.properties.find(p=>p.name?.getText(ast)===name).initializer.expression.getText(ast)+')')(cache);
  const loaded=callback('onArtworkLoaded'),failed=callback('onArtworkFailed');
@@ -816,4 +817,29 @@ test('cover double-click and visible fullscreen button share one window action i
  }
  const {NowPlayingLayoutPicker}=dependencies['./NowPlayingLayoutPicker'];const picker=NowPlayingLayoutPicker({layout:'audiophile',placement:'frame'});
  const select=nodes(picker,n=>n.type==='select')[0];assert.equal(select.props['aria-keyshortcuts'],'1 2 3 4');assert.equal(select.props.title,i18n.t('nowPlaying.look.shortcuts'));
+});
+
+test('Navidrome artwork reaches PlayerBar and all four Now Playing layouts in embedded and detached hosts',()=>{
+ const cover='data:image/png;base64,bmF2aWRyb21l';
+ const current={...snapshot.playback,state:'play',thumb:cover,plex_image:null,current_media:{kind:'navidrome',connection_id:'fixture-nav',song_id:'fixture-song',queue_index:0}};
+ const hooks={...React,default:React,useEffect(){},useRef:value=>({current:value}),useState:value=>[value,()=>{}]};
+ const {PlayerBar}=compile('components/PlayerBar.tsx',{'react':hooks,'../services/audio':{audioService:{}}});
+ assert.equal(nodes(PlayerBar({status:current,health:snapshot.health,route:snapshot.route,onToggleQueue(){},isQueueOpen:false}),node=>node.type==='img')[0].props.src,cover);
+ const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:View},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{}});
+ for(const embedded of [true,false])for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
+  const host=NowPlayingHost({snapshot:{...snapshot,playback:current,sourceInfo:null},owner,embedded,onReady(){}});
+  const html=renderToStaticMarkup(React.createElement(View,{...host.props,layout}));assert.ok(html.includes(cover),`${layout}/${embedded}`);assert.equal(host.props.snapshot.playback.current_media.connection_id,'fixture-nav');
+ }
+});
+
+test('Navidrome lower player and Now Playing expose artist and album links while radio remains non-navigable',()=>{
+ const text=node=>node==null?'':typeof node==='string'?node:Array.isArray(node)?node.map(text).join(''):text(node.props?.children);
+ const current={...snapshot.playback,state:'play',title:'Nav Track',artist:'Nav Artist',album:'Nav Album',current_media:{kind:'navidrome',connection_id:'nav',song_id:'song',queue_index:0}};
+ const hooks={...React,default:React,useEffect(){},useRef:value=>({current:value}),useState:value=>[value,()=>{}]};
+ const {PlayerBar}=compile('components/PlayerBar.tsx',{'react':hooks,'../services/audio':{audioService:{}}});let albums=0,artists=0;
+ const bar=PlayerBar({status:current,health:snapshot.health,route:snapshot.route,onToggleQueue(){},isQueueOpen:false,onNavigateToAlbum:()=>albums++,onNavigateToArtist:()=>artists++});
+ for(const label of ['Nav Track','Nav Album','Nav Artist']){const button=nodes(bar,n=>n.type==='button'&&text(n).trim()===label)[0];assert.ok(button,label);button.props.onClick();}
+ assert.equal(albums,2);assert.equal(artists,1);
+ const navigations=[];const tree=View({...props,snapshot:{...snapshot,playback:current},onNavigate:view=>navigations.push(view)});
+ for(const label of ['Nav Album','Nav Artist'])nodes(tree,n=>n.type==='button'&&text(n).trim()===label)[0].props.onClick();assert.deepEqual(navigations,['album','artist']);
 });

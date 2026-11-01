@@ -145,16 +145,16 @@ test("quota/access failures do not affect normal display; only the thumbnail key
 const cardSource = readFileSync(new URL("../components/LocalBrowserView.tsx", import.meta.url), "utf8");
 const cardBody = ts.transpileModule(cardSource.slice(cardSource.indexOf("const LocalAlbumCard:"), cardSource.indexOf("export type LocalSubview")),
   { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2020 } }).outputText;
-function renderCard({ confirmed, resolved, thumbnail }) {
+function renderCard({ confirmed, resolved, thumbnail, layout = "grid" }) {
   const a = album("a"), effects = []; let reductions = 0, lookups = 0, reads = 0, captures = 0, forgotten = 0; const triggers = [];
   const state = { albums: confirmed ? [a] : [], loaded: confirmed, loading: false, error: null, mpdBusy: false, saveBlocked: false };
   let stateIndex = 0;
-  const component = new Function("useMemo", "useQueueInsertion", "loadLocalAlbumQueue", "React", "useTranslation", "useState", "useRef", "useEffect", "localArtworkResolver", "localAlbumThumbnails", "localAlbumCatalog", "artworkReadBlocked", "getLocalAlbumCover", "logError", "AlbumArtworkPlaceholder", "Heart", "Play", cardBody + "return LocalAlbumCard;")(
+  const component = new Function("useMemo", "useQueueInsertion", "loadLocalAlbumQueue", "React", "useTranslation", "useState", "useRef", "useEffect", "localArtworkResolver", "localAlbumThumbnails", "localAlbumCatalog", "artworkReadBlocked", "getLocalAlbumCover", "logError", "AlbumArtworkPlaceholder", "Heart", "Play", "AlbumCatalogRow", cardBody + "return LocalAlbumCard;")(
     fn => fn(), () => ({ open() {}, trigger: () => null, menu: null, notice: null }), async () => { throw new Error("unexpected album load"); }, React, () => ({ t: key => key }), initial => { const index = stateIndex++; return [index === 2 ? true : typeof initial === "function" ? initial() : initial, () => {}]; }, () => ({ current: null }), task => effects.push(task),
     { get: () => { lookups++; return resolved; }, subscribe: () => () => {} },
     { get: () => thumbnail, capture: (_album, _image, current, trigger) => { captures++; triggers.push(trigger); if (current()) reductions++; }, observeInitialCard() {}, forget: (_album, current) => { if (current()) forgotten++; } },
-    { getSnapshot: () => state }, artworkReadBlocked, () => { reads++; return Promise.resolve(null); }, () => {}, () => null, () => null, () => null);
-  const tree = component({ album: a, isFavorite: false, readEnabled: confirmed, isPlaybackAvailable: confirmed,
+    { getSnapshot: () => state }, artworkReadBlocked, () => { reads++; return Promise.resolve(null); }, () => {}, () => null, () => null, () => null, function AlbumCatalogRow(){});
+  const tree = component({ layout, album: a, isFavorite: false, readEnabled: confirmed, isPlaybackAvailable: confirmed,
     isLibraryUpdating: false, onlineArtworkEnabled: false, onClick() {}, onPlayQuick() {}, onToggleFavorite() {} });
   const elements = [];
   function visit(node) { if (!React.isValidElement(node)) return; elements.push(node); React.Children.forEach(node.props.children, visit); }
@@ -290,4 +290,17 @@ test("the JPEG parser accepts a real encoded image with APP/DQT/Huffman segments
   const f = fixture(() => encoded); f.cache.setContext(["/music"]);
   f.cache.capture(album("a"), image, () => true); f.cache.flush();
   assert.equal(f.cache.get(album("a")), encoded); assert.equal(f.cache.getDiagnostics().captured, 1);
+});
+
+
+test("detailed album rows never look up, subscribe to, observe or load artwork", () => {
+  const row=renderCard({confirmed:true,resolved:"fixture-cover",thumbnail:jpeg(),layout:"details"});
+  row.effects.forEach(run=>run());
+  assert.equal(row.elements.filter(node=>node.type==="img").length,0);
+  const content=row.elements.find(node=>node.type?.name==="AlbumCatalogRow");assert.ok(content);assert.equal(content.props.detailed,true);assert.equal(content.props.artwork,undefined);
+  assert.deepEqual(row.counts,{reductions:0,lookups:0,reads:0,captures:0,forgotten:0});
+});
+test("list rows reuse the same admitted local artwork and actions as cards", () => {
+  const row=renderCard({confirmed:true,resolved:"fixture-cover",thumbnail:null,layout:"list"});
+  const content=row.elements.find(node=>node.type?.name==="AlbumCatalogRow");assert.ok(content);assert.equal(content.props.detailed,false);assert.equal(content.props.artwork.props.src,"fixture-cover");assert.equal(content.props.playable,true);
 });

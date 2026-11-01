@@ -965,6 +965,7 @@ pub(crate) mod mirror {
         pub(crate) manifest: MirrorManifest,
         topology: ReadonlyTopology,
         changes: Option<MirrorChanges>,
+        startup_names: Option<BTreeMap<PathBuf, Vec<OsString>>>,
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum ReadonlyMirrorOpenError { Unconfirmed, UnsupportedSchema }
@@ -1019,6 +1020,13 @@ pub(crate) mod mirror {
             Ok(inventory)
         }
         pub(crate) fn open(library: &Path) -> Result<Self, ReadonlyMirrorOpenError> {
+            let result=Self::capture(library)?;
+            result.revalidate()?;
+            Ok(result)
+        }
+        // An unvalidated capture never escapes this impl. Public open() retains
+        // its strict validation; startup validates after installing its watches.
+        fn capture(library: &Path) -> Result<Self, ReadonlyMirrorOpenError> {
             use crate::source_identity::{ReadonlyBoundedFile, ReadonlyDirectory, readonly_unique_json};
             let directory=ReadonlyDirectory::open(library)?;
             let marker=ReadonlyBoundedFile::open(&directory, MANIFEST_NAME, 16*1024*1024, false)?;
@@ -1035,7 +1043,7 @@ pub(crate) mod mirror {
                 return Err(ReadonlyMirrorOpenError::Unconfirmed);
             }
             let topology=Self::topology(&directory, &manifest)?;
-            let result=Self {directory,marker,manifest,topology,changes:None}; result.revalidate()?; Ok(result)
+            Ok(Self {directory,marker,manifest,topology,changes:None,startup_names:None})
         }
         pub(crate) fn open_cached(library:&Path)->Result<Self,ReadonlyMirrorOpenError> {
             let mut result=Self::open(library)?;
@@ -1046,6 +1054,57 @@ pub(crate) mod mirror {
             if let Ok(changes)=changes {changes.check()?;result.changes=Some(changes);}
             // Unsupported watches keep the original full-scan algorithm.
             Ok(result)
+        }
+        // Startup needs one complete ORIGINAL capture, registration and one full
+        // post-registration verification. A full pass before registration adds
+        // no authority: mutations in that interval must be refused by the final
+        // verification too. All later admission boundaries remain unchanged.
+        pub(crate) fn open_for_startup(library:&Path)->Result<Self,ReadonlyMirrorOpenError> {
+            let clock=std::time::Instant::now();
+            let result=Self::capture(library);
+            crate::local_diagnostics::record(crate::local_diagnostics::Stage::StartupSourceCapture,clock.elapsed(),
+                result.as_ref().err().map(|_|"SOURCE_STARTUP_UNCONFIRMED"));
+            Self::finish_startup(result?,MirrorChanges::open)
+        }
+        fn finish_startup(mut result:Self,register:impl FnOnce(&Self)->Result<MirrorChanges,()>)->Result<Self,ReadonlyMirrorOpenError> {
+            let clock=std::time::Instant::now();
+            let changes=register(&result);
+            crate::local_diagnostics::record(crate::local_diagnostics::Stage::StartupSourceWatch,clock.elapsed(),
+                changes.as_ref().err().map(|_|"SOURCE_WATCH_UNAVAILABLE"));
+            let clock=std::time::Instant::now();
+            let verified=(|| {
+                // Names come from the ORIGINAL capture, never from a new tree.
+                // A pre-watch addition can share its directory's timestamp.
+                result.startup_names=Some(result.captured_entry_names()?);
+                result.revalidate_full()?;
+                if let Ok(changes)=changes {changes.check()?;result.changes=Some(changes);}
+                // Unsupported notifications keep full validation at every later
+                // admission; never turn a failed watch into cached authority.
+                Ok(())
+            })();
+            crate::local_diagnostics::record(crate::local_diagnostics::Stage::StartupSourceVerify,clock.elapsed(),
+                verified.as_ref().err().map(|_:&()|"SOURCE_STARTUP_UNCONFIRMED"));
+            verified?;
+            Ok(result)
+        }
+        fn captured_entry_names(&self)->Result<BTreeMap<PathBuf,Vec<OsString>>,()> {
+            let mut names=BTreeMap::from([(PathBuf::new(),vec![OsString::from(MANIFEST_NAME)])]);
+            for (relative,(_,target)) in &self.topology {
+                let parent=relative.parent().ok_or(())?.to_path_buf();
+                names.entry(parent).or_default().push(relative.file_name().ok_or(())?.to_os_string());
+                if target.is_none() {names.entry(relative.clone()).or_default();}
+            }
+            for children in names.values_mut() {children.sort();}
+            Ok(names)
+        }
+        fn revalidate_startup_names(&self)->Result<(),()> {
+            let Some(expected)=&self.startup_names else {return Ok(());};
+            for (relative,names) in expected {
+                let observed=if relative.as_os_str().is_empty() {self.directory.names(131_072)?}
+                    else {crate::source_identity::ReadonlyDirectory::open(&self.directory.descendant(relative)?)?.names(131_072)?};
+                if &observed!=names {return Err(());}
+            }
+            Ok(())
         }
         #[cfg(test)]
         pub(crate) fn has_change_watch(&self)->bool {self.changes.is_some()}
@@ -1099,6 +1158,7 @@ pub(crate) mod mirror {
                     return Err(());
                 }
             }
+            self.revalidate_startup_names()?;
             self.marker.revalidate(&self.directory)
         }
         #[cfg(test)]
@@ -1154,6 +1214,9 @@ pub(crate) mod mirror {
             root.revalidate()?; Ok(result)
         }
     }
+
+    #[cfg(test)]
+    mod startup_snapshot_tests { include!("startup_snapshot_tests.rs"); }
 
     pub(crate) fn build_filtered_staging(
         staging_path: &Path,

@@ -22,8 +22,11 @@ import {
   Radio,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { sourceEnabled } from "../utils/musicSources";
+import { SourcesSettings } from "./SourcesSettings";
 import { SettingsPages, type SettingsPage } from "./SettingsPages";
 import { UpnpSetting } from "./UpnpSetting";
+import { ScrobblingSetting } from "./ScrobblingSetting";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
 import { AppConfig, ConfigSaveOperation, ConfigSaveWarning } from "../types/config";
@@ -90,7 +93,9 @@ export const SettingsModal: React.FC<Props> = ({
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [savingState, setSaving] = useState(false);
+  const [connectionBusy, setConnectionBusy] = useState(false);
+  const saving = savingState || connectionBusy;
   const [isPickingFolder, setIsPickingFolder] = useState(false);
   const [scanning, setScanning] = useState<"check" | null>(null);
   const [scanUnchanged, setScanUnchanged] = useState(false);
@@ -137,7 +142,7 @@ export const SettingsModal: React.FC<Props> = ({
         originalConfigRef.current = { ...cfg, local_folders: [...cfg.local_folders] };
         setConfig(initialDraft ? { ...initialDraft, local_folders: [...initialDraft.local_folders] } : cfg);
         setDevices(devs);
-        if (cfg.plex_token && cfg.plex_token.trim().length > 0) {
+        if (sourceEnabled(cfg, "plex") && cfg.plex_token && cfg.plex_token.trim().length > 0) {
           const generation = authGenerationRef.current;
           const current = () => active && mountedRef.current && generation === authGenerationRef.current;
           setLoadingServers(true);
@@ -318,8 +323,16 @@ export const SettingsModal: React.FC<Props> = ({
     };
   }, [pinId, isPollingPin]);
 
+  useEffect(() => {
+    if (config && !sourceEnabled(config, "plex")) {
+      authGenerationRef.current++; authActiveRef.current=false;
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      setIsPollingPin(false); setPinId(null); setPinCode(null); setLoadingServers(false);
+    }
+  }, [config?.sources?.plex]);
+
   const handleSave = async () => {
-    if (!config || saveInProgressRef.current) return;
+    if (!config || saveInProgressRef.current || connectionBusy) return;
     saveInProgressRef.current = true;
     // A displayed busy result is momentary. Retry once on Save rather than
     // permanently refusing a choice based on an old observation.
@@ -361,6 +374,8 @@ export const SettingsModal: React.FC<Props> = ({
       onClose();
     } catch (err) {
       const diagnostic = formatConfigError(err);
+      if (diagnostic === "SOURCE_IN_QUEUE") { alert(t("sources.inQueue")); return; }
+      if (diagnostic === "LOCAL_FOLDERS_MIXED_CONFIG_CHANGE") { alert(t("settings.separateFolderChanges")); return; }
       if(diagnostic === "DIRECT_CHOICE_CANCELLED") return; // Preserve this complete draft.
       logError("settings.save", err);
       if (diagnostic === "LOCAL_SOURCE_NEW_OVERLAP") {
@@ -450,6 +465,7 @@ export const SettingsModal: React.FC<Props> = ({
           general={<>
             <AppearanceSetting />
             <UpnpSetting />
+            <ScrobblingSetting />
             {/* Idioma da interface */}
             <div className="space-y-3">
               <h3 className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider flex items-center space-x-1.5">
@@ -710,7 +726,9 @@ export const SettingsModal: React.FC<Props> = ({
               </details>
             </div>
           </>}
-          local={<>
+          sources={<SourcesSettings config={config} onChange={setConfig} disabled={saving || connectionBusy || scanning !== null || isLibraryUpdating}
+            initialSource={initialPage === 'local' || initialPage === 'plex' || initialPage === 'navidrome' ? initialPage : undefined}
+            localCommitted={sourceEnabled(originalConfigRef.current, "local")} onConnectionBusy={setConnectionBusy} local={<>
             {/* Fontes e atualização */}
             <div className="space-y-3 pt-3 border-t border-[color:var(--theme-border-soft,#242424)]">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -957,7 +975,7 @@ export const SettingsModal: React.FC<Props> = ({
                 )}
               </div>
             </div>
-          </>}
+          </>} />}
         />
 
         {/* Rodapé */}
@@ -972,7 +990,7 @@ export const SettingsModal: React.FC<Props> = ({
 
           <button
             onClick={handleSave}
-            disabled={saving || (newPhysicalOutputChoice(originalConfigRef.current, config) && availability.checking)}
+            disabled={saving || connectionBusy || (newPhysicalOutputChoice(originalConfigRef.current, config) && availability.checking)}
             className="flex shrink-0 items-center space-x-2 px-5 py-2 rounded-lg bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-md transition-transform active:scale-95 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving ? <RefreshCw size={15} className="animate-spin" /> : <Check size={15} />}

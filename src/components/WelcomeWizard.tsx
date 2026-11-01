@@ -1,3 +1,6 @@
+import { SourceCards } from "./SourceCards";
+import { NavidromeConnectionSetting } from "./NavidromeConnectionSetting";
+import { sourceEnabled } from "../utils/musicSources";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useState, useEffect, useRef, useId } from "react";
 import {
@@ -9,7 +12,6 @@ import {
   Check,
   ArrowRight,
   ArrowLeft,
-  HardDrive,
   ShieldCheck,
   Disc3,
   ExternalLink,
@@ -50,13 +52,16 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   const [step, setStep] = useState<number>(() => OPENING_PAGES.indexOf(onCancel ? "sources" : "appearance") + 1);
   const [config, setConfig] = useState<AppConfig>({ ...initialConfig, local_folders: [...initialConfig.local_folders] });
 
-  const [useLocal, setUseLocal] = useState<boolean>(onCancel ? initialConfig.local_folders.length > 0 || !initialConfig.plex_token.trim() : true);
-  const [usePlex, setUsePlex] = useState<boolean>(onCancel ? Boolean(initialConfig.plex_token.trim()) : false);
+  const [useLocal, setUseLocal] = useState<boolean>(onCancel ? sourceEnabled(initialConfig, "local") : true);
+  const [usePlex, setUsePlex] = useState<boolean>(onCancel ? sourceEnabled(initialConfig, "plex") : false);
+  const [useNavidrome, setUseNavidrome] = useState(onCancel ? sourceEnabled(initialConfig, "navidrome") : false);
+  const [navidromeReady, setNavidromeReady] = useState(false);
+  const [connectionBusy, setConnectionBusy] = useState(false);
   const [isFinishing, setIsFinishing] = useState<boolean>(false);
   const [isPickingFolder, setIsPickingFolder] = useState(false);
   const pickingFolderRef = useRef(false);
   const finishingRef = useRef(false);
-  const [completionError, setCompletionError] = useState<WizardSaveErrorKey | "wizard.plexNotReady" | "wizard.folderError" | null>(null);
+  const [completionError, setCompletionError] = useState<WizardSaveErrorKey | "wizard.plexNotReady" | "wizard.navidromeNotReady" | "wizard.folderError" | null>(null);
   const preparationBlockedRef = useRef(false);
   const [availability, setAvailability] = useState<AvailabilityQueryState>({ checking: false, results: [], failed: false });
   const availabilityQueryRef = useRef<ReturnType<typeof createDeviceAvailabilityQuery> | null>(null);
@@ -227,6 +232,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
       case "wizard.deviceUnavailable": return t("wizard.deviceUnavailable");
       case "wizard.saveError": return t("wizard.saveError");
       case "wizard.plexNotReady": return t("wizard.plexNotReady");
+      case "wizard.navidromeNotReady": return t("wizard.navidromeNotReady");
       case "wizard.folderError": return t("wizard.folderError");
       default: {
         const unsupported: never = error;
@@ -236,11 +242,12 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   };
 
   const handleComplete = async () => {
-    if (finishingRef.current || preparationBlockedRef.current || availability.checking) return;
+    if (finishingRef.current || connectionBusy || preparationBlockedRef.current || availability.checking) return;
     if (plexRequired && !plexReady) {
       setCompletionError("wizard.plexNotReady");
       return;
     }
+    if (useNavidrome && !navidromeReady) { setCompletionError("wizard.navidromeNotReady"); return; }
     finishingRef.current = true;
     availabilityQueryRef.current?.invalidate();
     setCompletionError(null);
@@ -249,6 +256,8 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
       const finalConfig: AppConfig = {
         ...config,
         first_run: false,
+        sources: !initialConfig.first_run && useLocal === sourceEnabled(initialConfig, 'local') && usePlex === sourceEnabled(initialConfig, 'plex') && useNavidrome === sourceEnabled(initialConfig, 'navidrome')
+          ? initialConfig.sources : { local: useLocal, plex: usePlex, navidrome: useNavidrome },
       };
       const response = await configService.saveConfig(finalConfig);
       if (response.status === "accepted" && onSaveAccepted) { onSaveAccepted(response.operation); return; }
@@ -264,14 +273,16 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
     }
   };
 
-  const pages = [...OPENING_PAGES, ...(useLocal ? ["local"] : []), ...(usePlex ? ["plex"] : []), "review"];
+  const pages = [...OPENING_PAGES, ...(useLocal ? ["local"] : []), ...(usePlex ? ["plex"] : []), ...(useNavidrome ? ["navidrome"] : []), "review"];
   const totalSteps = pages.length;
   const currentPage = pages[step - 1];
   const plexReady = wizardPlexConnectionReady(config) && !loadingServers && !plexError;
-  const plexRequired = usePlex || Boolean(config.plex_token.trim());
+  const plexRequired = usePlex;
 
   const nextStep = () => {
-    if (currentPage === "sources" && !useLocal && !usePlex) {
+    if (connectionBusy || isFinishing) return;
+    if (currentPage === "navidrome" && !navidromeReady) { setCompletionError("wizard.navidromeNotReady"); return; }
+    if (currentPage === "sources" && !useLocal && !usePlex && !useNavidrome) {
       alert(t("wizard.sourceRequired"));
       return;
     }
@@ -299,7 +310,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--theme-surface-base,#0C0C0C)] select-none p-3 sm:p-6 text-[color:var(--theme-fg-primary,#ffffff)] font-sans">
-      <div role="dialog" onKeyDown={event => { if (event.key === "Escape" && !finishingRef.current && onCancel) { event.preventDefault(); onCancel(); } }} aria-modal="true" aria-labelledby={titleId} className="bg-[var(--theme-surface-base,#161616)] border border-[color:var(--theme-border-soft,#2B2B2B)] rounded-2xl w-full max-w-4xl h-[min(820px,94dvh)] min-h-0 flex flex-col shadow-2xl overflow-hidden">
+      <div role="dialog" onKeyDown={event => { if (event.key === "Escape" && !finishingRef.current && !connectionBusy && onCancel) { event.preventDefault(); onCancel(); } }} aria-modal="true" aria-labelledby={titleId} className="bg-[var(--theme-surface-base,#161616)] border border-[color:var(--theme-border-soft,#2B2B2B)] rounded-2xl w-full max-w-4xl h-[min(820px,94dvh)] min-h-0 flex flex-col shadow-2xl overflow-hidden">
         {/* Topo do Wizard */}
         <div className="px-4 sm:px-8 py-4 border-b border-[color:var(--theme-border-soft,#242424)] flex flex-wrap gap-3 items-center justify-between bg-[var(--theme-surface-panel,#191919)] shrink-0">
           <div className="flex items-center space-x-3">
@@ -313,7 +324,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
           </div>
 
           <div className="flex items-center space-x-3">
-            {onCancel && <button type="button" disabled={isFinishing} onClick={onCancel}
+            {onCancel && <button type="button" disabled={isFinishing || connectionBusy} onClick={onCancel}
               className="rounded-lg px-3 py-2 text-xs text-[color:var(--theme-fg-secondary,#AAAAAA)] hover:text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-40">{t("settings.cancel")}</button>}
             {/* Alternador de Idioma */}
             <div className="flex items-center space-x-1 bg-[var(--theme-surface-base,#121212)] border border-[color:var(--theme-border-soft,#282828)] rounded-lg p-0.5 text-[11px]">
@@ -507,59 +518,8 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                 <p className="text-xs text-[color:var(--theme-fg-secondary,#999999)]">{t("wizard.step2Desc")}</p>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-                <button
-                  type="button" aria-pressed={useLocal} disabled={isFinishing}
-                  onClick={() => setUseLocal(!useLocal)}
-                  className={`p-5 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between text-left focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] ${
-                    useLocal
-                      ? "border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-accent,#221B0E)]"
-                      : "border-[color:var(--theme-border-soft,#262626)] bg-[var(--theme-surface-base,#141414)] hover:bg-[var(--theme-surface-panel,#1A1A1A)]"
-                  }`}
-                >
-                  <div className="space-y-2">
-                    <div className="w-10 h-10 rounded-lg bg-[var(--theme-surface-raised,#252525)] flex items-center justify-center text-[color:var(--theme-fg-accent,#E5A00D)]">
-                      <HardDrive size={20} />
-                    </div>
-                    <h3 className="font-bold text-sm text-[color:var(--theme-fg-primary,#ffffff)]">{t("sidebar.local")}</h3>
-                    <p className="text-[11px] text-[color:var(--theme-fg-muted,#888888)] leading-relaxed">
-                      {t("wizard.step2LocalDesc")}
-                    </p>
-                  </div>
-                  <div className="pt-4 flex items-center justify-between text-xs">
-                    <span className={useLocal ? "text-[color:var(--theme-fg-accent,#E5A00D)] font-bold" : "text-[color:var(--theme-fg-muted,#666666)]"}>
-                      {useLocal ? t("wizard.enabled") : t("wizard.disabled")}
-                    </span>
-                    <Check size={16} aria-hidden="true" className={useLocal ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "opacity-20"} />
-                  </div>
-                </button>
-
-                <button
-                  type="button" aria-pressed={usePlex} disabled={isFinishing}
-                  onClick={() => { if (usePlex) cancelPlexAuth(); setUsePlex(!usePlex); }}
-                  className={`p-5 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between text-left focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] ${
-                    usePlex
-                      ? "border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-accent,#221B0E)]"
-                      : "border-[color:var(--theme-border-soft,#262626)] bg-[var(--theme-surface-base,#141414)] hover:bg-[var(--theme-surface-panel,#1A1A1A)]"
-                  }`}
-                >
-                  <div className="space-y-2">
-                    <div className="w-10 h-10 rounded-lg bg-[var(--theme-surface-raised,#252525)] flex items-center justify-center text-[color:var(--theme-fg-accent,#E5A00D)]">
-                      <Server size={20} />
-                    </div>
-                    <h3 className="font-bold text-sm text-[color:var(--theme-fg-primary,#ffffff)]">{t("sidebar.plex")}</h3>
-                    <p className="text-[11px] text-[color:var(--theme-fg-muted,#888888)] leading-relaxed">
-                      {t("wizard.step2PlexDesc")}
-                    </p>
-                  </div>
-                  <div className="pt-4 flex items-center justify-between text-xs">
-                    <span className={usePlex ? "text-[color:var(--theme-fg-accent,#E5A00D)] font-bold" : "text-[color:var(--theme-fg-muted,#666666)]"}>
-                      {usePlex ? t("wizard.enabled") : t("wizard.disabled")}
-                    </span>
-                    <Check size={16} aria-hidden="true" className={usePlex ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "opacity-20"} />
-                  </div>
-                </button>
-              </div>
+              <SourceCards value={{local:useLocal,plex:usePlex,navidrome:useNavidrome}} disabled={isFinishing}
+                onChange={(source,enabled)=>{if(source==='local')setUseLocal(enabled);else if(source==='plex'){if(!enabled)cancelPlexAuth();setUsePlex(enabled);}else setUseNavidrome(enabled);}} />
             </div>
           )}
 
@@ -674,6 +634,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
           )}
 
           {/* ETAPA FINAL: REVISÃO & CONCLUSÃO */}
+          {currentPage === "navidrome" && <div className="space-y-4"><h2 ref={headingRef} tabIndex={-1} className="text-xl font-bold">{t("navidrome.title")}</h2><p className="text-xs text-[color:var(--theme-fg-muted,#999)]">{t("wizard.navidromeDesc")}</p><NavidromeConnectionSetting onBusyChange={setConnectionBusy} onConfiguredChange={setNavidromeReady} /></div>}
           {currentPage === "review" && (
             <div className="space-y-5 animate-in fade-in duration-150">
               <div className="space-y-1.5">
@@ -699,13 +660,17 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                 </div>}
                 <div className="flex justify-between py-1 border-b border-[color:var(--theme-border-soft,#1F1F1F)]">
                   <span className="text-[color:var(--theme-fg-muted,#888888)]">{t("sidebar.local")}:</span>
-                  <span className="text-[color:var(--theme-fg-primary,#ffffff)]">{t("wizard.foldersCount", { count: config.local_folders.length })}</span>
+                  <span className="text-[color:var(--theme-fg-primary,#ffffff)]">{useLocal ? t("wizard.foldersCount", { count: config.local_folders.length }) : t("wizard.disabled")}</span>
                 </div>
                 <div className="flex justify-between py-1">
                   <span className="text-[color:var(--theme-fg-muted,#888888)]">{t("sidebar.plex")}:</span>
                   <span className="text-[color:var(--theme-fg-primary,#ffffff)]">
-                    {plexReady ? `${t("wizard.connected")} • ${serverName}` : plexRequired ? t("wizard.plexNotReady") : t("wizard.disabled")}
+                    {!usePlex ? t("wizard.disabled") : plexReady ? `${t("wizard.connected")} • ${serverName}` : t("wizard.plexNotReady")}
                   </span>
+                </div>
+                <div className="flex justify-between gap-3 py-1">
+                  <span className="text-[color:var(--theme-fg-muted,#888888)]">{t('navidrome.title')}:</span>
+                  <span>{t(useNavidrome && navidromeReady ? 'sources.connectionSaved' : 'wizard.disabled')}</span>
                 </div>
               </div>
             </div>
@@ -719,7 +684,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
             <button
               type="button"
               onClick={prevStep}
-              disabled={isFinishing || completionError === "wizard.preparationIncomplete"}
+              disabled={isFinishing || connectionBusy || completionError === "wizard.preparationIncomplete"}
               className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-[var(--theme-surface-raised,#222222)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] text-xs font-bold text-[color:var(--theme-fg-secondary,#CCCCCC)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer"
             >
               <ArrowLeft size={15} />
@@ -733,7 +698,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
             <button
               type="button"
               onClick={nextStep}
-              disabled={isFinishing || (currentPage === "plex" && !plexReady)}
+              disabled={isFinishing || connectionBusy || (currentPage === "plex" && !plexReady) || (currentPage === "navidrome" && !navidromeReady)}
               className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-md transition-transform active:scale-95 cursor-pointer"
             >
               <span>{t("wizard.next")}</span>
@@ -743,7 +708,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
             <button
               type="button"
               onClick={handleComplete}
-              disabled={isFinishing || completionError === "wizard.preparationIncomplete" || availability.checking || (plexRequired && !plexReady)}
+              disabled={isFinishing || connectionBusy || completionError === "wizard.preparationIncomplete" || availability.checking || (plexRequired && !plexReady) || (useNavidrome && !navidromeReady)}
               className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-md transition-transform active:scale-95 cursor-pointer disabled:opacity-50"
             >
               <Check size={16} />

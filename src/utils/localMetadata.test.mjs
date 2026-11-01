@@ -1,3 +1,4 @@
+import { sourceEnabled } from "./musicSources.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
@@ -27,14 +28,14 @@ const artworkUrl = dataModule(`const status = {onlineActivity: null}; export con
  export const localAlbumThumbnails = {get: () => null, setOpeningOrder() {}, observeInitialCard() {}, capture() {}, forget() {}};`);
 const virtualUrl = dataModule(`import React from ${JSON.stringify(import.meta.resolve("react"))};
  export const VirtualList = props => React.createElement("div", {"data-virtual-list": true}, props.items.map(item => React.createElement(React.Fragment, {key: props.getItemKey(item)}, props.renderItem(item))));
- export const VirtualAlbumGrid = () => null;`);
+ export const VirtualAlbumGrid = () => null; export const AlbumCatalog=VirtualAlbumGrid;`);
 const componentMocks = new Map([
   ["QueueInsertionMenu.tsx", dataModule('export const useQueueInsertion = () => ({open(){},trigger:()=>null,menu:null,notice:null});')],
   ["TrackSelection.tsx", dataModule('export const useTrackSelection = () => ({click:()=>false,checked:()=>false,checkbox:()=>null,toolbar:null});')],
   ["queueAlbumLoader.ts", dataModule('export const loadQueuedAlbum = async () => []; export const loadLocalAlbumQueue = async () => [];')],
   ["audio.ts", audioUrl], ["favorites.ts", favoritesUrl], ["localArtworkSession.ts", artworkUrl],
-  ["VirtualList.tsx", virtualUrl], ["VirtualAlbumGrid.tsx", virtualUrl],
-  ...["LocalAlbumTagEditorModal", "LibraryDoctorModal", "LocalTagEditorModal", "PlaylistPickerModal", "LocalImportPreviewSection", "AlbumArtworkPlaceholder", "ToolbarSelect", "AlbumGenreGrid"].map(name => [name + ".tsx", dataModule(`export const ${name} = () => null;`)]),
+  ["VirtualList.tsx", virtualUrl], ["VirtualAlbumGrid.tsx", virtualUrl], ["AlbumCatalog.tsx", virtualUrl],
+  ...["LocalAlbumTagEditorModal", "LibraryDoctorModal", "LocalTagEditorModal", "PlaylistPickerModal", "LocalImportPreviewSection", "AlbumArtworkPlaceholder", "ToolbarSelect", "AlbumGenreGrid", "AlbumViewControls"].map(name => [name + ".tsx", dataModule(`export const ${name} = () => null;`)]),
 ]);
 const moduleCache = new Map();
 function moduleUrl(url) {
@@ -221,7 +222,7 @@ test("Local sidebar omits Metadata and preserves Local/player subview context an
     const calls = [], before = structuredClone(player);
     const navigate = new Function("mediaSource", "eqReturnSectionRef", "playerTarget", "centralSection", "changePlayerLocalSubview", "setLocalSubview", "resetAllNavigation", "mainSectionPreference", `return (${expression});`)(
       section, {current:section}, player, section, view => calls.push(["player", view]), view => calls.push(["local", view]), () => calls.push(["reset"]), { navigate: view => calls.push(["source", view]) });
-    const item = SidebarNavItem({ icon: () => null, label: "Local", active: true, onClick: new Function("navigateLocalSubview", `return (${localSidebarClick()});`)(navigate) });
+    const item = SidebarNavItem({ icon: () => null, label: "Local", active: true, onClick: new Function("sourceEnabled", "config", "configureSource", "navigateLocalSubview", `return (${localSidebarClick()});`)(sourceEnabled, {}, () => assert.fail("enabled source must navigate"), navigate) });
     item.props.onClick(); assert.deepEqual(calls, expected); assert.deepEqual(player, before);
   }
   const app = source("../App.tsx"); assert.match(app, /<LocalBrowserView\s+subview=\{localSubview\}/); assert.match(app, /subview=\{playerSubview\} onSubviewChange=\{changePlayerLocalSubview\}/);

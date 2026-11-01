@@ -1,3 +1,4 @@
+import { LocalDiagnostics } from './LocalDiagnostics';
 import React from "react";
 import { X, Sparkles, Cpu, HardDrive, Server, ShieldCheck, Heart } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -11,7 +12,7 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs select-none p-4">
-      <div className="bg-[var(--theme-surface-panel,#181818)] border border-[color:var(--theme-border-soft,#2B2B2B)] rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden animate-in fade-in duration-150">
+      <div className="bg-[var(--theme-surface-panel,#181818)] border border-[color:var(--theme-border-soft,#2B2B2B)] rounded-2xl w-full max-w-lg max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in duration-150">
         {/* Cabeçalho */}
         <div className="p-6 border-b border-[color:var(--theme-border-soft,#262626)] flex items-center justify-between bg-[var(--theme-surface-panel,#1D1D1D)]">
           <div className="flex items-center space-x-3">
@@ -22,7 +23,7 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
               <div className="flex items-center space-x-2">
                 <h2 className="text-lg font-black tracking-wider text-[color:var(--theme-fg-accent,#E5A00D)]">SONANTE</h2>
                 <span className="text-[10px] font-mono font-bold bg-[#E5A00D] text-black px-1.5 py-0.5 rounded-sm">
-                  v0.5.9
+                  v0.6.0
                 </span>
               </div>
               <p className="text-[11px] text-[color:var(--theme-fg-muted,#888888)]">{t("about.tagline")}</p>
@@ -37,7 +38,7 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
         </div>
 
         {/* Conteúdo */}
-        <div className="p-6 space-y-4 text-xs">
+        <div className="p-6 min-h-0 overflow-y-auto space-y-4 text-xs">
           <div className="space-y-3">
             <h3 className="text-[11px] font-bold text-[color:var(--theme-fg-secondary,#CCCCCC)] uppercase tracking-wider">
               {t("about.techTitle")}
@@ -85,6 +86,7 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
               </div>
             </div>
           </div>
+          <LocalDiagnostics />
           <p className="text-[11px] text-[color:var(--theme-fg-muted,#888888)] leading-relaxed">
             {t("about.license", { license: "GPL-3.0-only" })}
           </p>

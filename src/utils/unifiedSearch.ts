@@ -1,3 +1,5 @@
+import type {NavidromeStatus,NavidromeAlbum,NavidromeArtist,NavidromeSearchSong,NavidromeSearchResults} from "../types/navidrome";
+import {navidromeQueueTrack} from "./navidromeTracks.ts";
 import type { LocalAlbum, LocalItem } from "../types/local";
 import type { PlexAlbum, PlexArtistResult, PlexSearchResults, PlexTrack } from "../types/plex";
 import type { TrackMetadata } from "../types/audio";
@@ -5,7 +7,7 @@ import { deriveLocalArtists, type LocalArtistSummary } from "./localArtistNaviga
 import { normalizeLocalNavigationText } from "./localAlbumNavigation.ts";
 import { plexTrackArtist, plexTrackDurationSeconds } from "./plexTrackMetadata.ts";
 
-export type SearchSource = "all" | "local" | "plex";
+export type SearchSource = "all" | "local" | "plex" | "navidrome";
 export type SearchKind = "all" | "album" | "artist" | "track";
 export type SearchRow =
   | { source: "local"; kind: "album"; key: string; album: LocalAlbum }
@@ -13,7 +15,10 @@ export type SearchRow =
   | { source: "local"; kind: "track"; key: string; track: LocalItem }
   | { source: "plex"; kind: "album"; key: string; album: PlexAlbum }
   | { source: "plex"; kind: "artist"; key: string; artist: PlexArtistResult }
-  | { source: "plex"; kind: "track"; key: string; track: PlexTrack };
+  | { source: "plex"; kind: "track"; key: string; track: PlexTrack }
+  | { source: "navidrome"; kind: "album"; key:string; album:NavidromeAlbum; connection:NavidromeStatus }
+  | { source: "navidrome"; kind: "artist"; key:string; artist:NavidromeArtist; connection:NavidromeStatus }
+  | { source: "navidrome"; kind: "track"; key:string; track:NavidromeSearchSong; connection:NavidromeStatus };
 export interface SearchPreview { rows: SearchRow[]; limited: boolean; tracksUnavailable?: boolean }
 export const SEARCH_PREVIEW_LIMIT = 20;
 
@@ -24,6 +29,7 @@ export function searchQuery(value: string): string | null {
 export function rowText(row: SearchRow): { title: string; subtitle: string } {
   if (row.kind === "album") return { title: row.album.title, subtitle: row.album.artist };
   if (row.kind === "artist") return { title: row.artist.name, subtitle: "" };
+  if(row.source === "navidrome")return {title:row.track.title,subtitle:[row.track.artist,row.track.album].filter(Boolean).join(" · ")};
   return row.source === "local"
     ? { title: row.track.title || row.track.name, subtitle: [row.track.artist, row.track.album].filter(Boolean).join(" · ") }
     : { title: row.track.title, subtitle: [plexTrackArtist(row.track), row.track.album_title].filter(Boolean).join(" · ") };
@@ -86,10 +92,21 @@ export function plexSearchPreview(results: PlexSearchResults, serverId: string):
   return { rows, limited };
 }
 export function searchTrackMetadata(row: Extract<SearchRow, { kind: "track" }>): TrackMetadata {
+  if(row.source === "navidrome")return navidromeQueueTrack(row.connection,row.track);
   if (row.source === "local") return { title: row.track.title || row.track.name, artist: row.track.artist || "", album: row.track.album || "",
     media_locator: { kind: "local", uri: row.track.path }, duration: row.track.duration, thumb: null };
   return { title: row.track.title, artist: plexTrackArtist(row.track), album: row.track.album_title || "",
     media_locator: row.track.media_locator, duration: plexTrackDurationSeconds(row.track), plex_image: row.track.thumb ?? null };
+}
+
+export function navidromeSearchPreview(results:NavidromeSearchResults,connection:NavidromeStatus):SearchPreview{
+ if(results.connection_id!==connection.connection_id||results.account_id!==connection.account_id)throw Error("SEARCH_CONTEXT_CHANGED");
+ const all:SearchRow[]=[...results.albums.map(album=>({source:"navidrome",kind:"album",key:`navidrome:${results.account_id}:album:${album.id}`,album,connection}) as const),
+  ...results.artists.map(artist=>({source:"navidrome",kind:"artist",key:`navidrome:${results.account_id}:artist:${artist.id}`,artist,connection}) as const),
+  ...results.songs.map(track=>({source:"navidrome",kind:"track",key:`navidrome:${results.account_id}:track:${track.id}`,track,connection}) as const)];
+ const seen=new Set<string>(),rows:SearchRow[]=[];let limited=false;
+ for(const kind of ["album","artist","track"] as const){const group=all.filter(row=>row.kind===kind&&!seen.has(row.key)&&Boolean(seen.add(row.key)));rows.push(...group.slice(0,SEARCH_PREVIEW_LIMIT));limited ||= group.length>SEARCH_PREVIEW_LIMIT;}
+ return {rows,limited};
 }
 
 export interface SearchLaneState<T> { phase: "idle" | "loading" | "ready" | "error"; value: T | null }

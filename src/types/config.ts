@@ -1,4 +1,8 @@
+export type MusicSource = "local" | "plex" | "navidrome";
+export type EnabledSources = Record<MusicSource, boolean>;
+
 export interface AppConfig {
+  sources?: EnabledSources | null;
   first_run: boolean;
   alsa_device: string;
   direct_volume_choice?: { version: number; endpoint: string; dop_enabled: boolean } | null;

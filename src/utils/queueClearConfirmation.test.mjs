@@ -242,7 +242,7 @@ test("App cancellation discards the removal proposal and reopens Settings withou
   assert.equal(app.effects.opened, false, "stale cancellation cannot affect another operation");
   app.cancelQueueClear("1");
   assert.equal(app.effects.opened, true);
-  assert.equal(app.effects.page, "general");
+  assert.equal(app.effects.page, "sources");
   assert.equal(app.effects.confirmation, null);
   assert.deepEqual(app.effects.saves, []);
   assert.equal(flow.isPending(), false);
@@ -270,7 +270,7 @@ test("Settings Cancel, X and Escape unmount edits and reopening loads persisted 
   assert.match(app, /onClose=\{\(\) => \{ setShowSettings\(false\); setLocalFoldersDraft\(null\); \}\}/);
   assert.match(app, /else if \(showSettings\) \{\s*setShowSettings\(false\);\s*setLocalFoldersDraft\(null\)/);
   assert.match(app, /e\.key === "Escape"[\s\S]*?else if \(showSettings\) \{\s*setShowSettings\(false\)/);
-  assert.match(app, /onClick=\{\(\) => \{ if \(!configSaveInProgressRef\.current\) \{ setSettingsInitialPage\("general"\); setShowSettings\(true\); \} \}\}/);
+  assert.match(app, /onClick=\{\(\) => \{ if \(!configSaveInProgressRef\.current\) \{ setSettingsInitialPage\("sources"\); setShowSettings\(true\); \} \}\}/);
   assert.match(modal, /Promise\.all\(\[configService\.getConfig\(\), configService\.getAudioDevices\(\)\]\)/);
   assert.match(modal, /setConfig\(initialDraft \?[^;]+: cfg\)/);
   const buttons = [...modal.matchAll(/<button\b[^>]*onClick=\{onClose\}[^>]*>([\s\S]*?)<\/button>/g)].map(match => match[1]);
@@ -286,7 +286,7 @@ test("confirmation wiring discards cancelled edits, uses an accessible dialog an
   const cancel = app.slice(app.indexOf("const cancelQueueClear"), app.indexOf("const confirmQueueClear"));
   assert.doesNotMatch(cancel, /saveConfig|startLocalFoldersSave|setConfig\(|setLocalFoldersDraft/);
   assert.match(cancel, /queueClearFlowRef\.current\.cancel\(operationId\)/);
-  assert.match(cancel, /setQueueClearConfirmation\(null\);\s*setSettingsInitialPage\("general"\);\s*setShowSettings\(true\)/);
+  assert.match(cancel, /setQueueClearConfirmation\(null\);\s*setSettingsInitialPage\("sources"\);\s*setShowSettings\(true\)/);
   assert.match(modal, /role="alertdialog"[\s\S]*?aria-modal="true"[\s\S]*?aria-labelledby=\{titleId\}[\s\S]*?aria-describedby=\{descriptionId\}/);
   assert.match(modal, /cancelRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key === "Escape"/);

@@ -30,6 +30,7 @@ const SUPPORTED_IMAGE_CONTENT_TYPES: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PlexErrorKind {
+    SourceDisabled,
     Timeout,
     Transport,
     Unauthorized,
@@ -115,6 +116,7 @@ impl PlexError {
             PlexErrorKind::ConfigurationChanged => {
                 "A configuração Plex mudou durante a conexão. Tente novamente.".to_string()
             }
+            PlexErrorKind::SourceDisabled => "SOURCE_DISABLED".to_string(),
             PlexErrorKind::StateUnavailable => {
                 "O estado da conexão Plex está indisponível.".to_string()
             }
@@ -446,6 +448,7 @@ struct PlexConnectionSnapshot {
 }
 
 struct PlexConnectionState {
+    enabled: bool,
     identity: Option<PlexServerIdentity>,
     current_base_url: Option<String>,
     legacy_base_url: Option<String>,
@@ -492,6 +495,7 @@ impl PlexConnectionManager {
         let legacy_base_url = normalized_base_url(&config.plex_url);
         Self {
             state: Mutex::new(PlexConnectionState {
+                enabled: config.sources.unwrap_or_default().plex,
                 identity,
                 current_base_url: None,
                 legacy_base_url,
@@ -506,10 +510,12 @@ impl PlexConnectionManager {
     }
 
     fn snapshot(&self) -> Result<PlexConnectionSnapshot, PlexError> {
+        if !crate::music_sources::plex() { return Err(PlexError { operation: "fonte desabilitada", kind: PlexErrorKind::SourceDisabled }); }
         let state = self.state.lock().map_err(|_| PlexError {
             operation: "acessar o estado da conexão",
             kind: PlexErrorKind::StateUnavailable,
         })?;
+        if !state.enabled { return Err(PlexError {operation:"fonte desabilitada",kind:PlexErrorKind::SourceDisabled}); }
         Ok(PlexConnectionSnapshot {
             identity: state.identity.clone(),
             current_base_url: state.current_base_url.clone(),
@@ -534,7 +540,7 @@ impl PlexConnectionManager {
                 display_name: config.plex_server_name.clone().unwrap_or_default(),
             });
         let legacy_base_url = normalized_base_url(&config.plex_url);
-        let connection_changed = state.identity != identity
+        let connection_changed = state.enabled != config.sources.unwrap_or_default().plex || state.identity != identity
             || state.legacy_base_url != legacy_base_url
             || state.account_token != config.plex_token;
 
@@ -543,6 +549,7 @@ impl PlexConnectionManager {
             state.current_base_url = None;
             state.resolved_token = None;
         }
+        state.enabled = config.sources.unwrap_or_default().plex;
         state.identity = identity;
         state.legacy_base_url = legacy_base_url;
         state.account_token = config.plex_token.clone();
@@ -830,6 +837,7 @@ impl PlexConnectionManager {
         connection: &ResolvedPlexConnection,
         path: &str,
     ) -> Result<Vec<u8>, PlexError> {
+        self.validate_source_connection(connection)?;
         let operation = "buscar a imagem";
         let mut response = self
             .http
@@ -882,12 +890,18 @@ impl PlexConnectionManager {
         Ok(bytes)
     }
 
+    fn validate_source_connection(&self, connection: &ResolvedPlexConnection) -> Result<(),PlexError> {
+        let snapshot=self.snapshot()?;
+        if snapshot.generation != connection.generation { return Err(PlexError{operation:"fonte alterada",kind:PlexErrorKind::ConfigurationChanged}); }
+        Ok(())
+    }
     async fn send_authenticated<T: DeserializeOwned>(
         &self,
         connection: &ResolvedPlexConnection,
         path_and_query: &str,
         operation: &'static str,
     ) -> Result<T, PlexError> {
+        self.validate_source_connection(connection)?;
         let separator = if path_and_query.contains('?') { '&' } else { '?' };
         let url = format!(
             "{}{}{}X-Plex-Token={}",
@@ -896,11 +910,13 @@ impl PlexConnectionManager {
             separator,
             connection.token
         );
-        send_json(
+        let result=send_json(
             self.http.get(url).header("Accept", "application/json"),
             operation,
         )
-        .await
+        .await;
+        self.validate_source_connection(connection)?;
+        result
     }
 }
 
@@ -1249,6 +1265,19 @@ mod tests {
         MockServer::start(move |_| MockResponse::json("200 OK", payload.clone()))
     }
 
+    #[test]
+    fn source_switch_fences_connection_generation_without_deleting_credentials() {
+        let mut config=AppConfig::default();config.plex_token="fixture-only-token".into();
+        let manager=test_manager(&config,"http://127.0.0.1:1/unused".into());
+        let before=manager.snapshot().unwrap().generation;
+        config.sources=Some(crate::config::EnabledSources{local:true,plex:false,navidrome:true});
+        manager.update_config(&config);
+        assert!(matches!(manager.snapshot(),Err(PlexError{kind:PlexErrorKind::SourceDisabled,..})));
+        assert_eq!(manager.state.lock().unwrap().account_token,"fixture-only-token");
+        config.sources.as_mut().unwrap().plex=true;manager.update_config(&config);
+        assert_ne!(manager.snapshot().unwrap().generation,before);
+    }
+
     fn manager_config(base_url: &str, machine_identifier: Option<&str>) -> AppConfig {
         AppConfig {
             plex_url: base_url.to_string(),
@@ -1481,6 +1510,14 @@ mod tests {
         (result, paths)
     }
 
+    #[test]
+    fn album_catalog_retains_optional_added_timestamp_for_smart_rules_without_an_extra_request() {
+        let mut page=album_catalog_page(0,Some(2),&["1","2"]);
+        page["MediaContainer"]["Metadata"][0]["addedAt"]=serde_json::json!(1793404800u64);
+        page["MediaContainer"]["Metadata"][1]["addedAt"]=serde_json::json!(-1);
+        let (result,paths)=fixture_album_catalog(vec![MockResponse::json("200 OK",page)],None);
+        let result=result.unwrap();assert_eq!(paths.len(),1);assert_eq!(result.albums[0].added_at,Some(1793404800));assert_eq!(result.albums[1].added_at,None);
+    }
     #[test]
     fn album_catalog_empty_and_multiple_pages_are_complete_only_after_verified_termination() {
         for pages in [
@@ -3101,6 +3138,8 @@ pub struct PlexLibrary {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlexAlbum {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_id: Option<String>,
@@ -3229,6 +3268,7 @@ impl AlbumCatalogPages {
                 return Err(invalid());
             }
             page.push(PlexAlbum {
+                added_at: item["addedAt"].as_u64().filter(|v| *v > 0 && *v <= 253_402_300_799),
                 server_id: Some(connection.server_id.clone()),
                 library_id: source_info::source_library(item),
                 rating_key: id.to_string(),
@@ -3460,6 +3500,7 @@ fn parse_track_navigation(
     let artist_name = navigation_text(&track["grandparentTitle"])?;
     Ok(PlexTrackNavigation {
         album: PlexAlbum {
+            added_at: None,
             server_id: Some(connection.server_id.clone()),
             library_id: source_info::source_library(track),
             rating_key: album_key.to_string(),
@@ -3914,6 +3955,7 @@ impl PlexClient {
                                     .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                                 albums.push(PlexAlbum {
+                    added_at: item["addedAt"].as_u64().filter(|v| *v > 0 && *v <= 253_402_300_799),
                     server_id: Some(connection.server_id.clone()),
                     library_id: source_info::source_library(item),
                                     rating_key,
@@ -3982,6 +4024,7 @@ impl PlexClient {
         &self,
         locator: &MediaLocator,
     ) -> Result<String, String> {
+        crate::music_sources::require_locator(locator)?;
         let MediaLocator::Plex {
             server_id,
             part_key,
@@ -3993,6 +4036,7 @@ impl PlexClient {
                 MediaLocator::Local { uri } => Ok(uri.clone()),
                 MediaLocator::Upnp { session_id } => crate::upnp_bridge::resolve(session_id),
                 MediaLocator::Radio { .. } => Err("RADIO_STATION_EXPIRED".into()),
+                MediaLocator::Navidrome { connection_id, song_id, .. } => crate::navidrome::resolve(connection_id, song_id),
                 MediaLocator::Plex { .. } => unreachable!(),
             };
         };
@@ -4221,6 +4265,7 @@ impl PlexClient {
                     .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                 albums.push(PlexAlbum {
+                    added_at: item["addedAt"].as_u64().filter(|v| *v > 0 && *v <= 253_402_300_799),
                     server_id: Some(connection.server_id.clone()),
                     library_id: source_info::source_library(item),
                     rating_key,
@@ -4282,6 +4327,7 @@ impl PlexClient {
                     .and_then(|thumb| PlexImageRef::from_connection(&connection, thumb));
 
                 albums.push(PlexAlbum {
+                    added_at: item["addedAt"].as_u64().filter(|v| *v > 0 && *v <= 253_402_300_799),
                     server_id: Some(connection.server_id.clone()),
                     library_id: source_info::source_library(item),
                     rating_key,

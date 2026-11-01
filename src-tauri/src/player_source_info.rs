@@ -38,7 +38,7 @@ impl Drop for SourcePermit { fn drop(&mut self) { ACTIVE.store(false, Ordering::
 
 fn queued_locator(queue: &[TrackMetadata], media: &CurrentMedia) -> Option<MediaLocator> {
     match media {
-        CurrentMedia::Upnp { .. } | CurrentMedia::Radio { .. } => None,
+        CurrentMedia::Upnp { .. } | CurrentMedia::Radio { .. } | CurrentMedia::Navidrome { .. } => None,
         CurrentMedia::Local { uri, queue_index } => {
             let track = queue.get(*queue_index)?;
             match &track.media_locator {
@@ -60,7 +60,7 @@ async fn acquire_player_source_info(media: CurrentMedia, audio_state: State<'_, 
     let permit = SourcePermit::acquire()?;
     let locator = snapshot(&audio_state, &media)?;
     let info = match &locator {
-        MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } => return None,
+        MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } | MediaLocator::Navidrome { .. } => return None,
         MediaLocator::Local { uri } => {
             let file_permit = InspectionPermit::acquire().ok()?;
             let folders = config_state.0.lock().ok()?.local_folders.clone();

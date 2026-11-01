@@ -1,8 +1,8 @@
 # Sonante
 
-**A library-first music player for Linux — local collections and Plex, in one place.**
+**A library-first music player for Linux — local collections, Plex and Navidrome, in one place.**
 
-Sonante is a desktop music player built for people who want to **listen to, navigate, and maintain their music collections** without giving up control of playback. It combines local folders and Plex Media Server with a dedicated [Music Player Daemon (MPD)](https://www.musicpd.org/) instance, a native Rust backend, and a React interface.
+Sonante is a desktop music player built for people who want to **listen to, navigate, and maintain their music collections** without giving up control of playback. It combines local folders, Plex Media Server and Navidrome with a dedicated [Music Player Daemon (MPD)](https://www.musicpd.org/) instance, a native Rust backend, and a React interface.
 
 **Platform:** Linux (x86_64) · **Interface:** English / Português (Brasil) · **Stack:** React, TypeScript, Tauri, Rust, MPD, ALSA
 
@@ -14,25 +14,27 @@ Sonante is a desktop music player built for people who want to **listen to, navi
 | --- | --- |
 | **Local music** | Multiple local folders and mounted shares; album, artist, year, genre, and folder browsing; source selection and incremental library updates. |
 | **Plex** | Account authorization, server/library selection, album and artist navigation, years, genres, collections, and remote playback. |
+| **Navidrome** | Subsonic-compatible album browsing, incremental loading, source-bound favorites and playlists, unified search, recent history and queue restoration. |
 | **Online radio** | Worldwide station directory with name, country and genre filters; favorites, manual stream addresses and live playback. |
 | **Playback** | Queue management, play/pause, next/previous, seek, session restoration without automatic playback, and desktop media-key integration through MPRIS2. |
-| **Collection tools** | Local and Plex favorites, named playlists, availability-aware playlist playback, local album diagnostics, and reviewed FLAC tag editing with per-file results. |
-| **Artwork & browsing** | Local and Plex album artwork, virtualized grids for large catalogs, and artwork caching with bounded work. |
+| **Collection tools** | Source-bound favorites, manual and smart playlists, availability-aware playlist playback, local album diagnostics, and reviewed FLAC tag editing with per-file results. |
+| **Scrobbling** | Optional Last.fm and ListenBrainz connections for eligible Local, Plex and Navidrome listening. |
+| **Artwork & browsing** | Three catalog layouts and three cover sizes across Local, Plex and Navidrome; virtualized catalogs and artwork caching with bounded work. |
 | **Audio controls** | Shared and Direct output choices, device availability checks, ReplayGain settings, an explanatory Signal Path, and a shared Now Playing layout with visualization, an artwork queue, embedded, detached, and fullscreen modes. |
 
 Sonante is designed for substantial, imperfect real-world libraries: multiple storage locations, multi-disc albums, CUE-based albums, varying metadata, and sources that may temporarily become unavailable.
 
-## Installation — 0.5.9
+## Installation — 0.6.0
 
-Download the complete package and `SHA256SUMS.txt` from [Sonante 0.5.9](https://github.com/tiagoalam/Sonante/releases/tag/v0.5.9) for your distribution:
+Download the complete package and `SHA256SUMS.txt` from [Sonante 0.6.0](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.0) for your distribution:
 
-- Ubuntu 22.04: `sonante_0.5.9-1_amd64.deb` (`apt install ./sonante_0.5.9-1_amd64.deb`).
-- Fedora 44: `sonante-0.5.9-1.x86_64.rpm` (`dnf install ./sonante-0.5.9-1.x86_64.rpm`).
-- Arch Linux / Manjaro: `sonante-0.5.9-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.5.9-1-x86_64.pkg.tar.zst`).
+- Ubuntu 22.04: `sonante_0.6.0-1_amd64.deb` (`apt install ./sonante_0.6.0-1_amd64.deb`).
+- Fedora 44: `sonante-0.6.0-1.x86_64.rpm` (`dnf install ./sonante-0.6.0-1.x86_64.rpm`).
+- Arch Linux / Manjaro: `sonante-0.6.0-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.6.0-1-x86_64.pkg.tar.zst`).
 
 Close Sonante before upgrading, and install with your distribution's package manager. Verify the supplied checksum first. Packages manage their own pinned audio runtimes and do not enable a system MPD service. Corresponding runtime source sidecars accompany the packages; they are not installed into `/usr`.
 
-Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the complete 0.5.9 release payload.
+Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the complete 0.6.0 release payload.
 
 ### System requirements
 
@@ -56,7 +58,7 @@ Fedora uses the separate compat3 runtime descriptor: private bzip2/sndio ABIs, s
 ## Getting started
 
 1. **Choose an audio output.** Shared mode uses the system's default ALSA route; Direct mode targets a selected ALSA hardware endpoint.
-2. **Add your music.** Register one or more local folders, connect a Plex server, or use both.
+2. **Add your music.** Enable Local, Plex and/or Navidrome in **Preferences → Sources**, then configure the sources you use.
 3. **Browse your collection.** Explore albums, artists, years, genres, and the source-specific views; add tracks to the queue or save them to a playlist.
 4. **Adjust playback.** Use the player controls, your desktop media keys, or the Now Playing window.
 
@@ -86,15 +88,15 @@ Artwork requests are handled through the backend; authenticated Plex URLs and ac
 
 ## Explore, search, and Now Playing
 
-**Explore** is a single navigation entry. With both sources configured, prominent Local/Plex tabs select local suggestions or Plex discovery. Local suggestions can target one local source or all local libraries independently of the Local browser selection. Startup restores the main Local or Plex section rather than reopening a suggestion view. Favorites use the same source tabs.
+**Explore** is a single navigation entry. With multiple sources configured, prominent Local/Plex/Navidrome tabs select their suggestions. Disabled sources are not queried. Local suggestions can target one local source or all local libraries independently of the Local browser selection. Startup restores the main library section rather than reopening a suggestion view. Favorites use the same source tabs.
 
 **Plex discovery** offers library-aware shelves and finite mixes of up to 100 tracks: Library Mix, Decade Mix (using the album release year), and Style Mix. Open a mix to preview it, play it, generate another selection, or save that exact selection as a named playlist. Sources and availability remain associated with their original libraries.
 
-**Unified search** (Ctrl+K) searches Local and Plex albums, artists, and tracks together, with source/type filters and keyboard navigation. Results open their original source context.
+**Unified search** (Ctrl+K) searches enabled Local, Plex and Navidrome albums, artists, and tracks together, with source/type filters and keyboard navigation. Results open their original source context.
 
 **Now Playing** can fill the main content area or open as a detached window with fullscreen support. Choose Audiophile, Psychedelic, Sleeve or Poster from the layout selector or keys 1–4. Audiophile includes revised VU meters, a circular dial option and spectrum views; Psychedelic offers Aurora, Mandala and Cosmos scenes with an economy mode. Double-click the artwork to toggle fullscreen. The detached fullscreen player can hide controls while playing, and each layout remembers whether its queue panel is open. The queue opens on the right with album artwork and can be hidden. Repeat queue, repeat track, and shuffle controls share the MPD playback state across player presentations. The queue supports filtering, jumping to the current occurrence, and duration estimates when the playback mode permits them. Track context menus and ellipsis buttons can insert a track after the current queue position, append it, or append its identified album without replacing the queue or starting playback on an empty queue. Existing shuffle/repeat settings are retained. Reorder queue occurrences by dragging or with the keyboard, move a queued track next, and remove other occurrences while protecting the currently playing or paused item.
 
-Use Ctrl/Shift or the selection checkboxes to add multiple tracks to the queue or a playlist. Album menus load tracks only when an action needs them. **Recent history** keeps up to 100 Local/Plex tracks locally and can be cleared or disabled.
+Use Ctrl/Shift or the selection checkboxes to add multiple tracks to the queue or a playlist. Album menus load tracks only when an action needs them. **Recent history** keeps up to 100 Local/Plex/Navidrome tracks locally and can be cleared or disabled.
 
 The sleep timer offers 15, 30 or 60 minutes from the player bar and Now Playing. It shows the remaining time and can be canceled; expiry stops playback without clearing the queue. Timers are session-only. The main Plex library also shows loading progress and a retry action when loading fails.
 
@@ -109,6 +111,38 @@ Playback uses the selected Sonante output and shows **Live**, with station/track
 Choose from six themes: Dark, Light, Cyber, Summer, Zen, and Nocturne. Compact previews are available in Preferences and the first-run wizard. Catalog counts reuse existing metadata.
 
 The optional [UPnP receiver](docs/UPNP_RECEIVER.md) lets compatible controllers such as BubbleUPnP send music to Sonante. It is disabled by default and uses the selected audio output. This is a renderer, not a media server or a TIDAL/Qobuz Connect implementation.
+
+## Navidrome
+
+In **Preferences → Sources**, enable Navidrome, enter your server's base URL, username and password, then choose **Connect and save**. Sonante uses the server's [Subsonic-compatible API](https://www.navidrome.org/docs/developers/subsonic-api/). Use HTTPS outside a trusted local network. Credentials stay in an owner-only `navidrome.json` profile file; authenticated server URLs are not exposed to the renderer or stored in queue metadata.
+
+This first phase provides a shared Local/Plex-style album catalog with three cover sizes, lists with or without artwork, and incremental loading as you scroll, recent/alphabetical sorting, server-side album search, artwork, album tracks and playback through the existing Sonante audio controls. Browsing does not start playback. Empty results, loading and server failures have distinct states and an explicit retry. Album playback supports up to 500 tracks. Streaming uses the original server format through a revocable loopback bridge with HTTP Range support; this does not independently qualify a DAC or bit-perfect output.
+
+Navidrome album favorites are saved by Sonante in a separate private file, scoped to the server address and username. They survive reconnecting to the same account and appear in a **Navidrome** tab under **Favorites** whenever a Navidrome connection is configured. They do not change server favorites. Favorites can be browsed without a server request; opening or playing an album still needs the server. The store is bounded to 2,000 albums across accounts.
+
+Navidrome supports manual and smart playlists, recent history, unified album/artist/track search, and Last.fm/ListenBrainz scrobbling. Saved selections remain bound to the server/account; reconnect to that account before playing them. Explore offers bounded server selections of suggested and recently added albums plus Sonante favorites, without loading the whole catalog. Navidrome queue entries are restored on reopening using their durable server/account and song references, with a fresh internal stream connection. The queue and saved position return without starting playback; press Play to resume. Restoration requires the same configured account and an enabled source. An unavailable or changed account does not silently remove saved tracks.
+
+## Local diagnostics
+
+**About Sonante → Copy diagnostics** prepares a bounded, in-memory report for the current session. The same control is available on a failed-bootstrap screen. It contains sanitized error categories/codes and passive startup measurements, without music metadata, paths, server addresses or credentials. Nothing is transmitted automatically. If clipboard access is unavailable, a selectable report appears instead.
+
+Native timings describe configuration, engine start, readiness and the queue-restoration attempt. Engine details separate source snapshot/admission (including initial capture, change-watch registration and final verification), runtime resolution, configuration, process identity and socket readiness; queue details separate media resolution and MPD restoration. Nested timings overlap and must not be added together. Renderer timings describe module entry, the first shell commit and the first configuration commit. These clocks have different origins; neither a completed attempt nor a timing proves successful playback, catalog coverage or recovery. Secondary page modules load when opened; the application shell, preferences and recovery remain available independently.
+
+## Smart playlists
+
+In **Playlists**, create a smart playlist from a template or your own rules. Choose **Local**, a library on the selected **Plex** server, or **Navidrome**; a smart playlist uses one source. All conditions apply to album metadata: genre, album artist, inclusive year range, catalog added date and Sonante favorite albums. Preview the resulting tracks before saving, including an empty selection if you want to follow future additions. Added-date filters exclude albums with unknown dates; this never falls back to folder modification time.
+
+Saving smart rules is separate from manual playlists. **Save this selection** creates an ordinary playlist with exactly the visible tracks and order, without changing the rules. Opening a saved smart playlist or choosing **Refresh selection** evaluates the current catalog without reindexing or changing playback. New rules distribute tracks across matching albums by default; album sequence remains available and existing rules retain it. Album order follows your selected sort, tracks retain disc/track order within each album, and the selection is limited to 1–500 tracks. Play uses the visible selection through Sonante's existing playback controls. Source/read failures remain errors rather than empty successful results. Editing rules requires a new preview before saving.
+
+Local smart playlists offer principal genre families by default, with an explicit original-tag filter for exact matches. Family grouping uses indexed album metadata before track expansion; it does not rewrite tags or reindex files. Existing exact genre rules keep their meaning. Plex continues using server genre tags unchanged.
+
+## Scrobbling
+
+Optional **Last.fm** and **ListenBrainz** connections are available in Preferences → General → Scrobbling. Both are off until you explicitly connect and enable an account. ListenBrainz uses its user token; Last.fm uses an application API key/shared secret and browser authorization, followed by explicit confirmation in Sonante. Account passwords are never requested.
+
+Local, Plex and Navidrome tracks with identified artist/title and a known duration longer than 30 seconds qualify after listening to half their duration or four minutes, whichever is earlier. Pauses, seek jumps, uncertain playback and unobserved gaps do not add listening credit. Radio and UPnP are excluded from this first version.
+
+Submissions run in a native background worker and reuse existing playback snapshots. A private, bounded queue retains up to 500 pending submissions across restarts and retries temporary failures with backoff. Disabling or disconnecting a service discards its pending submissions. Credentials and queued metadata are stored in the private `scrobbling.json` file, with owner-only permissions. Only artist, track, album, duration and the listening timestamp are transmitted; file paths, artwork and server credentials are excluded. Status is available in the preferences panel. Delivery remains subject to the service's availability and acceptance; ambiguous transport failures are retried with the original timestamp.
 
 ## Audio: what Shared and Direct mean
 

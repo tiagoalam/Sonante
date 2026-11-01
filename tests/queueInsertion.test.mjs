@@ -1,3 +1,4 @@
+import * as musicSources from "../src/utils/musicSources.ts";
 import { passiveTrackSelection } from "./support/passiveQueueInsertion.mjs";
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,12 +18,13 @@ const read = path => readFileSync(new URL(`../src/${path}`, import.meta.url), 'u
 const compile = (path, deps, env = {}) => {
   const exports = {};
   const code = ts.transpileModule(read(path), { fileName: path, compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  new Function('require', 'exports', ...Object.keys(env), code)(id => { assert.ok(id in deps, id); return deps[id]; }, exports, ...Object.values(env));
+  new Function('require', 'exports', ...Object.keys(env), code)(id => { if(id==="../utils/musicSources")return musicSources; assert.ok(id in deps, id); return deps[id]; }, exports, ...Object.values(env));
   return exports;
 };
 const flush = async () => { for (let i = 0; i < 70; i++) await Promise.resolve(); };
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const nodes = (tree, pred) => Array.isArray(tree) ? tree.flatMap(n => nodes(n, pred)) : !tree || typeof tree !== 'object' ? [] : [...(pred(tree) ? [tree] : []), ...nodes(tree.props?.children, pred)];
+const text=tree=>tree==null||typeof tree==='boolean'?'':typeof tree==='string'||typeof tree==='number'?String(tree):Array.isArray(tree)?tree.map(text).join(' '):text(tree.props?.children);
 const local = (title = 'Synthetic track', path = 'Source/Album/track.flac') => ({ title, artist: 'Synthetic artist', album: 'Synthetic album', media_locator: { kind: 'local', uri: path }, duration: 182 });
 const eq = (a,b) => a?.length === b?.length && a.every((v,i) => Object.is(v,b[i]));
 
@@ -223,7 +225,7 @@ async function historyFixture(f, initial) {
   react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t,i18n:{language:'en'}})},'lucide-react':icons,
   '../services/history':{historyService:service},'../services/audio':{audioService:audio},'../utils/localAlbumCatalogSession':{localAlbumCatalog:{getSnapshot:()=>({loaded:true,albums:[album]})}},
   '../utils/playerNavigation':{localAlbumForMedia},'../utils/usePlaybackAttempt':playback,'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},'./QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},
-  './LocalBrowserView':{LocalBrowserView:()=>null},'./AlbumView':{AlbumView:()=>null},
+  './LocalBrowserView':{LocalBrowserView:()=>null},'./AlbumView':{AlbumView:()=>null},'./NavidromeView':{NavidromeView:()=>null},'../services/navidrome':{navidromeService:{songNavigation:async locator=>{calls.push(['navNavigate',locator]);return{account_id:'a'.repeat(64),album_id:'nav-album'};}}},
  });
  const props={config:{local_folders:['synthetic'],plex_token:'configured',online_artwork_enabled:false},plexIdentity:{},status:{state:'stop',is_updating:false},active:true,isPlaybackAvailable:true,catalogRefreshRevision:0};
  const host=new f.Harness(()=>HistoryView(props));host.paint();await flush();host.paint();return{host,service,calls,props,paint:()=>host.paint()};
@@ -255,4 +257,12 @@ test('Recent drops pending navigation/read replies after source change or unmoun
   if(mode==='error'){h.service.configure=async()=>{throw Error('PRIVATE_TOKEN /private/path')};nodes(h.paint(),n=>n.type==='input')[0].props.onChange({target:{checked:false}});await flush();const html=renderToStaticMarkup(h.paint());assert.match(html,/History could not/);assert.doesNotMatch(html,/PRIVATE_TOKEN|private\/path/);assert.equal(nodes(h.paint(),n=>n.type==='input')[0].props.checked,false);}
   if(mode!=='read')h.host.close();
  }
+});
+
+test('Recent Navidrome entries open an account-bound album and disappear when the source is disabled',async()=>{
+ const f=await fixture();f.host.close();const track={title:'Nav history',artist:'Artist',album:'Album',media_locator:{kind:'navidrome',connection_id:'',account_id:'a'.repeat(64),song_id:'song-a'}};
+ const h=await historyFixture(f,{version:1,enabled:true,entries:[{id:'nav-history',played_at:1720000000000,track}]});
+ try{let tree=h.paint();const source=nodes(tree,n=>n.type==='button'&&text(n)===f.t('history.navidrome'))[0];assert.ok(source);source.props.onClick();tree=h.paint();const open=nodes(tree,n=>n.type==='button'&&n.props['aria-label']===f.t('history.openAlbum'))[0];await open.props.onClick();await flush();tree=h.paint();assert.ok(nodes(tree,n=>n.props.initialAlbum?.id==='nav-album'&&n.props.initialAlbum?.account_id==='a'.repeat(64)).length);assert.equal(h.calls.filter(c=>c[0]==='albums'||c[0]==='navigate'||c[0]==='play').length,0);
+  h.props.config={...h.props.config,sources:{local:true,plex:true,navidrome:false}};tree=h.paint();await flush();tree=h.paint();assert.ok(!text(tree).includes('Nav history'));assert.equal(nodes(tree,n=>n.type==='button'&&text(n)===f.t('history.navidrome')).length,0);assert.equal(h.calls.filter(c=>c[0]==='navNavigate').length,1);
+ }finally{h.host.close();}
 });

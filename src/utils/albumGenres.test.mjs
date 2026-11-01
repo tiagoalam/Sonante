@@ -103,7 +103,7 @@ test("UI wiring restricts genres to album data and keeps confirmed source identi
   assert.match(app, /items=\{selectedPlexGenreAlbums\}/);
   assert.match(app, /derivePlexArtists\(albums\)/);
   assert.match(app, /derivePlexYearNavigation\(albums\)/);
-  assert.match(app, /visibleSearchAlbums\.map/);
+  assert.match(app, /items=\{visibleSearchAlbums\}/);
   assert.equal((app.match(/configuredLocalFolders=\{config\?\.local_folders \?\? \[\]\}/g) ?? []).length, 3);
   assert.match(local, /items=\{sortedAlbums\}/);
   assert.match(app, /items=\{sortedPlexAlbums\}/);
@@ -278,7 +278,7 @@ function renderGenreBranch(source, variable, end, bindings) {
 test("Local genre page reuses the virtual grid and real album identities, isolated from other views", () => {
   const album = { id: "opaque/cue", folder_path: "A/Album", genres: ["Jazz"] }, calls = [], cards = [];
   const grid = props => { calls.push(props); return React.createElement("div", null, props.items.map(item => React.cloneElement(props.renderItem(item), { key: props.getItemKey(item) }))); };
-  const base = { VirtualAlbumGrid: grid, LocalAlbumCard: props => { cards.push(props); return React.createElement("span", null, props.album.id); },
+  const base = { AlbumCatalog: grid, albumPresentation:{layout:"grid",coverSize:"medium"}, LocalAlbumCard: props => { cards.push(props); return React.createElement("span", null, props.album.id); },
     activeGenre: "jazz", genreAlbums: [album], activeSourceId: "opaque", albumSearch: "", albumSortMode: "album-asc",
     scrollContainer: {}, favoriteIds: new Set(), handleToggleFavoriteLocal() {}, handleSelectAlbum() {}, handlePlayEntireAlbum() {},
     catalog: { albums: [album], loading: false, loaded: true, error: null, mpdBusy: false, saveBlocked: false },
@@ -306,7 +306,7 @@ test("Local genre page reuses the virtual grid and real album identities, isolat
 test("Plex genre page reuses the virtual grid and rating keys, with no new IPC", () => {
   const album = { rating_key: "real-key", genres: ["Rock"] }, calls = [];
   const base = { activePlexGenre: "rock", selectedPlexGenreAlbums: [album], selectedLibrary: { key: "one" }, plexSortMode: "added_recent", plexScrollContainer: {},
-    VirtualAlbumGrid: props => { calls.push(props); return React.createElement("div", null, props.items.map(item => React.cloneElement(props.renderItem(item), { key: props.getItemKey(item) }))); },
+    plexAlbumPresentation: {layout:"grid",coverSize:"medium"}, AlbumCatalog: props => { calls.push(props); return React.createElement("div", null, props.items.map(item => React.cloneElement(props.renderItem(item), { key: props.getItemKey(item) }))); },
     PlexAlbumCard: props => React.createElement("span", null, props.album.rating_key), plexFavIds: new Set(), setActiveAlbum() {},
     handlePlayQuick() {}, handleTogglePlexCardFav() {}, handleSelectArtist() {}, isPlaybackAvailable: true,
     plexGenreOptions: deriveAlbumGenres([album]), setSelectedPlexGenre() {} };

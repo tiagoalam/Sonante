@@ -1,3 +1,4 @@
+import { sourceEnabled } from "./musicSources.ts";
 import { LocalPlaybackThumbnail } from "./localPlaybackThumbnail.ts";
 import { createLocalCoverBatch } from "./localCoverBatch.ts";
 import { createLocalSourceReadQueue } from "./localSourceReadQueue.ts";
@@ -57,7 +58,7 @@ function mount({ cover = async () => "local-cover", cached = async () => null, i
   const f = { status:raw(),available:true,showSettings:false,showAbout:false,online,catalog,calls,resolver,
     render() {
       cursor=0;const state=catalog.getSnapshot();resolver.setContext(artworkReadBlocked(f.status.is_updating,state),state.albums);
-      const vars={useLocalPlaybackArtwork:hook,playbackStatus:f.status,localCatalog:state,isPlaybackAvailable:f.available,
+      const vars={sourceEnabled,useLocalPlaybackArtwork:hook,playbackStatus:f.status,sourceArtworkPlayback:f.status,localCatalog:state,isPlaybackAvailable:f.available,
         config:{first_run:false,online_artwork_enabled:f.online},showSettings:f.showSettings,showAbout:f.showAbout,ensurePlaybackArtworkCatalog:ensure};
       f.display=new Function(...Object.keys(vars),`return (${projection});`)(...Object.values(vars));
       effects.splice(0).forEach(run=>run());return f.display;
@@ -75,7 +76,7 @@ test("actual App projection restores Local artwork before Play through focal IPC
   for(let i=0;i<20;i++){f.status={...f.status,elapsed:19.5+i};f.render();await flush();}
   assert.equal(f.calls.length,1,"health/status rerenders perform no artwork or playback I/O");
   const sourceInfo={media:f.display.current_media,info:{provenance:"local",codec:"FLAC",compression:"lossless",sample_type:"integer",sample_rate:96000,bit_depth:24,dsd_level:null,revision:"fixture"}};
-  const ref={current:null},published=[];const vars={sourceInfo,queueArtwork:{blocked:false,onlineEnabled:true,generation:0},nowPlayingSnapshotRef:ref,configuredSignalRoute:()=>({mode:"shared"}),config:{},mpdHealth:{state:"available"},presentationPlayback:f.display,publishCurrentNowPlayingSnapshot:()=>published.push(ref.current)};
+  const ref={current:null},published=[];const vars={sourceEnabled,sourceInfo,queueArtwork:{blocked:false,onlineEnabled:true,generation:0},nowPlayingSnapshotRef:ref,configuredSignalRoute:()=>({mode:"shared"}),config:{},mpdHealth:{state:"available"},presentationPlayback:f.display,publishCurrentNowPlayingSnapshot:()=>published.push(ref.current)};
   new Function(...Object.keys(vars),`return (${snapshotEffect});`)(...Object.values(vars))();
   assert.equal(published[0].playback,f.display,"actual detached-window bridge publishes the projection");
   assert.equal(published[0].queueArtwork,vars.queueArtwork,"the same bridge carries the queue artwork gate/generation");

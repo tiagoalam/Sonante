@@ -290,7 +290,8 @@ fn prepare_new_items(items: Vec<NewPlaylistItem>) -> Result<Vec<PlaylistItem>, S
     let timestamp = now_millis()?;
     items
         .into_iter()
-        .map(|item| {
+        .map(|mut item| {
+            if matches!(item.media_locator, MediaLocator::Navidrome { .. }) { item.media_locator = crate::navidrome::storage_locator(&item.media_locator).ok_or("NAVIDROME_INVALID")?; }
             validate_new_item(&item)?;
             Ok(PlaylistItem {
                 id: generate_item_id(timestamp),
@@ -384,6 +385,7 @@ fn validate_loaded_playlists(playlists: &[Playlist]) -> Result<(), String> {
 fn validate_media_locator(locator: &MediaLocator) -> Result<(), String> {
     let valid = match locator {
         MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } => false,
+        MediaLocator::Navidrome { .. } => crate::navidrome::storage_locator(locator).is_some(),
         MediaLocator::Local { uri } => {
             !uri.trim().is_empty()
                 && !uri.contains(['\0', '\r', '\n'])
@@ -747,4 +749,16 @@ mod tests {
         assert_eq!(reloaded.items[1].metadata.title, "Plex removida");
         fs::remove_dir_all(directory).unwrap();
     }
+    #[test]
+    fn navidrome_playlist_items_store_only_durable_account_and_song_ids() {
+        let (directory,store)=test_store("navidrome-durable");let mut item=local_item("local.flac","Track");
+        item.media_locator=MediaLocator::Navidrome{connection_id:"TEMPORARY_SESSION".into(),account_id:Some("a".repeat(64)),song_id:"song-a".into()};
+        let playlist=store.create_with_items("Navidrome",vec![item]).unwrap();
+        let raw=fs::read_to_string(directory.join(PLAYLISTS_FILE_NAME)).unwrap();assert!(!raw.contains("TEMPORARY_SESSION"));
+        let reread=store.get(&playlist.id).unwrap();assert!(matches!(&reread.items[0].media_locator,MediaLocator::Navidrome{connection_id,..} if connection_id.is_empty()));
+        let mut invalid=local_item("local.flac","Invalid");invalid.media_locator=MediaLocator::Navidrome{connection_id:"temporary".into(),account_id:None,song_id:"song-a".into()};
+        assert!(store.add_items(&playlist.id,vec![invalid]).is_err());assert_eq!(store.get(&playlist.id).unwrap().items.len(),1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
 }

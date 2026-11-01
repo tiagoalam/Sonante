@@ -34,6 +34,14 @@ export function localCatalogErrorKey(error: string): "localBrowser.catalogUnsupp
     ? "localBrowser.catalogReadUnavailable" : null;
 }
 
+// A retry reads the current catalog only; it cannot admit recovery, rebuild a
+// mirror, bypass a writer or make an unavailable playback engine ready.
+export function canRetryLocalCatalog(state: LocalAlbumCatalogState, updating: boolean, available: boolean): boolean {
+  return !!state.error && state.error !== "SOURCE_AVAILABILITY_UNSUPPORTED_FORMAT"
+    && available && !updating && !state.loading && !state.mpdBusy && !state.saveBlocked
+    && !state.manualCheckPlayback;
+}
+
 const MPD_CATALOG_BUSY = "Biblioteca local em atualização no MPD; tente novamente após a atualização.";
 
 export function localCatalogActivity(

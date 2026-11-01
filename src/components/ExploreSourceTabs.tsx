@@ -3,8 +3,8 @@ import { useTranslation } from "react-i18next";
 import { LibrarySourceTabs } from "./LibrarySourceTabs";
 import type { ExploreSource } from "../utils/exploreNavigation";
 
-export const ExploreSourceTabs: React.FC<{ source: ExploreSource; onChange: (source: ExploreSource) => void }> = ({ source, onChange }) => {
+export const ExploreSourceTabs: React.FC<{ source: ExploreSource; onChange: (source: ExploreSource) => void; sources?: readonly ExploreSource[] }> = ({ source, onChange, sources }) => {
   const { t } = useTranslation();
-  return <LibrarySourceTabs source={source} onChange={onChange} idPrefix="explore-source"
-    label={t("explore.sourceTabs")} labels={{ local: t("explore.sources.local"), plex: t("explore.sources.plex") }} />;
+  return <LibrarySourceTabs source={source} onChange={onChange} idPrefix="explore-source" sources={sources}
+    label={t("explore.sourceTabs")} labels={{ local: t("explore.sources.local"), plex: t("explore.sources.plex"), navidrome: t("explore.sources.navidrome") }} />;
 };

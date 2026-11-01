@@ -88,12 +88,12 @@ test("actual Plex Connect and sidebar handlers choose each opening independently
   assert.equal(f.effects.opened, true); assert.equal(f.effects.page, "plex");
   f.effects.opened = false;
   f.click(normal);
-  assert.equal(f.effects.opened, true); assert.equal(f.effects.page, "general");
+  assert.equal(f.effects.opened, true); assert.equal(f.effects.page, "sources");
   f.run(f.proposal); await flush();
   assert.equal(f.effects.page, "local");
   f.effects.opened = false;
   f.click(normal);
-  assert.equal(f.effects.opened, true); assert.equal(f.effects.page, "general");
+  assert.equal(f.effects.opened, true); assert.equal(f.effects.page, "sources");
   for (const marker of [plex, normal]) {
     f.effects.busy = true; f.effects.opened = false; f.effects.page = "audio";
     f.click(marker);

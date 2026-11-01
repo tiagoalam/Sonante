@@ -154,19 +154,19 @@ test("actual guarded player handler persists only a resolved destination, not co
   const body = source.match(/const navigateFromPlayer = \(view: "album" \| "artist"\) => \{([\s\S]*?)\n  \};/)?.[1];
   assert.ok(body);
   for (const [kind, view, expected] of [["local", "artist", "local"], ["plex", "artist", "plex"],
-    ["local", "album", "local"], ["plex", "album", "plex"], [null, "album", null]]) {
+    ["local", "album", "local"], ["plex", "album", "plex"], ["navidrome", "album", "navidrome"], ["navidrome", "artist", "navidrome"], [null, "album", null]]) {
     const state = preference("playlists");
     state.controller.restore(config);
     const media = kind === "local" ? { kind, uri: "Source/Album/one.flac", queue_index: 0 }
-      : kind === "plex" ? { kind, server_id: "server", part_key: "/library/parts/1/file.flac", queue_index: 0 } : null;
+      : kind === "plex" ? { kind, server_id: "server", part_key: "/library/parts/1/file.flac", queue_index: 0 } : kind === "navidrome" ? {kind,connection_id:"session",song_id:"song",queue_index:0} : null;
     let session = null;
-    const handler = new Function("playbackStatus", "mainSectionPreference", "playerNavigationRequests", "localCatalog", "plexService", "audioService",
+    const handler = new Function("playbackStatus", "mainSectionPreference", "playerNavigationRequests", "localCatalog", "plexService", "audioService", "navidromeService",
       "setPlayerNavigationError", "setPlayerNavigation", "visitPlayerTarget", "centralSection", `return view => {${body}};`)(
       { current_media: media, artist: "Artist" }, state.controller, new PlayerNavigationRequests(), {
         loaded: true, albums: [{ id: "one", folder_path: "Source/Album", source_id: "Source", artist: "Artist", discs: [] }],
       }, { resolvePlayerNavigation: async input => ({ media: input, navigation: {
         album: { rating_key: "album-1", artist_rating_key: "artist-1" }, artist_rating_key: "artist-1", artist_name: "Artist",
-      } }) }, { getLocalAlbumTracks: async () => [{ tracks: [{ item_type: "file", path: "Source/Album/one.flac" }] }] },
+      } }) }, { getLocalAlbumTracks: async () => [{ tracks: [{ item_type: "file", path: "Source/Album/one.flac" }] }] }, {resolvePlayerNavigation:async media=>({...media,account_id:"a".repeat(64),album_id:"album",artist_id:"artist"})},
       () => {}, update => { session = update(session); }, visitPlayerTarget, "playlists");
     handler(view);
     for (let i = 0; i < 4; i++) await Promise.resolve();

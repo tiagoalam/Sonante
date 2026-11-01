@@ -1,3 +1,4 @@
+import * as musicSources from "./musicSources.ts";
 import * as appearanceModel from './appearance.ts';
 import * as frontendDiagnostics from "./frontendDiagnostics.ts";
 import test from "node:test";
@@ -22,17 +23,17 @@ const base = { first_run: true, audio_output_type: "pipewire", alsa_device: "def
 const devices = ["hw:CARD=A,DEV=0", "hw:CARD=B,DEV=0", "hw:CARD=C,DEV=0"].map((id, i) => ({ id, name: `Fixture DAC ${i + 1}` }));
 const server = (name = "Living room", id = "fixture-server") => ({ name, client_identifier: id,
   chosen_uri: "http://192.0.2.12:32400", connections: [{ uri: "http://192.0.2.12:32400", local: true, address: "192.0.2.12", port: 32400 }] });
-const connected = { ...base, plex_token: "fixture-token", plex_server_id: "fixture-server", plex_server_name: "Living room", plex_url: server().chosen_uri };
+const connected = { ...base, sources:{local:true,plex:true,navidrome:false}, plex_token: "fixture-token", plex_server_id: "fixture-server", plex_server_name: "Living room", plex_url: server().chosen_uri };
 function nodes(tree) {
   if (!React.isValidElement(tree)) return Array.isArray(tree) ? tree.flatMap(nodes) : [];
-  return [tree, ...nodes(tree.props.children)];
+  return [tree, ...nodes(tree.type?.name === "SourceCards" ? tree.type(tree.props) : tree.props.children)];
 }
 const text = tree => React.isValidElement(tree) ? text(tree.props.children) : Array.isArray(tree) ? tree.map(text).join("") : typeof tree === "string" || typeof tree === "number" ? String(tree) : "";
 const find = (tree, predicate) => { const value = nodes(tree).find(predicate); assert.ok(value, "Expected UI control exists"); return value; };
 const button = (f, label) => find(f.tree, node => node.type === "button" && text(node) === label);
 const mode = (f, id) => find(f.tree, node => node.type === "button" && text(node).includes(`settings.${id}Mode`));
 const selector = (f, suffix) => find(f.tree, node => node.type === "select" && node.props.id.endsWith(suffix));
-const sourceButton = (f, id) => find(f.tree, node => node.type === "button" && text(node).includes(`sidebar.${id}`));
+const sourceButton = (f, id) => find(f.tree, node => node.type === "button" && text(node).includes(`sources.names.${id}`));
 const diagram = f => find(f.tree, node => node.type?.name === "AudioSignalDiagram").props;
 const fixtures = [];
 test.afterEach(() => { fixtures.splice(0).reverse().forEach(f => f.dispose()); });
@@ -76,6 +77,12 @@ function wizard(overrides = {}) {
       async getServers() { calls.servers++; return overrides.getServers ? overrides.getServers() : overrides.servers ?? [server()]; },
     } },
   };
+  const cardExports = {};
+  const cardJs=ts.transpileModule(readFileSync(new URL("../components/SourceCards.tsx", import.meta.url),"utf8"),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+  new Function("require","exports",cardJs)(id=>id==="../utils/musicSources"?musicSources:dependencies[id],cardExports);
+  dependencies["./SourceCards"]=cardExports;
+  dependencies["../utils/musicSources"]=musicSources;
+  dependencies["./NavidromeConnectionSetting"]={NavidromeConnectionSetting:()=>null};
   const js = ts.transpileModule(source, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
   const exports = {};
   new Function("require", "exports", js)(id => { assert.ok(id in dependencies, `Unexpected import ${id}`); return dependencies[id]; }, exports);
@@ -164,8 +171,8 @@ test("source controls are semantic toggle buttons and all optional combinations 
   for (const [local, plex, total] of [[true, false, 5], [false, true, 5], [true, true, 6]]) {
     const f = audioWizard({ config: plex ? connected : base });
     next(f); const localToggle = sourceButton(f, "local"), plexToggle = sourceButton(f, "plex");
-    assert.equal(localToggle.props.type, "button"); assert.equal(localToggle.props["aria-pressed"], true);
-    assert.equal(plexToggle.props.type, "button"); assert.equal(plexToggle.props["aria-pressed"], false);
+    assert.equal(localToggle.props.type, "button"); assert.equal(localToggle.props["aria-checked"], true);
+    assert.equal(plexToggle.props.type, "button"); assert.equal(plexToggle.props["aria-checked"], false);
     assert.equal(nodes(f.tree).filter(node => node.type === "input" && node.props.type === "checkbox").length, 0);
     if (!local) { localToggle.props.onClick(); f.render(); }
     if (plex) { sourceButton(f, "plex").props.onClick(); f.render(); }
@@ -336,17 +343,17 @@ test("PIN creation, browser and polling failures are translated, cancelable and 
   assert.equal(f.calls.servers, 0); button(f, "settings.cancel").props.onClick(); f.render(); assert.equal(f.timers.size, 0);
 });
 
-test("retained configuration is reviewed truthfully and an incomplete saved Plex reference cannot be submitted", async () => {
+test("retained Plex credentials remain saved when the wizard disables Plex", async () => {
   const f = audioWizard({ config: { ...connected, local_folders: ["/fixture/retained"] } });
   selectSources(f, true, false); next(f);
-  assert.match(text(f.tree), /wizard.connected.*Living room/);
+  assert.match(text(f.tree), /wizard.disabled/);
   await button(f, "wizard.start").props.onClick();
   assert.deepEqual(f.calls.finished[0].local_folders, ["/fixture/retained"]);
   assert.equal(f.calls.finished[0].plex_url, connected.plex_url); f.dispose();
   const incomplete = audioWizard({ config: { ...connected, plex_server_id: null } }); selectSources(incomplete, true, false); next(incomplete);
-  assert.match(text(incomplete.tree), /wizard.plexNotReady/);
-  assert.equal(button(incomplete, "wizard.start").props.disabled, true);
-  await button(incomplete, "wizard.start").props.onClick(); assert.equal(incomplete.calls.saves.length, 0);
+  assert.match(text(incomplete.tree), /wizard.disabled/);
+  assert.equal(button(incomplete, "wizard.start").props.disabled, false);
+  await button(incomplete, "wizard.start").props.onClick(); assert.equal(incomplete.calls.saves.length, 1); assert.equal(incomplete.calls.saves[0].sources.plex, false); assert.equal(incomplete.calls.saves[0].plex_token, connected.plex_token);
 });
 
 
@@ -355,18 +362,18 @@ test("reopened collection wizard prefills existing sources, cancel/reopen is rea
   const before=JSON.stringify(existing);let cancelled=0;
   for(let i=0;i<2;i++){
     const f=audioWizard({config:existing,onCancel(){cancelled++;}});
-    assert.equal(sourceButton(f,"local").props["aria-pressed"],true);assert.equal(sourceButton(f,"plex").props["aria-pressed"],true);
+    assert.equal(sourceButton(f,"local").props["aria-checked"],true);assert.equal(sourceButton(f,"plex").props["aria-checked"],true);
     next(f);assert.match(text(f.tree),/fixture\/existing/);
     await button(f,"settings.addFolder").props.onClick();f.render();assert.match(text(f.tree),/fixture\/local/);
     button(f,"settings.cancel").props.onClick();assert.equal(cancelled,i+1);assert.equal(f.calls.saves.length,0);assert.equal(f.calls.finished.length,0);assert.equal(f.calls.servers,0);assert.equal(f.calls.reads.length,0);
     f.dispose();assert.equal(JSON.stringify(existing),before);
   }
-  const onlyPlex=audioWizard({config:{...connected,first_run:false,local_folders:[]},onCancel(){}});
-  assert.equal(sourceButton(onlyPlex,"local").props["aria-pressed"],false);assert.equal(sourceButton(onlyPlex,"plex").props["aria-pressed"],true);
+  const onlyPlex=audioWizard({config:{...connected,sources:{local:false,plex:true,navidrome:false},first_run:false,local_folders:[]},onCancel(){}});
+  assert.equal(sourceButton(onlyPlex,"local").props["aria-checked"],false);assert.equal(sourceButton(onlyPlex,"plex").props["aria-checked"],true);
   next(onlyPlex);next(onlyPlex);await button(onlyPlex,"wizard.start").props.onClick();
   assert.equal(onlyPlex.calls.finished.length,1);assert.equal(onlyPlex.calls.finished[0].plex_token,connected.plex_token);assert.deepEqual(onlyPlex.calls.finished[0].local_folders,[]);assert.equal(onlyPlex.calls.finished[0].audio_output_type,connected.audio_output_type);onlyPlex.dispose();
   const operation={id:"fixture-operation",phase:"preparing"};let accepted;
-  const f=audioWizard({config:{...base,first_run:false},onCancel(){},save:async()=>({status:"accepted",operation}),onSaveAccepted(value){accepted=value;}});
+  const f=audioWizard({config:{...base,sources:{local:true,plex:false,navidrome:false},first_run:false},onCancel(){},save:async()=>({status:"accepted",operation}),onSaveAccepted(value){accepted=value;}});
   next(f);await button(f,"settings.addFolder").props.onClick();f.render();next(f);
   await button(f,"wizard.start").props.onClick();assert.equal(accepted,operation);assert.equal(f.calls.finished.length,0);assert.equal(f.calls.saves[0].first_run,false);f.dispose();
 });
@@ -389,7 +396,7 @@ test("appearance is the first initial step; reconfiguration starts at Sources by
  back(f);back(f);assert.match(text(f.tree),/wizard.appearanceTitle/);assert.equal(f.calls.focused.at(-1),"wizard.appearanceTitle");
  const reopened=wizard({config:{...connected,first_run:false,local_folders:["/fixture/retained"]},onCancel(){}});
  assert.match(text(reopened.tree),/wizard.step2Title/);assert.match(text(reopened.tree),/wizard.step:3\/6/);assert.equal(reopened.calls.focused.at(-1),"wizard.step2Title");
- assert.equal(sourceButton(reopened,"local").props["aria-pressed"],true);assert.equal(sourceButton(reopened,"plex").props["aria-pressed"],true);
+ assert.equal(sourceButton(reopened,"local").props["aria-checked"],true);assert.equal(sourceButton(reopened,"plex").props["aria-checked"],true);
  back(reopened);assert.match(text(reopened.tree),/wizard.step1Title/);back(reopened);assert.match(text(reopened.tree),/wizard.appearanceTitle/);
 });
 
@@ -426,4 +433,15 @@ test("confirmed first preferences enter the app while catalogue indexing remains
   assert.equal(indexed, false); assert.equal(f.calls.finished.length, 1);
   assert.equal(f.calls.finished[0].first_run, false);
   indexing.resolve(); await flush(); f.dispose();
+});
+
+
+test("Navidrome-only setup waits for a saved connection and saves the actual source switches", async () => {
+  const f=audioWizard();next(f);sourceButton(f,"local").props.onClick();f.render();sourceButton(f,"navidrome").props.onClick();f.render();next(f);
+  assert.equal(button(f,"wizard.next").props.disabled,true);
+  const setting=find(f.tree,node=>typeof node.props.onConfiguredChange==="function");
+  setting.props.onBusyChange(true);f.render();assert.equal(button(f,"wizard.back").props.disabled,true);
+  setting.props.onConfiguredChange(true);setting.props.onBusyChange(false);f.render();next(f);
+  assert.equal(button(f,"wizard.start").props.disabled,false);await button(f,"wizard.start").props.onClick();
+  assert.deepEqual(f.calls.saves[0].sources,{local:false,plex:false,navidrome:true});assert.equal(f.calls.servers,0);assert.equal(f.calls.pins,0);
 });

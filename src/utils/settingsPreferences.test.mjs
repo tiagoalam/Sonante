@@ -1,3 +1,4 @@
+import * as musicSources from "./musicSources.ts";
 import * as frontendDiagnostics from "./frontendDiagnostics.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -39,6 +40,8 @@ function component(name, dependencies = {}) {
     react: { ...hooks, default: hooks, __esModule: true }, "react/jsx-runtime": jsx,
     "../utils/frontendDiagnostics": frontendDiagnostics,
     "lucide-react": icons,
+    "../utils/musicSources": musicSources,
+    "./SourcesSettings": { SourcesSettings: function SourcesSettings() {} },
     "react-i18next": { useTranslation: () => ({ t, i18n: { language: "en", changeLanguage() {} } }) },
   };
   const js = ts.transpileModule(source(name), { compilerOptions: {
@@ -60,7 +63,7 @@ function component(name, dependencies = {}) {
 function nodes(tree) {
   if (!React.isValidElement(tree)) return Array.isArray(tree) ? tree.flatMap(nodes) : [];
   const children = tree.type?.name === "SettingsPages"
-    ? [tree.props.general, tree.props.audio, tree.props.local, tree.props.plex] : tree.props.children;
+    ? [tree.props.sources, tree.props.general, tree.props.audio] : tree.type?.name === "SourcesSettings" ? [tree.props.local, tree.props.plex] : tree.props.children;
   return [tree, ...nodes(children)];
 }
 const find = (tree, predicate) => { const result = nodes(tree).find(predicate); assert.ok(result, "Expected control exists"); return result; };
@@ -86,6 +89,7 @@ async function modal(overrides = {}) {
   const plexService = { async getServers() { return []; }, async createPin() { calls.pins++; return { id: 7, code: "fixture", auth_url: "https://example.invalid" }; }, async openExternalUrl() {} };
   const h = component("SettingsModal", {
     "./SettingsPages": { SettingsPages: function SettingsPages() {} },
+    "./ScrobblingSetting": { ScrobblingSetting: () => null },
     "./AppearanceSetting": { AppearanceSetting: function AppearanceSetting() {} },
     "./UpnpSetting": { UpnpSetting: function UpnpSetting() {} },
     "./LocalIndexCoverage": { LocalIndexCoverageStatus: function LocalIndexCoverageStatus() {} },
@@ -119,31 +123,31 @@ globalThis.document = { activeElement: null };
 globalThis.HTMLElement = class {};
 test.after(() => { globalThis.document = previousDocument; globalThis.HTMLElement = previousHTMLElement; });
 
-test("four mounted pages share one scroll panel and support keyboard navigation", () => {
+test("three mounted pages share one scroll panel and support keyboard navigation", () => {
   const h = component("SettingsPages");
-  const contents = Object.fromEntries(["general", "audio", "local", "plex"].map(id => [id, React.createElement("input", { defaultValue: id })]));
+  const contents = Object.fromEntries(["sources", "general", "audio"].map(id => [id, React.createElement("input", { defaultValue: id })]));
   let tree = h.render(contents);
   const panels = () => nodes(tree).filter(node => node.props.role === "tabpanel");
   const tabs = () => nodes(tree).filter(node => node.props.role === "tab");
-  assert.equal(panels().length, 4);
-  assert.deepEqual(panels().map(node => node.props.hidden), [false, true, true, true]);
+  assert.equal(panels().length, 3);
+  assert.deepEqual(panels().map(node => node.props.hidden), [false, true, true]);
   const retained = panels().map(node => node.props.children[1]);
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 3; i++) {
     tabs()[i].props.onClick(); tree = h.render(contents);
-    assert.deepEqual(panels().map(node => node.props.hidden), [0, 1, 2, 3].map(n => n !== i));
+    assert.deepEqual(panels().map(node => node.props.hidden), [0, 1, 2].map(n => n !== i));
     assert.deepEqual(panels().map(node => node.props.children[1]), retained);
     assert.equal(tabs()[i].props.tabIndex, 0);
     assert.equal(panels()[i].props["aria-labelledby"], tabs()[i].props.id);
   }
   let focused = false, prevented = false;
   tabs()[0].props.ref({ focus() { focused = true; } });
-  tabs()[3].props.onKeyDown({ key: "ArrowDown", preventDefault() { prevented = true; } });
+  tabs()[2].props.onKeyDown({ key: "ArrowDown", preventDefault() { prevented = true; } });
   tree = h.render(contents);
   assert.equal(panels()[0].props.hidden, false);
   assert.equal(focused && prevented, true);
   tabs()[0].props.onKeyDown({ key: "End", preventDefault() {} }); tree = h.render(contents);
-  assert.equal(panels()[3].props.hidden, false);
-  tabs()[3].props.onKeyDown({ key: "Home", preventDefault() {} }); tree = h.render(contents);
+  assert.equal(panels()[2].props.hidden, false);
+  tabs()[2].props.onKeyDown({ key: "Home", preventDefault() {} }); tree = h.render(contents);
   assert.equal(panels()[0].props.hidden, false);
   const scroll = find(tree, node => node.props.className?.includes("overflow-y-auto"));
   scroll.props.ref.current = { scrollTop: 200 };
@@ -164,7 +168,7 @@ test("audio draft survives page changes and saving retains existing controls and
   find(tree, node => node.type === "input" && node.props["aria-label"] === "settings.dop").props.onChange({ target: { checked: true } }); tree = f.render();
   for (const id of ["plex", "local", "general", "audio"]) {
     const p = pages.render(pageProps(tree));
-    button(p, `settings.pages.${id}`).props.onClick();
+    button(p, id === "local" || id === "plex" ? "sources.title" : `settings.pages.${id}`).props.onClick();
     tree = f.render();
   }
   assert.equal(select(tree, "-buffer").props.value, 32768);
@@ -226,7 +230,7 @@ test("explicit availability request survives page changes without another reques
   const request = button(f.tree(), "settings.deviceAvailability.check").props.onClick();
   f.render();
   for (const id of ["local", "plex", "audio"]) {
-    button(pages.render(pageProps(f.tree())), `settings.pages.${id}`).props.onClick(); f.render();
+    button(pages.render(pageProps(f.tree())), id === "local" || id === "plex" ? "sources.title" : `settings.pages.${id}`).props.onClick(); f.render();
   }
   assert.equal(f.calls.availability, 1);
   f.query.resolve([{ id: base.alsa_device, state: "available" }]); await request; await flush();
@@ -264,7 +268,7 @@ test("Plex PIN polling stays mounted across page changes and is cleaned up once"
     await button(f.tree(), "settings.connectPlex").props.onClick(); f.render();
     assert.equal(started.length, 1);
     for (const id of ["general", "audio", "local", "plex", "audio", "plex"]) {
-      button(pages.render(pageProps(f.tree())), `settings.pages.${id}`).props.onClick(); f.render();
+      button(pages.render(pageProps(f.tree())), id === "local" || id === "plex" ? "sources.title" : `settings.pages.${id}`).props.onClick(); f.render();
     }
     assert.equal(f.calls.pins, 1); assert.equal(started.length, 1); assert.equal(cleared.length, 0);
     assert.ok(nodes(f.tree()).some(node => text(node).includes("settings.waitingBrowser")));
@@ -600,7 +604,7 @@ test("inconclusive reads and configured ownership cannot claim that MPD is using
   assert.ok(!text(f.tree()).includes("private raw ALSA diagnostic"));
   const pages = component("SettingsPages");
   for (const id of ["local", "plex", "audio"]) {
-    button(pages.render(pageProps(f.tree())), `settings.pages.${id}`).props.onClick(); f.render();
+    button(pages.render(pageProps(f.tree())), id === "local" || id === "plex" ? "sources.title" : `settings.pages.${id}`).props.onClick(); f.render();
   }
   assert.equal(f.calls.availability, 1); pages.dispose(); f.h.dispose();
 });
@@ -657,7 +661,7 @@ test("initial page survives config loading, tab selection survives rerenders, an
     const check = expected => {
       const tabs = nodes(tree).filter(node => node.props.role === "tab");
       const panels = nodes(tree).filter(node => node.props.role === "tabpanel");
-      assert.equal(tabs.length, 4); assert.equal(panels.length, 4);
+      assert.equal(tabs.length, 3); assert.equal(panels.length, 3);
       for (let i = 0; i < tabs.length; i++) {
         const active = tabs[i].props.id.endsWith(`-tab-${expected}`);
         assert.equal(tabs[i].props["aria-selected"], active);
@@ -667,7 +671,7 @@ test("initial page survives config loading, tab selection survives rerenders, an
         assert.equal(panels[i].props["aria-labelledby"], tabs[i].props.id);
       }
     };
-    check(initialPage ?? "general");
+    check(!initialPage || ["local", "plex", "navidrome"].includes(initialPage) ? "sources" : initialPage);
     const retained = nodes(tree).filter(node => node.props.role === "tabpanel").map(node => node.props.children[1]);
     button(tree, "settings.pages.audio").props.onClick();
     tree = pages.render(pageProps(f.tree())); check("audio");
@@ -698,4 +702,24 @@ test('local Settings keeps the all-folder check and omits the technical coverage
  assert.doesNotMatch(text,/LocalIndexCoverageStatus/);
  assert.match(text,/audioService\.checkLocalLibrary/);
  assert.match(text,/t\("settings\.checkNew"\)/);
+});
+
+
+test("source switches save without restarting audio, changing folders or deleting credentials", async () => {
+  const config={...base, plex_token:'fixture-token'}; const f=await modal({config});
+  const panel=pageProps(f.tree()).sources;
+  panel.props.onChange(musicSources.withSourceEnabled(config,'plex',false));f.render();
+  await button(f.tree(),'settings.save').props.onClick();
+  assert.equal(f.calls.save.length,1);assert.equal(f.calls.save[0].sources.plex,false);
+  assert.equal(f.calls.save[0].plex_token,config.plex_token);assert.deepEqual(f.calls.save[0].local_folders,config.local_folders);
+  assert.deepEqual(f.calls.started,[false]);assert.equal(f.calls.scans,0);assert.equal(f.calls.local.length,0);f.h.dispose();
+});
+test("refusing to disable a queued source preserves its complete settings draft and playback", async () => {
+  const alerts=[]; const previous=globalThis.alert;globalThis.alert=message=>alerts.push(message);
+  const f=await modal({save:async()=>{throw 'SOURCE_IN_QUEUE';}});
+  try{const draft=musicSources.withSourceEnabled(base,'local',false);pageProps(f.tree()).sources.props.onChange(draft);f.render();
+    await button(f.tree(),'settings.save').props.onClick();f.render();
+    assert.deepEqual(alerts,['sources.inQueue']);assert.equal(f.calls.closed,0);assert.equal(f.calls.config,1);
+    assert.equal(pageProps(f.tree()).sources.props.config.sources.local,false);assert.equal(f.calls.scans,0);
+  }finally{f.h.dispose();globalThis.alert=previous;}
 });
