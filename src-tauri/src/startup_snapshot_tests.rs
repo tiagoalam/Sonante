@@ -92,6 +92,28 @@ fn startup_without_watch_keeps_complete_revalidation() {
     scene.mutate("link");assert!(snapshot.revalidate().is_err());
 }
 #[test]
+fn startup_inventory_refuses_additions_independently_of_directory_timestamps() {
+    for watched in [false,true] {
+        let scene=Scene::new();
+        let mut snapshot=ReadonlyMirrorSnapshot::finish_startup(
+            ReadonlyMirrorSnapshot::capture(&scene.library).unwrap(),
+            |value|if watched {MirrorChanges::open(value)} else {Err(())},
+        ).unwrap();
+        scene.mutate("addition");
+        // Model a filesystem reporting the same directory stamp: make stamps
+        // agree without changing the captured entry names. No clock/sleep race.
+        for (relative,(stamp,target)) in &mut snapshot.topology {
+            if target.is_none() {*stamp=crate::source_identity::ReadonlyStamp::of(
+                &fs::symlink_metadata(scene.library.join(relative)).unwrap());}
+        }
+        let names=snapshot.startup_names.take();
+        assert!(snapshot.revalidate_full().is_ok(),"the stamp-only check misses this addition");
+        snapshot.startup_names=names;
+        assert!(snapshot.revalidate_startup_names().is_err());
+        assert!(snapshot.revalidate_full().is_err());
+    }
+}
+#[test]
 fn startup_proof_refuses_later_mutation_and_watch_loss_at_every_admission() {
     for kind in ["link","addition","removal","directory","marker"] {
         let scene=Scene::new();let snapshot=ReadonlyMirrorSnapshot::open_for_startup(&scene.library).unwrap();
