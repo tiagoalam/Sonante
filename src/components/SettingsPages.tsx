@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 export type SettingsPage = "sources" | "general" | "audio" | "local" | "plex" | "navidrome";
 
 // All panels stay mounted: changing pages must not reset drafts or async work.
-export function SettingsPages({ initialPage = "sources", general, audio, sources }: { general: React.ReactNode; audio: React.ReactNode; sources: React.ReactNode; initialPage?: SettingsPage }) {
+export function SettingsPages({ initialPage = "general", general, audio, sources }: { general: React.ReactNode; audio: React.ReactNode; sources: React.ReactNode; initialPage?: SettingsPage }) {
   const { t } = useTranslation();
   // Consume the destination once on mount; polling must not override user navigation.
   const [active, setActive] = useState<SettingsPage>(["local", "plex", "navidrome"].includes(initialPage) ? "sources" : initialPage);
@@ -13,8 +13,8 @@ export function SettingsPages({ initialPage = "sources", general, audio, sources
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
   const scroll = useRef<HTMLDivElement>(null);
   const pages = [
-    { id: "sources" as const, label: t("sources.title"), icon: Server, content: sources },
     { id: "general" as const, label: t("settings.pages.general"), icon: Languages, content: general },
+    { id: "sources" as const, label: t("sources.title"), icon: Server, content: sources },
     { id: "audio" as const, label: t("settings.pages.audio"), icon: Radio, content: audio },
   ];
   function select(index: number, focus = false) {

@@ -171,15 +171,16 @@ function effect(fragment){let out;const visit=n=>{if(ts.isCallExpression(n)&&n.e
 
 test("existing Plex album query publishes error or data once and drops disposed/generation-obsolete responses without another query", async () => {
   for(const scenario of ["success","error","disposed","generation"]){
-    const calls=[],pending=deferred(),status=[],published=[],identity={},generation={current:0},conn={};
+    const calls=[],pending=deferred(),status=[],published=[],sourceStates=[],identity={},generation={current:0},conn={};
     const setters=["setAlbums","setCollections","setHasCollections","setLoading","setActiveAlbum","setActiveCollection","setActiveArtist","setFallbackPlexArtist","setSelectedPlexDecade","setSelectedPlexYear","setSelectedPlexUnknownYear","setSelectedPlexGenre","setSearchQuery","setSearchResults","setPlexViewMode"];
     const values=setters.map(name=>name==="setAlbums"?v=>published.push(v):()=>{});
     const resetScope = {}, reset = bindCollectionReset(resetScope);
-    const run=new Function("clearCollection","centralSection","plexArea","selectedLibrary","plexLibrariesIdentity","plexConnectionIdentity","plexBrowserIdentity","plexLibraryRequestGenerationRef","setPlexAlbumLoad","plexService","plexCatalog","plexAlbumLoad","logError",...setters,`return (${effect("plexCatalog.loadLibrary(selectedLibrary")});`)(resetScope.clearCollection,
-      "plex","library",{key:"exact-library"},conn,conn,identity,generation,v=>status.push(v),{getCollections:()=>Promise.resolve([])},{loadLibrary:(...a)=>{calls.push(a);return pending.promise;}},null,()=>{},...values);
+    const run=new Function("clearCollection","centralSection","plexArea","selectedLibrary","plexLibrariesIdentity","plexConnectionIdentity","plexBrowserIdentity","plexLibraryRequestGenerationRef","setPlexAlbumLoad","plexService","plexCatalog","plexAlbumLoad","logError","sourceReadiness",...setters,`return (${effect("plexCatalog.loadLibrary(selectedLibrary")});`)(resetScope.clearCollection,
+      "plex","library",{key:"exact-library"},conn,conn,identity,generation,v=>status.push(v),{getCollections:()=>Promise.resolve([])},{loadLibrary:(...a)=>{calls.push(a);return pending.promise;}},null,()=>{},{report:(...args)=>sourceStates.push(args)},...values);
     const cleanup=run();reset.assertReset();assert.deepEqual(calls,[[{key:"exact-library"}]]);assert.equal(status[0].phase,"loading");
     if(scenario==="disposed")cleanup();if(scenario==="generation")generation.current++;
     if(scenario==="error")pending.reject(Error("DO_NOT_EXPOSE"));else pending.resolve([plex("exact")]);await flush();
+    assert.deepEqual(sourceStates,scenario==="success"?[["plex","ready"]]:scenario==="error"?[["plex","error"]]:[]);
     assert.equal(calls.length,1);assert.equal(status.at(-1).phase,scenario==="success"?"ready":scenario==="error"?"error":"loading");
     if(scenario==="success")assert.equal(published.at(-1)[0].rating_key,"exact");else assert.deepEqual(published,[]);cleanup();
   }

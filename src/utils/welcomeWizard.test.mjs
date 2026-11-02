@@ -63,6 +63,7 @@ function wizard(overrides = {}) {
     "react-i18next": { useTranslation: () => ({ t, i18n: { language: "en", changeLanguage() {} } }) },
     "./AudioSignalDiagram": { AudioSignalDiagram: function AudioSignalDiagram() {} },
     "./AppearanceSetting": appearanceExports,
+    "./ExperimentalFeatures": { ExperimentalFeaturesSetting: function ExperimentalFeaturesSetting() {} },
     "../utils/deviceAvailability": { createDeviceAvailabilityQuery, shouldCheckContextualDevice },
     "../utils/welcomeWizard": { wizardPlexConnectionReady, wizardSaveErrorKey },
     "../services/audio": { audioService: { async pickDirectory() { calls.pickers++; return "/fixture/local"; } } },
@@ -444,4 +445,17 @@ test("Navidrome-only setup waits for a saved connection and saves the actual sou
   setting.props.onConfiguredChange(true);setting.props.onBusyChange(false);f.render();next(f);
   assert.equal(button(f,"wizard.start").props.disabled,false);await button(f,"wizard.start").props.onClick();
   assert.deepEqual(f.calls.saves[0].sources,{local:false,plex:false,navidrome:true});assert.equal(f.calls.servers,0);assert.equal(f.calls.pins,0);
+});
+
+
+test("wizard summary offers one opt-in for both beta tools and persists the chosen value",async()=>{
+ for(const enabled of [true,false]){
+  const f=audioWizard();selectSources(f,true,false);next(f);
+  const option=find(f.tree,node=>node.type?.name==='ExperimentalFeaturesSetting');assert.equal(option.props.enabled,false);option.props.onChange(enabled);f.render();
+  await button(f,'wizard.start').props.onClick();assert.equal(f.calls.saves.length,1);assert.equal(f.calls.saves[0].experimental_features,enabled);assert.equal(f.calls.finished[0].experimental_features,enabled);assert.equal(f.calls.saves[0].first_run,false);f.dispose();
+ }
+});
+test("reopening the wizard preserves a previously selected experimental preference",async()=>{
+ const f=audioWizard({config:{...base,first_run:false,sources:{local:true,plex:false,navidrome:false},experimental_features:true},onCancel:()=>{}});next(f);next(f);
+ const option=find(f.tree,node=>node.type?.name==='ExperimentalFeaturesSetting');assert.equal(option.props.enabled,true);f.dispose();
 });

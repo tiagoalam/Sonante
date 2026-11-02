@@ -91,7 +91,9 @@ async function modal(overrides = {}) {
     "./SettingsPages": { SettingsPages: function SettingsPages() {} },
     "./ScrobblingSetting": { ScrobblingSetting: () => null },
     "./AppearanceSetting": { AppearanceSetting: function AppearanceSetting() {} },
+    "./ExperimentalFeatures": { ExperimentalFeaturesSetting: function ExperimentalFeaturesSetting() {} },
     "./UpnpSetting": { UpnpSetting: function UpnpSetting() {} },
+    "./RemoteControlSetting": { RemoteControlSetting: function RemoteControlSetting() {} },
     "./LocalIndexCoverage": { LocalIndexCoverageStatus: function LocalIndexCoverageStatus() {} },
     "./AudioSignalDiagram": { AudioSignalDiagram: function AudioSignalDiagram() {} },
     "../services/config": { configService }, "../services/audio": { audioService }, "../services/plex": { plexService },
@@ -671,7 +673,7 @@ test("initial page survives config loading, tab selection survives rerenders, an
         assert.equal(panels[i].props["aria-labelledby"], tabs[i].props.id);
       }
     };
-    check(!initialPage || ["local", "plex", "navidrome"].includes(initialPage) ? "sources" : initialPage);
+    check(!initialPage ? "general" : ["local", "plex", "navidrome"].includes(initialPage) ? "sources" : initialPage);
     const retained = nodes(tree).filter(node => node.props.role === "tabpanel").map(node => node.props.children[1]);
     button(tree, "settings.pages.audio").props.onClick();
     tree = pages.render(pageProps(f.tree())); check("audio");
@@ -722,4 +724,21 @@ test("refusing to disable a queued source preserves its complete settings draft 
     assert.deepEqual(alerts,['sources.inQueue']);assert.equal(f.calls.closed,0);assert.equal(f.calls.config,1);
     assert.equal(pageProps(f.tree()).sources.props.config.sources.local,false);assert.equal(f.calls.scans,0);
   }finally{f.h.dispose();globalThis.alert=previous;}
+});
+
+
+test("experimental tools opt in and out through General Save without restarting audio, scanning or altering sources", async () => {
+  for (const enabled of [true, false]) {
+    const config={...base, experimental_features: !enabled, plex_token:'fixture-token'};
+    const f=await modal({config});
+    const option=find(pageProps(f.tree()).general,node=>node.type?.name==='ExperimentalFeaturesSetting');
+    assert.equal(option.props.enabled,!enabled); option.props.onChange(enabled); f.render();
+    await button(f.tree(),'settings.save').props.onClick();
+    assert.equal(f.calls.save.length,1);assert.equal(f.calls.save[0].experimental_features,enabled);
+    const {experimental_features,...rest}=f.calls.save[0];const {experimental_features:previous,...expected}=config;assert.deepEqual(rest,expected);
+    assert.deepEqual(f.calls.started,[false]);assert.deepEqual(f.calls.saved,[false]);assert.equal(f.calls.scans,0);assert.equal(f.calls.local.length,0);f.h.dispose();
+  }
+});
+test("legacy settings leave experimental tools disabled until explicitly enabled",async()=>{
+ const f=await modal();const option=find(pageProps(f.tree()).general,node=>node.type?.name==='ExperimentalFeaturesSetting');assert.equal(option.props.enabled,false);f.h.dispose();
 });

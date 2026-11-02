@@ -87,16 +87,17 @@ fn metadata(value: &serde_json::Value) -> Result<crate::smart_playlists::Album, 
     Ok(crate::smart_playlists::Album { id:a.id.clone(),title:a.title,artist:a.artist,genres,year:a.year,
         added_at:crate::smart_playlists::local_added(created.as_deref()),favorite_key:a.id,image:None })
 }
-pub(crate) async fn smart_catalog(id: &str) -> Result<Vec<crate::smart_playlists::Album>, String> {
-    let c = connection_for_account(id)?;
-    // Cache belongs to one live account. It is only populated by explicit smart-playlist work.
-    let mut cache = c.catalog.lock().await;
-    if let Some((at, albums)) = cache.as_ref().filter(|(at,_)| at.elapsed()<Duration::from_secs(30)) {
-        let _ = at;
-        if !c.active() { return Err(CHANGED.into()); }
-        return Ok(albums.clone());
-    }
-    let mut albums=Vec::new(); let mut ids=HashSet::new(); let mut offset=0; let mut expected=None;
+pub(super) struct CatalogSnapshot {
+    at: Instant,
+    smart: Vec<crate::smart_playlists::Album>,
+    presentation: Vec<api::Album>,
+}
+// Both projections come from the same complete, account-bound response pages.
+// No per-album request is needed for cover IDs or known track counts.
+async fn populate_catalog(c: &Connection, cache: &mut Option<CatalogSnapshot>) -> Result<(), String> {
+    if !c.active() { return Err(CHANGED.into()); }
+    if cache.as_ref().is_some_and(|cache|cache.at.elapsed()<Duration::from_secs(30)) { return Ok(()); }
+    let mut albums=Vec::new(); let mut presentation=Vec::new(); let mut ids=HashSet::new(); let mut offset=0; let mut expected=None;
     loop {
         if !c.active() { return Err(CHANGED.into()); }
         let (root,total)=api::request_counted(&c.client,&c.credentials,"getAlbumList2",&[("type","alphabeticalByName".into()),("size","72".into()),("offset",offset.to_string())]).await?;
@@ -106,7 +107,7 @@ pub(crate) async fn smart_catalog(id: &str) -> Result<Vec<crate::smart_playlists
         let rows=root.get("albumList2").filter(|v|v.is_object()).ok_or(PROTOCOL)?.get("album");
         let rows=match rows {None=>&[][..],Some(serde_json::Value::Array(rows)) if rows.len()<=72=>rows.as_slice(),_=>return Err(PROTOCOL.into())};
         let before=albums.len();
-        for row in rows { let a=metadata(row)?; if ids.insert(a.id.clone()) { albums.push(a); } }
+        for row in rows { let a=metadata(row)?; if ids.insert(a.id.clone()) { presentation.push(api::album(row)?); albums.push(a); } }
         offset+=rows.len();
         if albums.len()>100_000 { return Err(PROTOCOL.into()); }
         if rows.len()<72 || expected.is_some_and(|n|offset>=n) { break; }
@@ -114,7 +115,22 @@ pub(crate) async fn smart_catalog(id: &str) -> Result<Vec<crate::smart_playlists
     }
     if expected.is_some_and(|n|n!=albums.len()) { return Err(PROTOCOL.into()); }
     if !c.active() { return Err(CHANGED.into()); }
-    *cache=Some((Instant::now(),albums.clone())); Ok(albums)
+    *cache=Some(CatalogSnapshot {at:Instant::now(),smart:albums,presentation}); Ok(())
+}
+pub(crate) async fn smart_catalog(id: &str) -> Result<Vec<crate::smart_playlists::Album>, String> {
+    let c=connection_for_account(id)?;
+    let mut cache=c.catalog.lock().await;
+    populate_catalog(&c,&mut cache).await?;
+    if !c.active() {return Err(CHANGED.into());}
+    Ok(cache.as_ref().ok_or(PROTOCOL)?.smart.clone())
+}
+pub(super) async fn edition_catalog(connection_id: &str, account_id: &str) -> Result<Vec<api::Album>, String> {
+    let c=connection_for_account(account_id)?;
+    if c.credentials.connection_id!=connection_id {return Err(CHANGED.into());}
+    let mut cache=c.catalog.lock().await;
+    populate_catalog(&c,&mut cache).await?;
+    super::current(connection_id)?;
+    Ok(cache.as_ref().ok_or(PROTOCOL)?.presentation.clone())
 }
 pub(crate) async fn smart_favorites(id: &str) -> Result<Vec<String>, String> {
     let c=connection_for_account(id)?; let own=id.to_owned();
@@ -183,6 +199,21 @@ mod tests {
         let mut wrong = saved.clone(); assert!(bind_tracks(&mut wrong).is_err());
         assert_eq!(wrong[0].media_locator, saved[0].media_locator, "failed binding must not partly mutate the captured queue");
         *state().current.lock().unwrap() = previous;
+    }
+
+    #[tokio::test(flavor="current_thread")]
+    async fn edition_catalog_reuses_complete_album_metadata_without_track_requests_and_refuses_other_sessions() {
+        let c=Arc::new(fixture("editions","EDITION_SESSION"));let account=favorites::scope(&c.credentials);
+        let row=serde_json::json!({"id":"album","name":"Album","artist":"Artist","genre":"Jazz","coverArt":"al-cover","songCount":12,"year":1974});
+        *c.catalog.lock().await=Some(CatalogSnapshot {at:Instant::now(),smart:vec![metadata(&row).unwrap()],presentation:vec![api::album(&row).unwrap()]});
+        let previous=state().current.lock().unwrap().replace(c.clone());
+        let albums=edition_catalog("EDITION_SESSION",&account).await.unwrap();assert_eq!(albums.len(),1);assert_eq!(albums[0].cover_id.as_deref(),Some("al-cover"));assert_eq!(albums[0].song_count,Some(12));
+        let smart=smart_catalog(&account).await.unwrap();assert_eq!(smart[0].genres,vec!["Jazz"]);assert_eq!(smart[0].id,albums[0].id);
+        assert!(c.details.lock().unwrap().is_empty(),"catalog access cannot prepare or evict album playback");
+        assert!(edition_catalog("OLD_SESSION",&account).await.is_err());
+        assert!(edition_catalog("EDITION_SESSION",&"0".repeat(64)).await.is_err());
+        c.retire();assert!(edition_catalog("EDITION_SESSION",&account).await.is_err());
+        *state().current.lock().unwrap()=previous;
     }
 
 }

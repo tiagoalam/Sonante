@@ -270,7 +270,7 @@ test("Settings Cancel, X and Escape unmount edits and reopening loads persisted 
   assert.match(app, /onClose=\{\(\) => \{ setShowSettings\(false\); setLocalFoldersDraft\(null\); \}\}/);
   assert.match(app, /else if \(showSettings\) \{\s*setShowSettings\(false\);\s*setLocalFoldersDraft\(null\)/);
   assert.match(app, /e\.key === "Escape"[\s\S]*?else if \(showSettings\) \{\s*setShowSettings\(false\)/);
-  assert.match(app, /onClick=\{\(\) => \{ if \(!configSaveInProgressRef\.current\) \{ setSettingsInitialPage\("sources"\); setShowSettings\(true\); \} \}\}/);
+  assert.match(app, /onClick=\{\(\) => \{ if \(!configSaveInProgressRef\.current\) \{ setSettingsInitialPage\("general"\); setShowSettings\(true\); \} \}\}/);
   assert.match(modal, /Promise\.all\(\[configService\.getConfig\(\), configService\.getAudioDevices\(\)\]\)/);
   assert.match(modal, /setConfig\(initialDraft \?[^;]+: cfg\)/);
   const buttons = [...modal.matchAll(/<button\b[^>]*onClick=\{onClose\}[^>]*>([\s\S]*?)<\/button>/g)].map(match => match[1]);

@@ -27,6 +27,7 @@ function scope(){
  const s={loadingLibraries:false,plexLibrariesError:false,plexLibrariesIdentity:connection,plexConnectionIdentity:connection,
   selectedLibrary:{key:'1',title:'One'},plexBrowserIdentity:identity,plexBrowserIdentityRef:{current:identity},plexCatalogRetryRef:{current:null},
   plexAlbumLoad:{identity,phase:'error'},plexLibraryRequestGenerationRef:{current:0},plexCatalog:null,albums:[],attempt:0,
+  sourceReadiness:{report:(source,phase)=>{assert.equal(source,'plex');events.push(['source',phase])}},
   setPlexDiscoveryAttempt(fn){s.attempt=fn(s.attempt)},setPlexAlbumLoad(value){events.push(['load',value.phase]);s.plexAlbumLoad=value},setAlbums(value){events.push(['albums']);s.albums=value},logError(operation){events.push(['error',operation])}};
  return{s,events};
 }

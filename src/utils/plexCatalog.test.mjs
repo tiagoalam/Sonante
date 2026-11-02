@@ -41,9 +41,10 @@ test("actual catalog effect preserves valid data on failure and drops library/lo
     const pending = new Promise((a, b) => { resolve = a; reject = b; });
     const lastValid = [{ rating_key: "old", title: "Last valid", artist: "Artist" }];
     let inventory = lastValid;
-    const states = [], diagnostics = [], connection = {}, identity = {}, generation = { current: 0 };
+    const states = [], sourceStates = [], diagnostics = [], connection = {}, identity = {}, generation = { current: 0 };
     const scope = { selectedLibrary: { key: "1" }, plexLibrariesIdentity: connection, plexConnectionIdentity: connection,
       centralSection: "plex", plexArea: "library", plexBrowserIdentity: identity, plexLibraryRequestGenerationRef: generation, plexAlbumLoad: { identity, phase: "ready" },
+      sourceReadiness: { report: (...args) => sourceStates.push(args) },
       setPlexAlbumLoad: value => states.push(value), setAlbums: value => { inventory = value; },
       plexService: { getCollections: async () => [] },
       plexCatalog: { loadLibrary: () => pending.then(catalog => requireCompletePlexCatalog(catalog, "1")) },
@@ -62,6 +63,7 @@ test("actual catalog effect preserves valid data on failure and drops library/lo
     if (scenario === "complete") { assert.equal(inventory, next); assert.equal(states.at(-1).phase, "ready"); }
     else if (["logout", "account"].includes(scenario)) { assert.deepEqual(inventory, []); assert.equal(states.at(-1).phase, "loading"); }
     else { assert.equal(inventory, lastValid); assert.equal(states.at(-1).phase, scenario === "library" ? "loading" : "error"); }
+    assert.deepEqual(sourceStates, scenario === "complete" ? [["plex", "ready"]] : ["partial", "unknown", "http"].includes(scenario) ? [["plex", "error"]] : []);
     assert.deepEqual(diagnostics, ["partial", "unknown", "http"].includes(scenario) ? ["plex.albums-load"] : []);
     cleanup();
   }
@@ -75,6 +77,7 @@ test("actual browser effect changes only its displayed library while concurrent 
   let displayed = [];
   const scope = { selectedLibrary: libraries[0], plexLibrariesIdentity: connection, plexConnectionIdentity: connection,
     centralSection: "plex", plexArea: "library", plexBrowserIdentity: identity, plexLibraryRequestGenerationRef: generation, plexAlbumLoad: null,
+    sourceReadiness: { report: (source, phase) => { assert.equal(source, 'plex'); assert.equal(phase, 'ready'); } },
     setPlexAlbumLoad: value => states.push(value), setAlbums: value => { displayed = value; },
     plexCatalog: coordinator, plexService: { getCollections: async () => [] }, logError() {} };
   for (const setter of ["setCollections", "setHasCollections", "setLoading", "setActiveAlbum", "setActiveCollection", "setActiveArtist", "setFallbackPlexArtist", "setSelectedPlexDecade", "setSelectedPlexYear", "setSelectedPlexUnknownYear", "setSelectedPlexGenre", "setSearchQuery", "setSearchResults", "setPlexViewMode"]) scope[setter] = () => {};

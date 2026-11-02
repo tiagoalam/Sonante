@@ -56,6 +56,7 @@ fn snapshot(status: &PlaybackStatus) -> Snapshot {
     }
 }
 pub fn publish(app: &AppHandle, status: &PlaybackStatus, trusted_volume: bool) {
+    if trusted_volume { crate::remote_bridge::publish(app, status); }
     if let Some(state) = app.try_state::<upnp::State>() {
         if let Ok(mut current) = state.snapshot.lock() {
             let mut next = snapshot(status);

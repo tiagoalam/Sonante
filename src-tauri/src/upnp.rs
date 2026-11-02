@@ -171,7 +171,7 @@ impl State {
     }
 }
 
-fn interfaces() -> Result<Vec<Ipv4Addr>, String> {
+pub(crate) fn interfaces() -> Result<Vec<Ipv4Addr>, String> {
     let mut head = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut head) } != 0 {
         return Err("UPNP_NETWORK_UNAVAILABLE".into());
