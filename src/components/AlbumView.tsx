@@ -1,3 +1,4 @@
+import { AlbumEditionsButton } from "./AlbumEditionsButton";
 import { useTrackSelection } from "./TrackSelection";
 import { useQueueInsertion } from "./QueueInsertionMenu";
 import { plexQueueTrack } from "../utils/queueActions";
@@ -220,7 +221,7 @@ export const AlbumView: React.FC<Props> = ({
               <span className="text-[color:var(--theme-fg-muted,#888888)]">{t("common.trackCount", { count: tracks.length })}</span>
             </div>
 
-            <div className="pt-2 flex items-center space-x-3">
+            <div className="pt-2 flex flex-wrap items-center gap-3">
               <button
                 onClick={() => handlePlayTracks(0)}
                 disabled={!isPlaybackAvailable || loading || tracks.length === 0}
@@ -252,6 +253,7 @@ export const AlbumView: React.FC<Props> = ({
                   fill={isFavorite ? "#E5A00D" : "none"}
                 />
               </button>
+              <AlbumEditionsButton album={album} source="plex" albumId={album.rating_key} disabled={!active} />
             </div>
           </div>
         </div>

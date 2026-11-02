@@ -153,6 +153,7 @@ test('real Plex album context menu and ellipsis insert exact ordered album refer
  const tracks=[{title:'Disc 1',rating_key:'1',duration_ms:182000,media_locator:{kind:'plex',server_id:'server',part_key:'/library/parts/1'}},{title:'Disc 2',rating_key:'2',duration_ms:1000,media_locator:{kind:'plex',server_id:'server',part_key:'/library/parts/2'}}];
  let plays=0;
  const {AlbumView}=compile('components/AlbumView.tsx',{
+  './AlbumEditionsButton':{AlbumEditionsButton:()=>null},
   react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t})},'lucide-react':icons,
   './TrackSelection':passiveTrackSelection, './QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},'../utils/queueActions':metadata,
   '../utils/usePlaybackAttempt':{usePlaybackAttempt:()=>({failure:null,run:async()=>{plays++;}})},'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},

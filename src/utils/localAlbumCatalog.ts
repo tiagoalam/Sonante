@@ -118,7 +118,7 @@ export class LocalAlbumCatalog {
     }
     this.waitingForMpd = false;
     this.publish({ albums: [], presentationAlbums: albums, loaded: false, loading: false, error: null, mpdBusy: false, confirmedPlayback: false, manualCheckPlayback: false, manualCheckArtwork: false });
-    this.pending = this.pending || wasReady;
+    this.pending = folders.length > 0 && (this.pending || wasReady);
     this.refresh();
   }
 
@@ -199,7 +199,7 @@ export class LocalAlbumCatalog {
   }
 
   private refresh(): void {
-    if (!this.contextReady || !this.pending || this.updating || this.state.saveBlocked || this.state.manualCheckPlayback || this.inFlight) return;
+    if (this.configuredFolders?.length === 0 || !this.contextReady || !this.pending || this.updating || this.state.saveBlocked || this.state.manualCheckPlayback || this.inFlight) return;
     this.pending = false;
     this.inFlight = true;
     this.waitingForMpd = false;

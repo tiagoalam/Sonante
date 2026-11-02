@@ -410,3 +410,15 @@ test("cover readiness changes preserve the confirmed check catalog and never gra
   catalog.onMpdStatus(true, false, true);
   assert.equal(catalog.getSnapshot().manualCheckArtwork, false, "artwork cannot outlive the Check hint");
 });
+
+
+test("disabling Local retires an unfinished catalog and status/refresh cannot restart disabled source reads", async () => {
+  let calls=0,resolve;
+  const waiting=new Promise(yes=>{resolve=yes});
+  const catalog=new LocalAlbumCatalog(async()=>{calls++;return calls===1?waiting:[album("new")];},{read:()=>null,write:()=>{}});
+  catalog.setPresentationContext(["/fixture"]);catalog.ensureLoaded(false,true);await tick();assert.equal(calls,1);
+  catalog.setPresentationContext([]);catalog.requestRefresh();catalog.onMpdStatus(true);catalog.onMpdStatus(false);
+  resolve([album("stale")]);await tick();assert.equal(calls,1);assert.equal(catalog.getSnapshot().loaded,false);assert.deepEqual(catalog.getSnapshot().albums,[]);
+  catalog.ensureLoaded(false,true);catalog.requestRefresh();await tick();assert.equal(calls,1);
+  catalog.setPresentationContext(["/fixture"]);await tick();assert.equal(calls,2);assert.deepEqual(catalog.getSnapshot().albums.map(a=>a.id),["new"]);
+});

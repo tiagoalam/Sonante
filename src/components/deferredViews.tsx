@@ -37,3 +37,7 @@ export const NavidromeView = deferredView<React.ComponentProps<typeof import('./
 export const NavidromeArtistView = deferredView<React.ComponentProps<typeof import('./NavidromeArtistView').NavidromeArtistView>>(() => import('./NavidromeArtistView').then(module => ({ default: module.NavidromeArtistView })));
 
 export const NavidromeExploreView = deferredView<React.ComponentProps<typeof import('./NavidromeExploreView').NavidromeExploreView>>(() => import('./NavidromeExploreView').then(module => ({ default: module.NavidromeExploreView })));
+
+export const ListeningSessionsView = deferredView<React.ComponentProps<typeof import('./ListeningSessionsView').ListeningSessionsView>>(() => import('./ListeningSessionsView').then(module => ({ default: module.ListeningSessionsView })));
+
+export const AlbumEditionsView = deferredView<React.ComponentProps<typeof import('./AlbumEditionsView').AlbumEditionsView>>(() => import('./AlbumEditionsView').then(module => ({ default: module.AlbumEditionsView })));

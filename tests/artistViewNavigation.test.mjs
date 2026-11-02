@@ -85,7 +85,7 @@ test('App uses the same ArtistView for Discover and retains it across album navi
 
 test('retained AlbumView restores its own scroll and focused artist link without loading or playing again',async()=>{
  const albumExports={};let loads=0,selected;
- const albumDeps={...deps,'../services/plex':{plexService:{getAlbumTracks:async()=>{loads++;return[];}}},'../services/favorites':{favoritesService:{getFavorites:async()=>[]}}};
+ const albumDeps={...deps,'./AlbumEditionsButton':{AlbumEditionsButton:()=>null},'../services/plex':{plexService:{getAlbumTracks:async()=>{loads++;return[];}}},'../services/favorites':{favoritesService:{getFavorites:async()=>[]}}};
  new Function('require','exports',compile(readFileSync(new URL('../src/components/AlbumView.tsx',import.meta.url),'utf8')))(name=>albumDeps[name],albumExports);
  const h=new Harness();h.component=albumExports.AlbumView;
  let p={album:album(),active:true,isPlaybackAvailable:true,onBack(){},onSelectArtist:a=>selected=a};let tree=h.render(p);await flush();tree=h.render(p);

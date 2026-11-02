@@ -1,3 +1,4 @@
+import { AlbumEditionsButton } from "./AlbumEditionsButton";
 import { AlbumCatalog } from "./AlbumCatalog";
 import { LocalCatalogReadError } from "./LocalCatalogReadError";
 import { AlbumCatalogRow } from "./AlbumCatalogRow";
@@ -1210,6 +1211,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     <span>{t("playlists.addAlbum")}</span>
                   </button>
 
+                  <AlbumEditionsButton album={selectedAlbum} source="local" albumId={selectedAlbum.id} disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)} />
                   <button
                     onClick={(e) => handleToggleFavoriteLocal(e, selectedAlbum, albumCover)}
                     className="p-2.5 rounded-xl bg-[var(--theme-surface-raised,#1E1E1E)] border border-[color:var(--theme-border-soft,#2B2B2B)] hover:bg-[var(--theme-surface-hover,#282828)] text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer"

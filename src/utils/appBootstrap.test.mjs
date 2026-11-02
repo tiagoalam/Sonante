@@ -175,3 +175,22 @@ test("actual guarded player handler persists only a resolved destination, not co
     if (expected) assert.equal(session.returnSection, "playlists");
   }
 });
+
+
+test("listening sessions never replace the principal startup destination", () => {
+  const state = preference("local"); state.controller.restore(config);
+  state.controller.navigate("sessions"); assert.equal(state.published.at(-1), "sessions");
+  assert.deepEqual(state.writes, []);
+  state.controller.restore(config); assert.equal(state.published.at(-1), "local");
+  const legacy = preference("sessions"); legacy.controller.restore(config);
+  assert.equal(legacy.published.at(-1), "plex");
+});
+
+test("album editions are explicit navigation and never replace the principal startup destination", () => {
+  const state = preference("local"); state.controller.restore(config);
+  state.controller.navigate("editions"); assert.equal(state.published.at(-1), "editions");
+  assert.deepEqual(state.writes, []);
+  state.controller.restore(config); assert.equal(state.published.at(-1), "local");
+  const legacy = preference("editions"); legacy.controller.restore(config);
+  assert.equal(legacy.published.at(-1), "plex");
+});

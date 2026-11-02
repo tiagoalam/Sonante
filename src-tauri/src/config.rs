@@ -60,6 +60,9 @@ pub struct AppConfig {
     // Omission preserves the serialized shape of legacy recovery fingerprints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<EnabledSources>,
+    // False is omitted to preserve legacy recovery configuration fingerprints.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub experimental_features: bool,
     #[serde(default = "default_first_run")]
     pub first_run: bool,
     pub alsa_device: String,
@@ -127,6 +130,7 @@ impl Default for AppConfig {
         Self {
             first_run: true,
             sources: None,
+            experimental_features: false,
             alsa_device: "default".to_string(),
             direct_volume_choice: None, direct_muted:false,
             audio_output_type: "pipewire".to_string(),
@@ -232,6 +236,23 @@ mod tests {
         "replay_gain": "off"
     }"#;
 
+    #[test]
+    fn experimental_features_are_opt_in_and_preserve_legacy_fingerprints() {
+        let legacy: AppConfig = serde_json::from_str(LEGACY_CONFIG).unwrap();
+        assert!(!legacy.experimental_features);
+        assert!(!AppConfig::default().experimental_features);
+        let original = serde_json::to_vec(&legacy).unwrap();
+        assert!(!String::from_utf8_lossy(&original).contains("experimental_features"));
+        let mut enabled = legacy.clone(); enabled.experimental_features = true;
+        assert!(!crate::route_save_resume_requested(&legacy, &enabled));
+        assert!(!crate::is_local_folders_only_change(&legacy, &enabled));
+        let encoded = serde_json::to_vec(&enabled).unwrap();
+        assert!(serde_json::from_slice::<AppConfig>(&encoded).unwrap().experimental_features);
+        enabled.experimental_features = false;
+        assert_eq!(serde_json::to_vec(&enabled).unwrap(), original);
+        let explicit_false = LEGACY_CONFIG.replacen('{', "{\"experimental_features\":false,", 1);
+        assert_eq!(crate::managed_save_intent::recovery_config_hash(explicit_false.as_bytes()).unwrap(), crate::managed_save_intent::recovery_config_hash(LEGACY_CONFIG.as_bytes()).unwrap());
+    }
     #[test]
     fn legacy_recovery_fingerprint_omits_absent_direct_metadata() {
         use sha2::{Digest, Sha256};

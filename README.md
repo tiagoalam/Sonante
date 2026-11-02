@@ -24,17 +24,17 @@ Sonante is a desktop music player built for people who want to **listen to, navi
 
 Sonante is designed for substantial, imperfect real-world libraries: multiple storage locations, multi-disc albums, CUE-based albums, varying metadata, and sources that may temporarily become unavailable.
 
-## Installation — 0.6.0
+## Installation — 0.6.1
 
-Download the complete package and `SHA256SUMS.txt` from [Sonante 0.6.0](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.0) for your distribution:
+Download the complete package and `SHA256SUMS.txt` from [Sonante 0.6.1](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.1) for your distribution:
 
-- Ubuntu 22.04: `sonante_0.6.0-1_amd64.deb` (`apt install ./sonante_0.6.0-1_amd64.deb`).
-- Fedora 44: `sonante-0.6.0-1.x86_64.rpm` (`dnf install ./sonante-0.6.0-1.x86_64.rpm`).
-- Arch Linux / Manjaro: `sonante-0.6.0-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.6.0-1-x86_64.pkg.tar.zst`).
+- Ubuntu 22.04: `sonante_0.6.1-1_amd64.deb` (`apt install ./sonante_0.6.1-1_amd64.deb`).
+- Fedora 44: `sonante-0.6.1-1.x86_64.rpm` (`dnf install ./sonante-0.6.1-1.x86_64.rpm`).
+- Arch Linux / Manjaro: `sonante-0.6.1-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.6.1-1-x86_64.pkg.tar.zst`).
 
 Close Sonante before upgrading, and install with your distribution's package manager. Verify the supplied checksum first. Packages manage their own pinned audio runtimes and do not enable a system MPD service. Corresponding runtime source sidecars accompany the packages; they are not installed into `/usr`.
 
-Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the complete 0.6.0 release payload.
+Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the complete 0.6.1 release payload.
 
 ### System requirements
 
@@ -112,6 +112,17 @@ Choose from six themes: Dark, Light, Cyber, Summer, Zen, and Nocturne. Compact p
 
 The optional [UPnP receiver](docs/UPNP_RECEIVER.md) lets compatible controllers such as BubbleUPnP send music to Sonante. It is disabled by default and uses the selected audio output. This is a renderer, not a media server or a TIDAL/Qobuz Connect implementation.
 
+## Experimental features — opt in
+
+Enable **Preferences → General → Experimental features** to try the beta tools. The first-run wizard offers the same choice. They remain hidden by default; disabling them preserves saved listening sessions and version-analysis caches.
+
+- **Listening sessions:** build a source-specific listening selection around a genre and an approximate 30, 60 or 90 minute target. Complete albums remain intact, so actual duration varies. Preview, play and explicitly save a session; playback alone does not save it.
+- **Compare versions:** find album editions within each enabled Local, Plex or Navidrome source. Analysis checks edition labels and track lists, groups matching file-size copies, caches its results and shows scanning progress. Results are suggestions based on available metadata, not proof of a different mastering.
+- **Continuous A/B:** inside Compare versions, prepare 30, 60 or 90 second samples with an optional level balance and timing adjustment. The comparator uses PCM at 48 kHz through the system's shared audio output, with its own volume and without the normal player EQ. Direct output is outside this first phase. Format support can differ from normal playback.
+- **Web remote:** separately enable Remote control in General, then open the displayed IP address and port (default **8787**) on the same trusted local network. Pair with the temporary desktop code or QR. Control playback, position, supported volume and the queue, with Artwork and Poster layouts. Audio continues playing on the computer. Pairing survives normal restarts for up to 30 days; revoking access or disabling the listener clears it. This beta uses local HTTP and is not intended for Internet exposure. See the [remote API and pairing guide](docs/remote-control-api.md).
+
+These tools are in development and may contain errors. Enabling experimental features alone does not start the remote listener. General is now the first Preferences page.
+
 ## Navidrome
 
 In **Preferences → Sources**, enable Navidrome, enter your server's base URL, username and password, then choose **Connect and save**. Sonante uses the server's [Subsonic-compatible API](https://www.navidrome.org/docs/developers/subsonic-api/). Use HTTPS outside a trusted local network. Credentials stay in an owner-only `navidrome.json` profile file; authenticated server URLs are not exposed to the renderer or stored in queue metadata.
@@ -182,12 +193,12 @@ Configuration directories and sensitive files are created with restrictive Linux
 
 Development requires **Node.js 22**, npm, a stable Rust toolchain, and the native development dependencies for Tauri 2, GTK 3, WebKitGTK 4.1, ALSA, and OpenSSL. See the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/) and the [CI workflow](https://github.com/tiagoalam/Sonante/blob/main/.github/workflows/ci.yml) for the Ubuntu build environment.
 
-For a development compilation of the verified 0.5.9 source archive without installation, extract the supplied source archive and run the normal build commands. This compilation alone does not create the complete release packages.
+For a development compilation of the verified 0.6.1 source archive without installation, extract the supplied source archive and run the normal build commands. This compilation alone does not create the complete release packages.
 
 ```bash
 # Extract the supplied, SHA-verified source archive first.
 cd sonante
-# The supplied sources already identify version 0.5.9; no unpublished tag is required.
+# The supplied sources already identify version 0.6.1; no unpublished tag is required.
 npm ci
 npm run tauri -- build --no-bundle -- --locked
 ```
@@ -210,13 +221,13 @@ cargo check --manifest-path src-tauri/Cargo.toml --locked
 python3 -m unittest discover -s tests -p '*packaging_test.py'
 ```
 
-Development CI now produces **`sonante-complete-linux-packages`** after both native build jobs pass. This artifact contains complete DEB, Fedora RPM and Arch installers, corresponding sources and `SHA256SUMS.txt`. The separate `sonante-compilation-*-inputs` artifacts are intermediate build inputs. See [complete-package assembly](packaging/COMPLETE_PACKAGES.md) for provenance, checks and local reproduction. The manual workflow uses the same assembly; it does not publish a release. The 0.5.9 release uses revision-1 packages; CI rebuilds do not replace published assets. AppImage is outside this scope.
+Development CI now produces **`sonante-complete-linux-packages`** after both native build jobs pass. This artifact contains complete DEB, Fedora RPM and Arch installers, corresponding sources and `SHA256SUMS.txt`. The separate `sonante-compilation-*-inputs` artifacts are intermediate build inputs. See [complete-package assembly](packaging/COMPLETE_PACKAGES.md) for provenance, checks and local reproduction. The manual workflow uses the same assembly; it does not publish a release. The 0.6.1 release uses revision-1 packages; CI rebuilds do not replace published assets. AppImage is outside this scope.
 
 ## Project status and scope
 
 Sonante prioritizes **reliable playback, conservative MPD lifecycle management, safe library changes, and clear audio reporting** over claiming support for every possible codec or audio feature. Platform and hardware behavior must be tested rather than inferred from a successful build.
 
-Local tag editing is limited to supported physical FLAC files and reports independent per-file results. Availability of codecs, network sources, and DAC capabilities depends on the configured system. The 0.5.9 release targets DEB, RPM, and Arch packages for x86_64; each requires its own final installation and startup evidence.
+Local tag editing is limited to supported physical FLAC files and reports independent per-file results. Availability of codecs, network sources, and DAC capabilities depends on the configured system. The 0.6.1 release targets DEB, RPM, and Arch packages for x86_64; each requires its own final installation and startup evidence.
 
 Bug reports and reproducible feedback can be submitted through [GitHub Issues](https://github.com/tiagoalam/Sonante/issues).
 

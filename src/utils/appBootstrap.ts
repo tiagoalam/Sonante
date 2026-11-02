@@ -9,12 +9,12 @@ export function initialMediaSource(config: Pick<AppConfig, "plex_token" | "sourc
   return 'radio';
 }
 
-export type MainSection = "navidrome" | "radio" | "history" | "search" | "local" | "plex" | "favorites" | "playlists" | "explore" | "equalizer";
+export type MainSection = "editions" | "sessions" | "navidrome" | "radio" | "history" | "search" | "local" | "plex" | "favorites" | "playlists" | "explore" | "equalizer";
 export const MAIN_SECTION_STORAGE_KEY = "sonante.lastMainSection";
 type SectionStorage = Pick<Storage, "getItem" | "setItem">;
 
 function isMainSection(value: unknown): value is MainSection {
-  return value === "navidrome" || value === "radio" || value === "history" || value === "search" || value === "local" || value === "plex" || value === "favorites" || value === "playlists" || value === "explore" || value === "equalizer";
+  return value === "editions" || value === "sessions" || value === "navidrome" || value === "radio" || value === "history" || value === "search" || value === "local" || value === "plex" || value === "favorites" || value === "playlists" || value === "explore" || value === "equalizer";
 }
 
 function browserStorage(): SectionStorage | null {
@@ -41,7 +41,7 @@ export function createMainSectionPreference(
       const initial = initialMediaSource(config);
       fallback = sourceEnabled(config, "local") ? "local" : sourceEnabled(config, "navidrome") ? "navidrome" : "radio";
       const section = navigationEnabled && isMainSection(preferred)
-        ? preferred === "explore" ? (sourceEnabled(config, 'local') ? 'local' : initial) :
+        ? preferred === "editions" || preferred === "sessions" ? initial : preferred === "explore" ? (sourceEnabled(config, 'local') ? 'local' : initial) :
           (preferred === 'local' || preferred === 'plex' || preferred === 'navidrome') && !sourceEnabled(config, preferred) ? initial :
           preferred === 'plex' && initial !== 'plex' ? initial : preferred
         : initial;
@@ -57,7 +57,7 @@ export function createMainSectionPreference(
       if (!navigationEnabled || !isMainSection(section)) return;
       restoringPlex = false;
       publish(section);
-      try { storage()?.setItem(MAIN_SECTION_STORAGE_KEY, section === "explore" ? "local" : section); } catch { /* Navigation still works. */ }
+      try { if (section !== "sessions" && section !== "editions") storage()?.setItem(MAIN_SECTION_STORAGE_KEY, section === "explore" ? "local" : section); } catch { /* Navigation still works. */ }
     },
     plexDiscoveryFinished(available: boolean) {
       if (!restoringPlex) return;

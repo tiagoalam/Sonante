@@ -25,8 +25,10 @@ import { useTranslation } from "react-i18next";
 import { sourceEnabled } from "../utils/musicSources";
 import { SourcesSettings } from "./SourcesSettings";
 import { SettingsPages, type SettingsPage } from "./SettingsPages";
+import { RemoteControlSetting } from "./RemoteControlSetting";
 import { UpnpSetting } from "./UpnpSetting";
 import { ScrobblingSetting } from "./ScrobblingSetting";
+import { ExperimentalFeaturesSetting } from "./ExperimentalFeatures";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
 import { AppConfig, ConfigSaveOperation, ConfigSaveWarning } from "../types/config";
@@ -464,7 +466,11 @@ export const SettingsModal: React.FC<Props> = ({
           initialPage={initialPage}
           general={<>
             <AppearanceSetting />
+            <ExperimentalFeaturesSetting enabled={config.experimental_features === true} disabled={saving || connectionBusy} onChange={enabled => setConfig({ ...config, experimental_features: enabled })} />
             <UpnpSetting />
+            {config.experimental_features === true && (originalConfigRef.current?.experimental_features === true
+              ? <RemoteControlSetting />
+              : <p className="text-xs text-[color:var(--theme-fg-muted,#888888)]">{t("remote.saveBetaFirst")}</p>)}
             <ScrobblingSetting />
             {/* Idioma da interface */}
             <div className="space-y-3">

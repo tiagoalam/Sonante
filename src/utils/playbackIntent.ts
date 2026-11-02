@@ -10,10 +10,17 @@ let admission: () => Promise<string | null> = () => Promise.resolve(null);
 let cancellation: (token: string) => Promise<unknown> = async () => {};
 let confirmation: (token: string) => Promise<boolean> = async () => true;
 let latest: PlaybackIntent | undefined;
+const playbackRequests = new Set<() => void>();
+// Optional decorators such as A/B stop before another same-window gesture can
+// start ordinary playback. No service is imported or started by this hook.
+export function subscribePlaybackRequests(listener: () => void): () => void {
+  playbackRequests.add(listener); return () => { playbackRequests.delete(listener); };
+}
 export function configurePlaybackIntents(admit: () => Promise<string>, cancel: (token: string) => Promise<unknown>, confirm: (token: string) => Promise<boolean> = async () => true) {
   admission = admit; cancellation = cancel; confirmation = confirm;
 }
 export function beginPlaybackIntent(): PlaybackIntent {
+  for (const listener of playbackRequests) { try { listener(); } catch { /* Transport admission continues. */ } }
   latest?.cancel();
   let cancelled = false;
   const token = admission();

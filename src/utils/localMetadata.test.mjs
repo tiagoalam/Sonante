@@ -30,6 +30,7 @@ const virtualUrl = dataModule(`import React from ${JSON.stringify(import.meta.re
  export const VirtualList = props => React.createElement("div", {"data-virtual-list": true}, props.items.map(item => React.createElement(React.Fragment, {key: props.getItemKey(item)}, props.renderItem(item))));
  export const VirtualAlbumGrid = () => null; export const AlbumCatalog=VirtualAlbumGrid;`);
 const componentMocks = new Map([
+  ["ExperimentalFeatures.tsx", dataModule('export const useExperimentalFeatures = () => false; export const BetaBadge = () => null;')],
   ["QueueInsertionMenu.tsx", dataModule('export const useQueueInsertion = () => ({open(){},trigger:()=>null,menu:null,notice:null});')],
   ["TrackSelection.tsx", dataModule('export const useTrackSelection = () => ({click:()=>false,checked:()=>false,checkbox:()=>null,toolbar:null});')],
   ["queueAlbumLoader.ts", dataModule('export const loadQueuedAlbum = async () => []; export const loadLocalAlbumQueue = async () => [];')],

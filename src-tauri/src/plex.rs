@@ -4442,6 +4442,58 @@ impl PlexClient {
         Ok(tracks)
     }
 
+
+    async fn ab_inventory(&self, server:&str, library:&str, album:&str) -> Result<(serde_json::Value,ResolvedPlexConnection),String> {
+        if !crate::music_sources::plex() || !self.navigation_server_is_selected(server) || !navigation_rating_key(library) || !navigation_rating_key(album) {return Err("AB_CHANGED".into());}
+        let path=format!("/library/metadata/{album}/children?X-Plex-Container-Start=0&X-Plex-Container-Size=500");
+        let (json,connection):(serde_json::Value,_)=self.connection_manager.request_json(&path,"preparar comparação").await.map_err(|_|"AB_NETWORK")?;
+        if connection.server_id!=server || crate::album_file_sizes::plex_profile(&json,library,album).is_none(){return Err("AB_TRACKS".into());}
+        self.connection_manager.validate_source_connection(&connection).map_err(|_|"AB_CHANGED")?;
+        Ok((json,connection))
+    }
+    pub(crate) async fn ab_tracks(&self,server:&str,library:&str,album:&str)->Result<Vec<crate::ab_comparison::Track>,String>{
+        let (json,_)=self.ab_inventory(server,library,album).await?;
+        json["MediaContainer"]["Metadata"].as_array().ok_or("AB_TRACKS")?.iter().enumerate().map(|(i,row)|{
+            let key=row["ratingKey"].as_str().ok_or("AB_TRACKS")?;
+            crate::ab_comparison::track(key,row["title"].as_str().ok_or("AB_TRACKS")?,row["duration"].as_f64().map(|n|n/1000.),i+1)
+        }).collect()
+    }
+    pub(crate) async fn ab_input(&self,server:&str,library:&str,album:&str,key:&str,current:crate::ab_comparison::Check)->Result<crate::ab_comparison::Input,String>{
+        use std::io::{Seek,SeekFrom};use tokio::io::AsyncWriteExt;
+        let (json,connection)=self.ab_inventory(server,library,album).await?;
+        let rows=json["MediaContainer"]["Metadata"].as_array().ok_or("AB_TRACKS")?;
+        let row=rows.iter().enumerate().find_map(|(i,row)|{
+            let track=crate::ab_comparison::track(row["ratingKey"].as_str()?,row["title"].as_str()?,row["duration"].as_f64().map(|n|n/1000.),i+1).ok()?;
+            (track.key==key).then_some(row)
+        }).ok_or("AB_CHANGED")?;
+        let path=row["Media"][0]["Part"][0]["key"].as_str().ok_or("AB_TRACKS")?;
+        if !crate::ab_comparison::valid_part_path(path){return Err("AB_TRACKS".into());}
+        let manager=self.connection_manager.clone();let captured=connection.clone();
+        let alive:crate::ab_comparison::Check=std::sync::Arc::new(move||crate::music_sources::plex()&&manager.validate_source_connection(&captured).is_ok());
+        let http=reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(45)).build().map_err(|_|"AB_NETWORK")?;
+        let mut response=http.get(format!("{}{}",connection.base_url,path)).header("X-Plex-Token",&connection.token).send().await.map_err(|_|"AB_NETWORK")?;
+        if !response.status().is_success(){return Err("AB_NETWORK".into());}
+        if response.content_length().is_some_and(|n|n>crate::ab_comparison::MAX_SOURCE_BYTES as u64){return Err("AB_LIMIT".into());}
+        let file=tempfile::tempfile().map_err(|_|"AB_STORAGE")?;let mut file=tokio::fs::File::from_std(file);let mut count=0usize;
+        while let Some(chunk)=response.chunk().await.map_err(|_|"AB_NETWORK")?{
+            if !current()||!alive(){return Err("AB_CHANGED".into());}
+            count=count.checked_add(chunk.len()).ok_or("AB_LIMIT")?;if count>crate::ab_comparison::MAX_SOURCE_BYTES{return Err("AB_LIMIT".into());}
+            file.write_all(&chunk).await.map_err(|_|"AB_STORAGE")?;
+        }
+        file.flush().await.map_err(|_|"AB_STORAGE")?;let mut file=file.into_std().await;file.seek(SeekFrom::Start(0)).map_err(|_|"AB_STORAGE")?;
+        if !current()||!alive(){return Err("AB_CHANGED".into());}
+        Ok(crate::ab_comparison::Input{media:Box::new(file),alive:alive.clone(),validate:alive,identity:format!("plex:{server}:{key}")})
+    }
+
+    pub(crate) async fn edition_profile(&self, server: &str, library: &str, album: &str) -> Result<Option<crate::album_file_sizes::Profile>, String> {
+        if !crate::music_sources::plex() || !self.navigation_server_is_selected(server)
+            || !navigation_rating_key(library) || !navigation_rating_key(album) {return Err("EDITIONS_SOURCE".into());}
+        let path=format!("/library/metadata/{album}/children?X-Plex-Container-Start=0&X-Plex-Container-Size=500");
+        let (json,connection):(serde_json::Value,_)=self.connection_manager.request_json(&path,"consultar tamanhos do álbum").await.map_err(|e|e.public_message())?;
+        if connection.server_id!=server || !self.navigation_server_is_selected(server) || !crate::music_sources::plex(){return Err("EDITIONS_SOURCE".into());}
+        Ok(crate::album_file_sizes::plex_profile(&json,library,album))
+    }
+
     pub async fn get_album_tracks(&self, album_rating_key: &str) -> Result<Vec<PlexTrack>, String> {
         let path = format!("/library/metadata/{}/children", album_rating_key);
 

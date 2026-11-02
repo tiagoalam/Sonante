@@ -61,7 +61,7 @@ for(const lang of ['pt-BR','en'])for(const name of ['AlbumView','AlbumDetailModa
  hooks.useLayoutEffect=hooks.useEffect;deps.react.useLayoutEffect=hooks.useEffect;
  const hook=compile(source('utils/usePlaybackAttempt.ts'),deps);
  const notice=compile(source('components/PlaybackRequestNotice.tsx'),{...deps});
- Object.assign(deps,{'../utils/usePlaybackAttempt':hook,'./PlaybackRequestNotice':notice,'../services/audio':{audioService:{playTracks(){const d=deferred();requests.push(d);return d.promise}}},'../services/plex':{plexService:{getAlbumTracks:async()=>[track]}},'../services/favorites':{favoritesService:{getFavorites:async()=>[]}},'./PlexImage':{PlexImage:()=>null},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null},'./PlexFileInfoModal':{PlexFileInfoModal:()=>null}});
+ Object.assign(deps,{'./AlbumEditionsButton':{AlbumEditionsButton:()=>null},'../utils/usePlaybackAttempt':hook,'./PlaybackRequestNotice':notice,'../services/audio':{audioService:{playTracks(){const d=deferred();requests.push(d);return d.promise}}},'../services/plex':{plexService:{getAlbumTracks:async()=>[track]}},'../services/favorites':{favoritesService:{getFavorites:async()=>[]}},'./PlexImage':{PlexImage:()=>null},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null},'./PlexFileInfoModal':{PlexFileInfoModal:()=>null}});
  const View=compile(process.env.SONANTE_BASE_UI?new URL(`file://${process.env.SONANTE_BASE_UI}/src/components/${name}.tsx`):source(`components/${name}.tsx`),deps)[name];
  const h={slots:[],cursor:0,effects:[],writes:0,props:{album,active:true,isPlaybackAvailable:true,onBack(){},onClose(){}}};
  const render=()=>{host=h;h.cursor=0;h.effects=[];const tree=View(h.props);h.effects.splice(0).forEach(fn=>fn());return tree};

@@ -2,6 +2,7 @@ export type MusicSource = "local" | "plex" | "navidrome";
 export type EnabledSources = Record<MusicSource, boolean>;
 
 export interface AppConfig {
+  experimental_features?: boolean;
   sources?: EnabledSources | null;
   first_run: boolean;
   alsa_device: string;

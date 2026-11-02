@@ -4548,6 +4548,21 @@ impl AudioEngine {
     pub fn pause(&mut self) -> Result<(), String> {
         self.note_eq_intervention();
         self.invalidate_playback_intents();
+        self.pause_transport()
+    }
+
+    // Comparison owns an already admitted gesture; preserve its token while
+    // reusing the same explicit pause/radio/restored-cursor transport behavior.
+    pub(crate) fn pause_for_ab(&mut self, token: &str) -> Result<EqTransitionWatch, String> {
+        self.validate_playback_intent(token)?;
+        self.ensure_queue_coherent()?;
+        self.note_eq_intervention();
+        self.pause_transport()?;
+        if self.observed_mpd_playback_state()? == PlaybackState::Playing { return Err("AB_PAUSE".into()); }
+        Ok(self.watch_eq_transition())
+    }
+
+    fn pause_transport(&mut self) -> Result<(), String> {
         if !self.queue_coherent { return self.send_command("pause 1").map(|_| ()); }
         self.ensure_startup_queue_ready()?;
         if self.queue.len() == 1 && matches!(self.queue[0].media_locator, Some(MediaLocator::Radio { .. })) { return self.send_command("stop").map(|_| ()); }
@@ -5919,6 +5934,20 @@ mod tests {
             explicit_playback_command(PlaybackState::Stopped, ExplicitPlaybackRequest::Play),
             Some("play")
         );
+    }
+
+    #[test]
+    fn ab_pause_keeps_the_queue_and_admitted_intent_without_resume_or_persistence() {
+        let (socket, server) = fake_mpd_script(vec![("status".into(),Some("state: play\nOK\n".into())),("pause 1".into(),Some("OK\n".into())),("status".into(),Some("state: pause\nOK\n".into()))]);
+        let mut engine=engine_with_track("fixture/one.flac");engine.socket_path=socket;let token=engine.admit_playback_intent().unwrap();let before=engine.queue.clone();
+        let watch=engine.pause_for_ab(&token).unwrap();assert!(watch.current());assert!(engine.validate_playback_intent(&token).is_ok());assert_eq!(engine.queue,before);assert!(!engine.cache_persistence_pending);
+        engine.note_eq_intervention();assert!(!watch.current());server.join().unwrap();
+    }
+    #[test]
+    fn ab_pause_preserves_a_logical_resume_and_refuses_unconfirmed_or_revoked_transport() {
+        let mut engine=engine_with_logical_resume();let resume=engine.restored_resume;let (socket,server)=fake_mpd_script(vec![("status".into(),Some("state: stop\nOK\n".into()))]);engine.socket_path=socket;let token=engine.admit_playback_intent().unwrap();engine.pause_for_ab(&token).unwrap();assert_eq!(engine.restored_resume,resume);server.join().unwrap();
+        let mut engine=engine_with_track("fixture/one.flac");let token=engine.admit_playback_intent().unwrap();engine.invalidate_playback_intents();assert!(matches!(engine.pause_for_ab(&token),Err(e) if e=="PLAYBACK_SUPERSEDED"));
+        let (socket,server)=fake_mpd_script(vec![("status".into(),Some("state: play\nOK\n".into())),("pause 1".into(),Some("OK\n".into())),("status".into(),Some("state: play\nOK\n".into()))]);engine.socket_path=socket;let token=engine.admit_playback_intent().unwrap();assert!(matches!(engine.pause_for_ab(&token),Err(e) if e=="AB_PAUSE"));server.join().unwrap();
     }
 
     #[test]
@@ -10921,6 +10950,27 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[test]
+    fn remote_first_play_accepts_the_same_restored_local_and_plex_identity_that_telemetry_displays() {
+        for plex in [false,true] {
+            let mut engine=engine_with_track("local/faixa.flac");
+            if plex { engine.queue=vec![plex_track()]; }
+            engine.restored_resume=Some(PlaybackResumeSnapshot{queue_index:0,elapsed:0.,state:PlaybackState::Paused});
+            let expected=crate::remote::digest(&serde_json::to_vec(&engine.current_media_for_queue_index(Some(0))).unwrap());
+            let (socket,server)=fake_album_mpd(vec![
+                ("status","state: stop\nOK\n"),
+                ("status","state: stop\nOK\n"),
+                ("play 0","OK\n"),
+                ("status","state: play\nsong: 0\nOK\n"),
+            ]);engine.socket_path=socket;
+            // Characterize the old mismatch: physical MPD status omits a logical
+            // restored cursor, while desktop/remote telemetry intentionally shows it.
+            assert!(engine.get_mpris_status().unwrap().current_media.is_none());
+            crate::remote_bridge::media_matches(&engine,&expected).unwrap();
+            engine.play(false).unwrap();assert!(engine.restored_resume.is_none());
+            server.join().unwrap();
+        }
+    }
     #[test]
     fn restored_status_is_paused_with_track_position_and_stable_plex_artwork() {
         let (socket, server) = fake_album_mpd(vec![("status", "state: stop\nvolume: 70\nOK\n")]);

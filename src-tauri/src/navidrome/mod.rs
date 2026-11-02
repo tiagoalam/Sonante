@@ -31,7 +31,7 @@ struct Connection {
     stop: Arc<tokio::sync::Notify>,
     covers: tokio::sync::Semaphore,
     details: Mutex<VecDeque<Detail>>,
-    catalog: tokio::sync::Mutex<Option<(std::time::Instant, Vec<crate::smart_playlists::Album>)>>,
+    catalog: tokio::sync::Mutex<Option<library::CatalogSnapshot>>,
 }
 impl Connection {
     fn active(&self) -> bool {
@@ -380,6 +380,18 @@ async fn detail(c: &Connection, id: &str) -> Result<Detail, String> {
         songs: api::songs(value)?,
         artist_id: value["artistId"].as_str().filter(|id| api::id(id)).map(str::to_owned),
     })
+}
+#[tauri::command]
+pub(crate) async fn navidrome_edition_catalog(app: tauri::AppHandle,connection_id:String,account_id:String)->Result<Vec<Album>,String> {
+    crate::require_experimental_features(&app)?;
+    library::edition_catalog(&connection_id,&account_id).await
+}
+pub(crate) async fn edition_profile(connection_id:&str,account_id:&str,id:&str)->Result<Option<crate::album_file_sizes::Profile>,String> {
+    let c=current(connection_id)?;
+    if favorites::scope(&c.credentials)!=account_id || !api::id(id){return Err(CHANGED.into());}
+    let root=c.request("getAlbum",&[("id",id.into())]).await?;
+    current(connection_id)?;
+    Ok(root.get("album").and_then(|value|crate::album_file_sizes::navidrome_profile(value,id)))
 }
 #[tauri::command]
 pub(crate) async fn navidrome_album(connection_id: String, id: String) -> Result<Detail, String> {

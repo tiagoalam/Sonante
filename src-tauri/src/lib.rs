@@ -1,3 +1,5 @@
+mod ab_comparison;
+mod ab_commands;
 mod direct_volume;
 mod direct_playback;
 mod alsa_preflight;
@@ -49,6 +51,9 @@ mod mpris;
 mod upnp;
 mod upnp_protocol;
 mod upnp_bridge;
+mod remote;
+mod remote_http;
+mod remote_bridge;
 mod mpris_shutdown;
 mod online_artwork;
 mod system_tray;
@@ -69,6 +74,7 @@ mod mpd_engine;
 mod installed_runtimes;
 mod tags;
 mod local_file_info;
+mod album_file_sizes;
 mod player_source_info;
 
 use audio::{
@@ -1378,6 +1384,9 @@ fn persist_experimental_local_folders_config(
     app.state::<Arc<direct_playback::Gate>>().commit_choice(new_config);
     plex_guard.update_config(new_config);
     *config_guard = new_config.clone();
+    drop(plex_guard);
+    drop(config_guard);
+    remote_bridge::beta_preference_changed(app, expected_current.experimental_features, new_config.experimental_features);
     Ok(())
 }
 
@@ -4354,6 +4363,51 @@ async fn get_local_album_tracks(album_id: String, app: AppHandle, diagnostic_id:
     }).await.map_err(|_| "Consulta de faixas indisponível.".to_string())?
 }
 
+// Separates descriptive Editions caches for DEV/installed/custom profiles.
+// No directory creation, music/source access or startup work.
+#[tauri::command]
+fn get_edition_cache_namespace() -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(MpdSupervisor::sonante_config_dir().as_os_str().as_encoded_bytes()))
+}
+
+fn require_experimental_features(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<ConfigState>();
+    let config = state.0.lock().map_err(|_| "EXPERIMENTAL_DISABLED")?;
+    if config.experimental_features && !config.first_run { Ok(()) } else { Err("EXPERIMENTAL_DISABLED".into()) }
+}
+
+#[tauri::command]
+async fn get_edition_profile(source: album_file_sizes::Request, app: AppHandle) -> Result<Option<album_file_sizes::Profile>, String> {
+    use album_file_sizes::Request;
+    require_experimental_features(&app)?;
+    match source {
+        Request::Plex {server_id,library_id,album_id} => {
+            if !music_sources::plex() {return Err("SOURCE_DISABLED".into());}
+            let client=app.state::<PlexState>().0.lock().map_err(|_|"EDITIONS_SOURCE")?.clone();
+            client.edition_profile(&server_id,&library_id,&album_id).await
+        },
+        Request::Navidrome {connection_id,account_id,album_id} => navidrome::edition_profile(&connection_id,&account_id,&album_id).await,
+        Request::Local {album_id} => tauri::async_runtime::spawn_blocking(move || {
+            let (result,_)=with_local_source_context(&app,|before,recheck,context| {
+                if before.observed_conflict {return Err("LOCAL_CATALOG_IDENTITY_CONFLICT".into());}
+                let socket=app.state::<AudioState>().0.try_lock().map_err(|_|"EDITIONS_SOURCE")?.local_album_socket_path();
+                let expected=MpdSupervisor::socket_path();
+                if Path::new(&socket)!=expected.as_path(){return Err("LOCAL_CATALOG_CONTEXT_CHANGED".into());}
+                let groups=AudioEngine::get_local_album_tracks_at(&socket,&album_id)?.ok_or("EDITIONS_SOURCE")?;
+                let tracks=groups.into_iter().flat_map(|g|g.tracks).filter(|t|t.item_type=="file").collect::<Vec<_>>();
+                let uris=tracks.iter().map(|t|t.path.clone()).collect::<Vec<_>>();
+                let sizes=album_file_sizes::inspect(context.library,context.configured,&uris);
+                let after=recheck()?;
+                let actual=app.state::<AudioState>().0.try_lock().map_err(|_|"EDITIONS_SOURCE")?.local_album_socket_path();
+                if after.observed_conflict||before.sources!=after.sources||actual!=socket||MpdSupervisor::socket_path()!=expected{return Err("LOCAL_CATALOG_CONTEXT_CHANGED".into());}
+                Ok(Some(album_file_sizes::Profile::new(sizes,tracks.into_iter().map(|t|t.title))))
+            })?;
+            Ok(result)
+        }).await.map_err(|_|"EDITIONS_SOURCE".to_string())?,
+    }
+}
+
 #[tauri::command]
 async fn get_local_album_doctor(
     album_id: String,
@@ -6174,9 +6228,11 @@ async fn save_config(
     music_sources::install(&new_config);
     if !music_sources::navidrome() { navidrome::suspend(); }
     let target_shared=is_shared_output(&new_config);
+    let experimental_enabled = new_config.experimental_features;
     *config_guard = new_config;
     drop(plex_guard);
     drop(config_guard);
+    remote_bridge::beta_preference_changed(&app, current_cfg.experimental_features, experimental_enabled);
     if !music_sources::local() { app.state::<LocalWatcherState>().stop_and_join(); }
 
     resume_analyzer.confirmed = true;
@@ -6783,6 +6839,7 @@ async fn get_plex_image(
 
 fn shutdown_controlled_resources(app_handle: &AppHandle) {
     navidrome::shutdown();
+    app_handle.state::<remote::State>().shutdown();
     app_handle.state::<upnp::State>().shutdown();
     mpris::shutdown(app_handle);
     if app_handle.state::<library_recovery::State>().should_persist_shutdown_queue() {
@@ -7119,6 +7176,8 @@ pub fn run() {
         .manage(PlaylistState(Mutex::new(PlaylistStore::default())))
         .manage(mpris::MprisState::default())
         .manage(upnp::State::default())
+        .manage(remote::State::default())
+        .manage(remote_bridge::MediaState::default())
         .invoke_handler(tauri::generate_handler![
             local_diagnostics::get_local_diagnostics,
             analyze_library_recovery,
@@ -7139,6 +7198,11 @@ pub fn run() {
             previous_track,
             seek_playback,
             play_uris,
+            remote_bridge::get_remote_control,
+            remote_bridge::set_remote_control,
+            remote_bridge::pair_remote_control,
+            remote_bridge::revoke_remote_control,
+            remote_bridge::remote_control_qr,
             upnp_bridge::get_upnp_receiver,
             upnp_bridge::set_upnp_receiver,
             play_tracks,
@@ -7157,6 +7221,7 @@ pub fn run() {
             navidrome::navidrome_connect,
             navidrome::navidrome_disconnect,
             navidrome::navidrome_albums,
+            navidrome::navidrome_edition_catalog,
             navidrome::navidrome_album,
             navidrome::navidrome_cover,
             navidrome::navidrome_song_cover_id,
@@ -7185,6 +7250,16 @@ pub fn run() {
             set_window_title,
             list_local_directory,
             get_local_album_tracks,
+            get_edition_profile,
+            ab_commands::ab_tracks,
+            ab_commands::ab_begin,
+            ab_commands::ab_load,
+            ab_commands::ab_decode,
+            ab_commands::ab_start,
+            ab_commands::ab_alive,
+            ab_commands::ab_end,
+            ab_commands::ab_cancel,
+            get_edition_cache_namespace,
             get_local_album_doctor,
             search_online_album_metadata,
             get_online_album_metadata_details,
@@ -7297,6 +7372,7 @@ pub fn run() {
                 if managed_startup_allowed || resume_initial {
                     mpris::start(app_handle.clone());
                     upnp_bridge::restore(app_handle);
+                    remote_bridge::restore(app_handle);
                 }
                 if mpd_started && !restore_started.swap(true, Ordering::SeqCst) {
                     let app = app_handle.clone();

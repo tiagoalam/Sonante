@@ -1,3 +1,4 @@
+import { AlbumEditionsButton } from './AlbumEditionsButton';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Disc3, Heart, LoaderCircle, ListPlus, Play, RefreshCw, Search, Server } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -50,6 +51,7 @@ interface Props {
     available: boolean;
     active?: boolean;
     onConfigure?: () => void;
+    onCatalogAvailability?: (phase: 'ready' | 'error') => void;
     initialAlbum?: {account_id:string;id:string};
     onAlbumBack?: () => void;
     backLabel?: string;
@@ -57,7 +59,7 @@ interface Props {
     embedded?: boolean;
     onFavoritesChange?: (count: number) => void;
 }
-export function NavidromeView({ available, active = true, favoritesOnly = false, embedded = false, onFavoritesChange, onConfigure, initialAlbum, onAlbumBack, backLabel }: Props) {
+export function NavidromeView({ available, active = true, favoritesOnly = false, embedded = false, onFavoritesChange, onConfigure, onCatalogAvailability, initialAlbum, onAlbumBack, backLabel }: Props) {
     const { t } = useTranslation();
     const [connection, setConnection] = useState<NavidromeStatus | null>(null);
     const [artistTarget,setArtistTarget] = useState<{account_id:string;id:string}|null>(null);
@@ -159,7 +161,7 @@ export function NavidromeView({ available, active = true, favoritesOnly = false,
                 if (catalogIdentityRef.current !== catalogIdentity || !connectionRef.current) return Promise.reject('NAVIDROME_CONTEXT_CHANGED');
                 return navidromeService.albums(connectionRef.current, query, sort, offset, 36);
             },
-            state => { setFeed(state); if (!query && state.total !== null) setLibraryTotal(state.total); if (state.error) logError('navidrome.catalog', state.error); },
+            state => { if (state.error) onCatalogAvailability?.('error'); else if (!state.loading && (state.albums.length > 0 || !state.more)) onCatalogAvailability?.('ready'); setFeed(state); if (!query && state.total !== null) setLibraryTotal(state.total); if (state.error) logError('navidrome.catalog', state.error); },
         );
         feedRef.current = session;
         void session.loadMore();
@@ -300,7 +302,7 @@ export function NavidromeView({ available, active = true, favoritesOnly = false,
                     <button type="button" className={control + ' mb-5 inline-flex items-center gap-2'} onClick={() => { if (onAlbumBack) { onAlbumBack(); return; } detailRequest.current++; setAlbumId(null); setDetail(null); setDetailError(null); setDetailLoading(false); }}><ArrowLeft size={16} />{backLabel ?? t('navidrome.back')}</button>
                     {detailLoading && <p role="status">{t('navidrome.loadingAlbum')}</p>}{failureNotice}
                     {detail && <>
-                        <div className="mb-7 flex flex-wrap items-end gap-6"><div className="w-52 shrink-0"><Artwork connection={connectionId} id={detail.album.cover_id} /></div><div className="min-w-0 flex-1 space-y-3"><p className="text-xs font-bold uppercase tracking-wider text-[color:var(--theme-fg-accent,#E5A00D)]">{t('navidrome.album')}</p><h2 className="text-3xl font-black">{detail.album.title}</h2><NavidromeArtistLink artist={detail.album.artist} albumId={detail.album.id} connectionId={connectionId} accountId={connection?.account_id??''} onOpen={setArtistTarget} disabled={!active||!!error||!!artistTarget} className="text-base text-[color:var(--theme-fg-secondary,#ccc)]" /><p className="text-xs text-[color:var(--theme-fg-muted,#777)]">{detail.album.year ? `${detail.album.year} · ` : ''}{t('navidrome.tracks', { count: detail.songs.length })}</p><div className="flex flex-wrap gap-3 pt-2"><button type="button" className="inline-flex items-center gap-2 rounded-xl bg-[#E5A00D] px-6 py-2.5 text-xs font-bold text-black disabled:opacity-50" disabled={!available || !!error || playing || !detail.songs.length || detail.songs.length > 500} onClick={() => void play(0)}><Play size={16} fill="currentColor" />{t(playing ? 'navidrome.preparing' : 'navidrome.playAlbum')}</button><button type="button" className={control + ' inline-flex items-center gap-2'} disabled={!connection?.account_id || !detail.songs.length || detail.songs.length > 500} onClick={() => addToPlaylist(detail.songs)}><ListPlus size={16} />{t('playlists.addAlbum')}</button>{favoriteButton(detail.album)}</div></div></div>
+                        <div className="mb-7 flex flex-wrap items-end gap-6"><div className="w-52 shrink-0"><Artwork connection={connectionId} id={detail.album.cover_id} /></div><div className="min-w-0 flex-1 space-y-3"><p className="text-xs font-bold uppercase tracking-wider text-[color:var(--theme-fg-accent,#E5A00D)]">{t('navidrome.album')}</p><h2 className="text-3xl font-black">{detail.album.title}</h2><NavidromeArtistLink artist={detail.album.artist} albumId={detail.album.id} connectionId={connectionId} accountId={connection?.account_id??''} onOpen={setArtistTarget} disabled={!active||!!error||!!artistTarget} className="text-base text-[color:var(--theme-fg-secondary,#ccc)]" /><p className="text-xs text-[color:var(--theme-fg-muted,#777)]">{detail.album.year ? `${detail.album.year} · ` : ''}{t('navidrome.tracks', { count: detail.songs.length })}</p><div className="flex flex-wrap gap-3 pt-2"><button type="button" className="inline-flex items-center gap-2 rounded-xl bg-[#E5A00D] px-6 py-2.5 text-xs font-bold text-black disabled:opacity-50" disabled={!available || !!error || playing || !detail.songs.length || detail.songs.length > 500} onClick={() => void play(0)}><Play size={16} fill="currentColor" />{t(playing ? 'navidrome.preparing' : 'navidrome.playAlbum')}</button><button type="button" className={control + ' inline-flex items-center gap-2'} disabled={!connection?.account_id || !detail.songs.length || detail.songs.length > 500} onClick={() => addToPlaylist(detail.songs)}><ListPlus size={16} />{t('playlists.addAlbum')}</button>{favoriteButton(detail.album)}<AlbumEditionsButton album={detail.album} source="navidrome" albumId={detail.album.id} disabled={!active || !!error || !!artistTarget} /></div></div></div>
                         {detail.songs.length > 500 && <p className="mb-4 text-sm">{t('navidrome.albumLimit')}</p>}
                         <div className="overflow-hidden rounded-xl border border-[color:var(--theme-border-soft,#222)]">
                             <div className="flex gap-4 bg-[var(--theme-surface-panel,#181818)] px-4 py-2.5 text-[11px] font-bold uppercase tracking-wider text-[color:var(--theme-fg-muted,#666)]"><span className="w-8">#</span><span className="flex-1">{t('plex.tracks')}</span></div>

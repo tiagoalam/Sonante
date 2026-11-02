@@ -31,6 +31,7 @@ import { audioService } from "../services/audio";
 import { configService } from "../services/config";
 import { plexService } from "../services/plex";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
+import { ExperimentalFeaturesSetting } from "./ExperimentalFeatures";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { createDeviceAvailabilityQuery, shouldCheckContextualDevice, type AvailabilityQueryState } from "../utils/deviceAvailability";
 import { wizardPlexConnectionReady, wizardSaveErrorKey, type WizardSaveErrorKey } from "../utils/welcomeWizard";
@@ -673,6 +674,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                   <span>{t(useNavidrome && navidromeReady ? 'sources.connectionSaved' : 'wizard.disabled')}</span>
                 </div>
               </div>
+              <ExperimentalFeaturesSetting enabled={config.experimental_features === true} disabled={isFinishing || connectionBusy} onChange={enabled => setConfig({ ...config, experimental_features: enabled })} />
             </div>
           )}
 
