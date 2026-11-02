@@ -157,7 +157,7 @@ Submissions run in a native background worker and reuse existing playback snapsh
 
 ## Audio: what Shared and Direct mean
 
-Sonante uses its **own supervised MPD process** as the actual decoder and playback engine. The application itself does not implement a separate PCM decoder/output pipeline.
+Normal library and radio playback uses Sonante's **own supervised MPD process** as its decoder and playback engine. The optional beta A/B comparator prepares and decodes its samples separately, then plays them through the system's shared audio output.
 
 | | Shared | Direct |
 | --- | --- | --- |
