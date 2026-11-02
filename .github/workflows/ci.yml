@@ -181,7 +181,8 @@ jobs:
           pacman -Qlp ./*.pkg.tar.zst
           bsdtar -xOf ./*.pkg.tar.zst .PKGINFO | tee package-info.txt
           VERSION="$(node -p "require('../package.json').version")"
-          grep -Fx "pkgver = $VERSION-1" package-info.txt
+          REVISION="$(sed -n 's/^pkgrel=//p' ../sonante-arch/PKGBUILD)"
+          grep -Fx "pkgver = $VERSION-$REVISION" package-info.txt
           for dep in mpd alsa-utils xdg-utils webkit2gtk-4.1; do grep -Fx "depend = $dep" package-info.txt; done
           bsdtar -tf ./*.pkg.tar.zst | grep -Fx usr/bin/sonante
           desktop-file-validate src/sonante.desktop
@@ -232,7 +233,7 @@ jobs:
             --candidates "$RUNNER_TEMP/sonante-candidates" \
             --work-dir "$RUNNER_TEMP/sonante-complete-work" \
             --output "$RUNNER_TEMP/sonante-complete-output" \
-            --revision 1
+            --revision "$(sed -n 's/^pkgrel=//p' sonante-arch/PKGBUILD)"
       - name: Upload complete installable packages
         uses: actions/upload-artifact@v4
         with:

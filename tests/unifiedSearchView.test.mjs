@@ -352,3 +352,55 @@ test("Navidrome account revision invalidates pending and opened results without 
  f.host.paint({...f.host.props,navidromeRevision:2});assert.equal(nodes(f.host.tree,n=>n.type===f.AlbumView).length,0);
  f.host.paint({...f.host.props,config:{...f.host.props.config,sources:{local:true,plex:true,navidrome:false}}});assert.doesNotMatch(renderToStaticMarkup(f.host.tree),/Live new account/);f.host.close();
 });
+
+const selectSearchSource = (host, t, source) => {
+  const label = source === "all" ? t("unifiedSearch.allSources") : t(`explore.sources.${source}`);
+  const button = nodes(host.tree, node => node.type === "button" && node.props.children === label)[0];
+  assert.ok(button, `source button: ${source}`);
+  button.props.onClick(); host.paint();
+};
+const searchCall = source => source === "navidrome" ? "nav-search" : source;
+for (const selected of ["local", "plex", "navidrome"]) {
+  test(`switching all → ${selected} → all repeats the unchanged query and finishes searching`, async () => {
+    const {host, calls, t} = fixture("pt-BR", {props: {navidromeConfigured: true}});
+    try {
+      host.type("Live"); await host.tick();
+      const reads = () => calls.filter(call => call[0] === searchCall(selected)).length;
+      assert.equal(reads(), 1);
+      selectSearchSource(host, t, selected); await host.tick();
+      assert.equal(reads(), 2, "switching scope must restart a source that remains visible");
+      assert.equal(nodes(host.tree, n => n.type === "input")[0].props.value, "Live");
+      assert.ok(!renderToStaticMarkup(host.tree).includes(t("unifiedSearch.searching")));
+      selectSearchSource(host, t, "all"); await host.tick();
+      for (const source of ["local", "plex", "navidrome"])
+        assert.equal(calls.filter(call => call[0] === searchCall(source)).length, source === selected ? 3 : 2);
+      assert.ok(!renderToStaticMarkup(host.tree).includes(t("unifiedSearch.searching")));
+      assert.equal(calls.filter(call => call[0] === "play").length, 0);
+    } finally { host.close(); }
+  });
+  test(`switching to ${selected} during an in-flight search fences stale responses and completes the replacement`, async () => {
+    const old = deferred(), fresh = deferred(); let reads = 0;
+    const staleTitle = "Live STALE result";
+    const localPage = title => ({tracks: [{item_type: "file", path: `Source/${title}`, name: title, title}], limited: false});
+    const plexPage = title => ({...empty, albums: [{rating_key: title, title, artist: "Artist", server_id: "server"}]});
+    const navPage = title => ({connection_id: "fixture-nav", account_id: "a".repeat(64), albums: [{id: title, title, artist: "Artist"}], artists: [], songs: []});
+    const page = selected === "local" ? localPage : selected === "plex" ? plexPage : navPage;
+    const read = () => ++reads === 1 ? old.promise : fresh.promise;
+    const {host, calls, t} = fixture("en", {props: {navidromeConfigured: true},
+      ...(selected === "local" ? {readLocal: read} : selected === "plex" ? {readPlex: read} : {readNav: read})});
+    try {
+      host.type("Live"); await host.tick(); assert.equal(reads, 1);
+      selectSearchSource(host, t, selected); await host.tick();
+      assert.equal(reads, 1, "the source still has at most one in-flight read");
+      old.resolve(page(staleTitle)); await flush(); host.paint();
+      assert.equal(reads, 2, "the replacement runs after the old request settles");
+      assert.ok(!renderToStaticMarkup(host.tree).includes(staleTitle));
+      fresh.resolve(page("Live CURRENT result")); await flush(); host.paint();
+      const html = renderToStaticMarkup(host.tree);
+      assert.match(html, /Live CURRENT result/); assert.ok(!html.includes(staleTitle));
+      assert.ok(!html.includes(t("unifiedSearch.searching")));
+      assert.equal(nodes(host.tree, n => n.type === "input")[0].props.value, "Live");
+      assert.equal(calls.filter(call => call[0] === "play").length, 0);
+    } finally { host.close(); }
+  });
+}

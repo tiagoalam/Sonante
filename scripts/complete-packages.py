@@ -471,7 +471,7 @@ def assemble(variant, inputs, candidates, work, output, identity, revision):
         if variant == 'ubuntu':
             require(run('dpkg-deb', '-f', packages[0], 'Version').strip() == identity['version'], 'Wrong Ubuntu candidate version')
         else:
-            require('pkgver = ' + identity['version'] + '-1\n' in run('bsdtar', '-xOf', packages[0], '.PKGINFO'), 'Wrong Arch candidate version')
+            require('pkgver = ' + identity['version'] + '-' + revision + '\n' in run('bsdtar', '-xOf', packages[0], '.PKGINFO'), 'Wrong Arch candidate version')
         extract_application(packages[0], variant, app)
     require(descriptor in checked_file(app).read_bytes(), 'Application compiled descriptor mismatch')
     _, needed = elf_info(app, variant == 'arch')

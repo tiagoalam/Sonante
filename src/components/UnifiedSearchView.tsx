@@ -100,7 +100,7 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
       }
     }), 300);
     return () => { clearTimeout(timer); localLane.cancel(); };
-  }, [active, query, showLocal, localReady, localIdentity, localIndex, localLane, retry]);
+  }, [active, query, scope, showLocal, localReady, localIdentity, localIndex, localLane, retry]);
 
   useEffect(() => {
     if (!active || !query || !showPlex) { plexLane.cancel(); return; }
@@ -109,7 +109,7 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
       return plexSearchPreview(await plexService.search(query), config.plex_server_id);
     }), 300);
     return () => { clearTimeout(timer); plexLane.cancel(); };
-  }, [active, query, showPlex, plexIdentity, plexLane, config.plex_server_id, retry]);
+  }, [active, query, scope, showPlex, plexIdentity, plexLane, config.plex_server_id, retry]);
   useEffect(()=>{
     if(!active||!query||!showNav){navLane.cancel();return;}
     const timer=setTimeout(()=>navLane.request(query,async current=>{
@@ -119,7 +119,7 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
       return navidromeSearchPreview(await navidromeService.search(connection.connection_id,query),connection);
     }),300);
     return()=>{clearTimeout(timer);navLane.cancel();};
-  },[active,query,showNav,navIdentity,navLane,retry]);
+  },[active,query,scope,showNav,navIdentity,navLane,retry]);
   useEffect(() => () => { localLane.cancel(); plexLane.cancel(); navLane.cancel(); }, [localLane, plexLane,navLane]);
 
   useLayoutEffect(() => {
