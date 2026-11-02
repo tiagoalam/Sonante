@@ -8,7 +8,10 @@ const cargo = /^version = "([^"]+)"/m.exec(read("src-tauri/Cargo.toml"))?.[1];
 const cargoLock = /name = "sonante"\nversion = "([^"]+)"/.exec(read("src-tauri/Cargo.lock"))?.[1];
 const arch = /^pkgver=(.+)$/m.exec(read("sonante-arch/PKGBUILD"))?.[1];
 for (const version of [lock.version, lock.packages[""].version, tauri.version, cargo, cargoLock, arch]) assert.equal(version, pkg.version);
-if (process.env.RELEASE_TAG) assert.equal(process.env.RELEASE_TAG, `v${pkg.version}`);
+const revision = /^pkgrel=([1-9][0-9]*)$/m.exec(read("sonante-arch/PKGBUILD"))?.[1];
+assert.ok(revision, "Arch package revision must be a positive integer");
+const sourceTag = `v${pkg.version}${revision === "1" ? "" : `-r${revision}`}`;
+if (process.env.RELEASE_TAG) assert.equal(process.env.RELEASE_TAG, sourceTag);
 assert.match(read("src/components/AboutModal.tsx"), new RegExp(`v${pkg.version.replaceAll(".", "\\.")}`));
 // API/SONAME 4.1 alone does not guarantee the WebKit 2.40 APIs used by Tauri/Wry.
 for (const dep of ["mpd", "alsa-utils", "xdg-utils", "xdg-desktop-portal", "libasound2", "libssl3"]) assert.ok(tauri.bundle.linux.deb.depends.includes(dep), dep);

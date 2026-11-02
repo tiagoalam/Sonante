@@ -4,7 +4,7 @@ import {useNavidromeConfiguration} from "./utils/useNavidromeConfiguration";
 import { sourceEnabled } from "./utils/musicSources";
 import { subscribeAlbumEditions, type EditionAnchor } from './utils/albumEditions';
 import { experimentalFeaturesEnabled, isExperimentalSection, createExperimentalSessionObserver } from './utils/experimentalFeatures';
-import { ExperimentalFeaturesContext, BetaBadge } from './components/ExperimentalFeatures';
+import { ExperimentalFeaturesContext } from './components/ExperimentalFeatures';
 import { frontendStartup } from './utils/frontendStartup';
 import { useAppWindowTitle } from './utils/useAppWindowTitle';
 import { AboutModal } from './components/AboutModal';
@@ -1799,9 +1799,9 @@ export function App() {
                     mainSectionPreference.navigate("favorites");
                   }}
                 />
-                {experimental && <SidebarNavItem trailing={<BetaBadge />} icon={Headphones} label={t("sessions.title")} active={mediaSource === "sessions"}
+                {experimental && <SidebarNavItem icon={Headphones} label={t("sessions.title")} active={mediaSource === "sessions"}
                   onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("sessions"); }} />}
-                {experimental && <SidebarNavItem trailing={<BetaBadge />} icon={Layers3} label={t("editions.menu")} active={mediaSource === "editions"}
+                {experimental && <SidebarNavItem icon={Layers3} label={t("editions.menu")} active={mediaSource === "editions"}
                   onClick={() => { resetAllNavigation(); setEditionAnchor(null); mainSectionPreference.navigate("editions"); }} />}
                 <SidebarNavItem icon={History} label={t("history.title")} active={mediaSource === "history"}
                   onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("history"); }} />
