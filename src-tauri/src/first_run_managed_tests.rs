@@ -47,6 +47,23 @@ impl Fixture {
     }
 }
 
+// Reopen scenarios require a process with no unrelated fork/pre_exec activity.
+// A parallel libtest process can fork while a Lease is alive: O_CLOEXEC closes
+// the child's descriptor at exec, not at fork. Dropping the parent's Lease
+// therefore does not prove the lock is already unowned in this test process.
+fn run_in_isolated_test_process(name: &str) -> bool {
+    const CASE: &str = "SONANTE_FIRST_RUN_ISOLATED_TEST";
+    if std::env::var(CASE).as_deref() == Ok(name) { return false; }
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &format!("first_run_managed::tests::{name}"), "--test-threads=1", "--nocapture"])
+        .env(CASE, name).output().unwrap();
+    assert!(result.status.success(), "isolated {name}: {}{}",
+        String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("test result: ok. 1 passed; 0 failed;"),
+        "isolated {name} must execute exactly one test: {}", String::from_utf8_lossy(&result.stdout));
+    true
+}
+
 #[cfg_attr(test, test)]
 pub(crate) fn empty_to_selected_folder_publishes_schema2_before_config() {
     let f = Fixture::new(); let (previous, next) = f.configs(false);
@@ -313,6 +330,7 @@ pub(crate) fn real_mpd_failed_database_save_prevents_initial_config_commit() { r
 
 #[cfg_attr(test, test)]
 pub(crate) fn preferences_enter_before_database_and_resume_the_same_generation() {
+    if run_in_isolated_test_process("preferences_enter_before_database_and_resume_the_same_generation") { return; }
     let f = Fixture::new(); let (previous, next) = f.configs(true);
     let owner = Lease::acquire(&f.profile).unwrap();
     let mut tx = InitialPublication::prepare(&owner, &previous, &next, "initial-background-resume", &|| false).unwrap();
@@ -367,6 +385,7 @@ pub(crate) fn resumed_cleanup_never_removes_foreign_contents() {
 
 #[cfg_attr(test, test)]
 pub(crate) fn resumed_cleanup_can_finish_after_original_marker_was_unlinked() {
+    if run_in_isolated_test_process("resumed_cleanup_can_finish_after_original_marker_was_unlinked") { return; }
     let f = Fixture::new(); let (previous, next) = f.configs(false);
     let owner = Lease::acquire(&f.profile).unwrap();
     let mut tx = InitialPublication::prepare(&owner, &previous, &next, "initial-cleanup-resume", &|| false).unwrap();
@@ -565,4 +584,40 @@ pub(crate) fn private_mpd_child_database_completes_without_changing_parent_mask(
         print!("{}", String::from_utf8_lossy(&result.stdout));
         assert!(result.status.success(), "mask {mask}: {}", String::from_utf8_lossy(&result.stderr));
     }
+}
+
+
+#[cfg_attr(test, test)]
+pub(crate) fn forked_pre_exec_child_can_temporarily_retain_a_closed_parent_profile_lease() {
+    if run_in_isolated_test_process("forked_pre_exec_child_can_temporarily_retain_a_closed_parent_profile_lease") { return; }
+    let f = Fixture::new();
+    let owner = Lease::acquire(&f.profile).unwrap();
+    let mut ready = [0; 2]; let mut release = [0; 2];
+    assert_eq!(unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    assert_eq!(unsafe { libc::pipe2(release.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    let child = unsafe { libc::fork() }; assert!(child >= 0);
+    if child == 0 {
+        // Only async-signal-safe calls until _exit. No Rust allocation/locks,
+        // application engine, media, GUI or external executable is involved.
+        unsafe {
+            libc::close(ready[0]); libc::close(release[1]);
+            let byte: u8 = 1; libc::write(ready[1], (&byte as *const u8).cast(), 1);
+            let mut poll = libc::pollfd { fd: release[0], events: libc::POLLIN, revents: 0 };
+            let waiting = libc::poll(&mut poll, 1, 10000);
+            libc::_exit(if waiting > 0 { 0 } else { 1 });
+        }
+    }
+    unsafe { libc::close(ready[1]); libc::close(release[0]); }
+    let mut poll = libc::pollfd { fd: ready[0], events: libc::POLLIN, revents: 0 };
+    let signalled = unsafe { libc::poll(&mut poll, 1, 5000) };
+    drop(owner);
+    let blocked = Lease::acquire(&f.profile).map(|_| ());
+    // Always release and reap our own child BEFORE any assertion can unwind.
+    let byte: u8 = 1;
+    unsafe { libc::write(release[1], (&byte as *const u8).cast(), 1); libc::close(release[1]); libc::close(ready[0]); }
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+    assert_eq!(signalled, 1); assert!(libc::WIFEXITED(status)); assert_eq!(libc::WEXITSTATUS(status), 0);
+    assert_eq!(blocked, Err(crate::profile_lease::BUSY.into()));
+    Lease::acquire(&f.profile).unwrap().validate().unwrap();
 }

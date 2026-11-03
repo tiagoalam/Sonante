@@ -1016,6 +1016,9 @@
     "plexDesc": "Integração Plex por PIN/OAuth, descoberta na LAN, navegação da biblioteca e reprodução de partes de mídia pelo MPD.",
     "devTitle": "Desenvolvimento",
     "devDesc": "Construído em Rust, Tauri, React e MPD.",
+    "testersTitle": "Agradecimentos aos beta testers",
+    "testersDescription": "Obrigado pela colaboração nos testes e pelas sugestões que ajudam a melhorar o Sonante.",
+    "channelOpenError": "Não foi possível abrir o canal no navegador. Tente novamente.",
     "builtWith": "Desenvolvido com",
     "forEnthusiasts": "para entusiastas de áudio",
     "license": "Licenciado sob {{license}}. Copyright 2026 Tiago Alam. Sem garantia. Componentes de terceiros mantêm suas próprias licenças."
