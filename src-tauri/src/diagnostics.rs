@@ -75,6 +75,12 @@ pub(crate) fn error_summary(error: impl Display) -> String {
     // surrounding error or changing its IPC/guard semantics.
     let candidate = text.split(|c: char| c.is_whitespace() || c == ':' || c == ';').next().unwrap_or("");
     let code_hint = match candidate {
+        "SONANTE_RUNTIME_MISSING" => Some("not_found"),
+        "SONANTE_RUNTIME_UNTRUSTED" => Some("untrusted_runtime"),
+        "SONANTE_RUNTIME_OVERRIDE_FORBIDDEN" => Some("runtime_override_forbidden"),
+        "FIRST_RUN_EXISTING_LIBRARY_REQUIRES_REVIEW" => Some("existing_library"),
+        "FIRST_RUN_CONFIG_CHANGED" => Some("conflict"),
+        "FIRST_RUN_MANAGED_SAVE_UNCONFIRMED" | "FIRST_RUN_PREPARATION_INCOMPLETE" | "FIRST_RUN_DATABASE_UNCONFIRMED" => Some("uncertain"),
         "LIBRARY_RECOVERY_PROFILE_BUSY" | "CONFIG_SAVE_BUSY" => Some("busy"),
         "LIBRARY_RECOVERY_UNSAFE_FILESYSTEM" => Some("unsafe_filesystem"),
         "LIBRARY_RECOVERY_PLAN_CHANGED" | "NAVIDROME_CONTEXT_CHANGED" => Some("conflict"),

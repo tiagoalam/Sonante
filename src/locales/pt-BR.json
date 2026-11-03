@@ -972,7 +972,7 @@
     "unnamedServer": "Servidor Plex",
     "libraryPreparationError": "Não foi possível preparar a biblioteca de músicas. A configuração inicial não foi concluída.",
     "preparationIncomplete": "Não foi possível concluir a configuração inicial. Feche o Sonante e preserve os arquivos de configuração para recuperação.",
-    "saveError": "Ocorreu um erro ao salvar as preferências iniciais.",
+    "saveError": "Não foi possível concluir a configuração. Copie o diagnóstico para ajudar a identificar a causa.",
     "sourceRequired": "Selecione pelo menos uma fonte: Local, Plex ou Navidrome.",
     "foldersCount_zero": "{{count}} pastas",
     "foldersCount_one": "{{count}} pasta",
