@@ -972,7 +972,7 @@
     "unnamedServer": "Plex server",
     "libraryPreparationError": "The music library could not be prepared. Initial setup has not completed.",
     "preparationIncomplete": "Initial setup could not be completed. Close Sonante and preserve the configuration files for recovery.",
-    "saveError": "An error occurred while saving the initial preferences.",
+    "saveError": "Could not complete setup. Copy the diagnostic to help identify the cause.",
     "sourceRequired": "Select at least one source: Local, Plex or Navidrome.",
     "foldersCount_zero": "{{count}} folders",
     "foldersCount_one": "{{count}} folder",

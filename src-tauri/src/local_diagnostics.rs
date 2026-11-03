@@ -5,7 +5,7 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
-#[derive(Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Stage {
     StartupConfig,
@@ -25,6 +25,15 @@ pub(crate) enum Stage {
     QueueApply,
     StartupReady,
     QueueRestoreAttempt,
+    PreferencesSave,
+    WizardPreparation,
+    WizardSourceAdmission,
+    WizardWatch,
+    WizardLibraryPrepare,
+    WizardLibraryPublish,
+    WizardEngine,
+    WizardPreferences,
+    WizardBackground,
 }
 #[derive(Clone, Serialize)]
 pub(crate) struct Entry {
@@ -34,8 +43,8 @@ pub(crate) struct Entry {
     error_summary: Option<String>,
 }
 static ENTRIES: OnceLock<Mutex<VecDeque<Entry>>> = OnceLock::new();
-pub(crate) fn record(stage: Stage, elapsed: Duration, error: Option<&str>) {
-    let entry = Entry {
+fn entry(stage: Stage, elapsed: Duration, error: Option<&str>) -> Entry {
+    Entry {
         stage,
         elapsed_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
         outcome: if error.is_some() {
@@ -44,7 +53,10 @@ pub(crate) fn record(stage: Stage, elapsed: Duration, error: Option<&str>) {
             "completed"
         },
         error_summary: error.map(crate::diagnostics::error_summary),
-    };
+    }
+}
+pub(crate) fn record(stage: Stage, elapsed: Duration, error: Option<&str>) {
+    let entry = entry(stage, elapsed, error);
     if let Ok(mut entries) = ENTRIES.get_or_init(|| Mutex::new(VecDeque::new())).lock() {
         if entries.len() == 32 {
             entries.pop_front();
@@ -61,6 +73,23 @@ pub(crate) fn timed<T>(stage: Stage, run: impl FnOnce() -> Result<T, String>) ->
         result.as_ref().err().map(String::as_str),
     );
     result
+}
+/// Same result and call count as the operation; diagnostics never retain the raw error.
+/// These fixed enum labels are also useful before Settings becomes accessible.
+pub(crate) fn wizard_step<T>(stage: Stage, run: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let started = Instant::now();
+    let result = run();
+    observe(stage, started.elapsed(), &result);
+    result
+}
+
+pub(crate) fn observe<T>(stage: Stage, elapsed: Duration, result: &Result<T, String>) {
+    record(stage, elapsed, result.as_ref().err().map(String::as_str));
+    if let Err(error) = result {
+        use std::io::Write;
+        // A closed or broken diagnostic stream must never replace the actual failure.
+        let _ = writeln!(std::io::stderr(), "[Preferences] stage={stage:?} {}", crate::diagnostics::error_summary(error));
+    }
 }
 #[derive(Serialize)]
 pub(crate) struct Report {
@@ -111,4 +140,29 @@ mod tests {
             assert!(!serialized.contains(value));
         }
     }
+    #[test]
+    fn wizard_steps_preserve_results_and_report_only_fixed_labels_and_safe_errors() {
+        let mut calls = 0;
+        let failure = "SONANTE_RUNTIME_MISSING: /home/private https://host/?token=secret (os error 2)";
+        let result: Result<(), String> = wizard_step(Stage::WizardEngine, || {
+            calls += 1;
+            Err(failure.into())
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(result.unwrap_err(), failure);
+        assert_eq!(wizard_step(Stage::WizardPreferences, || Ok(42)).unwrap(), 42);
+        // Test the actual sanitizer independently of the bounded process-wide
+        // queue: parallel tests may legitimately append or evict its entries.
+        let entries = [entry(Stage::WizardEngine, Duration::ZERO, Some(failure)),
+            entry(Stage::WizardPreferences, Duration::ZERO, None)];
+        let encoded = serde_json::to_string(&entries).unwrap();
+        for secret in ["/home", "private", "https://", "token", "secret"] {
+            assert!(!encoded.contains(secret), "{encoded}");
+        }
+        assert!(encoded.contains("wizard_engine"));
+        assert!(encoded.contains("wizard_preferences"));
+        assert!(encoded.contains("SONANTE_RUNTIME_MISSING"));
+        assert!(encoded.contains("os_code=2"));
+    }
+
 }

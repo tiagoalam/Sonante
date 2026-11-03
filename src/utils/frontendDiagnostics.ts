@@ -24,10 +24,13 @@ const operations = [
   "plex.servers-discover", "queue.clear", "queue.load",
   "queue.play-index", "settings.load", "settings.local-folders-save",
   "settings.pick-folder", "settings.reload", "settings.reload-confirmed",
-  "settings.save", "settings.save-status", "wizard.pick-folder"
+  "settings.save", "settings.save-status", "wizard.pick-folder", "wizard.save"
 ] as const;
 export type DiagnosticOperation = typeof operations[number];
 const safeCodes = new Set([
+  "SONANTE_RUNTIME_MISSING", "SONANTE_RUNTIME_UNTRUSTED", "SONANTE_RUNTIME_OVERRIDE_FORBIDDEN",
+  "FIRST_RUN_EXISTING_LIBRARY_REQUIRES_REVIEW", "FIRST_RUN_MANAGED_SAVE_UNCONFIRMED",
+  "FIRST_RUN_PREPARATION_INCOMPLETE", "FIRST_RUN_DATABASE_UNCONFIRMED", "FIRST_RUN_CONFIG_CHANGED",
   "NAVIDROME_DETAILS_EXPIRED", "NAVIDROME_INVALID", "NAVIDROME_AUTH", "NAVIDROME_PROTOCOL", "NAVIDROME_UNAVAILABLE", "NAVIDROME_CONTEXT_CHANGED", "NAVIDROME_STORAGE", "NAVIDROME_RATE_LIMITED",
   "LOCAL_SEARCH_QUERY_INVALID", "LOCAL_SEARCH_RESPONSE_INVALID", "LOCAL_SEARCH_UPDATING", "LOCAL_SEARCH_UNAVAILABLE",
   "SEARCH_CONTEXT_CHANGED", "SEARCH_CONTEXT_UNAVAILABLE",

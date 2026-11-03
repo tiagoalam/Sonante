@@ -62,6 +62,7 @@ function wizard(overrides = {}) {
     "../utils/frontendDiagnostics": frontendDiagnostics, "lucide-react": icons,
     "react-i18next": { useTranslation: () => ({ t, i18n: { language: "en", changeLanguage() {} } }) },
     "./AudioSignalDiagram": { AudioSignalDiagram: function AudioSignalDiagram() {} },
+    "./LocalDiagnostics": { LocalDiagnostics: function LocalDiagnostics() {} },
     "./AppearanceSetting": appearanceExports,
     "./ExperimentalFeatures": { ExperimentalFeaturesSetting: function ExperimentalFeaturesSetting() {} },
     "../utils/deviceAvailability": { createDeviceAvailabilityQuery, shouldCheckContextualDevice },
@@ -458,4 +459,20 @@ test("wizard summary offers one opt-in for both beta tools and persists the chos
 test("reopening the wizard preserves a previously selected experimental preference",async()=>{
  const f=audioWizard({config:{...base,first_run:false,sources:{local:true,plex:false,navidrome:false},experimental_features:true},onCancel:()=>{}});next(f);next(f);
  const option=find(f.tree,node=>node.type?.name==='ExperimentalFeaturesSetting');assert.equal(option.props.enabled,true);f.dispose();
+});
+
+
+test("failed completion exposes the existing safe report before Settings is available", async () => {
+  const f = audioWizard({ save: async () => { throw "SONANTE_RUNTIME_MISSING: /private?token=SECRET (os error 2)"; } });
+  selectSources(f, true, false); next(f);
+  assert.equal(nodes(f.tree).some(n => n.type?.name === "LocalDiagnostics"), false);
+  await button(f, "wizard.start").props.onClick(); f.render();
+  assert.equal(f.calls.finished.length, 0);
+  assert.ok(nodes(f.tree).some(n => n.type?.name === "LocalDiagnostics"));
+  const last = frontendDiagnostics.localDiagnosticErrors().at(-1);
+  assert.equal(last.operation, "wizard.save");
+  assert.equal(last.diagnostic.code, "SONANTE_RUNTIME_MISSING");
+  assert.equal(last.diagnostic.os_code, 2);
+  assert.doesNotMatch(JSON.stringify(last), /private|token|SECRET/);
+  assert.doesNotMatch(text(f.tree), /private|token|SECRET/);
 });

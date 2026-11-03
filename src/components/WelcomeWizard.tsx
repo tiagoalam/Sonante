@@ -1,3 +1,4 @@
+import { LocalDiagnostics } from "./LocalDiagnostics";
 import { SourceCards } from "./SourceCards";
 import { NavidromeConnectionSetting } from "./NavidromeConnectionSetting";
 import { sourceEnabled } from "../utils/musicSources";
@@ -265,6 +266,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
       if (response.status !== "completed") throw new Error(t("settings.librarySaveUncertain"));
       onFinish(finalConfig);
     } catch (err) {
+      logError("wizard.save", err);
       const error = wizardSaveErrorKey(err);
       if (error === "wizard.preparationIncomplete") preparationBlockedRef.current = true;
       setCompletionError(error);
@@ -678,7 +680,10 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
             </div>
           )}
 
-          {completionError && <p role="alert" className="mt-4 text-xs text-[color:var(--theme-fg-error,#FF8686)]">{completionErrorMessage(completionError)}</p>}
+          {completionError && <div className="mt-4 space-y-3">
+            <p role="alert" className="text-xs text-[color:var(--theme-fg-error,#FF8686)]">{completionErrorMessage(completionError)}</p>
+            <LocalDiagnostics />
+          </div>}
         </div>
         {/* Rodapé */}
         <div className="px-4 sm:px-6 py-4 border-t border-[color:var(--theme-border-soft,#242424)] flex items-center justify-between shrink-0">

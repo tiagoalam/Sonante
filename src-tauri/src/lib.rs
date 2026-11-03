@@ -1990,16 +1990,19 @@ fn prepare_initial_preferences(
     let current = app.state::<ConfigState>().0.lock().map_err(|_| "Config unavailable")?.clone();
     validate_config_change_preflight(observed, &current, next, alsa_preflight::probe)?;
     if !is_finishing_first_run(&current, next) { return Err("FIRST_RUN_CONFIG_CHANGED".into()); }
-    let watch = app.state::<LocalWatcherState>().prepare(next.local_folders.iter().map(PathBuf::from).collect())?;
+    let watch = local_diagnostics::wizard_step(local_diagnostics::Stage::WizardWatch, ||
+        app.state::<LocalWatcherState>().prepare(next.local_folders.iter().map(PathBuf::from).collect()))?;
     let generation = format!("first-run-{}-{}", std::process::id(), MIRROR_GENERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed));
-    let mut initial = first_run_managed::InitialPublication::prepare(&owner, &current, next, &generation, &cancelled)?;
-    initial.publish(&cancelled)?;
+    let mut initial = local_diagnostics::wizard_step(local_diagnostics::Stage::WizardLibraryPrepare, ||
+        first_run_managed::InitialPublication::prepare(&owner, &current, next, &generation, &cancelled))?;
+    local_diagnostics::wizard_step(local_diagnostics::Stage::WizardLibraryPublish, || initial.publish(&cancelled))?;
     // Preserve the historical output admission: the owned MPD must accept its
     // configuration before preferences are confirmed. Its auto-index can run;
     // neither first DB completion nor a rescan idle is required for navigation.
     let supervisor = app.state::<SupervisorState>();
-    let started = supervisor.0.lock().map_err(|_| "MPD unavailable")?.start(next)
-        .and_then(|_| initial.validate_published());
+    let started = local_diagnostics::wizard_step(local_diagnostics::Stage::WizardEngine, ||
+        supervisor.0.lock().map_err(|_| "MPD unavailable".to_string())?.start(next)
+            .and_then(|_| initial.validate_published()));
     if let Err(error) = started {
         return Err(error_with_rollback(error, initial.rollback(|| stop_supervisor(&supervisor.0))));
     }
@@ -2013,7 +2016,12 @@ fn prepare_initial_preferences(
         let mut plex = plex_state.0.lock().map_err(|_| "Plex config unavailable")?;
         if *config != current { return Err("FIRST_RUN_CONFIG_CHANGED".into()); }
         initial.validate_preferences_before_save()?;
-        match next.save() {
+        let save_started = Instant::now();
+        let saved = next.save();
+        let save_error = saved.as_ref().err().map(ToString::to_string);
+        local_diagnostics::record(local_diagnostics::Stage::WizardPreferences, save_started.elapsed(),
+            save_error.as_deref());
+        match saved {
             Ok(()) => preferences_committed.set(true),
             Err(ConfigSaveError::BeforeRename(error)) => return Err(error),
             Err(error @ ConfigSaveError::AfterRenameUnconfirmed(_)) => {
@@ -2021,7 +2029,7 @@ fn prepare_initial_preferences(
                 return Err(uncertain_config_save_message(&error));
             }
         }
-        initial.prepare_background()?;
+        local_diagnostics::wizard_step(local_diagnostics::Stage::WizardBackground, || initial.prepare_background())?;
         owner.validate()?;
         plex.update_config(next);
     music_sources::install(next);
@@ -5805,6 +5813,24 @@ impl<F: FnMut(&analyzer::AnalyzerOwner) -> Result<(), String>> Drop for Analyzer
 
 #[tauri::command]
 async fn save_config(
+    new_config: AppConfig,
+    queue_clear_authorization: Option<QueueClearAuthorization>,
+    app: AppHandle,
+    config_state: State<'_, ConfigState>,
+    transaction_state: State<'_, ConfigTransactionState>,
+    plex_state: State<'_, PlexState>,
+    sup_state: State<'_, SupervisorState>,
+    audio_state: State<'_, AudioState>,
+    analyzer_state: State<'_, AnalyzerState>,
+) -> Result<config_save_operation::SaveResponse, String> {
+    let started = Instant::now();
+    let result = save_config_inner(new_config, queue_clear_authorization, app, config_state,
+        transaction_state, plex_state, sup_state, audio_state, analyzer_state).await;
+    local_diagnostics::observe(local_diagnostics::Stage::PreferencesSave, started.elapsed(), &result);
+    result
+}
+
+async fn save_config_inner(
     mut new_config: AppConfig,
     queue_clear_authorization: Option<QueueClearAuthorization>,
     app: AppHandle,
@@ -5840,7 +5866,10 @@ async fn save_config(
         let admission_current = observed_cfg.clone();
         let admission_next = new_config.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            validate_local_folder_admission(&admission_current, &admission_next)
+            if admission_current.first_run {
+                local_diagnostics::wizard_step(local_diagnostics::Stage::WizardSourceAdmission, ||
+                    validate_local_folder_admission(&admission_current, &admission_next))
+            } else { validate_local_folder_admission(&admission_current, &admission_next) }
         })
         .await
         .map_err(|_| "Local folder admission unavailable".to_string())??;
@@ -5853,7 +5882,8 @@ async fn save_config(
         let worker_app = app.clone();
         let (_, operation) = transaction_state.operations.reserve()?;
         let prepared = tauri::async_runtime::spawn_blocking(move || {
-            let result = prepare_initial_preferences(&worker_app, &observed_cfg, &new_config, &operation);
+            let result = local_diagnostics::wizard_step(local_diagnostics::Stage::WizardPreparation, ||
+                prepare_initial_preferences(&worker_app, &observed_cfg, &new_config, &operation));
             (result, operation)
         }).await.map_err(|_| "FIRST_RUN_PREPARATION_INCOMPLETE".to_string())?;
         let (result, operation) = prepared;
