@@ -1,6 +1,7 @@
 import { LocalDiagnostics } from './LocalDiagnostics';
-import React from "react";
-import { X, Sparkles, Cpu, HardDrive, Server, ShieldCheck, Heart } from "lucide-react";
+import React, { useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { X, Sparkles, Cpu, HardDrive, Server, ShieldCheck, Heart, ExternalLink } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 interface Props {
@@ -9,6 +10,11 @@ interface Props {
 
 export const AboutModal: React.FC<Props> = ({ onClose }) => {
   const { t } = useTranslation();
+  const [channelError, setChannelError] = useState(false);
+  const openChannel = async (url: string) => {
+    setChannelError(false);
+    try { await openUrl(url); } catch { setChannelError(true); }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs select-none p-4">
@@ -86,6 +92,25 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
               </div>
             </div>
           </div>
+          <section className="p-4 rounded-xl bg-[var(--theme-surface-base,#131313)] border border-[color:var(--theme-border-soft,#222222)] space-y-3" aria-labelledby="about-testers-title">
+            <h3 id="about-testers-title" className="flex items-center gap-2 text-[11px] font-bold text-[color:var(--theme-fg-secondary,#CCCCCC)] uppercase tracking-wider">
+              <Heart size={15} className="text-[color:var(--theme-fg-accent,#E5A00D)] shrink-0" />
+              {t("about.testersTitle")}
+            </h3>
+            <p className="text-[11px] text-[color:var(--theme-fg-muted,#888888)] leading-relaxed">{t("about.testersDescription")}</p>
+            <div className="flex flex-wrap gap-2">
+              {[
+                { name: "Eduardo Monks", url: "https://www.youtube.com/@emmonks" },
+                { name: "Digão Reviews", url: "https://www.youtube.com/channel/UCeQ57U46cZQBMVDnKM3SbEg" },
+              ].map(({ name, url }) => (
+                <button key={url} type="button" onClick={() => void openChannel(url)}
+                  className="inline-flex items-center gap-2 rounded-lg border border-[color:var(--theme-border-soft,#2B2B2B)] px-3 py-2 text-[color:var(--theme-fg-accent,#E5A00D)] hover:bg-[var(--theme-surface-raised,#252525)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--theme-fg-accent,#E5A00D)] transition-colors cursor-pointer">
+                  {name}<ExternalLink size={12} aria-hidden="true" />
+                </button>
+              ))}
+            </div>
+            {channelError && <p role="alert" className="text-[11px] text-red-300">{t("about.channelOpenError")}</p>}
+          </section>
           <LocalDiagnostics />
           <p className="text-[11px] text-[color:var(--theme-fg-muted,#888888)] leading-relaxed">
             {t("about.license", { license: "GPL-3.0-only" })}
