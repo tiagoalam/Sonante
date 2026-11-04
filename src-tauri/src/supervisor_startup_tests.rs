@@ -1,6 +1,15 @@
 // Synthetic executable only: no MPD, audio device, GUI or personal profile.
 fn startup_fixture(mode: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
-    let (root, socket, pid) = test_runtime_paths("startup-compatibility");
+    // AF_UNIX limits the complete socket pathname, including the CI checkout.
+    // Keep this synthetic runtime private and short regardless of repository depth.
+    use std::os::unix::fs::DirBuilderExt;
+    let root = PathBuf::from("/tmp").join(format!("sonante-start-{}-{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        NEXT_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    let socket = root.join("mpd.socket"); let pid = root.join("mpd.pid");
+    assert!(socket.as_os_str().len() < 108);
     let program = root.join("synthetic-engine.py");
     let log = root.join("attempts.jsonl");
     let script = format!(r##"#!/usr/bin/python3
