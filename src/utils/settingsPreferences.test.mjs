@@ -1,3 +1,4 @@
+import * as usageMode from "./usageMode.ts";
 import * as musicSources from "./musicSources.ts";
 import * as frontendDiagnostics from "./frontendDiagnostics.ts";
 import test from "node:test";
@@ -91,6 +92,8 @@ async function modal(overrides = {}) {
     "./SettingsPages": { SettingsPages: function SettingsPages() {} },
     "./ScrobblingSetting": { ScrobblingSetting: () => null },
     "./AppearanceSetting": { AppearanceSetting: function AppearanceSetting() {} },
+    "../utils/usageMode": usageMode,
+    "./UsageModeSetting": { UsageModeSetting: function UsageModeSetting() {} },
     "./ExperimentalFeatures": { ExperimentalFeaturesSetting: function ExperimentalFeaturesSetting() {} },
     "./UpnpSetting": { UpnpSetting: function UpnpSetting() {} },
     "./RemoteControlSetting": { RemoteControlSetting: function RemoteControlSetting() {} },
@@ -741,4 +744,34 @@ test("experimental tools opt in and out through General Save without restarting 
 });
 test("legacy settings leave experimental tools disabled until explicitly enabled",async()=>{
  const f=await modal();const option=find(pageProps(f.tree()).general,node=>node.type?.name==='ExperimentalFeaturesSetting');assert.equal(option.props.enabled,false);f.h.dispose();
+});
+
+
+test("usage mode is a reversible draft and mode-only Save preserves both audio routes and beta choice", async () => {
+  for (const audio_output_type of ['alsa', 'pipewire']) {
+    const config = { ...base, audio_output_type, experimental_features: true };
+    const f = await modal({ config });
+    let option = find(f.tree(), n => n.type?.name === 'UsageModeSetting');
+    assert.equal(option.props.value, undefined);
+    option.props.onChange('simple'); f.render();
+    assert.equal(f.calls.save.length, 0);
+    assert.equal(nodes(f.tree()).some(n => n.type?.name === 'ExperimentalFeaturesSetting'), false);
+    assert.equal(nodes(f.tree()).some(n => n.type?.name === 'UpnpSetting'), false);
+    assert.equal(nodes(f.tree()).some(n => n.type?.name === 'RemoteControlSetting'), false);
+    button(f.tree(), 'settings.save').props.onClick(); await flush(); f.render();
+    assert.equal(f.calls.save.length, 1);
+    const saved = f.calls.save[0];
+    assert.deepEqual(saved, { ...config, usage_mode: 'simple' });
+    assert.deepEqual(f.calls.started, [false]);
+    assert.deepEqual(f.calls.saved, [false]);
+    f.h.dispose();
+    const back = await modal({ config: saved });
+    find(back.tree(), n => n.type?.name === 'UsageModeSetting').props.onChange('full'); back.render();
+    assert.equal(nodes(back.tree()).some(n => n.type?.name === 'ExperimentalFeaturesSetting'), true);
+    assert.equal(nodes(back.tree()).some(n => n.type?.name === 'UpnpSetting'), false); // Save first.
+    button(back.tree(), 'settings.save').props.onClick(); await flush(); back.render();
+    assert.deepEqual(back.calls.save[0], { ...config, usage_mode: 'full' });
+    assert.deepEqual(back.calls.started, [false]);
+    back.h.dispose();
+  }
 });

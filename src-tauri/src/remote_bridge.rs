@@ -113,7 +113,7 @@ fn require_main(window: &tauri::WebviewWindow) -> Result<(), String> {
 fn configured(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<ConfigState>();
     let config = state.0.lock().map_err(|_| "REMOTE_BUSY")?;
-    if config.first_run || !config.experimental_features {
+    if !config.experimental_features_enabled() {
         Err("REMOTE_UNAVAILABLE".into())
     } else {
         Ok(())
@@ -422,11 +422,21 @@ pub(crate) fn beta_preference_changed(app: &AppHandle, previous: bool, next: boo
         }
     });
 }
+pub(crate) fn usage_mode_changed(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || restore(&app));
+}
 pub(crate) fn restore(app: &AppHandle) {
     // Repair a shutdown/crash between saving beta=false and asynchronous network
     // cleanup: disabled beta must not restore an old durable grant on re-enable.
-    let beta_enabled = configured(app).is_ok();
     let result = (|| -> Result<(), String> {
+        let state = app.state::<remote::State>();
+        let _serial = state.operation.lock().map_err(|_| "REMOTE_BUSY")?;
+        if !app.state::<crate::ConfigState>().0.lock().map_err(|_| "REMOTE_BUSY")?.full_mode() {
+            state.suspend_under_operation();
+            return Ok(());
+        }
+        let beta_enabled = configured(app).is_ok();
         use std::io::Read;
         use std::os::unix::fs::OpenOptionsExt;
         if !path().try_exists().map_err(|_| "REMOTE_PREFERENCES")? {
@@ -451,8 +461,6 @@ pub(crate) fn restore(app: &AppHandle) {
         if !beta_enabled {
             prefs.enabled = false;
         }
-        let state = app.state::<remote::State>();
-        let _serial = state.operation.lock().map_err(|_| "REMOTE_BUSY")?;
         state.configure(prefs.clone(), Arc::new(Adapter(app.clone())))?;
         if !beta_enabled {
             crate::persistence::atomic_write_private(

@@ -1,3 +1,4 @@
+import { fullModeEnabled, isAdvancedSection } from './utils/usageMode';
 import { SourceStatus } from './components/SourceStatus';
 import { useSourceReadiness } from './utils/useSourceReadiness';
 import {useNavidromeConfiguration} from "./utils/useNavidromeConfiguration";
@@ -400,6 +401,7 @@ export function App() {
   const { t, i18n } = useTranslation();
   const localCatalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
   const [config, setConfigState] = useState<AppConfig | null>(null);
+  const fullMode = fullModeEnabled(config);
   const experimental = experimentalFeaturesEnabled(config) && !config?.first_run;
   const navidromeConfiguration=useNavidromeConfiguration(sourceEnabled(config,"navidrome"));
   useLayoutEffect(() => { frontendStartup.mark("shell_committed"); }, []);
@@ -482,10 +484,10 @@ export function App() {
   const discoverSelectionId = discoverSelection ?? selectedLibrary?.key ?? "";
   const discoverLocale = discoverLanguage(i18n.resolvedLanguage ?? i18n.language);
   const discoverIdentity = useMemo(() => ({}), [plexConnectionIdentity, discoverSelectionId, discoverLocale]);
-  const discoverScope = useMemo(() => plexLibrariesIdentity === plexConnectionIdentity && config?.plex_server_id
+  const discoverScope = useMemo(() => fullMode && plexLibrariesIdentity === plexConnectionIdentity && config?.plex_server_id
     && (discoverSelectionId === "all" ? libraries.length > 0 : libraries.some(l => l.key === discoverSelectionId))
     ? { identity: discoverIdentity, serverId: config.plex_server_id, libraryId: discoverSelectionId, language: discoverLocale, libraries } : null,
-    [libraries, plexLibrariesIdentity, plexConnectionIdentity, discoverIdentity, discoverSelectionId, discoverLocale, config?.plex_server_id]);
+    [fullMode, libraries, plexLibrariesIdentity, plexConnectionIdentity, discoverIdentity, discoverSelectionId, discoverLocale, config?.plex_server_id]);
   useLayoutEffect(() => { plexDiscover.setContext(discoverScope); setDiscoverPages([]); }, [plexDiscover, discoverScope]);
 
   const [plexViewMode, setPlexViewMode] = useState<"albums" | "artists" | "years" | "genres" | "collections">("albums");
@@ -627,7 +629,7 @@ export function App() {
     playerSourceKind === "plex" ? plexConnectionIdentity : null,
     playerSourceKind === "plex" ? plexBrowserCatalog : null]);
   const sourceInfo = usePlayerSourceInfo(playbackStatus.current_media, sourceInfoContext,
-    !!config && !config.first_run && !configSavePhase && isPlaybackAvailable
+    fullMode && !!config && !config.first_run && !configSavePhase && isPlaybackAvailable
       && (playerSourceKind !== "local" || (!playbackStatus.is_updating
         && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy)));
   useEffect(() => {
@@ -667,6 +669,7 @@ export function App() {
   useEffect(() => onDetachedWindowClosed(nowPlayingHosting.detachedClosed), [nowPlayingHosting]);
   const nowPlayingReadyRef = useRef(false);
   const nowPlayingSnapshotRef = useRef({
+    usageMode: config?.usage_mode,
     route: configuredSignalRoute(config),
     health: mpdHealth,
     playback: presentationPlayback,
@@ -1037,6 +1040,7 @@ export function App() {
 
   useEffect(() => {
     nowPlayingSnapshotRef.current = {
+      usageMode: config?.usage_mode,
       route: configuredSignalRoute(config),
       health: mpdHealth,
       playback: presentationPlayback,
@@ -1486,6 +1490,16 @@ export function App() {
     if (isExperimentalSection(playerReturnSection)) setPlayerNavigation(previous => previous ? { ...previous, returnSection: fallback } : null);
   }, [experimental, config, mediaSource, playerReturnSection]);
 
+  useEffect(() => {
+    if (!config || fullMode) return;
+    const fallback = initialMediaSource(config) ?? 'radio';
+    const advanced = isAdvancedSection(mediaSource) || mediaSource === 'plex' && plexArea === 'discover' || mediaSource === 'navidrome' && navidromeArea === 'explore';
+    if (advanced) { resetAllNavigation(); mainSectionPreference.navigate(fallback); }
+    setPlexArea('library'); setNavidromeArea('library'); eqReturnViewRef.current = false;
+    if (isAdvancedSection(eqReturnSectionRef.current)) eqReturnSectionRef.current = fallback;
+    if (isAdvancedSection(playerReturnSection)) setPlayerNavigation(previous => previous ? { ...previous, returnSection: fallback } : null);
+  }, [fullMode, config, mediaSource, plexArea, navidromeArea, playerReturnSection]);
+
   const editionNavigation = useRef<(anchor: EditionAnchor) => void>(() => {});
   editionNavigation.current = anchor => {
     if (!experimental || !config || config.first_run || showSettings || showAbout) return;
@@ -1536,11 +1550,12 @@ export function App() {
   };
   const isPlexConnected = Boolean(sourceEnabled(config, "plex") && config?.plex_token && config.plex_token.trim().length > 0);
   const localExploreConfigured = Boolean(sourceEnabled(config, "local") && config?.local_folders.length);
-  const exploreSources = config ? configuredExploreSources(config,navidromeConfiguration.configured) : [];
+  const exploreSources = config && fullMode ? configuredExploreSources(config,navidromeConfiguration.configured) : [];
   const isExploreSection = centralSection === "explore" || centralSection === "plex" && plexArea === "discover" || centralSection === "navidrome" && navidromeArea === "explore";
   const showExploreTabs = isExploreSection && exploreSources.length > 1;
   const activeExploreSource: ExploreSource = centralSection === "explore" ? "local" : centralSection === "navidrome" ? "navidrome" : "plex";
   const navigateExplore = (preferred: ExploreSource = exploreSource) => {
+    if (!fullMode) return;
     const source = exploreSourceFor(exploreSources, preferred);
     resetAllNavigation();
     setExploreSource(source);
@@ -1761,14 +1776,14 @@ export function App() {
             <section aria-labelledby="sidebar-sources-group">
               <h2 id="sidebar-sources-group" className="mb-1 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[color:var(--theme-fg-muted,#5F5F5F)]">{t('sources.title')}</h2>
               <nav aria-label={t('sources.title')} className="ml-2 space-y-0.5 border-l border-[color:var(--theme-border-soft,#303030)] pl-1">
-                <SidebarNavItem diagnosticAction="local"
+                <SidebarNavItem diagnosticAction="local" sourceEnabled={sourceEnabled(config, "local")}
                   icon={Folder}
                   label={t("sidebar.local")}
                   active={mediaSource === "local"}
                   onClick={() => navigateLocalSubview("browser")}
                   trailing={<SourceStatus state={sourceReadiness.statuses.local} />}
                 />
-                <SidebarNavItem diagnosticAction="plex"
+                <SidebarNavItem diagnosticAction="plex" sourceEnabled={sourceEnabled(config, "plex")}
                   icon={Server}
                   label={t("sidebar.plex")}
                   trailing={<SourceStatus state={sourceReadiness.statuses.plex} />}
@@ -1779,7 +1794,7 @@ export function App() {
                     mainSectionPreference.navigate("plex");
                   }}
                 />
-                <SidebarNavItem diagnosticAction="navidrome" trailing={<SourceStatus state={sourceReadiness.statuses.navidrome} />} icon={Database} label={t('navidrome.title')} active={mediaSource === 'navidrome' && navidromeArea === "library"} onClick={() => { setNavidromeArea("library"); resetAllNavigation(); mainSectionPreference.navigate('navidrome'); }} />
+                <SidebarNavItem diagnosticAction="navidrome" sourceEnabled={sourceEnabled(config, "navidrome")} trailing={<SourceStatus state={sourceReadiness.statuses.navidrome} />} icon={Database} label={t('navidrome.title')} active={mediaSource === 'navidrome' && navidromeArea === "library"} onClick={() => { setNavidromeArea("library"); resetAllNavigation(); mainSectionPreference.navigate('navidrome'); }} />
                 <SidebarNavItem icon={Radio} label={t("radio.title")} active={mediaSource === "radio"}
                   onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("radio"); }} />
               </nav>
@@ -1816,13 +1831,13 @@ export function App() {
                 />
               </nav>
             </section>
-            <section aria-labelledby="sidebar-audio-group">
+            {fullMode && <section aria-labelledby="sidebar-audio-group">
               <h2 id="sidebar-audio-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[color:var(--theme-fg-muted,#5F5F5F)]">{t("equalizer.audioGroup")}</h2>
               <nav aria-label={t("equalizer.audioGroup")} className="space-y-1">
                 <SidebarNavItem icon={SlidersHorizontal} label={t("equalizer.title")} active={mediaSource === "equalizer"}
                   onClick={() => { if(mediaSource&&mediaSource!=="equalizer"){eqReturnSectionRef.current=mediaSource;eqReturnViewRef.current=true;} mainSectionPreference.navigate("equalizer"); }} />
               </nav>
-            </section>
+            </section>}
           </div>
 
           <nav aria-label={t("sidebar.utilitiesGroup")} className="mt-auto shrink-0 space-y-0.5 pt-2">
@@ -1840,7 +1855,7 @@ export function App() {
           </nav>
         </aside>
 
-        {mediaSource === "equalizer" && <div className={nowPlayingEmbedded ? "hidden" : "contents"} inert={nowPlayingEmbedded ? true : undefined}><EqualizerView onReturn={() => mainSectionPreference.navigate(eqReturnSectionRef.current)} available={mpdHealth.state === "available"} shared={configuredSignalRoute(config)?.mode === "shared"} runtime={playbackStatus.shared_dsp} onConfigure={() => { setSettingsInitialPage("audio"); setShowSettings(true); }} /></div>}
+        {fullMode && mediaSource === "equalizer" && <div className={nowPlayingEmbedded ? "hidden" : "contents"} inert={nowPlayingEmbedded ? true : undefined}><EqualizerView onReturn={() => mainSectionPreference.navigate(eqReturnSectionRef.current)} available={mpdHealth.state === "available"} shared={configuredSignalRoute(config)?.mode === "shared"} runtime={playbackStatus.shared_dsp} onConfigure={() => { setSettingsInitialPage("audio"); setShowSettings(true); }} /></div>}
         {(mediaSource !== "equalizer" || eqReturnViewRef.current) && <div ref={previousPageRef} data-now-playing-previous-page className={nowPlayingEmbedded || mediaSource === "equalizer" ? "hidden" : "contents"} inert={nowPlayingEmbedded || mediaSource === "equalizer" ? true : undefined}>
         {/* Painel Central */}
         <div className={playerTarget ? "hidden" : "contents"}>
@@ -1850,7 +1865,7 @@ export function App() {
         <div id={showExploreTabs ? "explore-source-panel" : undefined} role={showExploreTabs ? "tabpanel" : undefined}
           aria-labelledby={showExploreTabs ? `explore-source-${activeExploreSource}` : undefined}
           className={isExploreSection ? "flex min-h-0 min-w-0 flex-1" : "contents"}>
-        {!experimental && isExperimentalSection(centralSection) ? null : centralSection && (centralSection === 'local' || centralSection === 'plex' || centralSection === 'navidrome' || centralSection === 'explore') && !sourceEnabled(config, centralSection === 'explore' ? 'local' : centralSection) ? <main className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center"><p className="text-sm text-[color:var(--theme-fg-secondary,#999)]">{t('sources.disabledNotice')}</p><button type="button" className="rounded-lg bg-[var(--theme-control-accent,#E5A00D)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-control-on-accent,#000)]" onClick={() => configureSource(centralSection === 'explore' ? 'local' : centralSection)}>{t('sources.enableConfigure')}</button></main> : centralSection === "navidrome" && navidromeArea === "explore" ? <NavidromeExploreView available={isPlaybackAvailable} active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} revision={navidromeConfiguration.revision} onConfigure={() => configureSource("navidrome")} /> : centralSection === "navidrome" ? <NavidromeView onCatalogAvailability={phase => sourceReadiness.report('navidrome', phase)} available={isPlaybackAvailable} active={!playerTarget&&!showSettings&&!showAbout&&!nowPlayingEmbedded} onConfigure={() => configureSource("navidrome")} /> : centralSection === "search" ? (
+        {(!fullMode && isAdvancedSection(centralSection)) || (!experimental && isExperimentalSection(centralSection)) ? null : centralSection && (centralSection === 'local' || centralSection === 'plex' || centralSection === 'navidrome' || centralSection === 'explore') && !sourceEnabled(config, centralSection === 'explore' ? 'local' : centralSection) ? <main className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center"><p className="text-sm text-[color:var(--theme-fg-secondary,#999)]">{t('sources.disabledNotice')}</p><button type="button" className="rounded-lg bg-[var(--theme-control-accent,#E5A00D)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-control-on-accent,#000)]" onClick={() => configureSource(centralSection === 'explore' ? 'local' : centralSection)}>{t('sources.enableConfigure')}</button></main> : fullMode && centralSection === "navidrome" && navidromeArea === "explore" ? <NavidromeExploreView available={isPlaybackAvailable} active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} revision={navidromeConfiguration.revision} onConfigure={() => configureSource("navidrome")} /> : centralSection === "navidrome" ? <NavidromeView onCatalogAvailability={phase => sourceReadiness.report('navidrome', phase)} available={isPlaybackAvailable} active={!playerTarget&&!showSettings&&!showAbout&&!nowPlayingEmbedded} onConfigure={() => configureSource("navidrome")} /> : centralSection === "search" ? (
           <UnifiedSearchView config={config} navidromeConfigured={navidromeConfiguration.configured} navidromeRevision={navidromeConfiguration.revision} plexIdentity={plexConnectionIdentity} status={playbackStatus}
             isPlaybackAvailable={isPlaybackAvailable} catalogRefreshRevision={localCatalogRevision}
             active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded}
@@ -1929,7 +1944,7 @@ export function App() {
               <span>{t("plex.connectBtn")}</span>
             </button>
           </main>
-        ) : plexArea === "discover" ? (
+        ) : fullMode && plexArea === "discover" ? (
           <div data-plex-discover className="contents">
             <div className={(discoverAlbum?.identity === discoverIdentity || discoverArtist?.identity === discoverIdentity) ? "hidden" : "contents"}>
               <PlexDiscoverView session={plexDiscover} scope={discoverScope} active={!discoverAlbum && !discoverArtist && !playerTarget}
@@ -2625,7 +2640,7 @@ export function App() {
         )}
         </div>}
         {nowPlayingEmbedded && <div className="flex-1 min-h-0 min-w-0" data-now-playing-embedded>
-          <NowPlayingHost snapshot={{ route: configuredSignalRoute(config), health: mpdHealth, playback: presentationPlayback, sourceInfo, queueArtwork }} owner={hosting.owner} embedded busy={hosting.busy} hostingError={hosting.error}
+          <NowPlayingHost snapshot={{ usageMode: config?.usage_mode, route: configuredSignalRoute(config), health: mpdHealth, playback: presentationPlayback, sourceInfo, queueArtwork }} owner={hosting.owner} embedded busy={hosting.busy} hostingError={hosting.error}
             onReady={nowPlayingHosting.hostReady} onCollapse={() => void nowPlayingHosting.collapse()} onDetach={() => void nowPlayingHosting.detach()}
             onNavigate={view => void navigateFromNowPlaying(view)} />
         </div>}

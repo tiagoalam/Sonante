@@ -108,6 +108,7 @@ impl Adapter {
 }
 impl Adapter {
     fn control(&self, command: Control) -> Result<(), String> {
+        require_full_mode(&self.0)?;
         let (expected, command) = match command {
             Control::Session { id, action } => (Some(id), *action),
             command => (None, command),
@@ -270,7 +271,19 @@ fn load() -> Result<Option<Preferences>, String> {
         .map(Some)
         .map_err(|_| "UPNP_PREFERENCES_INVALID".into())
 }
+fn require_full_mode(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<ConfigState>();
+    let config = state.0.lock().map_err(|_| "UPNP_BUSY")?;
+    if config.full_mode() && !config.first_run { Ok(()) } else { Err("UPNP_MODE_DISABLED".into()) }
+}
+pub(crate) fn usage_mode_changed(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || restore(&app));
+}
 pub fn restore(app: &AppHandle) {
+    let state = app.state::<upnp::State>();
+    let Ok(_serial) = state.operation.lock() else { return; };
+    if require_full_mode(app).is_err() { state.shutdown(); return; }
     match load() {
         Ok(Some(prefs)) => {
             if let Err(error) = app
@@ -301,6 +314,7 @@ pub async fn set_upnp_receiver(
         }
         let state = app.state::<upnp::State>();
         let _serial = state.operation.lock().map_err(|_| "UPNP_BUSY")?;
+        require_full_mode(&app)?;
         let previous = state.preferences()?;
         let prefs = state.configure(
             Preferences {

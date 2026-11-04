@@ -623,6 +623,10 @@ impl State {
         let Ok(_serial) = self.operation.lock() else {
             return;
         };
+        self.suspend_under_operation();
+    }
+    // Caller must hold operation. Unlike configure(enabled=false), this never revokes clients.
+    pub(crate) fn suspend_under_operation(&self) {
         self.enabled.store(false, Ordering::Release);
         let worker = self
             .runtime
@@ -646,6 +650,22 @@ impl Auth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mode_suspension_keeps_saved_grants_and_requested_preferences() {
+        let dir = Scratch::new(); let file = dir.0.join("clients.json");
+        let clients = Shared::with_store(Some(file.clone())).unwrap();
+        let token = paired(&clients); let original = std::fs::read(&file).unwrap();
+        let state = State::default();
+        state.runtime.lock().unwrap().preferences = Preferences { enabled: true, port: 8787 };
+        let serial = state.operation.lock().unwrap();
+        state.suspend_under_operation();
+        assert!(!state.enabled.load(Ordering::Acquire));
+        assert!(state.preferences().unwrap().enabled);
+        assert_eq!(std::fs::read(&file).unwrap(), original);
+        assert!(Shared::with_store(Some(file)).unwrap().auth.lock().unwrap().allowed(&token));
+        drop(serial);
+    }
+
     #[test]
     fn remote_defaults_never_enable_a_listener() {
         let state = State::default();

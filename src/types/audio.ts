@@ -139,6 +139,7 @@ export interface QueueArtworkContext {
 }
 
 export interface NowPlayingSnapshot {
+  usageMode?: import("../utils/usageMode").UsageMode;
   queueArtwork?: QueueArtworkContext;
   sourceInfo?: import("./sourceAudio").PlayerSourceInfo | null;
   route: ConfiguredSignalRoute | null;

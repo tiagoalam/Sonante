@@ -8,14 +8,15 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs;
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // MPD creates its own database/log files with ordinary POSIX modes. Apply
 // privacy only after fork: changing the application's umask would race other
@@ -81,6 +82,8 @@ pub struct MpdSupervisor {
     engine_evidence: Option<crate::mpd_engine::EngineEvidence>,
     shared_eq_pipe: Option<PathBuf>,
     output_only_restart: bool,
+    startup_early_exit: bool,
+    startup_cleanup_confirmed: bool,
 }
 
 pub struct LibrarySyncResult {
@@ -151,6 +154,8 @@ impl MpdSupervisor {
             engine_evidence: None,
             shared_eq_pipe: None,
             output_only_restart: false,
+            startup_early_exit: false,
+            startup_cleanup_confirmed: false,
         }
     }
 
@@ -173,6 +178,8 @@ impl MpdSupervisor {
             engine_evidence: None,
             shared_eq_pipe: None,
             output_only_restart: false,
+            startup_early_exit: false,
+            startup_cleanup_confirmed: false,
         }
     }
 
@@ -843,26 +850,7 @@ decoder {{
             cfg.audio_buffer_size_kb
         );
 
-        let mut command = Command::new(engine.program());
-        command.arg("--no-daemon").arg(&conf_path);
-        let child = match spawn_private_mpd(&mut command) {
-            Ok(child) => child,
-            Err(error) => {
-                let failure = format!("Falha ao executar o processo do MPD: {}", error);
-                return match self.cleanup_owned_runtime_files(None, false) {
-                    Ok(()) => Err(failure),
-                    Err(cleanup_error) => Err(format!("{}; cleanup: {}", failure, cleanup_error)),
-                };
-            }
-        };
-
-        let engine_identity = crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineVerify, || engine.verify_child(&child));
-        self.process = Some(child);
-        if let Err(error) = engine_identity {
-            return Err(self.cleanup_after_start_failure(error));
-        }
-
-        crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineWait, || self.wait_for_startup(50, Duration::from_millis(50)))?;
+        self.start_owned_engine(&engine, &conf_path, cfg, existing)?;
         if let Err(error) = crate::analyzer::set_output_enabled(
             &self.socket_path,
             Self::ANALYZER_OUTPUT_NAME,
@@ -905,6 +893,136 @@ decoder {{
         }
         if let Some(gate)=&self.playback_gate {gate.bind(cfg,pid,self.direct_volume.clone());}
         Ok(library_sync)
+    }
+
+    // The ordinary launch, environment and stderr remain unchanged. Only a
+    // failed, reaped startup can enter the read-only diagnostic probe below.
+    fn start_owned_engine(&mut self, engine: &crate::mpd_engine::MpdEngine, conf_path: &Path,
+        cfg: &AppConfig, existing: Option<&crate::InitialManagedGeneration<'_>>) -> Result<(), String> {
+        let mut compatibility = false;
+        loop {
+            self.startup_early_exit = false;
+            self.startup_cleanup_confirmed = false;
+            self.health = MpdHealth::Starting;
+            let started = Instant::now();
+            let mut command = Command::new(engine.program());
+            command.arg("--no-daemon").arg(conf_path);
+            if compatibility {
+                command.env("OPENBLAS_NUM_THREADS", "1").env("OMP_NUM_THREADS", "1");
+            }
+            let child = match spawn_private_mpd(&mut command) {
+                Ok(child) => child,
+                Err(error) => {
+                    let failure = format!("Falha ao executar o processo do MPD: {}", error);
+                    return match self.cleanup_owned_runtime_files(None, false) {
+                        Ok(()) => Err(failure),
+                        Err(cleanup_error) => Err(format!("{}; cleanup: {}", failure, cleanup_error)),
+                    };
+                }
+            };
+            let identity = crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineVerify,
+                || engine.verify_child(&child));
+            self.process = Some(child);
+            let result = match identity {
+                Ok(()) => crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineWait,
+                    || self.wait_for_startup(50, Duration::from_millis(50))),
+                Err(error) => {
+                    // A pre-main abort may exit before /proc/PID/exe can be opened.
+                    // A hash mismatch or any other identity failure never qualifies.
+                    if error == "Não foi possível conferir a identidade do MPD." {
+                        self.startup_early_exit = self.process.as_mut().and_then(|child| child.try_wait().ok())
+                            .flatten().is_some_and(|status| status.code() == Some(1));
+                    }
+                    Err(self.cleanup_after_start_failure(error))
+                }
+            };
+            if compatibility {
+                crate::local_diagnostics::observe(crate::local_diagnostics::Stage::StartupEngineCompatibilityRetry,
+                    started.elapsed(), &result);
+            }
+            match result {
+                Ok(()) => return Ok(()),
+                Err(failure) => {
+                    if compatibility || !self.startup_early_exit || !self.startup_cleanup_confirmed || self.process.is_some() {
+                        return Err(failure);
+                    }
+                    let confirmed = crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineCompatibilityProbe,
+                        || self.probe_early_thread_failure(engine.program()));
+                    match confirmed {
+                        Ok(true) => {},
+                        Ok(false) => return Err(failure),
+                        Err(probe_error) => return Err(format!("{failure}; {probe_error}")),
+                    }
+                    // Revalidate the original admission and recreate only the owned
+                    // runtime FIFO. Never repeat library publication or change config.
+                    if let Some(admission) = existing { admission.validate(cfg)?; }
+                    self.prepare_runtime_files()?;
+                    eprintln!("[Supervisor] MPD pre-main background-thread failure confirmed; retrying once with child-only compatibility limits.");
+                    compatibility = true;
+                }
+            }
+        }
+    }
+
+    // Upstream --version exits before loading configuration or initializing
+    // audio/database. This runs only after startup exited(1) AND cleanup succeeded.
+    // Capture a bounded stderr exclusively for the short probe, not the player.
+    fn probe_early_thread_failure(&mut self, program: &Path) -> Result<bool, String> {
+        if self.process.is_some() { return Err("MPD_STARTUP_PROBE_UNCONFIRMED".into()); }
+        let mut command = Command::new(program);
+        command.arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+        let child = spawn_private_mpd(&mut command).map_err(|_| "MPD_STARTUP_PROBE_UNCONFIRMED")?;
+        self.process = Some(child);
+        let result = (|| {
+            let mut stderr = self.process.as_mut().and_then(|child| child.stderr.take())
+                .ok_or("MPD_STARTUP_PROBE_UNCONFIRMED")?;
+            let fd = stderr.as_raw_fd();
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                return Err("MPD_STARTUP_PROBE_UNCONFIRMED".into());
+            }
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut bytes = Vec::new();
+            let mut eof = false;
+            loop {
+                let mut buffer = [0u8; 512];
+                loop {
+                    if Instant::now() >= deadline { return Err("MPD_STARTUP_PROBE_TIMEOUT".into()); }
+                    match stderr.read(&mut buffer) {
+                        Ok(0) => { eof = true; break; },
+                        Ok(count) => {
+                            if bytes.len() + count > 16 * 1024 { return Err("MPD_STARTUP_PROBE_OUTPUT_LIMIT".into()); }
+                            bytes.extend_from_slice(&buffer[..count]);
+                        }
+                        Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                        Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                        Err(_) => return Err("MPD_STARTUP_PROBE_UNCONFIRMED".into()),
+                    }
+                }
+                let status = self.process.as_mut().ok_or("MPD_STARTUP_PROBE_UNCONFIRMED")?
+                    .try_wait().map_err(|_| "MPD_STARTUP_PROBE_UNCONFIRMED")?;
+                if let Some(status) = status {
+                    if eof { return Ok(status.code() == Some(1) && Self::is_early_thread_failure(&bytes)); }
+                }
+                if Instant::now() >= deadline { return Err("MPD_STARTUP_PROBE_TIMEOUT".into()); }
+                thread::sleep(Duration::from_millis(10));
+            }
+        })();
+        // stop retains the owned Child if termination cannot be confirmed.
+        // Never retry or lose ownership when the diagnostic process cannot stop.
+        match self.stop() {
+            Ok(()) => result,
+            Err(_) => Err("MPD_STARTUP_PROBE_CLEANUP_UNCONFIRMED".into()),
+        }
+    }
+
+    fn is_early_thread_failure(bytes: &[u8]) -> bool {
+        const MESSAGE: &str = "Background threads were detected before MPD could initialize.";
+        let Ok(text) = std::str::from_utf8(bytes) else { return false; };
+        text.lines().any(|line| {
+            let message = line.strip_prefix("exception: ").unwrap_or(line);
+            message.strip_prefix(MESSAGE).is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        })
     }
 
     fn prepare_runtime_files(&mut self) -> Result<(), String> {
@@ -1013,6 +1131,7 @@ decoder {{
 
             match child_status {
                 Ok(Some(status)) => {
+                    self.startup_early_exit = status.code() == Some(1);
                     let message = format!(
                         "O processo MPD encerrou antes de criar o socket (status: {}).",
                         status
@@ -1087,8 +1206,9 @@ decoder {{
     }
 
     fn cleanup_after_start_failure(&mut self, failure: String) -> String {
+        self.startup_cleanup_confirmed = false;
         match self.stop() {
-            Ok(()) => failure,
+            Ok(()) => { self.startup_cleanup_confirmed = true; failure },
             Err(cleanup_error) => {
                 format!("{} Falha adicional no cleanup: {}", failure, cleanup_error)
             }
@@ -1963,6 +2083,7 @@ mod tests {
 
     #[test]
     fn duplicate_targets_and_broken_links_are_reconciled_without_removing_regular_entries() {
+        if isolated_startup_fixture_case("duplicate_targets_and_broken_links_are_reconciled_without_removing_regular_entries") { return; }
         let (root, library) = library_test_paths("library-broken");
         let folder = root.join("Music");
         fs::create_dir(&folder).unwrap();
@@ -2555,5 +2676,7 @@ mod tests {
         assert_eq!(sources[0].id, "Music (2)");
         fs::remove_dir_all(root).unwrap();
     }
+
+    include!("supervisor_startup_tests.rs");
 
 }

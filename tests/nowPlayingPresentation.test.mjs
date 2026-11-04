@@ -843,3 +843,39 @@ test('Navidrome lower player and Now Playing expose artist and album links while
  const navigations=[];const tree=View({...props,snapshot:{...snapshot,playback:current},onNavigate:view=>navigations.push(view)});
  for(const label of ['Nav Album','Nav Artist'])nodes(tree,n=>n.type==='button'&&text(n).trim()===label)[0].props.onClick();assert.deepEqual(navigations,['album','artist']);
 });
+
+test('Simple Now Playing acknowledges both hosts without analyzer listeners or capture; Full retains capture and cleanup', async () => {
+ for (const embedded of [true,false]) for (const usageMode of ['simple','full']) {
+  const effects=[],calls=[],ready=[];
+  const hooks={...React,default:React,useEffect:effect=>effects.push(effect),useRef:value=>({current:value}),useState:initial=>[typeof initial==='function'?initial():initial,()=>{}]};
+  const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:View},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{listen:async name=>{calls.push(['listen',name]);return()=>calls.push(['unlisten',name])}},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{AUDIO_LEVEL_EVENT:'levels',ANALYZER_STATUS_EVENT:'status',startAudioAnalyzer:async()=>calls.push(['start']),stopAudioAnalyzer:async()=>calls.push(['stop'])}});
+  const currentOwner={...owner,host:embedded?'main':'now-playing'};
+  const rendered=NowPlayingHost({snapshot:{...snapshot,usageMode},owner:currentOwner,embedded,onReady:value=>ready.push(value)});
+  const cleanup=effects[2]();for(let i=0;i<12;i++)await Promise.resolve();
+  assert.deepEqual(ready,[currentOwner]);assert.equal(rendered.props.snapshot.usageMode,usageMode);
+  assert.equal(calls.filter(([kind])=>kind==='start').length,usageMode==='full'?1:0);
+  assert.equal(calls.filter(([kind])=>kind==='listen').length,usageMode==='full'?2:0);
+  cleanup?.();for(let i=0;i<12;i++)await Promise.resolve();
+  assert.equal(calls.filter(([kind])=>kind==='stop').length,usageMode==='full'?1:0);
+ }
+});
+test('Simple keeps cover and playback controls in all layouts and omits audiophile VUs and spectrum', () => {
+ for(const embedded of [true,false])for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
+  const tree=View({...props,embedded,layout,snapshot:{...snapshot,usageMode:'simple'}});
+  assert.equal(nodes(tree,node=>node.type===dependencies['./visualizer/VisualizerPanel'].VisualizerPanel).length,0);
+  assert.equal(nodes(tree,node=>node.props?.className==='np-cover').length,1);
+  assert.equal(nodes(tree,node=>node.type==='button'&&node.props['aria-label']===i18n.t('player.pause')).length,1);
+ }
+});
+
+
+test('Simple Psico animates during playback without PCM capture while Full retains analyzer availability rules', () => {
+ for (const embedded of [true,false]) for (const usageMode of ['simple','full']) for (const analyzerAvailable of [false,true]) for (const state of ['play','pause','stop']) {
+  const tree=View({...props,embedded,layout:'psycho',analyzerAvailable,snapshot:{...snapshot,usageMode,playback:{...snapshot.playback,state}}});
+  const scene=nodes(tree,node=>node.type===dependencies['./visualizer/PsychoVisualizer'].PsychoVisualizer)[0];
+  assert.equal(scene.props.active,state==='play'&&(usageMode==='simple'||analyzerAvailable));
+  if(usageMode==='simple'&&state==='pause')assert.equal(scene.props.inactiveLabel,i18n.t('nowPlaying.visualizer.paused'));
+  const unavailable=View({...props,embedded,layout:'psycho',analyzerAvailable,snapshot:{...snapshot,usageMode,health:{state:'unavailable'},playback:{...snapshot.playback,state}}});
+  assert.equal(nodes(unavailable,node=>node.type===dependencies['./visualizer/PsychoVisualizer'].PsychoVisualizer)[0].props.active,false);
+ }
+});

@@ -60,6 +60,7 @@ const formatTime = (seconds: number) => {
 export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = props => {
   const { t } = useTranslation();
   const layout = nowPlayingLayout(props.layout);
+  const advanced = props.snapshot?.usageMode !== "simple";
   const psychoPlacement = props.psychoPlacement === "background" ? "background" : "frame";
   const status = props.snapshot?.playback;
   const health = props.snapshot?.health;
@@ -110,8 +111,9 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
       <div className={`np-body${props.queueOpen ? " np-with-queue" : ""}`}>
         {props.queue}
         <section className="np-media" aria-label={t("nowPlaying.title")}>
-          {layout === "psycho" && <PsychoVisualizer levels={props.levels} active={Boolean(props.analyzerAvailable && available && status?.state === "play")}
-            inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} />}
+          {layout === "psycho" && <PsychoVisualizer levels={props.levels} active={Boolean((!advanced || props.analyzerAvailable) && available && status?.state === "play")}
+            inactiveLabel={!advanced && available && status?.state === "pause" ? t("nowPlaying.visualizer.paused") : visualizerMessage.label}
+            inactiveHelp={!advanced && available && status?.state === "pause" ? t("nowPlaying.visualizer.helpPaused") : visualizerMessage.help} />}
           {layout === "sleeve" && <div className="np-sleeve-caption" aria-hidden="true"><span>{t("nowPlaying.layouts.sleeve")}</span><span>SONANTE</span></div>}
           {layout === "poster" && <div className="np-poster-caption" aria-hidden="true"><span>{t("nowPlaying.look.posterCaption")}</span><span>{hasTrack && status ? status.artist : "SONANTE"}</span></div>}
           <div className="np-cover" data-fullscreen-action={!props.busy && !props.controlsDisabled} data-fullscreen={props.fullscreen}
@@ -141,7 +143,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
                   <div><dt>{t("nowPlaying.look.duration")}</dt><dd>{isRadio ? t("radio.live") : status.duration > 0 ? formatTime(status.duration) : "—"}</dd></div>
                 </dl>
               </div>}
-              {layout === "audiophile" && <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
+              {advanced && layout === "audiophile" && <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
                 inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} fullscreen={props.fullscreen} />}
               <div className="np-progress">
                 <input type="range" aria-label={t("nowPlaying.seek")} min={0} max={available && status.duration > 0 ? status.duration : 100} step={0.5}
