@@ -1,28 +1,46 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <script>
-      // Set the persisted palette before styles and the React entry can paint.
-      (() => {
-        let value = "dark";
-        try {
-          const r = JSON.parse(localStorage.getItem("sonante_appearance_v1") || "null");
-          if (r && r.version === 1 && ["dark", "light", "cyber", "summer", "zen", "nocturne"].includes(r.value) && r.revision &&
-            Number.isSafeInteger(r.revision.counter) && r.revision.counter >= 0 &&
-            typeof r.revision.origin === "string" && r.revision.origin.length <= 96 && /^[\w-]*$/.test(r.revision.origin)) value = r.value;
-        } catch { /* Storage is optional; Dark is the default. */ }
-        document.documentElement.dataset.theme = value;
-        document.documentElement.style.colorScheme = value === "light" || value === "summer" || value === "zen" ? "light" : "dark";
-      })();
-    </script>
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
-  </head>
-
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sonante — Your collection. Your sound.</title>
+  <meta name="description" content="A library-first music player for Linux. Bring local music, Plex, Navidrome and online radio together, with thoughtful collection tools and control over your audio output.">
+  <meta name="theme-color" content="#111310">
+  <meta property="og:title" content="Sonante — Your collection. Your sound.">
+  <meta property="og:description" content="A library-first music player for Linux. Local, Plex and Navidrome, in one place.">
+  <meta property="og:image" content="https://tiagoalam.github.io/Sonante/assets/now-playing.webp">
+  <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="content.js"></script><script defer src="site.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header><nav class="wrap" aria-label="Main navigation">
+  <a class="brand" href="#" aria-label="Sonante home"><img src="assets/icon.svg" width="30" height="30" alt=""><span>SONANTE</span></a>
+  <div class="nav-links"><a href="#about">About</a><a href="#features">Features</a><a href="#gallery">Gallery</a><a href="https://github.com/tiagoalam/Sonante">GitHub <span aria-hidden="true">↗</span></a></div>
+  <a class="nav-download" href="#download">Get Sonante <span aria-hidden="true">↓</span></a>
+</nav></header>
+<main id="main">
+  <section class="hero wrap" aria-labelledby="hero-title">
+    <div class="hero-copy"><p class="eyebrow"><span class="status-dot"></span> MADE FOR LINUX. MADE FOR LISTENING.</p>
+    <h1 id="hero-title">Your collection.<br>Your <em>sound.</em></h1>
+    <p class="intro">A home for the music you love. Bring your local collection, Plex and Navidrome together in one thoughtful Linux player.</p>
+    <div class="actions"><a class="button primary" href="#download">Download for Linux <span aria-hidden="true">↓</span></a><a class="text-link" href="#gallery">Take a closer look <span aria-hidden="true">↗</span></a></div>
+    <p class="hero-meta">Free & open source <span>·</span> Linux x86_64 <span>·</span> <span id="hero-version">v0.6.1</span></p></div>
+    <div class="hero-note"><span class="note-line"></span><p>Less between you<br>and your music.</p><span class="note-index">01 / LISTEN</span></div>
+    <figure class="hero-screen"><div class="window-top"><span></span><span></span><span></span><p>SONANTE / NOW PLAYING</p><small>LOCAL · PLEX · NAVIDROME</small></div><button class="image-open" data-image="now-playing" aria-label="Enlarge Now Playing screenshot"><img src="assets/now-playing.webp" width="1731" height="909" alt="Sonante Now Playing with album artwork, VU meters, spectrum, queue and signal path" fetchpriority="high"></button><figcaption>Now Playing, with space for every detail. <span>Edited demonstration artwork and music metadata.</span></figcaption></figure>
+  </section>
+  <div class="source-strip"><div class="wrap"><p>ONE PLAYER.<br><strong>YOUR MUSIC, CONNECTED.</strong></p><span>Local collections</span><span>Plex</span><span>Navidrome</span><span>Online radio</span></div></div>
+  <section class="wrap about section" id="about"><div><p class="eyebrow">THE IDEA BEHIND SONANTE</p><h2>A collection is more<br>than a list of tracks.</h2></div><div class="about-copy"><p>It is the albums you return to, the editions you compare, and the discoveries waiting in your own library. Sonante is built around that way of listening.</p><p>Browse across your sources, build a queue, and settle into an album. Choose a shared system output or a selected ALSA device. Keep your collection organized with tools that put review and control in your hands.</p><a class="text-link" href="https://github.com/tiagoalam/Sonante">Explore the open-source project ↗</a></div></section>
+  <section class="section gallery-section" id="gallery"><div class="wrap"><div class="section-heading"><div><p class="eyebrow">A CLOSER LOOK</p><h2>Find your next<br><em>listening moment.</em></h2></div><p>From a room full of records<br>to the detail inside one track.</p></div>
+    <div class="gallery-tabs" role="group" aria-label="Choose a screenshot" id="gallery-tabs"></div>
+    <figure class="gallery-frame"><button class="image-open" id="gallery-open" aria-label="Enlarge selected screenshot"><img id="gallery-image" src="assets/library-grid.webp" width="1731" height="909" loading="lazy" alt="Sonante album grid with demonstration covers"></button><figcaption><strong id="gallery-title">Your library, at a glance.</strong><span id="gallery-description">Browse albums in a visual grid.</span></figcaption></figure>
+    <p class="demo-note">Screenshots use edited demonstration artwork and fictional music metadata. The application interface shown is in Portuguese; Sonante also supports English.</p>
+  </div></section>
+  <section class="section wrap" id="features"><div class="section-heading"><div><p class="eyebrow">BUILT AROUND YOUR COLLECTION</p><h2>Good listening.<br>Thoughtful tools.</h2></div><p>The essentials up front.<br>The details when you need them.</p></div><div id="feature-highlights" class="feature-highlights"></div><div class="feature-details"><div class="detail-heading"><h3>Everything in Sonante</h3><p>A closer look at the current release.</p></div><div id="feature-details"></div></div></section>
+  <section class="audio-section section"><div class="wrap audio-inner"><div><p class="eyebrow">FOLLOW THE MUSIC</p><h2>Choose the route.<br><em>Know the path.</em></h2><p>Use Shared output for everyday desktop listening, or Direct output to target a selected ALSA hardware device. Inspect the selected route in Signal Path and adjust Shared EQ when you want to shape the sound.</p><p class="fine">Signal Path explains the configured route. Sample rate and bit depth are reported by MPD, not measured at your DAC; Sonante does not claim verified bit-perfect output.</p></div><div class="route"><div><span>01</span><strong>Your music</strong><small>Local · Plex · Navidrome · Radio</small></div><div><span>02</span><strong>Sonante + MPD</strong><small>A dedicated playback engine</small></div><div><span>03</span><strong>Your chosen output</strong><small>Shared system route or Direct ALSA</small></div><div><span>04</span><strong>Time to listen.</strong><small>Your speakers. Your headphones.</small></div></div></div></section>
+  <section class="section wrap download-section" id="download"><div class="section-heading"><div><p class="eyebrow">MAKE YOURSELF AT HOME</p><h2>Your next album<br>starts here.</h2></div><div class="release-info"><span class="release-pill" id="release-label">Sonante 0.6.1 · revision 4</span><p>Free software for Linux x86_64.<br>Choose the package for your distribution.</p></div></div><div class="download-grid" id="downloads"></div><div class="download-notes"><p>Close Sonante before upgrading. Verify the checksum, then install with your distribution’s package manager.</p><div><a id="checksum-link" href="https://github.com/tiagoalam/Sonante/releases/download/v0.6.1/SHA256SUMS.txt">SHA256 checksums ↗</a><a href="https://github.com/tiagoalam/Sonante#system-requirements">System requirements ↗</a><a href="https://github.com/tiagoalam/Sonante/releases">All releases & source ↗</a></div></div><details class="requirements"><summary>Before you install</summary><p>Linux x86_64, GTK 3, WebKitGTK 4.1 API (library version 2.40 or newer), ALSA and OpenSSL 3 are required. The complete installers include the pinned private audio runtimes. Shared EQ requires PipeWire and an available stereo output. Compatibility depends on your distribution, dependencies and hardware; see the project README for exact requirements.</p></details></section>
+  <section class="closing wrap"><p class="eyebrow">OPEN SOURCE. OPEN TO IDEAS.</p><h2>Help shape the next listen.</h2><p>Found a rough edge? Have a thoughtful idea?<br>Feedback and reproducible reports help Sonante grow.</p><a class="button outline" href="https://github.com/tiagoalam/Sonante/issues">Join the conversation <span aria-hidden="true">↗</span></a></section>
+</main>
+<footer class="wrap"><a class="brand" href="#"><img src="assets/icon.svg" width="26" height="26" alt=""><span>SONANTE</span></a><p>© 2026 Tiago Alam <span>·</span> GPL-3.0-only</p><div><a href="https://github.com/tiagoalam/Sonante">Source code ↗</a><a href="https://github.com/tiagoalam/Sonante/blob/main/LICENSE">License ↗</a></div></footer>
+<dialog id="lightbox" aria-label="Screenshot preview"><button id="close-lightbox" aria-label="Close screenshot">Close ×</button><img id="lightbox-image" alt=""><p id="lightbox-caption"></p></dialog>
+</body></html>
