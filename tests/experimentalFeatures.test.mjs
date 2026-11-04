@@ -7,7 +7,7 @@ import * as jsx from 'react/jsx-runtime';
 import * as icons from 'lucide-react';
 import { renderToStaticMarkup } from 'react-dom/server';
 function compile(file,deps={}){const exports={};new Function('require','exports',ts.transpileModule(readFileSync(new URL('../src/'+file,import.meta.url),'utf8'),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText)(name=>{assert.ok(name in deps,name);return deps[name]},exports);return exports;}
-const {experimentalFeaturesEnabled,createExperimentalSessionObserver}=compile('utils/experimentalFeatures.ts');
+const {experimentalFeaturesEnabled,createExperimentalSessionObserver}=compile('utils/experimentalFeatures.ts',{'./usageMode.ts':compile('utils/usageMode.ts')});
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return{promise,resolve,reject}};
 test('only an explicit boolean opt-in enables experimental tools; missing legacy preferences remain disabled',()=>{for(const config of [null,undefined,{}, {experimental_features:false},{experimental_features:'true'},{experimental_features:1}])assert.equal(experimentalFeaturesEnabled(config),false);assert.equal(experimentalFeaturesEnabled({experimental_features:true}),true)});
 test('ordinary playback never loads session code or reads progress when the option is off',async()=>{let loads=0;const observer=createExperimentalSessionObserver(async()=>{loads++;throw Error('must not load')});for(let i=0;i<20;i++)await observer.update(false,{state:'play'});observer.dispose();assert.equal(loads,0)});

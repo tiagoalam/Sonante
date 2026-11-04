@@ -2,6 +2,7 @@ export type MusicSource = "local" | "plex" | "navidrome";
 export type EnabledSources = Record<MusicSource, boolean>;
 
 export interface AppConfig {
+  usage_mode?: import("../utils/usageMode").UsageMode;
   experimental_features?: boolean;
   sources?: EnabledSources | null;
   first_run: boolean;

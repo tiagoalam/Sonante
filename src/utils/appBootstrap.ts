@@ -32,7 +32,7 @@ export function createMainSectionPreference(
   let restoringPlex = false;
   let fallback: MainSection = "local";
   return {
-    restore(config: Pick<AppConfig, "first_run" | "plex_token" | "sources"> | null) {
+    restore(config: Pick<AppConfig, "first_run" | "plex_token" | "sources" | "usage_mode"> | null) {
       navigationEnabled = Boolean(config && !config.first_run);
       let preferred: unknown = null;
       if (navigationEnabled) {
@@ -41,7 +41,7 @@ export function createMainSectionPreference(
       const initial = initialMediaSource(config);
       fallback = sourceEnabled(config, "local") ? "local" : sourceEnabled(config, "navidrome") ? "navidrome" : "radio";
       const section = navigationEnabled && isMainSection(preferred)
-        ? preferred === "editions" || preferred === "sessions" ? initial : preferred === "explore" ? (sourceEnabled(config, 'local') ? 'local' : initial) :
+        ? config?.usage_mode === "simple" && preferred === "equalizer" ? initial : preferred === "editions" || preferred === "sessions" ? initial : preferred === "explore" ? (sourceEnabled(config, 'local') ? 'local' : initial) :
           (preferred === 'local' || preferred === 'plex' || preferred === 'navidrome') && !sourceEnabled(config, preferred) ? initial :
           preferred === 'plex' && initial !== 'plex' ? initial : preferred
         : initial;

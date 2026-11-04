@@ -1,3 +1,4 @@
+import { fullModeEnabled } from "./usageMode.ts";
 import * as layoutHelpers from "./nowPlayingLayout.ts";
 import * as directVolumeHelpers from "./signalPath.ts";
 import test from 'node:test';
@@ -19,9 +20,10 @@ const flush=async()=>{for(let i=0;i<60;i++)await Promise.resolve();};
 const deferred=()=>{let resolve;return {promise:new Promise(r=>resolve=r),resolve:v=>resolve(v)};};
 function compile(file,deps){const out={};new Function('require','exports',ts.transpileModule(read(file),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2020}}).outputText)(name=>{assert.ok(name in deps,name);return deps[name]},out);return out;}
 const app=read('../App.tsx'),ast=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX),declarations=new Map();let snapshotEffect;
-function visit(n){if(ts.isVariableDeclaration(n)&&['playerSourceKind','sourceInfoContext','sourceInfo'].includes(n.name.getText(ast)))declarations.set(n.name.getText(ast),n.initializer.getText(ast));if(ts.isCallExpression(n)&&n.expression.getText(ast)==='useEffect'&&n.arguments[0]?.getText(ast).includes('nowPlayingSnapshotRef.current ='))snapshotEffect=n.arguments[0].getText(ast);ts.forEachChild(n,visit);}visit(ast);assert.ok(snapshotEffect&&declarations.has('sourceInfo'));
+function visit(n){if(ts.isVariableDeclaration(n)&&['fullMode','playerSourceKind','sourceInfoContext','sourceInfo'].includes(n.name.getText(ast)))declarations.set(n.name.getText(ast),n.initializer.getText(ast));if(ts.isCallExpression(n)&&n.expression.getText(ast)==='useEffect'&&n.arguments[0]?.getText(ast).includes('nowPlayingSnapshotRef.current ='))snapshotEffect=n.arguments[0].getText(ast);ts.forEachChild(n,visit);}visit(ast);assert.ok(snapshotEffect&&declarations.has('sourceInfo'));
 const vars=['config','configSavePhase','isPlaybackAvailable','playbackStatus','localCatalog','plexConnectionIdentity','plexBrowserCatalog','localCatalogRevision'];
-const project=new Function('scope','useMemo','usePlayerSourceInfo',`const {${vars}}=scope;${[...declarations].map(([n,v])=>`const ${n}=${v};`).join('')}return sourceInfo;`);
+const projectRaw=new Function('scope','useMemo','usePlayerSourceInfo','fullModeEnabled',`const {${vars}}=scope;${[...declarations].map(([n,v])=>`const ${n}=${v};`).join('')}return sourceInfo;`);
+const project=(...args)=>projectRaw(...args,fullModeEnabled);
 const plex=(n=1)=>({kind:'plex',server_id:'fixture-server',part_key:`/library/parts/${n}/file`,queue_index:n-1});
 const local=()=>({kind:'local',uri:'Music/1.flac',queue_index:0});
 const pcm=(extra={})=>({provenance:'plex',codec:'FLAC',compression:'lossless',sample_type:'integer',sample_rate:96000,bit_depth:24,dsd_level:null,revision:null,...extra});
@@ -68,4 +70,12 @@ test('known format does not imply Hi-Res; unknown/wrong identity/busy never gues
 test('global configuration/health/lifecycle guards still reject obsolete work; StrictMode does not duplicate IPC',async()=>{
  for(const gate of ['config','save','health']){const d=deferred(),f=mount({readInfo:()=>d.promise,updating:true});f.render();await flush();assert.equal(f.calls.length,1);if(gate==='config')f.scope.config=null;else if(gate==='save')f.scope.configSavePhase='persisting';else f.scope.isPlaybackAvailable=false;assert.equal(f.render(),null);d.resolve(response(plex()));await flush();f.render();badges(f,false);f.close();}
  const f=mount({updating:true});f.render();f.replay();await settle(f);assert.equal(f.calls.length,1);badges(f,true);f.close();await flush();
+});
+
+
+test('Simple stops optional technical source reads and returning to Full restores them',async()=>{
+ const f=mount();f.scope.config={...f.scope.config,usage_mode:'simple'};await settle(f);
+ assert.equal(f.calls.length,0);assert.equal(f.info,null);assert.equal(f.snapshot().usageMode,'simple');
+ f.scope.config={...f.scope.config,usage_mode:'full'};await settle(f);assert.equal(f.calls.length,1);badges(f,true);
+ f.scope.config={...f.scope.config,usage_mode:'simple'};assert.equal(f.render(),null);await settle(f);assert.equal(f.calls.length,1);f.close();
 });

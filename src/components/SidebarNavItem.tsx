@@ -6,6 +6,7 @@ interface SidebarNavItemProps {
   icon: LucideIcon;
   label: string;
   active?: boolean;
+  sourceEnabled?: boolean;
   onClick: () => void;
   trailing?: React.ReactNode;
   title?: string;
@@ -16,6 +17,7 @@ export const SidebarNavItem: React.FC<SidebarNavItemProps> = ({
   icon: Icon,
   label,
   active = false,
+  sourceEnabled,
   onClick,
   trailing,
   title,
@@ -36,9 +38,9 @@ export const SidebarNavItem: React.FC<SidebarNavItemProps> = ({
     <Icon
       size={17}
       aria-hidden="true"
-      className={`shrink-0 transition-colors ${active ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#777777)] group-hover:text-[color:var(--theme-fg-secondary,#BBBBBB)]"}`}
+      className={`shrink-0 transition-colors ${sourceEnabled === false ? "text-[color:var(--theme-fg-muted,#777777)]" : active ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#777777)] group-hover:text-[color:var(--theme-fg-secondary,#BBBBBB)]"}`}
     />
-    <span className="min-w-0 flex-1 truncate">{label}</span>
+    <span className={`min-w-0 flex-1 truncate ${sourceEnabled === false ? "text-[color:var(--theme-fg-muted,#8A8A8A)]" : sourceEnabled === true && !active ? "text-[color:var(--theme-fg-secondary,#CCCCCC)]" : ""}`}>{label}</span>
     {trailing && <span className="shrink-0">{trailing}</span>}
   </button>
 );

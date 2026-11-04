@@ -19,6 +19,7 @@ function initializer(name) {
   visit(ast); assert.ok(result, name); return result;
 }
 function compile(expression, env) {
+  env = { fullMode: true, ...env };
   const js = ts.transpileModule(`const value = (${expression});`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
   return new Function(...Object.keys(env), js + "return value;")(...Object.values(env));
 }

@@ -50,6 +50,11 @@ pub(crate) struct MpdEngine {
 }
 
 impl MpdEngine {
+    #[cfg(test)]
+    pub(crate) fn startup_fixture(program: PathBuf, private_sha256: Option<String>) -> Self {
+        Self { program, private_sha256 }
+    }
+
     pub(crate) fn resolve() -> Result<Self, String> {
         if !cfg!(debug_assertions) {
             return Ok(Self { program: crate::installed_runtimes::release(crate::installed_runtimes::Kind::Direct,"SONANTE_DEV_MPD_PATH")?, private_sha256: Some(INSTALLED_DIRECT_SHA256.into()) });

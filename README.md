@@ -24,19 +24,28 @@ Sonante is a desktop music player built for people who want to **listen to, navi
 
 Sonante is designed for substantial, imperfect real-world libraries: multiple storage locations, multi-disc albums, CUE-based albums, varying metadata, and sources that may temporarily become unavailable.
 
-## Installation — 0.6.1
+## Simple and Full modes
 
-Download the complete package and `SHA256SUMS.txt` from [Sonante 0.6.1](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.1) for your distribution:
+Choose a usage mode in **Settings → General** or during the welcome wizard. Existing configurations retain **Full** mode.
 
-- Ubuntu 22.04: `sonante_0.6.1-4_amd64.deb` (`apt install ./sonante_0.6.1-4_amd64.deb`).
-- Fedora 44: `sonante-0.6.1-4.x86_64.rpm` (`dnf install ./sonante-0.6.1-4.x86_64.rpm`).
-- Arch Linux / Manjaro: `sonante-0.6.1-4-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.6.1-4-x86_64.pkg.tar.zst`).
+- **Simple** keeps all music sources, search, favorites, recent history, ordinary playlists, queue controls, themes, Now Playing, the sleep timer and optional scrobbling. Shared and Direct outputs remain available. Psico keeps lightweight visual animation without PCM analysis; audiophile meters and spectrum are omitted.
+- **Full** keeps the complete experience, including Explore, smart playlists, EQ controls and UPnP. Experimental tools and the web remote still require their separate opt-in.
 
-Package revision 4 adds beta tester acknowledgments in About and isolates parallel first-run reopening tests in CI. Revision-3 setup diagnostics and revision-2 search/sidebar fixes are included. The reported Linux Mint setup failure has not been reproduced; this update does not claim to fix its underlying cause. Updated sources are tagged [v0.6.1-r4](https://github.com/tiagoalam/Sonante/tree/v0.6.1-r4).
+Switching modes preserves playback, the audio route, saved settings and collection data. An already applied EQ is preserved rather than changing the sound during a mode switch. Simple suspends advanced network services and analysis; returning to Full restores their saved settings.
+
+## Installation — 0.6.2
+
+Download the complete package and `SHA256SUMS.txt` from [Sonante 0.6.2](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.2) for your distribution:
+
+- Ubuntu 22.04: `sonante_0.6.2-1_amd64.deb` (`apt install ./sonante_0.6.2-1_amd64.deb`).
+- Fedora 44: `sonante-0.6.2-1.x86_64.rpm` (`dnf install ./sonante-0.6.2-1.x86_64.rpm`).
+- Arch Linux / Manjaro: `sonante-0.6.2-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.6.2-1-x86_64.pkg.tar.zst`).
+
+Version 0.6.2 adds Simple and Full usage modes, clearer disabled-source labels, and a targeted automatic recovery for MPD background-thread initialization failures. Recovery retries only after confirming that specific failure; normal startup retains its existing environment. Validation on the originally affected machine is still pending. Sources are tagged [v0.6.2](https://github.com/tiagoalam/Sonante/tree/v0.6.2).
 
 Close Sonante before upgrading, and install with your distribution's package manager. Verify the supplied checksum first. Packages manage their own pinned audio runtimes and do not enable a system MPD service. Corresponding runtime source sidecars accompany the packages; they are not installed into `/usr`.
 
-Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the complete 0.6.1 release payload.
+Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the complete 0.6.2 release payload.
 
 ### System requirements
 

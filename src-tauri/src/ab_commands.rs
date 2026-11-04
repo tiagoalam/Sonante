@@ -32,7 +32,7 @@ fn shared(app: &AppHandle) -> Result<(), String> {
 // Replacing the Plex client cannot keep an old prepared account alive.
 fn binding(config: &AppConfig, source: &Source) -> Result<String, String> {
     use sha2::{Digest, Sha256};
-    if !config.experimental_features || config.first_run { return Err("AB_CHANGED".into()); }
+    if !config.experimental_features_enabled() { return Err("AB_CHANGED".into()); }
     let values = match source {
         Source::Local { .. } => serde_json::to_vec(&config.local_folders),
         Source::Plex { server_id, .. } => {

@@ -1,6 +1,8 @@
 import type { AppConfig } from "../types/config";
 import { sourceLocatorEnabled } from "../utils/musicSources";
-import { SmartPlaylists } from "./SmartPlaylists";
+import { fullModeEnabled } from "../utils/usageMode";
+import { deferredView } from "./deferredViews";
+const SmartPlaylists = deferredView<React.ComponentProps<typeof import("./SmartPlaylists").SmartPlaylists>>(() => import("./SmartPlaylists").then(module => ({ default: module.SmartPlaylists })));
 import { useTrackSelection } from "./TrackSelection";
 import { beginPlaybackIntent, isPlaybackSuperseded, playbackFailure } from "../utils/playbackIntent";
 import { logError, logWarning } from "../utils/frontendDiagnostics";
@@ -296,7 +298,7 @@ export const PlaylistsView: React.FC<{ config: AppConfig; isPlaybackAvailable: b
             <p className="mt-0.5 text-xs text-[color:var(--theme-fg-muted,#888888)]">
               {selected
                 ? t("playlists.itemCount", { count: selected.items.length })
-                : t("playlists.count", { count: playlists.length + smartCount })}
+                : t("playlists.count", { count: playlists.length + (fullModeEnabled(config) ? smartCount : 0) })}
             </p>
           </div>
         </div>
@@ -336,7 +338,7 @@ export const PlaylistsView: React.FC<{ config: AppConfig; isPlaybackAvailable: b
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto p-8">
-        {!selected && <SmartPlaylists config={config} isPlaybackAvailable={isPlaybackAvailable} onCount={setSmartCount} onSelectionSaved={playlist => { setPlaylists(current => [...current, playlist]); setSelectedId(playlist.id); }} />}
+        {fullModeEnabled(config) && !selected && <SmartPlaylists config={config} isPlaybackAvailable={isPlaybackAvailable} onCount={setSmartCount} onSelectionSaved={playlist => { setPlaylists(current => [...current, playlist]); setSelectedId(playlist.id); }} />}
         {loading ? (
           <div className="flex h-full items-center justify-center text-[color:var(--theme-fg-muted,#777777)]">
             <LoaderCircle size={24} className="animate-spin" />

@@ -2553,5 +2553,14 @@
     "port": "This port is already in use. Choose another and apply again.",
     "unavailable": "Remote control could not be configured. Check the port and try again."
   }
-}
+},
+  "usageMode": {
+    "title": "Usage mode",
+    "simple": "Simple",
+    "full": "Full",
+    "simpleDescription": "All your sources, search, favorites, queue and playlists. An interface focused on listening to music.",
+    "fullDescription": "All Sonante features, including Explore, equalizer and smart playlists. Beta features remain optional.",
+    "help": "Shared and Direct are available in both modes. Switching modes preserves playback, settings and saved items. Simple suspends meters, spectrum, remote control and UPnP.",
+    "saveFirst": "Save Full mode to configure network features."
+  }
 }

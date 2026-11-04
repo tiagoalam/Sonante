@@ -2553,5 +2553,14 @@
     "port": "Esta porta já está em uso. Escolha outra e aplique novamente.",
     "unavailable": "Não foi possível configurar o controle remoto. Confira a porta e tente novamente."
   }
-}
+},
+  "usageMode": {
+    "title": "Modo de uso",
+    "simple": "Simples",
+    "full": "Completo",
+    "simpleDescription": "Todas as suas fontes, busca, favoritos, fila e playlists. Uma interface focada em ouvir música.",
+    "fullDescription": "Todos os recursos do Sonante, incluindo Explorar, equalizador e playlists inteligentes. Recursos beta continuam opcionais.",
+    "help": "Shared e Direct estão disponíveis nos dois modos. Trocar o modo preserva a reprodução, as configurações e os itens salvos. No Simples, VUs, espectro, controle remoto e UPnP ficam suspensos.",
+    "saveFirst": "Salve o modo Completo para configurar os recursos de rede."
+  }
 }

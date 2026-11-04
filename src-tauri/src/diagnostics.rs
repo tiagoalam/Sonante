@@ -76,6 +76,9 @@ pub(crate) fn error_summary(error: impl Display) -> String {
     let candidate = text.split(|c: char| c.is_whitespace() || c == ':' || c == ';').next().unwrap_or("");
     let code_hint = match candidate {
         "SONANTE_RUNTIME_MISSING" => Some("not_found"),
+        "MPD_STARTUP_PROBE_TIMEOUT" => Some("timeout"),
+        "MPD_STARTUP_PROBE_OUTPUT_LIMIT" => Some("output_limit"),
+        "MPD_STARTUP_PROBE_UNCONFIRMED" | "MPD_STARTUP_PROBE_CLEANUP_UNCONFIRMED" => Some("uncertain"),
         "SONANTE_RUNTIME_UNTRUSTED" => Some("untrusted_runtime"),
         "SONANTE_RUNTIME_OVERRIDE_FORBIDDEN" => Some("runtime_override_forbidden"),
         "FIRST_RUN_EXISTING_LIBRARY_REQUIRES_REVIEW" => Some("existing_library"),

@@ -21,6 +21,8 @@ pub(crate) enum Stage {
     StartupEngineRuntime,
     StartupEngineVerify,
     StartupEngineWait,
+    StartupEngineCompatibilityProbe,
+    StartupEngineCompatibilityRetry,
     QueueResolve,
     QueueApply,
     StartupReady,

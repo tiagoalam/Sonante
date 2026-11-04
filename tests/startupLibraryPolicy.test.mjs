@@ -36,5 +36,7 @@ test('managed startup reuses a watched original mirror proof without dropping ad
   'self.transaction.belongs_to', 'shutdown_requested()', 'check_startup(', 'self.profile.file_identity(',
   'self.profile.read(', 'self.observe_origins()?!=self.origins'])assert.ok(validation.includes(guard),guard);
  const supervisor=readFileSync(new URL('../src-tauri/src/supervisor.rs',import.meta.url),'utf8');
- assert.equal((supervisor.match(/admission\.validate\(cfg\)/g)||[]).length,4);
+ assert.equal((supervisor.match(/admission\.validate\(cfg\)/g)||[]).length,5);
+ const recovery=supervisor.slice(supervisor.indexOf('fn start_owned_engine('),supervisor.indexOf('fn probe_early_thread_failure('));
+ assert.match(recovery,/admission\.validate\(cfg\)\?;[\s\S]*?self\.prepare_runtime_files\(\)\?;[\s\S]*?compatibility = true/);
 });

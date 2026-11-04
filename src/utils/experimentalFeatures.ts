@@ -1,6 +1,7 @@
+import { fullModeEnabled } from './usageMode.ts';
 import type { AppConfig } from '../types/config';
 import type { PlaybackStatus } from '../types/audio';
-export const experimentalFeaturesEnabled = (config: Pick<AppConfig, 'experimental_features'> | null | undefined): boolean => config?.experimental_features === true;
+export const experimentalFeaturesEnabled = (config: Pick<AppConfig, 'experimental_features' | 'usage_mode'> | null | undefined): boolean => config?.experimental_features === true && fullModeEnabled(config);
 export const isExperimentalSection = (section: unknown): boolean => section === 'sessions' || section === 'editions';
 type ProgressModule = Pick<typeof import('./listeningSessionProgress'), 'observeSessionProgress' | 'suspendSessionProgress'>;
 // The ordinary player imports this small controller, not the session engine or

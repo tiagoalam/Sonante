@@ -1387,6 +1387,10 @@ fn persist_experimental_local_folders_config(
     drop(plex_guard);
     drop(config_guard);
     remote_bridge::beta_preference_changed(app, expected_current.experimental_features, new_config.experimental_features);
+    if expected_current.full_mode() != new_config.full_mode() {
+        remote_bridge::usage_mode_changed(app);
+        upnp_bridge::usage_mode_changed(app);
+    }
     Ok(())
 }
 
@@ -3065,6 +3069,10 @@ fn start_audio_analyzer(
     {
         return Err("Host do analyzer não autorizado ou fechado.".into());
     }
+    let config_state = app.state::<ConfigState>();
+    let config = config_state.0.lock().map_err(|_| "ANALYZER_MODE_UNAVAILABLE")?;
+    if !config.full_mode() { return Err("ANALYZER_MODE_DISABLED".into()); }
+    drop(config);
     let mut analyzer = analyzer_state
         .0
         .lock()
@@ -4382,7 +4390,7 @@ fn get_edition_cache_namespace() -> String {
 fn require_experimental_features(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<ConfigState>();
     let config = state.0.lock().map_err(|_| "EXPERIMENTAL_DISABLED")?;
-    if config.experimental_features && !config.first_run { Ok(()) } else { Err("EXPERIMENTAL_DISABLED".into()) }
+    if config.experimental_features_enabled() { Ok(()) } else { Err("EXPERIMENTAL_DISABLED".into()) }
 }
 
 #[tauri::command]
@@ -6259,10 +6267,15 @@ async fn save_config_inner(
     if !music_sources::navidrome() { navidrome::suspend(); }
     let target_shared=is_shared_output(&new_config);
     let experimental_enabled = new_config.experimental_features;
+    let usage_mode_changed = current_cfg.full_mode() != new_config.full_mode();
     *config_guard = new_config;
     drop(plex_guard);
     drop(config_guard);
     remote_bridge::beta_preference_changed(&app, current_cfg.experimental_features, experimental_enabled);
+    if usage_mode_changed {
+        remote_bridge::usage_mode_changed(&app);
+        upnp_bridge::usage_mode_changed(&app);
+    }
     if !music_sources::local() { app.state::<LocalWatcherState>().stop_and_join(); }
 
     resume_analyzer.confirmed = true;

@@ -1,3 +1,4 @@
+import * as usageMode from "./usageMode.ts";
 import * as musicSources from "./musicSources.ts";
 import * as appearanceModel from './appearance.ts';
 import * as frontendDiagnostics from "./frontendDiagnostics.ts";
@@ -64,6 +65,8 @@ function wizard(overrides = {}) {
     "./AudioSignalDiagram": { AudioSignalDiagram: function AudioSignalDiagram() {} },
     "./LocalDiagnostics": { LocalDiagnostics: function LocalDiagnostics() {} },
     "./AppearanceSetting": appearanceExports,
+    "../utils/usageMode": usageMode,
+    "./UsageModeSetting": { UsageModeSetting: function UsageModeSetting() {} },
     "./ExperimentalFeatures": { ExperimentalFeaturesSetting: function ExperimentalFeaturesSetting() {} },
     "../utils/deviceAvailability": { createDeviceAvailabilityQuery, shouldCheckContextualDevice },
     "../utils/welcomeWizard": { wizardPlexConnectionReady, wizardSaveErrorKey },
@@ -475,4 +478,16 @@ test("failed completion exposes the existing safe report before Settings is avai
   assert.equal(last.diagnostic.os_code, 2);
   assert.doesNotMatch(JSON.stringify(last), /private|token|SECRET/);
   assert.doesNotMatch(text(f.tree), /private|token|SECRET/);
+});
+
+test('wizard can choose Simple while retaining both audio routes and a previously saved beta opt-in', async () => {
+ for(const audio_output_type of ['alsa','pipewire']){
+  const f=audioWizard({config:{...base,audio_output_type,experimental_features:true}});selectSources(f,true,false);next(f);
+  const option=find(f.tree,node=>node.type?.name==='UsageModeSetting');option.props.onChange('simple');f.render();
+  assert.equal(nodes(f.tree).some(node=>node.type?.name==='ExperimentalFeaturesSetting'),false);
+  await button(f,'wizard.start').props.onClick();
+  assert.equal(f.calls.saves.length,1);assert.equal(f.calls.saves[0].usage_mode,'simple');
+  assert.equal(f.calls.saves[0].audio_output_type,audio_output_type);assert.equal(f.calls.saves[0].experimental_features,true);
+  assert.equal(f.calls.finished[0].usage_mode,'simple');f.dispose();
+ }
 });

@@ -28,6 +28,8 @@ import { SettingsPages, type SettingsPage } from "./SettingsPages";
 import { RemoteControlSetting } from "./RemoteControlSetting";
 import { UpnpSetting } from "./UpnpSetting";
 import { ScrobblingSetting } from "./ScrobblingSetting";
+import { UsageModeSetting } from "./UsageModeSetting";
+import { fullModeEnabled } from "../utils/usageMode";
 import { ExperimentalFeaturesSetting } from "./ExperimentalFeatures";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { AudioSignalDiagram } from "./AudioSignalDiagram";
@@ -465,10 +467,11 @@ export const SettingsModal: React.FC<Props> = ({
         <SettingsPages
           initialPage={initialPage}
           general={<>
+            <UsageModeSetting value={config.usage_mode} disabled={saving} onChange={usage_mode => setConfig({ ...config, usage_mode })} />
             <AppearanceSetting />
-            <ExperimentalFeaturesSetting enabled={config.experimental_features === true} disabled={saving || connectionBusy} onChange={enabled => setConfig({ ...config, experimental_features: enabled })} />
-            <UpnpSetting />
-            {config.experimental_features === true && (originalConfigRef.current?.experimental_features === true
+            {fullModeEnabled(config) && <ExperimentalFeaturesSetting enabled={config.experimental_features === true} disabled={saving || connectionBusy} onChange={enabled => setConfig({ ...config, experimental_features: enabled })} />}
+            {fullModeEnabled(config) && (fullModeEnabled(originalConfigRef.current) ? <UpnpSetting /> : <p className="text-xs text-[color:var(--theme-fg-muted,#888)]">{t("usageMode.saveFirst")}</p>)}
+            {fullModeEnabled(config) && config.experimental_features === true && (fullModeEnabled(originalConfigRef.current) && originalConfigRef.current?.experimental_features === true
               ? <RemoteControlSetting />
               : <p className="text-xs text-[color:var(--theme-fg-muted,#888888)]">{t("remote.saveBetaFirst")}</p>)}
             <ScrobblingSetting />

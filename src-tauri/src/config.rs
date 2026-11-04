@@ -55,8 +55,15 @@ pub struct EnabledSources { pub local: bool, pub plex: bool, pub navidrome: bool
 impl Default for EnabledSources {
     fn default() -> Self { Self { local: true, plex: true, navidrome: true } }
 }
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageMode { #[default] Full, Simple }
+fn is_full_mode(value: &UsageMode) -> bool { *value == UsageMode::Full }
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct AppConfig {
+    #[serde(default, skip_serializing_if = "is_full_mode")]
+    pub usage_mode: UsageMode,
     // Omission preserves the serialized shape of legacy recovery fingerprints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<EnabledSources>,
@@ -128,6 +135,7 @@ fn default_replay_gain() -> String {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            usage_mode: UsageMode::Full,
             first_run: true,
             sources: None,
             experimental_features: false,
@@ -151,6 +159,11 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    pub(crate) fn full_mode(&self) -> bool { self.usage_mode == UsageMode::Full }
+    pub(crate) fn experimental_features_enabled(&self) -> bool {
+        self.full_mode() && self.experimental_features && !self.first_run
+    }
+
     pub(crate) fn direct_context(&self) -> Option<DirectVolumeChoice> {
         (self.audio_output_type != "pipewire" && self.audio_output_type != "shared" && self.alsa_device != "default")
             .then(||DirectVolumeChoice {version:1,endpoint:self.alsa_device.clone(),dop_enabled:self.dop_enabled})
@@ -235,6 +248,29 @@ mod tests {
         "audio_buffer_size_kb": 8192,
         "replay_gain": "off"
     }"#;
+
+    #[test]
+    fn usage_modes_preserve_legacy_fingerprints_audio_and_beta_choice() {
+        let legacy: AppConfig = serde_json::from_str(LEGACY_CONFIG).unwrap();
+        assert!(legacy.full_mode());
+        assert!(AppConfig::default().full_mode());
+        let original = serde_json::to_vec(&legacy).unwrap();
+        assert!(!String::from_utf8_lossy(&original).contains("usage_mode"));
+        let explicit = LEGACY_CONFIG.replacen('{', "{\"usage_mode\":\"full\",", 1);
+        assert_eq!(serde_json::to_vec(&serde_json::from_str::<AppConfig>(&explicit).unwrap()).unwrap(), original);
+        for route in ["pipewire", "alsa"] {
+            let mut full = legacy.clone(); full.audio_output_type = route.into(); full.experimental_features = true;
+            let mut simple = full.clone(); simple.usage_mode = UsageMode::Simple;
+            assert!(full.experimental_features_enabled());
+            assert!(!simple.experimental_features_enabled());
+            assert!(simple.experimental_features);
+            assert!(!crate::route_save_resume_requested(&full, &simple));
+            let decoded: AppConfig = serde_json::from_slice(&serde_json::to_vec(&simple).unwrap()).unwrap();
+            assert_eq!(decoded, simple);
+            let mut restored = decoded; restored.usage_mode = UsageMode::Full;
+            assert_eq!(restored, full);
+        }
+    }
 
     #[test]
     fn experimental_features_are_opt_in_and_preserve_legacy_fingerprints() {
