@@ -6,8 +6,8 @@ This branch contains only the static website. The application is maintained on `
 
 ## Update the site
 
-- Edit `content.js` for the release version, package revision, exact release asset filenames, feature groups, and gallery captions. Keep download links consistent with the public GitHub release.
-- Edit `index.html` for the introduction, about text, audio explanation and installation requirements. Update static fallback release labels when changing the version.
+- Edit `content.js` for feature groups and gallery captions. Downloads are automatic: `site.js` queries the latest stable GitHub release when the page opens and uses its uploaded installer assets, installation filenames, publication date and checksums. Drafts and prereleases are excluded. No version or filename update is needed for new stable releases.
+- Edit `index.html` for the introduction, about text, audio explanation and installation requirements.
 - Edit `style.css` for visual changes; `site.js` renders content and handles the gallery and screenshot dialog.
 - Place screenshots in `assets/`. Images on this site are edited demonstrations using fictional music metadata and abstract artwork, not unmodified application captures. Keep that disclosure visible.
 - Treat `main/README.md` and release notes as the source of truth for functionality. Keep experimental capabilities explicitly opt-in and avoid claims of measured/verified bit-perfect output.
@@ -16,6 +16,8 @@ No build step or dependencies are required. Preview with `python3 -m http.server
 
 ## Review before publishing
 
-Check download filenames against release assets, screenshots and their captions, all navigation links, keyboard access to the gallery/dialog and features, and narrow-screen layout. Commit and push to `gh-pages`; check the GitHub Pages deployment before claiming publication is complete.
+Check automatic downloads against the latest stable release assets, screenshots and their captions, all navigation links, keyboard access to the gallery/dialog and features, and narrow-screen layout. Commit and push to `gh-pages`; check the GitHub Pages deployment before claiming publication is complete.
 
-Website content checked against public README and release 0.6.1 revision 4 on 2026-11-04. © 2026 Tiago Alam. The project code is GPL-3.0-only; see the application repository for full license and third-party notices.
+Feature content checked against public README and release 0.6.2 on 2026-11-05. Download information is fetched live; feature descriptions still require review when functionality changes. © 2026 Tiago Alam. The project code is GPL-3.0-only; see the application repository for full license and third-party notices.
+
+The latest-release link remains available if JavaScript is disabled, the GitHub API is unavailable or rate-limited, or the release has no supported installers. The request times out after 10 seconds. Only matching Sonante amd64/x86_64 DEB, RPM and Arch installer assets from this repository are shown; source archives are not offered as installers.
