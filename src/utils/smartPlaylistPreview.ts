@@ -3,7 +3,15 @@ import type { TrackMetadata } from '../types/audio';
 import type { SmartAlbum, SmartPreview, SmartRules, SmartSelection } from '../types/smartPlaylist';
 // Presentation data only. Actual playback retains native source/intent checks.
 // No metadata-title deduplication: different recordings may share those tags.
-export async function assembleSmartPreview(selection: SmartSelection, rules: SmartRules, read: (album: SmartAlbum) => Promise<TrackMetadata[]>, current: () => boolean = () => true, withinDeadline: () => boolean = () => true): Promise<SmartPreview> {
+export async function assembleSmartPreview(selection: SmartSelection, rules: SmartRules, read: (album: SmartAlbum) => Promise<TrackMetadata[]>, current: () => boolean = () => true, withinDeadline: () => boolean = () => true, random: () => number = Math.random): Promise<SmartPreview> {
+    const shuffled = <T,>(values: readonly T[]): T[] => {
+        const result = [...values];
+        for (let i = result.length - 1; i > 0; i--) {
+            const j = Math.floor(random() * (i + 1));
+            [result[i], result[j]] = [result[j], result[i]];
+        }
+        return result;
+    };
     const tracks: TrackMetadata[] = [];
     const seen = new Set<string>();
     const check = () => { if (!current())
@@ -19,15 +27,16 @@ export async function assembleSmartPreview(selection: SmartSelection, rules: Sma
         ? selection.albums.filter(album => classifySmartLocalAlbumFamily(album) === rules.genre_family)
         : selection.albums;
     const varied = rules.track_mode === 'varied';
-    const batches: TrackMetadata[][] = [];
-    for (const album of albums) {
+    const albumOrder = new Map(albums.map((album, index) => [album, index] as const));
+    const batches: { order: number; tracks: TrackMetadata[] }[] = [];
+    for (const album of varied ? shuffled(albums) : albums) {
         check();
         if (varied ? batches.length >= rules.limit : tracks.length >= rules.limit)
             break;
         const batch = await read(album);
         check();
         const unique: TrackMetadata[] = [];
-        for (const track of batch) {
+        for (const track of varied ? shuffled(batch) : batch) {
             if (varied ? unique.length >= rules.limit : tracks.length >= rules.limit)
                 break;
             const locator = track.media_locator;
@@ -45,16 +54,16 @@ export async function assembleSmartPreview(selection: SmartSelection, rules: Sma
                 (varied ? unique : tracks).push(track);
             }
         }
-        if (varied && unique.length) batches.push(unique);
+        if (varied && unique.length) batches.push({ order: albumOrder.get(album)!, tracks: unique });
     }
-    // Round-robin gives each participating album a turn before returning to it.
-    // This is distribution, not a hidden random reshuffle of the saved preview.
+    // Randomize the chosen subset, then present it in the configured album order.
+    batches.sort((a, b) => a.order - b.order);
     if (varied) for (let index = 0; tracks.length < rules.limit; index++) {
         check();
         let added = false;
         for (const batch of batches) {
             if (tracks.length >= rules.limit) break;
-            if (batch[index]) { tracks.push(batch[index]); added = true; }
+            if (batch.tracks[index]) { tracks.push(batch.tracks[index]); added = true; }
         }
         if (!added) break;
     }

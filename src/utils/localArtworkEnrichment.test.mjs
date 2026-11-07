@@ -61,7 +61,7 @@ test("three albums run in order with at most one active operation", async () => 
   gates[2].resolve(null);
   await until(() => queue.getSnapshot().processed === 3 && !queue.getSnapshot().active);
   assert.equal(maxActive, 1);
-  assert.deepEqual(queue.getSnapshot(), { active: false, total: 3, processed: 3, found: 0, latestFoundTitle: undefined });
+  assert.deepEqual(queue.getSnapshot(), { active: false, total: 3, processed: 3, found: 0, onlineFound: 0, latestFoundTitle: undefined });
 });
 
 test("known session cover is skipped; a newly found cover is published and counted once", async () => {
@@ -295,12 +295,35 @@ test("four disc folders keep their existing order before the online phase", asyn
   assert.equal(queue.getSnapshot().found, 1);
 });
 
-test("status strings exist in both locales", () => {
+test("cover progress labels exist in both locales", () => {
   for (const locale of ["en", "pt-BR"]) {
     const artwork = JSON.parse(readFileSync(new URL(`../locales/${locale}.json`, import.meta.url), "utf8")).artwork;
-    assert.ok(artwork.searchingOnline);
-    assert.ok(artwork.foundOnline);
+    assert.ok(artwork.progressOnline);
+    assert.ok(artwork.progressLabel);
+    assert.ok(artwork.progressBarLabel);
   }
+});
+
+test("onlineFound counts only covers with observed online provenance", async () => {
+  const gate = deferred();
+  const resolver = new LocalArtworkResolver(
+    async (path) => path === "local" ? "local cover" : null,
+    async () => gate.promise,
+  );
+  const queue = new LocalArtworkEnrichment(resolver, immediate);
+  queue.setOnlineEnabled(true);
+  queue.setCatalog([album("local"), album("online")]);
+  await until(() => queue.getSnapshot().onlineActivity?.kind === "searching");
+  assert.equal(queue.getSnapshot().processed, 1);
+  assert.equal(queue.getSnapshot().total, 2);
+  assert.equal(queue.getSnapshot().found, 1);
+  assert.equal(queue.getSnapshot().onlineFound, 0);
+  gate.resolve("online cover");
+  await until(() => queue.getSnapshot().processed === 2 && !queue.getSnapshot().active);
+  assert.equal(queue.getSnapshot().found, 2);
+  assert.equal(queue.getSnapshot().onlineFound, 1);
+  assert.equal(resolver.getSource("local"), "local");
+  assert.equal(resolver.getSource("online"), "online");
 });
 
 test("persisted local, embedded, online and valid negative skip the global queue on restart", async () => {

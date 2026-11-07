@@ -217,8 +217,9 @@
     "syncedTooltip": "Biblioteca Sincronizada"
   },
   "artwork": {
-    "searchingOnline": "Buscando capa online: {{title}}",
-    "foundOnline": "Capa encontrada: {{title}}"
+    "progressLabel": "Capas online",
+    "progressOnline": "Encontradas {{count}}",
+    "progressBarLabel": "Progresso da busca de capas online"
   },
   "localGenreFamilies": {
     "brazilian": "Música Brasileira",
@@ -1044,95 +1045,9 @@
     "discography": "Discografia"
   },
   "signalPath": {
-    "conditions": {
-      "title": "Condições da rota",
-      "summary": {
-        "directPending": "Aguardando reprodução pelo Sonante. O ganho será verificado antes de iniciar; se necessário, confirme o volume no equipamento ao dar Play.",
-        "inactive": "Disponível durante a reprodução",
-        "partial": "Verificação parcial · amostras não comparadas",
-        "attention": "Processamento ou diferenças de formato reportados",
-        "preserved": "Condições observadas da rota preservadas"
-      },
-      "help": "A avaliação utiliza o formato e o processamento observados, sem uma lista de modelos permitidos. Identificação USB e kernel são informações adicionais. Quando houver um ensaio de referência correspondente, ele aparece separadamente.",
-      "label": {
-        "route": "Rota de saída",
-        "rate": "Taxa MPD → ALSA",
-        "channels": "Canais MPD → ALSA",
-        "container": "Formato / contêiner",
-        "volume": "Controle de volume",
-        "replayGain": "ReplayGain informado pelo MPD",
-        "crossfade": "Crossfade informado pelo MPD",
-        "mixramp": "MixRamp",
-        "engine": "Motor",
-        "device": "Dispositivo USB",
-        "kernel": "Kernel",
-        "negotiation": "Negociação Direct",
-        "transport": "Transporte DSD"
-      },
-      "value": {
-        "routeShared": "Shared · processamento do sistema não verificado",
-        "directStrict": "Estrita: formatos incompatíveis são recusados antes de tocar; representações reversíveis são permitidas.",
-        "directCompatibility": "Compatibilidade: este motor não comprova a recusa de conversões. O selo considera apenas as condições observadas.",
-        "snapshotChanged": "A faixa mudou durante a consulta. Aguardando uma leitura coerente.",
-        "routeObserved": "Direct · fluxo ALSA atribuído ao MPD do Sonante",
-        "notChecked": "Não verificado",
-        "rateEqual": "Mesma taxa: {{input}} kHz",
-        "rateDifferent": "Taxas diferentes: {{input}} → {{output}} kHz",
-        "channelsEqual": "Mesma quantidade de canais: {{input}}",
-        "channelsDifferent": "Canais diferentes: {{input}} → {{output}}",
-        "containerEqual": "{{input}} → {{output}} bit · amostras não comparadas",
-        "containerWider": "{{input}} → {{output}} bit · contêiner maior não comprova perda de amostras",
-        "containerSmaller": "{{input}} → {{output}} bit · saída com menor capacidade PCM",
-        "containerUnknown": "Preservação no contêiner não verificada",
-        "dsdSeparate": "DSD/DoP precisa de uma verificação própria",
-        "softwareVolume": "Volume por software: {{value}}%",
-        "softwareUnity": "Volume por software: 100% · ganho unitário informado",
-        "softwareOther": "Volume por software: {{value}}% · efeito em DSD/DoP não verificado",
-        "hardwareVolume": "Volume pelo hardware · ganho digital não verificado",
-        "systemVolume": "Volume do sistema · ganho externo não verificado",
-        "replayGainUnavailable": "Não foi possível confirmar o modo atual",
-        "gain_off": "Desativado (informado pelo MPD)",
-        "gain_track": "Modo faixa habilitado",
-        "gain_album": "Modo álbum habilitado",
-        "gain_auto": "Modo automático habilitado",
-        "crossfadeOff": "Desativado (0 segundos)",
-        "crossfadeOn": "Habilitado: {{value}} segundos",
-        "mixrampOff": "Desativado pelo parâmetro informado",
-        "mixrampPossible": "Sobreposição não descartada",
-        "directChanged": "Ganho alterado. Verifique a saída nas configurações antes de reproduzir.",
-        "directPending": "Aguardando reprodução pelo Sonante. O ganho será verificado antes de iniciar; se necessário, confirme o volume no equipamento ao dar Play.",
-        "volumeChanged": "Leituras de volume divergentes; aguardando atualização.",
-        "engineIdentified": "Compilação do motor identificada.",
-        "deviceObserved": "{{model}} · USB {{vendor}}:{{product}}",
-        "kernelObserved": "{{value}}",
-        "nativeDsd": "DSD nativo · confirmado pelo motor e ALSA",
-        "dop": "DoP · encapsulamento confirmado pelo motor e ALSA",
-        "dsdTransportUnknown": "Transporte DSD não confirmado; opção DoP marcada não comprova a saída efetiva",
-        "dsdRateEqual": "DSD preservado: {{input}} MHz · transporte ALSA {{carrier}} kHz",
-        "dsdRateDifferent": "Taxa DSD diferente: {{input}} → {{output}} MHz",
-        "nativeDsdContainer": "{{format}} · empacotamento DSD nativo",
-        "dopContainer": "{{format}} · portadora DoP, sem conversão para PCM",
-        "dsdSoftwareBypass": "DSD/DoP sem ganho por software; volume ajustado no DAC/amplificador",
-        "dsdMuted": "Mute por software ativo; conteúdo substituído por silêncio DSD",
-        "softwareMuted": "Mute ativo · selo mantido para a configuração da rota; saída em silêncio"
-      }
-    },
     "observation": {
-      "title": "Saída ALSA",
-      "notVerified": "Bit-perfect não verificado",
-      "limit": "Não foi possível confirmar a saída dentro dos limites de leitura.",
-      "unavailable": "Saída não verificada.",
-      "not_playing": "A saída é observada durante a reprodução.",
-      "shared": "Shared: a saída física não é atribuída ao Sonante aqui.",
-      "unreadable": "Não foi possível ler os dados da saída.",
-      "malformed": "Não foi possível confirmar o formato da saída.",
-      "not_owned": "Nenhuma saída em reprodução pôde ser atribuída ao MPD do Sonante.",
-      "ambiguous": "Mais de uma saída corresponde; saída não verificada.",
-      "changed": "A saída mudou durante a verificação.",
-      "busy": "A verificação da saída já está em andamento.",
       "channelCount_one": "{{count}} canal",
       "channelCount_other": "{{count}} canais",
-      "help": "Leitura dos dados do fluxo ALSA em reprodução pertencente ao MPD do Sonante. Não compara amostras de áudio nem verifica o que o DAC recebe. O formato e a taxa descrevem o contêiner ALSA; não comprovam DoP ou DSD nativo.",
       "observedTitle": "Saída ALSA observada"
     },
     "rate": "Frequência",
@@ -1140,7 +1055,6 @@
     "channels": "Canais",
     "pcmCompact": "{{rate}} kHz · {{bits}}-bit",
     "endpointShort": "Endpoint",
-    "help": "Mostra a rota configurada e, durante a reprodução Direct, o fluxo ALSA atribuído ao MPD do Sonante. O perfil ensaiado registra uma verificação anterior por amostras.",
     "title": "Caminho do sinal",
     "configured": "Etapas da rota configurada",
     "shared": "Compartilhado",
@@ -1148,10 +1062,7 @@
     "unknownRoute": "Rota indisponível",
     "unknownSource": "Fonte indisponível",
     "system": "Áudio do sistema",
-    "dac": "DAC configurado",
     "output": "Saída",
-    "endpoint": "Endpoint configurado",
-    "unknownEndpoint": "Endpoint não exibido",
     "reported": "Informado pelo MPD",
     "volume": "Controle de volume",
     "pcm": "{{rate}} kHz · {{bits}}-bit · {{channels}} canais",
@@ -1164,32 +1075,6 @@
     "paused": "Pausado",
     "stopped": "Parado",
     "unavailable": "MPD indisponível",
-    "details": "Detalhes técnicos",
-    "formatExplanation": "O status MPD descreve um formato decodificado reportado, não o codec original ou o sinal recebido pelo DAC. Não comprova Hi-Res, DSD nativo ou reprodução bit-perfect.",
-    "sharedExplanation": "ALSA default segue o roteamento do sistema, que pode envolver PipeWire, PulseAudio ou dmix, com possíveis etapas de mistura e conversão. O endpoint não é medido aqui.",
-    "directExplanation": "Direct utiliza o endpoint ALSA de hardware selecionado. A observação mostra o fluxo e o formato em reprodução; volume e processamento são apresentados nas condições da rota.",
-    "assessment": {
-      "directPending": "Aguardando reprodução",
-      "compatible": "Condições monitoradas preservadas",
-      "attention": "Condições requerem atenção",
-      "partial": "Verificação incompleta",
-      "help": "Avalia a saída ALSA em reprodução, a taxa, os canais, a capacidade PCM e o processamento informado. Funciona independentemente do modelo do DAC ou da versão do kernel. Não é uma comparação das amostras da faixa atual."
-    },
-    "evidence": {
-      "title": "Ensaio de referência correspondente",
-      "reference": "{{frames}} quadros PCM preservados, com junção contínua de {{tracks}} faixas.",
-      "help": "Neste ensaio, as amostras de referência chegaram intactas às requisições USB. É uma evidência adicional desta combinação de motor, DAC, formato e kernel; não limita o uso de outros DACs nem compara a faixa atual."
-    },
-    "modal": {
-      "title": "Detalhes da rota de áudio",
-      "open": "Abrir detalhes da rota de áudio",
-      "close": "Fechar detalhes"
-    },
-    "seal": {
-      "label": "Bit-perfect",
-      "scope": "O selo indica as condições observadas da rota Direct no motor identificado: PCM com taxa e canais preservados e capacidade inteira suficiente, ou DSD nativo/DoP com transporte negociado e taxa DSD correspondente, PCM com volume em 100%, DSD com ganho por software em bypass, e sem alterações de processamento informadas. A validação do motor inclui ensaios em arquivo para DSD/DoP; isso não equivale a um ensaio USB de DSD no seu DAC. Não compara continuamente as amostras da faixa nem mede o processamento interno do DAC. Alterações podem levar o tempo dos buffers para alcançar a saída. O selo se refere à rota após a decodificação, não certifica que o arquivo de origem seja sem perdas. Durante o mute, o selo continua indicando a configuração da rota; o conteúdo é substituído por silêncio. Ao desmutar, o volume e as demais condições são reavaliados.",
-      "verified": "Condições da rota verificadas"
-    },
     "transport": {
       "native_dsd": "DSD nativo",
       "dop": "DoP (DSD sobre PCM)"
@@ -1927,6 +1812,8 @@
   },
   "selection": {
     "title": "Faixas selecionadas",
+    "start": "Selecionar faixas",
+    "done": "Concluir seleção",
     "count": "{{count}} selecionadas",
     "selectTrack": "Selecionar {{title}}",
     "playlist": "Adicionar à playlist",
@@ -2099,6 +1986,7 @@
     "catalogLoading": "Lendo as opções da biblioteca…",
     "preview": "Ver prévia",
     "previewLoading": "Montando a seleção…",
+    "generateAnotherSelection": "Gerar outra seleção",
     "refresh": "Atualizar seleção",
     "previewCount_one": "{{count}} faixa · {{albums}} álbuns correspondentes",
     "previewCount_other": "{{count}} faixas · {{albums}} álbuns correspondentes",

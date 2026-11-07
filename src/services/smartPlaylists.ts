@@ -19,7 +19,7 @@ export const smartPlaylistsService = {
     delete: (id: string) => invoke<SmartPlaylist[]>('smart_playlist_store', { action: { kind: 'delete', id } }),
     sources: () => invoke<SmartSources>('smart_playlist_sources'),
     catalog: (source: SmartSource, current: () => boolean = alive) => sourceRead(source, current, () => invoke<SmartAlbum[]>('smart_playlist_catalog', { source })),
-    preview: async (rules: SmartRules, current: () => boolean = alive) => {
+    preview: async (rules: SmartRules, current: () => boolean = alive, random: () => number = Math.random) => {
         const deadline = Date.now() + 120000;
         const nav = rules.source.kind === 'navidrome' ? await navidromeService.status() : null;
         if (rules.source.kind === 'navidrome' && (!nav?.connection_id || nav.account_id !== rules.source.account_id)) throw 'SMART_PLAYLIST_SOURCE';
@@ -40,7 +40,7 @@ export const smartPlaylistsService = {
             const values = await plexService.getAlbumTracks(album.id);
             check(current);
             return values.map(t => ({ title: t.title, artist: t.artist?.trim() ? t.artist : album.artist, album: t.album_title ?? album.title, media_locator: t.media_locator, plex_image: t.thumb ?? album.image ?? null, duration: t.duration_ms !== undefined ? t.duration_ms / 1000 : t.duration }));
-        }, current, () => Date.now() <= deadline);
+        }, current, () => Date.now() <= deadline, random);
         if (rules.source.kind === 'navidrome') {
             check(current);
             const selected = await navidromeService.status();

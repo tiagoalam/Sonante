@@ -79,3 +79,25 @@ test('Simple stops optional technical source reads and returning to Full restore
  f.scope.config={...f.scope.config,usage_mode:'full'};await settle(f);assert.equal(f.calls.length,1);badges(f,true);
  f.scope.config={...f.scope.config,usage_mode:'simple'};assert.equal(f.render(),null);await settle(f);assert.equal(f.calls.length,1);f.close();
 });
+
+test('playback diagnostics stay consistent in the bar and both Now Playing hosts',async()=>{
+ for(const lng of ['en','pt-BR']) {
+  await i18n.changeLanguage(lng);
+  const f=mount();
+  for(const state of ['pause','stop']) {
+   f.scope.playbackStatus={...f.scope.playbackStatus,state,playback_error:{code:'playback_error'}};
+   for(const output of html(f))assert.ok(output.includes(i18n.t('player.playbackError.playback_error')));
+  }
+  f.scope.playbackStatus={...f.scope.playbackStatus,state:'play'};
+  for(const output of html(f))assert.ok(!output.includes(i18n.t('player.playbackError.playback_error')));
+  f.scope.playbackStatus={...f.scope.playbackStatus,state:'stop',playback_error:null};
+  for(const output of html(f))assert.ok(!output.includes(i18n.t('player.playbackError.playback_error')));
+  for(const code of ['output_busy','output_unavailable','format_unsupported']) {
+   f.scope.playbackStatus={...f.scope.playbackStatus,state:'stop',playback_error:{code}};
+   for(const output of html(f))assert.ok(output.includes(i18n.t(`player.playbackError.${code}`)));
+   f.scope.playbackStatus={...f.scope.playbackStatus,state:'play'};
+   for(const output of html(f))assert.equal(output.includes(i18n.t(`player.playbackError.${code}`)),code==='format_unsupported');
+  }
+  f.close();
+ }
+});

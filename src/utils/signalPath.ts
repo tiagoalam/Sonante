@@ -53,6 +53,42 @@ export function signalPathInformation(status: PlaybackStatus, health: MpdHealth)
   };
 }
 
+export function observedAlsaOutput(route: ConfiguredSignalRoute | null, status: PlaybackStatus, health: MpdHealth) {
+  const output = status.output_observation;
+  const endpoint = route?.endpoint;
+  const match = typeof endpoint === "string" ? /^hw:(?:CARD=)?[A-Za-z0-9_-]{1,32},(?:DEV=)?([0-9]{1,3})$/.exec(endpoint) : null;
+  if (health.state !== "available" || status.state !== "play" || status.snapshot_consistent === false
+    || route?.mode !== "direct" || !match || Number(match[1]) > 255
+    || output?.state !== "observed" || output.configured_endpoint !== endpoint
+    || !Number.isInteger(output.card) || output.card < 0 || output.card > 1023
+    || !Number.isInteger(output.device) || output.device < 0 || output.device > 255
+    || !Number.isInteger(output.subdevice) || output.subdevice < 0 || output.subdevice > 31
+    || !Number.isInteger(output.rate) || output.rate < 1000 || output.rate > 50000000
+    || !Number.isInteger(output.channels) || output.channels < 1 || output.channels > 64
+    || typeof output.format !== "string" || output.format.length === 0) return null;
+  return output;
+}
+
+export function observedDsdTransport(status: PlaybackStatus, output: NonNullable<ReturnType<typeof observedAlsaOutput>>) {
+  const input = parseReportedMpdFormat(status.audio_format);
+  const transport = status.processing?.transport;
+  const engine = status.engine_evidence;
+  const identified = engine?.state === "identified" && engine.pcm_eof_flush === true && (
+    (engine.evidence_id === "mpd-route-20261017" && engine.scope === "pcm_dsd_route")
+    || (["mpd-strict-route-20261017", "mpd-strict-ubuntu2204-remap-20261018"].includes(engine.evidence_id)
+      && engine.scope === "pcm_dsd_route_strict"));
+  if (input.kind !== "dsd" || !identified || !transport
+    || (transport.kind !== "native_dsd" && transport.kind !== "dop")
+    || !Number.isSafeInteger(transport.source_rate) || transport.source_rate * 8 !== Math.round(input.rateMhz * 1_000_000)
+    || !Number.isSafeInteger(transport.epoch) || transport.epoch <= 0
+    || transport.output_rate !== output.rate || transport.channels !== output.channels) return undefined;
+  const nativeFormat = ["DSD_U8", "DSD_U16_LE", "DSD_U16_BE", "DSD_U32_LE", "DSD_U32_BE"].includes(output.format);
+  const dopFormat = ["S24_LE", "S24_BE", "S24_3LE", "S24_3BE", "S32_LE", "S32_BE"].includes(output.format);
+  if (transport.kind === "native_dsd" && nativeFormat) return "native_dsd" as const;
+  if (transport.kind === "dop" && dopFormat) return "dop" as const;
+  return undefined;
+}
+
 // Direct uses equipment volume for every transport, including PCM.
 export function requiresDeviceVolumeControl(route: ConfiguredSignalRoute | null | undefined, status: PlaybackStatus | null | undefined): boolean {
   return route?.mode === "direct" || status?.volume.backend === "direct_equipment";

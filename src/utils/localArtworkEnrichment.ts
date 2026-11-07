@@ -8,6 +8,7 @@ export interface ArtworkEnrichmentStatus {
   total: number;
   processed: number;
   found: number;
+  onlineFound: number;
   latestFoundTitle?: string;
   onlineActivity?: { kind: "searching" | "found"; title: string };
 }
@@ -40,6 +41,7 @@ export class LocalArtworkEnrichment {
   private ids = new Set<string>();
   private processed = new Set<string>();
   private foundIds = new Set<string>();
+  private onlineFoundIds = new Set<string>();
   private latestFoundId: string | null = null;
   private offlineMissing = new Set<string>();
   private index = 0;
@@ -50,7 +52,7 @@ export class LocalArtworkEnrichment {
   private onlineEnabled = false;
   private running = false;
   private listeners = new Set<() => void>();
-  private status: ArtworkEnrichmentStatus = { active: false, total: 0, processed: 0, found: 0 };
+  private status: ArtworkEnrichmentStatus = { active: false, total: 0, processed: 0, found: 0, onlineFound: 0 };
 
   constructor(
     resolver: ArtworkResolver,
@@ -171,6 +173,7 @@ export class LocalArtworkEnrichment {
     this.ids = new Set(this.albums.map((album) => album.id));
     this.processed = new Set([...this.processed].filter((id) => this.ids.has(id)));
     this.foundIds = new Set([...this.foundIds].filter((id) => this.ids.has(id)));
+    this.onlineFoundIds = new Set([...this.onlineFoundIds].filter((id) => this.ids.has(id)));
     if (this.latestFoundId && !this.ids.has(this.latestFoundId)) this.latestFoundId = null;
     this.offlineMissing = new Set([...this.offlineMissing].filter((id) => this.ids.has(id)));
     for (const album of this.albums) {
@@ -182,6 +185,7 @@ export class LocalArtworkEnrichment {
       } else if (this.resolver.get(album.id)) {
         this.processed.add(album.id);
         const source = this.resolver.getSource?.(album.id) ?? "local";
+        if (source === "online") this.onlineFoundIds.add(album.id);
         this.remember(album.id, source, source === "online");
       }
     }
@@ -189,6 +193,7 @@ export class LocalArtworkEnrichment {
       total: this.ids.size,
       processed: this.processed.size,
       found: this.foundIds.size,
+      onlineFound: this.onlineFoundIds.size,
       latestFoundTitle: this.albums.find((album) => album.id === this.latestFoundId)?.title,
     });
     this.flush();
@@ -264,6 +269,7 @@ export class LocalArtworkEnrichment {
             || (phase === "online_cache_positive" && !!cover) || phase === "online_ineligible"
             || (!!cover && this.resolver.getSource?.(album.id) === "online");
           this.remember(album.id, result, onlineComplete);
+          if (cover && result === "online") this.onlineFoundIds.add(album.id);
         }
         if (cover && !knownBefore) {
           this.foundIds.add(album.id);
@@ -273,6 +279,7 @@ export class LocalArtworkEnrichment {
         this.publish({
           processed: this.processed.size,
           found: this.foundIds.size,
+          onlineFound: this.onlineFoundIds.size,
           latestFoundTitle: cover && !knownBefore ? album.title : this.status.latestFoundTitle,
         });
       }

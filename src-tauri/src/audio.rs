@@ -5543,7 +5543,7 @@ mod tests {
     static ALBUM_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn processing_status_follows_existing_telemetry_without_extra_queries() {
+    fn mpd_volume_metadata_follows_existing_telemetry_without_extra_queries() {
         for plex in [false, true] {
             let mut engine = engine_with_track("fixture.flac");
             if plex { engine.queue[0] = plex_track(); }
@@ -5554,15 +5554,13 @@ mod tests {
                     let status = engine.get_status_with_io(false, false, |_| None, |command| {
                         commands.borrow_mut().push(command.to_string());
                         match command {
-                            "status" => Ok(format!("state: {state}\nsong: 0\naudio: 96000:24:2\n{volume_line}\nxfade: 0\nmixrampdelay: nan").lines().map(str::to_owned).collect()),
+                            "status" => Ok(format!("state: {state}\nsong: 0\naudio: 96000:24:2\n{volume_line}").lines().map(str::to_owned).collect()),
                             "currentsong" => Ok(vec!["Pos: 0".into(), "file: fixture.flac".into()]),
                             _ => panic!("unexpected diagnostic/transport command"),
                         }
                     }).unwrap();
                     let processing = status.processing.unwrap();
                     assert_eq!(processing.mpd_volume, expected);
-                    assert_eq!(processing.crossfade_seconds, Some(0.0));
-                    assert_eq!(processing.replay_gain, crate::signal_processing::ReplayGain::Unknown);
                     assert_eq!(*commands.borrow(), ["status", "currentsong"]);
                     assert_eq!(serde_json::to_string(&engine.queue).unwrap(), before);
                     assert_eq!(status.state, state);

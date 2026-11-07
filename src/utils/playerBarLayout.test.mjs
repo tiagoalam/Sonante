@@ -8,7 +8,6 @@ import * as icons from "lucide-react";
 import ts from "typescript";
 import i18next from "i18next";
 import { renderToStaticMarkup } from "react-dom/server";
-import { routeConditions } from "./routeConditions.ts";
 import { signalPathInformation, requiresDeviceVolumeControl } from "./signalPath.ts";
 import { currentMediaKey } from "./playerNavigation.ts";
 import { sourceAudioBadge, albumAudioBadge } from "./sourceAudio.ts";
@@ -28,7 +27,7 @@ async function fixture(language = "en", sharedMuteError = null) {
   const i18n = i18next.createInstance();
   await i18n.init({ lng: language, resources: { [language]: { translation: resource(language) } }, interpolation: { escapeValue: false } });
   const t = i18n.t.bind(i18n), calls = [], diagnostics = [];
-  const dependencies = { react: { ...React, default: React, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons, "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": {...directVolumeHelpers, signalPathInformation, requiresDeviceVolumeControl }, "../utils/routeConditions": { routeConditions } };
+  const dependencies = { react: { ...React, default: React, __esModule: true }, "react/jsx-runtime": jsx, "lucide-react": icons, "react-i18next": { useTranslation: () => ({ t }) }, "../utils/signalPath": {...directVolumeHelpers, signalPathInformation, requiresDeviceVolumeControl } };
   const SignalPath = compile("SignalPath", dependencies);
   const SourceAudioBadges = compile("SourceAudioBadges", { ...dependencies, "../utils/sourceAudio": { sourceAudioBadge, albumAudioBadge } });
   const hooks = { ...React, useState: initial => [initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
@@ -254,7 +253,7 @@ test("unmute, unknown format and missing route remain conservative", async () =>
   const { render, calls, t } = await fixture();
   const tree = render({ route: null, status: { ...status, audio_format: "unrecognized private input", volume: { ...status.volume, value: 0, muted: true } } });
   const html = renderToStaticMarkup(tree);
-  assert.ok(html.includes(t("signalPath.assessment.partial")));assert.match(html,/aria-haspopup="dialog"/);
+  assert.doesNotMatch(html,/data-route-assessment|data-bitperfect|data-signal-info/);
   assert.doesNotMatch(html, /unrecognized private input/);
   const unmute = nodes(tree).find(node => node.type === "button" && node.props.title === t("player.unmute"));
   assert.ok(unmute); await unmute.props.onClick();
@@ -310,17 +309,23 @@ test("All Direct transports use equipment volume and dedicated mute; Shared stay
  }
 });
 
-test('retained generic MPD errors stay out of the player while explicit playback remains available',async()=>{
+test('current generic MPD errors appear while stopped or paused, then clear after recovery',async()=>{
  const {render,t}=await fixture();
- for(const state of ['play','pause','stop']) {
+ for(const state of ['pause','stop']) {
   const tree=render({status:{...status,state,playback_error:{code:'playback_error'}}});
   const html=renderToStaticMarkup(tree);
-  assert.ok(!html.includes(t('player.playbackError.playback_error')));
+  assert.ok(html.includes(t('player.playbackError.playback_error')));
   const toggle=nodes(tree).find(node=>node.type==='button'&&node.props.title===t(state==='play'?'player.pause':'player.play'));
   assert.equal(toggle.props.disabled,false);
  }
- for(const code of ['queue_uncertain','persistence_failed','format_unsupported']) {
-  assert.ok(renderToStaticMarkup(render({status:{...status,playback_error:{code}}})).includes(t(`player.playbackError.${code}`)));
+ const confirmed=renderToStaticMarkup(render({status:{...status,state:'play',playback_error:{code:'playback_error'}}}));
+ assert.ok(!confirmed.includes(t('player.playbackError.playback_error')));
+ const unavailable=renderToStaticMarkup(render({health:{state:'unavailable',reason:'process_exited'},status:{...status,state:'stop',playback_error:{code:'playback_error'}}}));
+ assert.ok(!unavailable.includes(t('player.playbackError.playback_error')));
+ const cleared=renderToStaticMarkup(render({status:{...status,state:'stop',playback_error:null}}));
+ assert.ok(!cleared.includes(t('player.playbackError.playback_error')));
+ for(const code of ['queue_uncertain','persistence_failed','format_unsupported','output_busy','output_unavailable']) {
+  assert.ok(renderToStaticMarkup(render({status:{...status,state:'stop',playback_error:{code}}})).includes(t(`player.playbackError.${code}`)));
  }
 });
 

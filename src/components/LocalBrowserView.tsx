@@ -317,7 +317,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
 }) => {
   const { t } = useTranslation();
   const catalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
-  const artworkActivity = useSyncExternalStore(localArtworkEnrichment.subscribe, localArtworkEnrichment.getOnlineActivitySnapshot);
+  const artworkStatus = useSyncExternalStore(localArtworkEnrichment.subscribe, localArtworkEnrichment.getSnapshot);
   const albums = localCatalogPresentationAlbums(catalog);
   const openingAlbums = useMemo(() => sortLocalAlbums(albums, "album-asc"), [albums]);
   useLayoutEffect(() => { localAlbumThumbnails.setOpeningOrder(openingAlbums); }, [openingAlbums]);
@@ -947,7 +947,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       </div>
       <div className={metadataMode ? "hidden" : "contents"}>
       <div className="flex flex-wrap items-center justify-between gap-4 px-8 pt-8 pb-4">
-        <div className="flex items-center space-x-3">
+        <div className="flex min-w-0 flex-1 items-center space-x-3">
           {showContextBack && !(externalBackNavigation && (initialAlbumId && (!selectedAlbum || selectedAlbum.id === initialAlbumId) || initialArtist && !selectedAlbum)) && (
             <button
               onClick={handleContextBack}
@@ -958,21 +958,39 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
             </button>
           )}
 
-          <div>
-            <h2 className="text-2xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight">{headerTitle}</h2>
-            <p className={selectedAlbum || viewMode === "folders"
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-2xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight">{headerTitle}</h2>
+            <p className={`${selectedAlbum || viewMode === "folders"
               ? "mt-0.5 text-xs text-[color:var(--theme-fg-muted,#888888)]"
-              : "mt-1 text-sm font-medium tabular-nums text-[color:var(--theme-fg-secondary,#BBBBBB)]"}>{headerCount}</p>
-            {viewMode === "albums" && artworkActivity && (
-              <div className="text-[11px] text-[color:var(--theme-fg-muted,#777777)] mt-1 flex flex-wrap items-center gap-x-2">
-                <span className="text-[color:var(--theme-fg-accent,#E5A00D)] flex items-center gap-1 max-w-72 truncate" title={artworkActivity.title}>
-                  {artworkActivity.kind === "searching" && <Disc3 size={11} className="animate-spin" />}
-                  {t(artworkActivity.kind === "searching" ? "artwork.searchingOnline" : "artwork.foundOnline", { title: artworkActivity.title })}
-                </span>
-              </div>
-            )}
+              : "mt-1 text-sm font-medium tabular-nums text-[color:var(--theme-fg-secondary,#BBBBBB)]"} truncate`}>{headerCount}</p>
           </div>
         </div>
+        {viewMode === "albums" && (
+          <div role="status" aria-live={artworkStatus.active ? "polite" : "off"} aria-atomic="false"
+            aria-hidden={!artworkStatus.active} className={`ml-auto flex h-9 w-32 shrink-0 flex-col justify-center overflow-hidden sm:w-52${artworkStatus.active ? "" : " invisible"}`}>
+            <div className="flex min-w-0 items-center justify-end gap-1 whitespace-nowrap text-[9px] leading-3 tabular-nums">
+              <Search size={11} aria-hidden="true" className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" />
+              <span className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]">{t("artwork.progressLabel")}</span>
+              <span className="shrink-0 text-[color:var(--theme-fg-secondary,#BBBBBB)]">
+                {Math.min(artworkStatus.processed, artworkStatus.total)}/{artworkStatus.total}
+              </span>
+              {artworkStatus.onlineFound > 0 && <>
+                <span className="hidden shrink-0 text-[color:var(--theme-fg-muted,#777777)] sm:inline">
+                  {t("artwork.progressOnline", { count: artworkStatus.onlineFound })}
+                </span>
+                <span className="sr-only sm:hidden">
+                  {t("artwork.progressOnline", { count: artworkStatus.onlineFound })}
+                </span>
+              </>}
+            </div>
+            <div className={`mt-1 h-1 w-full overflow-hidden rounded-full bg-[var(--theme-surface-raised,#1E1E1E)]${artworkStatus.total > 0 ? "" : " invisible"}`}>
+              {artworkStatus.total > 0 && <div role="progressbar" aria-label={t("artwork.progressBarLabel")}
+                aria-valuemin={0} aria-valuemax={artworkStatus.total} aria-valuenow={Math.min(artworkStatus.processed, artworkStatus.total)}
+                className="h-full rounded-full bg-[color:var(--theme-fg-muted,#777777)]"
+                style={{ width: `${Math.min(100, artworkStatus.processed / artworkStatus.total * 100)}%` }} />}
+            </div>
+          </div>
+        )}
       </div>
 
       {!selectedAlbum && !selectedArtist && (

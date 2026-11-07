@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {canToggleMute,directMuteRequest,muteLabel,requiresDeviceVolumeControl} from './signalPath.ts';
-import {routeConditions} from './routeConditions.ts';
 const volume={backend:'direct_equipment',available:true,writable:false,value:0,muted:false,direct_gain:'pending',direct_token:'session:revision'};
 const status=(extra={})=>({state:'play',audio_format:'44100:16:2',volume:{...volume,...extra}});
 test('all Direct formats have equipment volume; Shared software and system volume remain adjustable',()=>{
@@ -18,17 +17,6 @@ test('all Direct mute actions are explicit; no separate preparation gesture',()=
  }
  for(const extra of [{available:false},{direct_token:undefined},{backend:'unavailable'},{backend:'mpd_software'}])assert.equal(directMuteRequest(status(extra)),null);
  assert.equal(canToggleMute(status({backend:'pipewire',writable:true})),true);
-});
-test('Direct evidence requires real unity or coherent intentional mute for PCM, native DSD and DoP',()=>{
- const route={mode:'direct',endpoint:'hw:Fixture,0'},health={state:'available'};
- const engine_evidence={state:'identified',evidence_id:'mpd-strict-ubuntu2204-remap-20261018',scope:'pcm_dsd_route_strict',pcm_eof_flush:true};
- for(const [audio_format,kind,format,rate] of [['44100:16:2','pcm','S16_LE',44100],['352800:dsd:2','native_dsd','DSD_U32_LE',88200],['352800:dsd:2','dop','S32_LE',176400]]){
-  const base={...status(),audio_format,snapshot_consistent:true,engine_evidence,output_observation:{state:'observed',configured_endpoint:route.endpoint,card:0,device:0,subdevice:0,format,rate,channels:2},processing:{transport:{kind,source_rate:352800,output_rate:rate,channels:2,epoch:1},mpd_volume:100,crossfade_seconds:0,mixramp:'off',replay_gain:{state:'off'}}};
-  const evaluate=(gain,value,reported=value,muted=false)=>routeConditions(route,{...base,volume:{...volume,direct_gain:gain,value,muted},processing:{...base.processing,mpd_volume:reported}},health);
-  assert.equal(evaluate('unity',100).bitPerfect,true,JSON.stringify({audio_format,kind,result:evaluate('unity',100)}));
-  assert.equal(evaluate('muted',0,0,true).bitPerfect,true);
-  for(const [gain,value,reported,muted] of [['pending',100,100,false],['changed',100,100,false],['unity',43,43,false],['unity',100,0,false],['muted',0,0,false],['muted',0,100,true]])assert.equal(evaluate(gain,value,reported,muted).bitPerfect,false);
- }
 });
 test('central gradual IPC and MPRIS cannot bypass Direct policy; all frontends use dedicated mute',()=>{
  const root=new URL('../../',import.meta.url),read=n=>readFileSync(new URL(n,root),'utf8');

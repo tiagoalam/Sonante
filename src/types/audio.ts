@@ -71,9 +71,6 @@ export type OutputObservation =
 export interface SignalProcessing {
   transport?: { kind: "pcm" | "native_dsd" | "dop"; source_rate: number; output_rate: number; channels: number; epoch: number } | null;
   mpd_volume: number | null;
-  crossfade_seconds: number | null;
-  mixramp: "off" | "possible" | "unknown";
-  replay_gain: { state: "off" | "track" | "album" | "auto" | "unknown" } | { state: "unavailable"; reason: "busy" | "unavailable" | "timeout" | "protocol" | "changed" };
 }
 
 export interface EngineEvidence {
