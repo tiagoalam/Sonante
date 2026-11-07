@@ -65,7 +65,8 @@ export const PlayerBar: React.FC<Props> = ({
   const isRadio = status.current_media?.kind === "radio";
   const canNavigate = !isRadio;
   const playbackDiagnostic = status.playback_error;
-  const playbackNotice = playbackDiagnostic?.code === "playback_error"
+  const playbackNotice = (playbackDiagnostic?.code === "playback_error"
+      && (!isAvailable || status.state === "play"))
     || (isAvailable && status.state === "play"
       && (playbackDiagnostic?.code === "output_busy" || playbackDiagnostic?.code === "output_unavailable"))
     ? null : playbackDiagnostic;

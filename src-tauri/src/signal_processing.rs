@@ -1,4 +1,4 @@
-//! Read-only processing metadata. No sample comparison or bit-perfect verdict.
+//! Read-only output metadata used for device volume control and DSD transport display.
 use serde::{Deserialize, Serialize};
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -14,28 +14,10 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadFailure {
-    Busy,
     Unavailable,
     Timeout,
     Protocol,
     Changed,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", content = "reason", rename_all = "snake_case")]
-pub enum ReplayGain {
-    Off,
-    Track,
-    Album,
-    Auto,
-    Unknown,
-    Unavailable(ReadFailure),
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MixRamp {
-    Off,
-    Possible,
-    Unknown,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -115,14 +97,11 @@ fn parse_transport(lines: &[String]) -> Option<OutputTransport> {
         epoch,
     })
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessingStatus {
     #[serde(default)]
     pub transport: Option<OutputTransport>,
     pub mpd_volume: Option<u8>,
-    pub crossfade_seconds: Option<f64>,
-    pub mixramp: MixRamp,
-    pub replay_gain: ReplayGain,
 }
 fn value<'a>(lines: &'a [String], key: &str) -> Option<&'a str> {
     let mut values = lines
@@ -143,48 +122,7 @@ impl ProcessingStatus {
             .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
             .and_then(|s| s.parse::<u8>().ok())
             .filter(|v| *v <= 100);
-        // MPD 0.24 status omits xfade and mixrampdelay when not positive.
-        // Only interpret omission in a complete status envelope; malformed or
-        // duplicate fields stay unknown. No extra command or playback mutation.
-        let complete_status = matches!(value(lines, "state"), Some("play" | "pause" | "stop"))
-            && ["playlist", "playlistlength"].iter().all(|key|
-                value(lines, key).is_some_and(|v| !v.is_empty()
-                    && v.bytes().all(|b| b.is_ascii_digit()) && v.parse::<u32>().is_ok()))
-            && ["repeat", "random"].iter().all(|key|
-                matches!(value(lines, key), Some("0" | "1")))
-            && matches!(value(lines, "single"), Some("0" | "1" | "oneshot"))
-            && matches!(value(lines, "consume"), Some("0" | "1" | "oneshot"))
-            && value(lines, "mixrampdb").is_some_and(|v|
-                v.parse::<f64>().is_ok_and(|n| n.is_finite()));
-        let omitted = |key: &str| !lines.iter().any(|line|
-            line.split_once(':').is_some_and(|(name, _)| name == key));
-        let crossfade_seconds = value(lines, "xfade")
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|n| n.is_finite() && (0.0..=86400.0).contains(n))
-            .or_else(|| (complete_status && omitted("xfade")).then_some(0.0));
-        let mixramp = match value(lines, "mixrampdelay") {
-            Some("nan") => MixRamp::Off,
-            Some(s) if s.parse::<f64>().is_ok_and(|v| v.is_finite() && v <= 0.0) => MixRamp::Off,
-            Some(s) if s.parse::<f64>().is_ok_and(|v| v.is_finite() && v > 0.0) => MixRamp::Possible,
-            None if complete_status && omitted("mixrampdelay") => MixRamp::Off,
-            _ => MixRamp::Unknown,
-        };
-        Self {
-            transport: None,
-            mpd_volume,
-            crossfade_seconds,
-            mixramp,
-            replay_gain: ReplayGain::Unknown,
-        }
-    }
-}
-fn parse_mode(lines: &[String]) -> Result<ReplayGain, ReadFailure> {
-    match value(lines, "replay_gain_mode") {
-        Some("off") => Ok(ReplayGain::Off),
-        Some("track") => Ok(ReplayGain::Track),
-        Some("album") => Ok(ReplayGain::Album),
-        Some("auto") => Ok(ReplayGain::Auto),
-        _ => Err(ReadFailure::Protocol),
+        Self { transport: None, mpd_volume }
     }
 }
 
@@ -304,7 +242,7 @@ pub(crate) fn connect(path: &Path, expected_pid: u32, deadline: Instant) -> Resu
     remaining(deadline)?;
     Ok(stream)
 }
-fn query_lines(path: &Path, pid: u32, outputs: bool) -> Result<Vec<String>, ReadFailure> {
+fn query_output_lines(path: &Path, pid: u32) -> Result<Vec<String>, ReadFailure> {
     let deadline = Instant::now() + Duration::from_millis(150);
     let mut stream = connect(path, pid, deadline)?;
     stream
@@ -337,7 +275,7 @@ fn query_lines(path: &Path, pid: u32, outputs: bool) -> Result<Vec<String>, Read
                 .position(|b| *b == b'\n')
                 .map_or(buffer.len(), |i| i + 1);
             *consumed += length;
-            if *consumed > if outputs { 16384 } else { 4096 } {
+            if *consumed > 16384 {
                 return Err(ReadFailure::Protocol);
             }
             bytes.extend_from_slice(&buffer[..length]);
@@ -358,10 +296,10 @@ fn query_lines(path: &Path, pid: u32, outputs: bool) -> Result<Vec<String>, Read
         .set_write_timeout(Some(remaining(deadline)?))
         .map_err(io_error)?;
     stream
-        .write_all(if outputs { b"outputs\n" } else { b"replay_gain_status\n" })
+        .write_all(b"outputs\n")
         .map_err(io_error)?;
     let mut lines = Vec::new();
-    for _ in 0..if outputs { 128 } else { 16 } {
+    for _ in 0..128 {
         read_line(&mut reader, &mut line, &mut consumed)?;
         let text = line.trim_end_matches('\n');
         if text == "OK" {
@@ -374,19 +312,9 @@ fn query_lines(path: &Path, pid: u32, outputs: bool) -> Result<Vec<String>, Read
     }
     Err(ReadFailure::Protocol)
 }
-fn query(path: &Path, pid: u32) -> Result<ReplayGain, ReadFailure> {
-    parse_mode(&query_lines(path, pid, false)?)
-}
 pub(crate) fn read_output_transport(path: &Path, pid: u32) -> Option<OutputTransport> {
     let _permit = enter(&READING)?;
-    parse_transport(&query_lines(path, pid, true).ok()?)
-}
-// The caller invalidates the result if its owned MPD/output context changed.
-pub(crate) fn read_replay_gain(path: &Path, pid: u32) -> ReplayGain {
-    let Some(_permit) = enter(&READING) else {
-        return ReplayGain::Unavailable(ReadFailure::Busy);
-    };
-    query(path, pid).unwrap_or_else(ReplayGain::Unavailable)
+    parse_transport(&query_output_lines(path, pid).ok()?)
 }
 
 #[cfg(test)]

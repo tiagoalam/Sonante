@@ -33,19 +33,19 @@ Choose a usage mode in **Settings → General** or during the welcome wizard. Ex
 
 Switching modes preserves playback, the audio route, saved settings and collection data. An already applied EQ is preserved rather than changing the sound during a mode switch. Simple suspends advanced network services and analysis; returning to Full restores their saved settings.
 
-## Installation — 0.6.2
+## Installation — 0.6.3
 
-Download the complete package and `SHA256SUMS.txt` from [Sonante 0.6.2](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.2) for your distribution:
+Download the complete package and `SHA256SUMS.txt` from [Sonante 0.6.3](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.3) for your distribution:
 
-- Ubuntu 22.04: `sonante_0.6.2-1_amd64.deb` (`apt install ./sonante_0.6.2-1_amd64.deb`).
-- Fedora 44: `sonante-0.6.2-1.x86_64.rpm` (`dnf install ./sonante-0.6.2-1.x86_64.rpm`).
-- Arch Linux / Manjaro: `sonante-0.6.2-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.6.2-1-x86_64.pkg.tar.zst`).
+- Ubuntu 22.04: `sonante_0.6.3-1_amd64.deb` (`apt install ./sonante_0.6.3-1_amd64.deb`).
+- Fedora 44: `sonante-0.6.3-1.x86_64.rpm` (`dnf install ./sonante-0.6.3-1.x86_64.rpm`).
+- Arch Linux / Manjaro: `sonante-0.6.3-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.6.3-1-x86_64.pkg.tar.zst`).
 
-Version 0.6.2 adds Simple and Full usage modes, clearer disabled-source labels, and a targeted automatic recovery for MPD background-thread initialization failures. Recovery retries only after confirming that specific failure; normal startup retains its existing environment. Validation on the originally affected machine is still pending. Sources are tagged [v0.6.2](https://github.com/tiagoalam/Sonante/tree/v0.6.2).
+Version 0.6.3 improves smart-playlist variety, exposes clearer online-artwork progress, adds contextual multi-track selection, and presents current playback errors. Signal Path now reports observed route and format details without a bit-perfect certification. ALSA Direct uses the compatibility setting validated on the FiiO K17 and Astro A50; this does not certify bit-perfect output. See [release notes](RELEASE-NOTES.md) and [changelog](CHANGELOG.md). Sources are tagged [v0.6.3](https://github.com/tiagoalam/Sonante/tree/v0.6.3).
 
 Close Sonante before upgrading, and install with your distribution's package manager. Verify the supplied checksum first. Packages manage their own pinned audio runtimes and do not enable a system MPD service. Corresponding runtime source sidecars accompany the packages; they are not installed into `/usr`.
 
-Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Ordinary Tauri bundles and historical qualified-0.5.4 installers are not substitutes for the complete 0.6.2 release payload.
+Ubuntu/Arch and Fedora intentionally use different runtime descriptors. Use the complete 0.6.3 release payload rather than ordinary Tauri bundles.
 
 ### System requirements
 

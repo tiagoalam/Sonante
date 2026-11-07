@@ -184,9 +184,14 @@ test('real multi-selection preserves displayed order and duplicate occurrences, 
  const tracks=[local('First'),local('Duplicate','Source/dup.flac'),local('Duplicate','Source/dup.flac'),local('Last','Source/last.flac')];
  const {useTrackSelection}=compile('components/TrackSelection.tsx',{
   react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t})},'../utils/trackSelection':selectionModel,
-  './QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null},
+  './QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null},'lucide-react':icons,
  });
  const host=new f.Harness(()=>useTrackSelection(currentContext,tracks,available));let view=host.paint();
+ assert.equal(view.selecting,false);assert.equal(view.checkbox(0),null);
+ let modeButton=nodes(view.toolbar,n=>n.type==='button'&&n.props.children?.[1]===f.t('selection.start'))[0];assert.ok(modeButton);assert.equal(modeButton.props['aria-pressed'],false);modeButton.props.onClick();view=host.paint();
+ assert.equal(view.selecting,true);assert.ok(view.checkbox(0));
+ assert.equal(view.click({target:{closest:()=>null},currentTarget:{},preventDefault(){},stopPropagation(){}},0),true);view=host.paint();assert.equal(view.checked(0),true);assert.deepEqual(f.calls,[]);
+ modeButton=nodes(view.toolbar,n=>n.type==='button'&&n.props.children?.[1]===f.t('selection.done'))[0];assert.ok(modeButton);modeButton.props.onClick();view=host.paint();assert.equal(view.selecting,false);assert.equal(view.checked(0),false);assert.equal(view.checkbox(0),null);
  assert.equal(view.click({},1),false);assert.deepEqual(f.calls,[]);
  assert.equal(view.click({ctrlKey:true,preventDefault(){},stopPropagation(){}},1),true);view=host.paint();assert.equal(view.checked(1),true);assert.equal(view.checked(2),false);
  view.click({shiftKey:true,preventDefault(){},stopPropagation(){}},3);view=host.paint();assert.deepEqual(tracks.map((_,i)=>view.checked(i)),[false,true,true,true]);
@@ -205,8 +210,8 @@ test('real multi-selection preserves displayed order and duplicate occurrences, 
 test('multi-selection queued payload is discarded after its view becomes unavailable or changes source', async () => {
  for(const mode of ['unavailable','source','unmount']) {
   const f=await fixture();f.host.close();const model=await import('../src/utils/trackSelection.ts');let context={},available=true;
-  const {useTrackSelection}=compile('components/TrackSelection.tsx',{react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t})},'../utils/trackSelection':model,'./QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null}});
-  const host=new f.Harness(()=>useTrackSelection(context,[local()],available));let view=host.paint();view.checkbox(0).props.onClick({stopPropagation(){}});view=host.paint();nodes(view.toolbar,n=>n.props?.['data-queue-trigger'])[0].props.onClick(f.event());view=host.paint();
+  const {useTrackSelection}=compile('components/TrackSelection.tsx',{react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t})},'../utils/trackSelection':model,'./QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null},'lucide-react':icons});
+  const host=new f.Harness(()=>useTrackSelection(context,[local()],available));let view=host.paint();nodes(view.toolbar,n=>n.type==='button'&&n.props.children?.[1]===f.t('selection.start'))[0].props.onClick();view=host.paint();view.checkbox(0).props.onClick({stopPropagation(){}});view=host.paint();nodes(view.toolbar,n=>n.props?.['data-queue-trigger'])[0].props.onClick(f.event());view=host.paint();
   const menu=nodes(view.toolbar,n=>typeof n.props?.choose==='function')[0];menu.props.choose('next');
   if(mode==='unavailable'){available=false;host.paint()}if(mode==='source'){context={};host.paint()}if(mode==='unmount')host.close();
   await flush();assert.deepEqual(f.calls,[],mode);if(mode!=='unmount')host.close();

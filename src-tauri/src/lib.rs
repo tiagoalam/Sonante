@@ -3270,12 +3270,6 @@ async fn get_mpd_status_snapshot(app: AppHandle, diagnostic_id: Option<u64>) -> 
                             audio.0.try_lock().ok().map(|audio| audio.local_album_socket_path())
                         };
                         let context_valid = output_observation_context(&app).as_ref() == Some(context);
-                        let gain = if !context_valid {
-                            signal_processing::ReplayGain::Unavailable(signal_processing::ReadFailure::Changed)
-                        } else {
-                            socket.as_ref().map(|socket| signal_processing::read_replay_gain(Path::new(socket), context.pid))
-                                .unwrap_or(signal_processing::ReplayGain::Unavailable(signal_processing::ReadFailure::Busy))
-                        };
                         // Only DSD needs an additional negotiated-transport query. It is
                         // read-only, bounded and uses this snapshot, without another timer.
                         let transport = if context_valid && snapshot.playback.as_ref().is_some_and(|p| p.audio_format.starts_with("dsd") || p.audio_format.contains(":dsd:")) {
@@ -3285,7 +3279,6 @@ async fn get_mpd_status_snapshot(app: AppHandle, diagnostic_id: Option<u64>) -> 
                             snapshot.output_observation = Some(alsa_observation::Observation::unverified(alsa_observation::Reason::Changed));
                             if let Some(playback) = snapshot.playback.as_mut() { playback.processing = None; }
                         } else if let Some(processing) = snapshot.playback.as_mut().and_then(|p| p.processing.as_mut()) {
-                            processing.replay_gain = gain;
                             processing.transport = transport;
                         }
                     }

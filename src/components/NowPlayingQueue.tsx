@@ -118,12 +118,13 @@ export const NowPlayingQueue: React.FC<{ open: boolean; available: boolean; stat
   const navidromeArtwork = useNavidromeQueueArtwork(state.items, visibleEntries.map(entry => entry.index), open && queueAvailable, status);
   const artwork = useLocalQueueArtwork(state.items, start, end, open, queueAvailable, status, artworkContext, detached, visibleEntries.map(entry => entry.index));
   return <aside data-now-playing-queue-content id="now-playing-queue" hidden={!open} className="np-queue" aria-label={t("queue.title")}>
-    {queueActions.notice}{queueActions.menu}{selection.toolbar}
+    {queueActions.notice}{queueActions.menu}
     <div className="np-queue-heading"><div><h2>{t("queue.title")}</h2><span aria-live="polite" aria-atomic="true">{filter.trim() && queueCoherent
       ? t("queue.filteredCount", { count: entries.length, total: state.items.length }) : t("common.trackCount", { count: queueCoherent ? state.items.length : 0 })}</span></div>
       {queueCoherent && state.items.length > 0 && <button type="button" onClick={() => void act()} disabled={!queueAvailable || actionBusy}
         aria-label={t(filter.trim() ? "queue.clearAll" : "queue.clear")} title={t(filter.trim() ? "queue.clearAll" : "queue.clear")}><Trash2 size={15} /></button>}
     </div>
+    {selection.toolbar}
     <div className="np-queue-tools">
       <label className="np-queue-filter" htmlFor={filterId}><Search size={14} aria-hidden="true" />
         <input ref={filterRef} id={filterId} type="search" value={filter} maxLength={160} aria-label={t("queue.filterLabel")} placeholder={t("queue.filterPlaceholder")}

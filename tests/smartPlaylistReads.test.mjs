@@ -32,7 +32,7 @@ test('native refusals remain errors and are never automatically retried',async()
  const f=fixture({invoke:async()=>{throw 'SMART_PLAYLIST_READ'}});await assert.rejects(f.service.catalog(local),e=>e==='SMART_PLAYLIST_READ');assert.equal(f.calls.length,1);
 });
 test('preview schedules each Local album separately so player control runs before the next batch',async()=>{
- const pending=deferred();const f=fixture({tracks:async id=>id==='a'?pending.promise:[group(id)]});const rules={...defaultSmartRules(),limit:2};const result=f.service.preview(rules);await flush();assert.deepEqual(f.calls.map(c=>c[0]),['smart_playlist_preview','tracks']);
+ const pending=deferred();const f=fixture({tracks:async id=>id==='a'?pending.promise:[group(id)]});const rules={...defaultSmartRules(),limit:2};const result=f.service.preview(rules,undefined,()=>0.999999);await flush();assert.deepEqual(f.calls.map(c=>c[0]),['smart_playlist_preview','tracks']);
  const control=f.queue.control(async()=>{f.calls.push(['player-control']);});pending.resolve([group('a')]);await control;const value=await result;assert.deepEqual(f.calls.map(c=>c[0]),['smart_playlist_preview','tracks','player-control','tracks']);assert.equal(value.tracks.length,2);assert.equal(value.limit_reached,true);assert.deepEqual(value.tracks.map(t=>t.media_locator.uri),['Local/a.flac','Local/b.flac']);
 });
 test('closing a preview stops further album queries and never changes playback',async()=>{
@@ -71,11 +71,16 @@ test('smart Local families cover explicit reported aliases and compound tags, wi
 });
 test('Local family filtering occurs before expansion and limit, using the same metadata grouping shown in the editor',async()=>{
  const selected=[{...albums[0],id:'rock',genres:['Rock']},{...albums[0],id:'a',genres:['Brazilian Rock']},{...albums[1],id:'b',genres:['Bossanova, Samba, MPB']}];
- const before=JSON.stringify(selected);const f=fixture({invoke:async()=>({albums:selected,matched_albums:3}),tracks:async id=>[group(id+'1'),group(id+'2')]});const value=await f.service.preview({...defaultSmartRules(),genre_family:'brazilian',limit:3});
- assert.deepEqual(f.calls.filter(c=>c[0]==='tracks').map(c=>c[1]),['a','b']);assert.equal(value.matched_albums,2);assert.deepEqual(value.tracks.map(t=>t.media_locator.uri),['Local/a1.flac','Local/b1.flac','Local/a2.flac']);assert.equal(JSON.stringify(selected),before);
+ const before=JSON.stringify(selected);const f=fixture({invoke:async()=>({albums:selected,matched_albums:3}),tracks:async id=>[group(id+'1'),group(id+'2')]});const value=await f.service.preview({...defaultSmartRules(),genre_family:'brazilian',limit:3},undefined,()=>0.999999);
+ assert.deepEqual(f.calls.filter(c=>c[0]==='tracks').map(c=>c[1]).sort(),['a','b']);assert.equal(value.matched_albums,2);assert.deepEqual(value.tracks.map(t=>t.media_locator.uri),['Local/a1.flac','Local/b1.flac','Local/a2.flac']);assert.equal(JSON.stringify(selected),before);
 });
-test('varied tracks give each album a turn, deduplicate identity and respect disc/track order within that album',async()=>{
- const f=fixture({invoke:async()=>({albums:[...albums,{...albums[0],id:'c'}],matched_albums:3}),tracks:async id=>[group(id+'2',2),group(id+'1',1),group(id+'1',1)]});const value=await f.service.preview({...defaultSmartRules(),limit:5});assert.deepEqual(value.tracks.map(t=>t.media_locator.uri),['Local/a1.flac','Local/b1.flac','Local/c1.flac','Local/a2.flac','Local/b2.flac']);assert.equal(f.calls.filter(c=>c[0]==='tracks').length,3);
+test('varied tracks give each album a turn, deduplicate identity and preserve configured album presentation order',async()=>{
+ const f=fixture({invoke:async()=>({albums:[...albums,{...albums[0],id:'c'}],matched_albums:3}),tracks:async id=>[group(id+'2',2),group(id+'1',1),group(id+'1',1)]});const value=await f.service.preview({...defaultSmartRules(),limit:5},undefined,()=>0.999999);assert.deepEqual(value.tracks.map(t=>t.media_locator.uri),['Local/a1.flac','Local/b1.flac','Local/c1.flac','Local/a2.flac','Local/b2.flac']);assert.equal(f.calls.filter(c=>c[0]==='tracks').length,3);
+});
+test('varied selection samples beyond the first limit of albums and can choose later tracks with controlled randomness',async()=>{
+ const selected=Array.from({length:8},(_,i)=>({...albums[0],id:String(i),title:`Album ${i}`}));const rules={...defaultSmartRules(),limit:3};const read=async album=>[0,1,2].map(i=>({title:`Track ${i}`,artist:'Artist',album:album.title,media_locator:{kind:'local',uri:`Local/${album.id}-${i}.flac`}}));
+ const build=random=>helpers.assembleSmartPreview({albums:selected,matched_albums:selected.length},rules,read,undefined,undefined,random);const later=await build(()=>0);const first=await build(()=>0.999999);
+ assert.equal(later.tracks.length,3);assert.equal(new Set(later.tracks.map(t=>t.media_locator.uri)).size,3);assert.deepEqual(later.tracks.map(t=>t.media_locator.uri),['Local/1-1.flac','Local/2-1.flac','Local/3-1.flac']);assert.ok(later.tracks.some(t=>Number(t.media_locator.uri.match(/Local\/(\d+)-/)[1])>=rules.limit),'albums beyond the first limit remain eligible');assert.deepEqual(first.tracks.map(t=>t.media_locator.uri),['Local/0-0.flac','Local/1-0.flac','Local/2-0.flac']);assert.equal(later.matched_albums,8);
 });
 test('variety reads at most the requested number of contributing albums, never every album just to fill a short selection',async()=>{
  const selected=Array.from({length:4000},(_,i)=>({...albums[0],id:String(i)}));const f=fixture({invoke:async()=>({albums:selected,matched_albums:4000})});const value=await f.service.preview({...defaultSmartRules(),limit:3});assert.equal(f.calls.filter(c=>c[0]==='tracks').length,3);assert.equal(value.tracks.length,3);assert.equal(value.matched_albums,4000);

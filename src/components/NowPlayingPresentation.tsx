@@ -66,7 +66,8 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
   const health = props.snapshot?.health;
   const available = health?.state === "available";
   const playbackDiagnostic = status?.playback_error;
-  const playbackNotice = playbackDiagnostic?.code === "playback_error"
+  const playbackNotice = (playbackDiagnostic?.code === "playback_error"
+      && (!available || status?.state === "play"))
     || (available && status?.state === "play"
       && (playbackDiagnostic?.code === "output_busy" || playbackDiagnostic?.code === "output_unavailable"))
     ? null : playbackDiagnostic;

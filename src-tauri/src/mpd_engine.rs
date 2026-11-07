@@ -148,7 +148,7 @@ impl MpdEngine {
         let prefix = section
             .strip_suffix("\n}")
             .ok_or_else(|| "Seção ALSA inválida para o motor experimental.".to_string())?;
-        Ok(format!("{prefix}\n    pcm_eof_flush \"yes\"\n    sonante_direct_strict \"yes\"\n}}"))
+        Ok(format!("{prefix}\n    pcm_eof_flush \"yes\"\n    sonante_direct_strict \"no\"\n}}"))
     }
 
     pub(crate) fn verify_child(&self, child: &Child) -> Result<(), String> {
@@ -420,7 +420,7 @@ mod tests {
         );
         let direct = engine.configure_output(section, false).unwrap();
         assert_eq!(direct.matches("pcm_eof_flush").count(), 1);
-        assert_eq!(direct.matches("sonante_direct_strict \"yes\"").count(), 1);
+        assert_eq!(direct.matches("sonante_direct_strict \"no\"").count(), 1);
         assert!(direct.contains("dop \"yes\""));
         assert!(engine.configure_output("invalid".into(), false).is_err());
     }

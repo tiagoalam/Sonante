@@ -31,16 +31,16 @@ export const SidebarNavItem: React.FC<SidebarNavItemProps> = ({
     className={`group relative flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] font-medium transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] ${
       active
         ? "bg-[var(--theme-surface-raised,#242424)] text-[color:var(--theme-fg-primary,#ffffff)]"
-        : "text-[color:var(--theme-fg-muted,#8A8A8A)] hover:bg-[var(--theme-surface-raised,#202020)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
+        : "text-[color:var(--theme-fg-secondary,#CCCCCC)] hover:bg-[var(--theme-surface-raised,#202020)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
     }`}
   >
     {active && <span aria-hidden="true" className="absolute inset-y-2 left-0 w-0.5 rounded-r bg-[#E5A00D]" />}
     <Icon
       size={17}
       aria-hidden="true"
-      className={`shrink-0 transition-colors ${sourceEnabled === false ? "text-[color:var(--theme-fg-muted,#777777)]" : active ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#777777)] group-hover:text-[color:var(--theme-fg-secondary,#BBBBBB)]"}`}
+      className={`shrink-0 transition-colors ${sourceEnabled === false ? "text-[color:var(--theme-fg-muted,#777777)]" : active ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-secondary,#BBBBBB)] group-hover:text-[color:var(--theme-fg-primary,#ffffff)]"}`}
     />
-    <span className={`min-w-0 flex-1 truncate ${sourceEnabled === false ? "text-[color:var(--theme-fg-muted,#8A8A8A)]" : sourceEnabled === true && !active ? "text-[color:var(--theme-fg-secondary,#CCCCCC)]" : ""}`}>{label}</span>
+    <span className={`min-w-0 flex-1 truncate ${sourceEnabled === false ? "text-[color:var(--theme-fg-muted,#8A8A8A)]" : ""}`}>{label}</span>
     {trailing && <span className="shrink-0">{trailing}</span>}
   </button>
 );
