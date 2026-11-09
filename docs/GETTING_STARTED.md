@@ -10,13 +10,13 @@ Visit the [latest release](https://github.com/tiagoalam/Sonante/releases/latest)
 
 | Linux distribution | What to download |
 | --- | --- |
-| Ubuntu 22.04 | The `.deb` file |
-| Fedora 44 | The `.rpm` file |
-| Arch Linux / Manjaro | The `.pkg.tar.zst` file |
+| Ubuntu 22.04 or newer, and compatible derivatives (such as Linux Mint) | The `.deb` file |
+| Fedora 43 or newer, and compatible derivatives | The `.rpm` file |
+| Arch Linux / Manjaro (updated rolling releases) | The `.pkg.tar.zst` file |
 
 Install it with your system's package manager, then open **Sonante** from the application menu.
 
-If you use another Linux distribution, check the [compatibility notes](LINUX_GUIDE.md#system-requirements) before installing. An AppImage isn't available yet.
+Compatible derivatives may also work, but individual distribution versions have not all been tested. Check the [compatibility notes](LINUX_GUIDE.md#system-requirements) before installing. An AppImage isn't available yet.
 
 ## 2. Tell Sonante where your music lives
 
