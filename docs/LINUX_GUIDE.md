@@ -37,9 +37,11 @@ Switching modes preserves playback, the audio route, saved settings and collecti
 
 Download the complete package and `SHA256SUMS.txt` from [Sonante 0.6.3](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.3) for your distribution:
 
-- Ubuntu 22.04: `sonante_0.6.3-1_amd64.deb` (`apt install ./sonante_0.6.3-1_amd64.deb`).
-- Fedora 44: `sonante-0.6.3-1.x86_64.rpm` (`dnf install ./sonante-0.6.3-1.x86_64.rpm`).
-- Arch Linux / Manjaro: `sonante-0.6.3-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.6.3-1-x86_64.pkg.tar.zst`).
+- Ubuntu 22.04 or newer, and compatible derivatives: `sonante_0.6.3-1_amd64.deb` (`apt install ./sonante_0.6.3-1_amd64.deb`).
+- Fedora 43 or newer, and compatible derivatives: `sonante-0.6.3-1.x86_64.rpm` (`dnf install ./sonante-0.6.3-1.x86_64.rpm`).
+- Arch Linux / Manjaro (updated rolling releases): `sonante-0.6.3-1-x86_64.pkg.tar.zst` (`pacman -U ./sonante-0.6.3-1-x86_64.pkg.tar.zst`).
+
+These are intended package families and minimum target versions, not a promise that every version or derivative has been tested. Verify the exact native dependencies on your system; package installation alone does not establish playback compatibility.
 
 Version 0.6.3 improves smart-playlist variety, exposes clearer online-artwork progress, adds contextual multi-track selection, and presents current playback errors. Signal Path reports observed route and format details. ALSA Direct uses the compatibility setting validated on the FiiO K17 and Astro A50. See [release notes](../RELEASE-NOTES.md) and [changelog](../CHANGELOG.md). Sources are tagged [v0.6.3](https://github.com/tiagoalam/Sonante/tree/v0.6.3).
 
