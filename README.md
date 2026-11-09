@@ -53,11 +53,11 @@ Some features are specific to certain music sources or interface modes. [See all
 
 | Distribution | Download |
 | --- | --- |
-| Ubuntu 22.04 | `.deb` |
-| Fedora 44 | `.rpm` |
-| Arch Linux / Manjaro | `.pkg.tar.zst` |
+| Ubuntu 22.04 or newer, and compatible derivatives (e.g. Linux Mint) | `.deb` |
+| Fedora 43 or newer, and compatible derivatives | `.rpm` |
+| Arch Linux / Manjaro (updated rolling releases) | `.pkg.tar.zst` |
 
-Download the package that matches your distribution and install it using your package manager. The latest release also provides a checksum file for download verification.
+Download the package that matches your distribution and install it using your package manager. The latest release also provides a checksum file for download verification. Versions and derivatives listed here describe expected package compatibility, not a guarantee of testing on every distribution: native library requirements still apply.
 
 **Windows is being developed** and isn't part of the current public release. Other platforms are not available yet.
 
