@@ -1,88 +1,97 @@
 <div align="center">
 
-<img src="app-icon.svg" alt="Sonante icon" width="88" />
+<img src="app-icon.svg" alt="Sonante" width="90" />
 
 # Sonante
 
 ### Your music. Your way.
 
-**A modern, open-source music player that brings your music collection, Plex and Navidrome together.**
+**Your music collection, all together.**
 
-[Website](https://tiagoalam.github.io/Sonante/) · [Download for Linux](https://github.com/tiagoalam/Sonante/releases/latest) · [Features & documentation](docs/LINUX_GUIDE.md) · [Report an issue](https://github.com/tiagoalam/Sonante/issues/new/choose)
+A modern, open-source music player for enjoying your own albums, Plex and Navidrome in one place.
+
+[**Explore the website**](https://tiagoalam.github.io/Sonante/) · [**Download Sonante**](https://github.com/tiagoalam/Sonante/releases/latest) · [**Get started**](docs/GETTING_STARTED.md)
+
+**Available for Linux** · Windows in development
+
+<img src="https://raw.githubusercontent.com/tiagoalam/Sonante/gh-pages/assets/library-grid.webp" alt="Sonante album library" width="820" />
 
 </div>
 
-Sonante is designed for people who enjoy exploring, organizing and listening to their own music. Browse local folders and network-mounted collections alongside your Plex and Navidrome libraries, build playlists, and choose how you want to listen—all in one desktop application.
+## More music. Less searching.
 
-**Available now:** Linux x86_64. **In development:** Windows. Other platforms are not yet released.
+Your albums deserve more than a folder list. Sonante brings your collection together, whether it's stored on your computer, a network drive, Plex or Navidrome.
 
-## Why Sonante?
+Browse your favorite artists, rediscover forgotten albums and spend more time listening.
 
-| | |
-| --- | --- |
-| **One home for your collection** | Browse local music, Plex libraries and Navidrome in a unified interface, while keeping each source identifiable. |
-| **Rediscover familiar music** | Explore albums, artists, years and genres, with collection-based suggestions, mixes and search. |
-| **Make listening your own** | Manual and smart playlists, favorites, queue controls, history and desktop media keys. |
-| **Choose your experience** | Simple and Full modes, six themes, multiple catalog layouts, and immersive Now Playing views. |
-| **Take care of your library** | Local metadata diagnostics, reviewed FLAC tag editing and tools for managing large collections. |
-| **Control the playback route** | MPD-based playback, Shared and Direct output options, device selection, ReplayGain and an informative Signal Path. |
+| Discover | Enjoy | Make it yours |
+| --- | --- | --- |
+| Explore albums, artists, decades and genres. | Build queues and playlists, save favorites and discover new combinations of music you already own. | Choose your themes, cover layouts, Now Playing views, and Simple or Full mode. |
 
-Sonante also offers online radio, optional Last.fm and ListenBrainz scrobbling, an opt-in UPnP receiver, and experimental listening and remote-control tools. Feature availability varies by mode and source. See the [full Linux feature guide](docs/LINUX_GUIDE.md).
+<div align="center">
+  <img src="https://raw.githubusercontent.com/tiagoalam/Sonante/gh-pages/assets/explore.webp" alt="Explore music in Sonante" width="48%" />
+  <img src="https://raw.githubusercontent.com/tiagoalam/Sonante/gh-pages/assets/now-playing.webp" alt="Sonante Now Playing" width="48%" />
+</div>
 
-## See Sonante
+## What can Sonante do?
 
-Visit the [official website](https://tiagoalam.github.io/Sonante/) for screenshots and an overview of the interface.
+- **Bring your libraries together:** local folders, mounted shares, Plex and Navidrome.
+- **Rediscover your collection:** Explore, suggestions, albums, artists, genres and decades.
+- **Create your own listening experience:** queues, favorites, manual playlists and smart playlists.
+- **Customize your player:** Simple and Full modes, six themes, library layouts and immersive Now Playing screens.
+- **Look after your music:** local album diagnostics and reviewed FLAC metadata editing.
+- **Choose how to listen:** Shared and Direct audio-output options, audio-device selection and playback controls.
+- **Go further when you want:** online radio, Last.fm and ListenBrainz, and optional advanced features.
 
-## Download and install
+Some features are specific to certain music sources or interface modes. [See all the details](docs/LINUX_GUIDE.md).
 
-Get the latest published Linux release and its `SHA256SUMS.txt` file from [GitHub Releases](https://github.com/tiagoalam/Sonante/releases/latest).
+## Download Sonante
 
-The current release is **v0.6.3**, with packages for:
+**The latest Linux release is v0.6.3.**
 
-| Distribution | Package format |
+[**Get the latest release for Linux**](https://github.com/tiagoalam/Sonante/releases/latest)
+
+| Distribution | Download |
 | --- | --- |
 | Ubuntu 22.04 | `.deb` |
 | Fedora 44 | `.rpm` |
 | Arch Linux / Manjaro | `.pkg.tar.zst` |
 
-Download the package matching your distribution, verify its checksum, close Sonante if it is running, and install it using your distribution's package manager. The release packages include Sonante's supervised private MPD runtime; you do not need to enable a system MPD service.
+Download the package that matches your distribution and install it using your package manager. The latest release also provides a checksum file for download verification.
 
-**Compatibility matters:** Linux packages require a supported GTK 3 / WebKitGTK 4.1 environment (WebKitGTK 2.40 or newer), ALSA and distribution-specific native dependencies. Other Linux distributions may work but are not automatically validated. Read [installation requirements and troubleshooting details](docs/LINUX_GUIDE.md#installation--063) before installing on an untested system.
+**Windows is being developed** and isn't part of the current public release. Other platforms are not available yet.
 
-## Getting started
+[New to Sonante? Start here.](docs/GETTING_STARTED.md) · [Installation requirements](docs/LINUX_GUIDE.md#system-requirements)
 
-1. Install the appropriate package from [Releases](https://github.com/tiagoalam/Sonante/releases/latest).
-2. Open Sonante and follow the welcome wizard.
-3. Choose a Shared or Direct audio output.
-4. Enable **Local**, **Plex** and/or **Navidrome** in **Preferences → Sources**.
-5. Start browsing your albums, build a queue and enjoy your collection.
+## A player that fits the way you listen
 
-For source setup, library management, audio behavior and privacy details, see the [Linux user and technical guide](docs/LINUX_GUIDE.md).
+**Simple mode** puts everyday listening first.
 
-## Simple or Full? It's your choice.
+**Full mode** opens more ways to explore your collection, build smart playlists and customize your experience. Advanced experimental features remain optional.
 
-**Simple** keeps the core music experience: your sources, search, favorites, playlists, queue, themes and Now Playing.
+Switch between modes without losing your music collection, playback state or saved preferences.
 
-**Full** adds more advanced features such as Explore, smart playlists, EQ and UPnP. Experimental tools remain opt-in. Switching modes preserves your settings, collection and playback state.
+## Help shape Sonante
 
-## Status and feedback
+Sonante is open source and actively evolving. If you try it, we'd like to know how it works with your distribution, music library and audio setup.
 
-Sonante is open source and under active development. The Linux version is available for real-world use and feedback; the Windows port is still being developed and **is not part of the current Linux release**.
+[**Report a problem**](https://github.com/tiagoalam/Sonante/issues/new/choose) · [Release notes](RELEASE-NOTES.md) · [Full Linux documentation](docs/LINUX_GUIDE.md)
 
-If something does not work, please [open a bug report](https://github.com/tiagoalam/Sonante/issues/new/choose). Include the Sonante version, distribution, audio device, reproduction steps and relevant diagnostics. **Remove personal information, library paths and server credentials before sharing logs.**
+Please review logs and screenshots before posting them publicly, and remove any personal information or credentials.
 
-For changes in the latest release, see [Release Notes](RELEASE-NOTES.md) and [Changelog](CHANGELOG.md).
+---
 
-## For developers
+<details>
+<summary><strong>For developers and technical readers</strong></summary>
 
-Sonante uses **React, TypeScript, Tauri and Rust**, with a supervised **Music Player Daemon (MPD)** for ordinary playback. The current Linux audio implementation uses **ALSA**.
+Sonante is built with React, TypeScript, Tauri and Rust. Linux playback uses a supervised private MPD engine and ALSA.
 
-- [Linux technical guide and build instructions](docs/LINUX_GUIDE.md)
+- [Detailed Linux guide, requirements and source builds](docs/LINUX_GUIDE.md)
 - [UPnP receiver](docs/UPNP_RECEIVER.md)
-- [Remote control API](docs/remote-control-api.md)
+- [Remote-control API](docs/remote-control-api.md)
 - [Gapless validation notes](docs/GAPLESS_VALIDATION.md)
 - [Third-party notices](THIRD_PARTY_NOTICES)
 
-## License
+</details>
 
-Sonante is distributed under the [GNU General Public License v3.0](LICENSE).
+**License:** [GNU GPL v3.0](LICENSE)
