@@ -63,6 +63,12 @@ Download the package that matches your distribution and install it using your pa
 
 **Windows is being developed** and isn't part of the current public release. Other platforms are not available yet.
 
+### Updating from an earlier public version
+
+After completing initial setup, open **Local** and use **Import saved folders** under **Previous libraries** to manually import Local folders saved in the previous public configuration. The import runs only when requested; Local folders are not scanned automatically at startup. Unavailable roots remain available for a later retry.
+
+Existing favorites are preserved, but a Local favorite without an exact safe match may need to be added again from the Local screen. The old queue is not automatically migrated or rebound to SQLite locators. Experimental development profiles are not imported.
+
 [New to Sonante? Start here.](docs/GETTING_STARTED.md) · [Installation requirements](docs/LINUX_GUIDE.md#system-requirements)
 
 ## A player that fits the way you listen

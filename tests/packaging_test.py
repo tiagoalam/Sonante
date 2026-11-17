@@ -54,6 +54,53 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('sonante-0.7.0-candidate-${{ inputs.candidate_sha || github.sha }}', ci)
         self.assertNotIn('actions/create-release', release + ci)
 
+    def test_arch_container_trust_is_scoped_to_workspace_before_source_gate(self):
+        ci = Path('.github/workflows/ci.yml').read_text()
+        arch = ci.split('\n  arch:\n', 1)[1]
+        trust = 'run: git config --global --add safe.directory "$GITHUB_WORKSPACE"'
+        gate = 'run: python3 scripts/verify-candidate-source.py'
+        self.assertEqual(arch.count(trust), 1)
+        self.assertLess(arch.index(trust), arch.index(gate))
+        self.assertNotIn('safe.directory=*', arch)
+        self.assertIn('chown -R builder:builder "$GITHUB_WORKSPACE"', arch)
+        self.assertIn('runuser -u builder -- makepkg', arch)
+        self.assertIn('runuser -u builder -- git -C .. rev-parse HEAD', arch)
+        self.assertLess(arch.index('chown -R builder:builder'), arch.index('runuser -u builder -- makepkg'))
+
+    def test_candidate_source_gate_accepts_only_exact_safe_directory_in_container(self):
+        script = Path('scripts/verify-candidate-source.py').resolve()
+        with tempfile.TemporaryDirectory(prefix='sn-candidate-owner-') as directory:
+            temporary_root = Path(directory)
+            root = temporary_root / 'checkout'
+            root.mkdir()
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            subprocess.run(['git', '-C', str(root), 'config', 'user.name', 'Sonante test'], check=True)
+            subprocess.run(['git', '-C', str(root), 'config', 'user.email', 'test@example.invalid'], check=True)
+            (root / 'package.json').write_text('{"version":"0.7.0"}\n')
+            (root / 'payload.txt').write_text('candidate\n')
+            subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(root), 'commit', '-qm', 'candidate'], check=True)
+            candidate = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            config = temporary_root / 'gitconfig'
+            config.write_text('')
+            env = {**os.environ, 'GIT_TEST_ASSUME_DIFFERENT_OWNER': '1',
+                   'GIT_CONFIG_GLOBAL': str(config), 'GIT_CONFIG_SYSTEM': os.devnull}
+            env.pop('GIT_CONFIG_COUNT', None)
+            env.pop('GIT_CONFIG_PARAMETERS', None)
+            args = ['python3', str(script), '--repo', str(root),
+                    '--candidate-sha', candidate, '--event-sha', candidate]
+            rejected = subprocess.run(args, env=env, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('dubious ownership', rejected.stderr)
+
+            subprocess.run(['git', 'config', '--global', '--add', 'safe.directory', str(root.resolve())],
+                           env=env, check=True)
+            safe_directories = subprocess.check_output(
+                ['git', 'config', '--global', '--get-all', 'safe.directory'], env=env, text=True).splitlines()
+            self.assertEqual(safe_directories, [str(root.resolve())])
+            accepted = subprocess.run(args, env=env, capture_output=True, text=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
     def test_candidate_source_gate_builds_exact_checked_out_full_sha(self):
         script = Path('scripts/verify-candidate-source.py').resolve()
         with tempfile.TemporaryDirectory(prefix='sn-candidate-source-') as directory:

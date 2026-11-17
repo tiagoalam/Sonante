@@ -186,6 +186,8 @@ jobs:
         with:
           ref: ${{ inputs.candidate_sha || github.sha }}
           fetch-depth: 0
+      - name: Trust exact checkout for container source verification
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Verify immutable candidate source
         env:
           SONANTE_CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
