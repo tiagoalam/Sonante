@@ -8487,15 +8487,45 @@ mod sqlite_profile_initialization_tests {
 
     #[test]
     fn experimental_runtime_rejects_unsafe_session_runtime_without_fallback() {
-        use std::os::unix::fs::DirBuilderExt;
-        let (_unused, root) = temp_config();
-        let unsafe_session = root.join("unsafe-runtime");
-        std::fs::DirBuilder::new().mode(0o755).create(&unsafe_session).unwrap();
-        assert_eq!(
-            prepare_064_runtime_dir(&root, false, Some(unsafe_session.as_os_str())).unwrap_err(),
-            "SESSION_RUNTIME_UNSAFE"
-        );
-        std::fs::remove_dir_all(root).unwrap();
+        const UMASK: &str = "SONANTE_TEST_UNSAFE_RUNTIME_UMASK";
+        if let Ok(mask) = std::env::var(UMASK) {
+            use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+            assert!(["0022", "0077"].contains(&mask.as_str()));
+            // This branch runs only in a dedicated child test process, so the
+            // process-global umask cannot interfere with parallel tests.
+            unsafe { libc::umask(u32::from_str_radix(&mask, 8).unwrap()); }
+            let (profile_root, root) = temp_config();
+            let unsafe_session = root.join("unsafe-runtime");
+            std::fs::DirBuilder::new().mode(0o755).create(&unsafe_session).unwrap();
+            std::fs::set_permissions(&unsafe_session, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(std::fs::metadata(&unsafe_session).unwrap().mode() & 0o777, 0o755);
+            assert_eq!(
+                prepare_064_runtime_dir(&profile_root, false, Some(unsafe_session.as_os_str())).unwrap_err(),
+                "SESSION_RUNTIME_UNSAFE"
+            );
+
+            let safe_session = root.join("safe-runtime");
+            std::fs::DirBuilder::new().mode(0o700).create(&safe_session).unwrap();
+            std::fs::set_permissions(&safe_session, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(std::fs::metadata(&safe_session).unwrap().mode() & 0o777, 0o700);
+            assert!(prepare_064_runtime_dir(&profile_root, false, Some(safe_session.as_os_str())).is_ok());
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+
+        for mask in ["0022", "0077"] {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "sqlite_profile_initialization_tests::experimental_runtime_rejects_unsafe_session_runtime_without_fallback",
+                    "--test-threads=1",
+                ])
+                .env(UMASK, mask)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "umask {mask}: {}{}",
+                String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        }
     }
 }
 
