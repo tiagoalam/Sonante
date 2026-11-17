@@ -13,6 +13,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 function compile(file, deps, env = {}) { const exports = {}; new Function('require', 'exports', ...Object.keys(env), ts.transpileModule(readFileSync(new URL('../src/' + file, import.meta.url), 'utf8'), { fileName: file, compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText)(name => { assert.ok(name in deps, name); return deps[name]; }, exports, ...Object.values(env)); return exports; }
 const helpers = compile('utils/albumEditions.ts', {});
 const analysis = compile('utils/albumEditionAnalysis.ts', { './albumEditionSizes': compile('utils/albumEditionSizes.ts', {}), './albumEditions': helpers });
+const availability = compile('utils/albumEditionAvailability.ts', {});
 const base = { title: 'Album', artist: 'Artist' };
 const entry = (source, id, title = 'Album') => ({ key: JSON.stringify([source, id]), source, origin: source + ' library', album: { ...base, title, id, rating_key: id, folder_path: 'Library/' + id, server_id: 'server', library_id: '7', track_count: 2, discs: [] }, serverId: 'server', libraryId: '7', accountId: 'account', connectionId: 'proxy' });
 function fixture(options = {}) {
@@ -39,7 +40,7 @@ function fixture(options = {}) {
   };
   const Tabs = () => null, Card = () => null, Local = () => null, Plex = () => null, Nav = () => null, Artist = () => null;
   const deps = { react: hooks, 'react/jsx-runtime': jsx, 'lucide-react': icons, 'react-i18next': { useTranslation: () => ({ t }) },
-    '../utils/musicSources': { sourceEnabled: (config, kind) => config.sources[kind] }, '../utils/albumEditions': helpers, '../utils/albumEditionAnalysis': analysis,
+    '../utils/musicSources': { sourceEnabled: (config, kind) => config.sources[kind] }, '../utils/albumEditions': helpers, '../utils/albumEditionAnalysis': analysis, '../utils/albumEditionAvailability': availability,
     '../services/albumEditions': {
       editionReadScope: (config, identity, nav, local) => { const signature = JSON.stringify([config.sources, config.local_folders, nav, local]); if (!session.scopeState || session.scopeState.identity !== identity || session.scopeState.signature !== signature) session.scopeState = { identity, signature, scope: {} }; return session.scopeState.scope; },
       invalidateEditionProfiles: scope => session.cache.clear(scope),
@@ -134,6 +135,12 @@ test('an exact album shortcut never opens another homonymous work editions',asyn
 });
 test('matching copies remain absent and no control counters or incomplete results appear after scanning',async()=>{
   const f=fixture({readSizes:async()=>[123,456]});await f.host.settle();assert.equal(rows(f).length,0);assert.doesNotMatch(text(f.host.tree),/candidatos|comparações incompletas|Análises reaproveitadas/i);assert.equal(nodes(f.host.tree,n=>n.props?.role==='progressbar').length,0);f.host.close();
+});
+test('only verified edition groups publish album shortcut identities; title-only coincidences remain unavailable',async()=>{
+  const verified=fixture();await verified.host.settle();assert.equal(availability.hasVerifiedEditionAlternative('local','one'),true);assert.equal(availability.hasVerifiedEditionAlternative('local','two'),true);verified.host.close();
+  const a=entry('local','1978','Chico Buarque'),b=entry('local','1984','Chico Buarque');a.album.track_count=11;b.album.track_count=10;a.album.artist=b.album.artist='Chico Buarque';
+  const saved=new Map([a,b].map(e=>[e.key,{sizes:Array.from({length:e.album.track_count},(_,i)=>100+i),titles:Array.from({length:e.album.track_count},(_,i)=>e.album.id+' Music '+i),cover_id:null}]));
+  const sameTitle=fixture({load:async source=>({source,phase:'ready',entries:[a,b]}),restore:async()=>saved,readProfile:async()=>assert.fail('saved observations should be reused')});await sameTitle.host.settle();assert.equal(availability.hasVerifiedEditionAlternative('local','1978'),false);assert.equal(availability.hasVerifiedEditionAlternative('local','1984'),false);sameTitle.host.close();
 });
 test('query, scrolling and source detail navigation preserve the source catalog and do not repeat analysis',async()=>{
   const entries=Array.from({length:31},(_,i)=>[entry('local',i+'-a','Record '+i),entry('local',i+'-b','Record '+i+' (Deluxe Edition)')]).flat();

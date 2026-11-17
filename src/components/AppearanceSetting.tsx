@@ -44,8 +44,8 @@ export function AppearanceSetting() {
   const {t} = useTranslation();
   const id = useId();
   const value = useSyncExternalStore(appearance.subscribe, appearance.getSnapshot, () => 'dark' as const);
-  return <fieldset className="min-w-0 space-y-3" aria-describedby={`${id}-help`}>
-    <legend className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider">{t('settings.appearance')}</legend>
+  return <fieldset data-settings-section="appearance" className="settings-section" aria-describedby={`${id}-help`}>
+    <legend className="settings-section-title">{t('settings.appearance')}</legend>
     <div className="flex flex-col gap-2">
       {APPEARANCES.map(mode => <label key={mode} className="relative min-w-0 cursor-pointer">
         <input type="radio" name={id} value={mode} checked={value === mode}

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sonante Windows Preview 44",
+  "identifier": "com.sonante.windows-preview",
+  "build": {
+    "beforeDevCommand": "npm exec vite -- --config windows/vite.config.ts",
+    "devUrl": "http://localhost:1421",
+    "beforeBuildCommand": "npm run build:windows-preview",
+    "frontendDist": "../windows/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Sonante — Windows Preview 44",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 1024,
+        "minHeight": 730,
+        "maximized": false,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  },
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "shortDescription": "Sonante Windows local library preview",
+    "resources": {
+      "../LICENSE": "licenses/LICENSE",
+      "../AUTHORS": "licenses/AUTHORS",
+      "../THIRD_PARTY_NOTICES": "licenses/THIRD_PARTY_NOTICES",
+      "../windows/runtime/mpd.exe": "runtimes/mpd/mpd.exe",
+      "../windows/runtime/mpd-0.24.18.tar.xz": "runtimes/mpd/mpd-0.24.18.tar.xz",
+      "../windows/runtime/mpd-0.24.18.exe.sig": "runtimes/mpd/mpd-0.24.18.exe.sig",
+      "../windows/runtime/mpd-0.24.18.tar.xz.sig": "runtimes/mpd/mpd-0.24.18.tar.xz.sig",
+      "../windows/licenses/mpd/": "licenses/mpd/",
+      "../windows/mpd-runtime.json": "runtimes/mpd/manifest.json",
+      "../windows/audio-runtime.json": "runtimes/audio-candidate/manifest.json",
+      "../windows/runtime/audio-mpd-candidate-5.exe": "runtimes/audio-candidate/mpd.exe",
+      "../windows/runtime/audio-source-candidate-5.tar.xz": "runtimes/audio-candidate/source-materials.tar.xz",
+      "../windows/licenses/audio-candidate-3/": "licenses/audio-candidate-3/",
+      "../windows/runtime/camilla-candidate-3.exe": "runtimes/audio-candidate/camilladsp.exe",
+      "../windows/runtime/camilla-source-candidate-3.tar.xz": "runtimes/audio-candidate/camilla-source-materials.tar.xz",
+      "../windows/camilla-runtime.json": "runtimes/audio-candidate/camilla-manifest.json",
+      "../windows/licenses/camilla-candidate-3/": "licenses/camilla-candidate-3/",
+      "../windows/licenses/qrcode-0.14.1/": "licenses/qrcode-0.14.1/",
+      "../windows/licenses/quick-xml-0.42.0/": "licenses/quick-xml-0.42.0/",
+      "../windows/licenses/socket2-0.6.5/": "licenses/socket2-0.6.5/"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": true,
+        "languages": [
+          "English",
+          "PortugueseBR"
+        ]
+      }
+    }
+  }
+}

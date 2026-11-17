@@ -1,0 +1,564 @@
+--- a/src/output/Filtered.cxx
++++ b/src/output/Filtered.cxx
+@@ -3,6 +3,9 @@
+ 
+ #include "Filtered.hxx"
+ #include "Interface.hxx"
++#ifdef _WIN32
++#include "plugins/SonantePcmPause.hxx"
++#endif
+ #include "Domain.hxx"
+ #include "lib/fmt/AudioFormatFormatter.hxx"
+ #include "lib/fmt/ExceptionFormatter.hxx"
+@@ -94,7 +97,11 @@
+ 	} catch (...) {
+ 		output->Close();
+ 
+-		if (out_audio_format.format == SampleFormat::DSD &&
++        if (
++#ifdef _WIN32
++            !sonante_direct_strict &&
++#endif
++            out_audio_format.format == SampleFormat::DSD &&
+ 		    /* retry only once; if the output returns DSD
+ 		       even though we asked for PCM (e.g. because
+ 		       of "allowed_formats"), this would recurse
+@@ -197,6 +204,10 @@
+ void
+ FilteredAudioOutput::BeginPause() noexcept
+ {
++#ifdef _WIN32
++    if (SonantePcm::PreservePause(plugin_name))
++        return; // Private PCM pause retains its exact FIFO generation.
++#endif
+ 	Cancel();
+ }
+ 
+--- a/src/output/Filtered.hxx
++++ b/src/output/Filtered.hxx
+@@ -39,6 +39,9 @@
+ 	 * usually in the form "NAME (PLUGIN)".
+ 	 */
+ 	std::string log_name;
++#ifdef _WIN32
++    bool sonante_direct_strict = false;
++#endif
+ 
+ public:
+ 	/**
+--- a/src/output/Init.cxx
++++ b/src/output/Init.cxx
+@@ -139,6 +139,12 @@
+ 			       FilterFactory *filter_factory)
+ {
+ 	if (!block.IsNull()) {
++#ifdef _WIN32
++        sonante_direct_strict = StringIsEqual(plugin_name, "wasapi")
++            && block.GetBlockValue("sonante_direct_strict", false);
++        if (sonante_direct_strict && block.GetBlockValue(AUDIO_OUTPUT_FORMAT) != nullptr)
++            throw std::runtime_error("Sonante Direct strict: forced output format is incompatible");
++#endif
+ 		name = block.GetBlockValue(AUDIO_OUTPUT_NAME);
+ 		if (name == nullptr)
+ 			throw std::runtime_error("Missing \"name\" configuration");
+--- a/src/output/Registry.cxx
++++ b/src/output/Registry.cxx
+@@ -29,6 +29,9 @@
+ #ifdef ENABLE_WASAPI_OUTPUT
+ #include "plugins/wasapi/WasapiOutputPlugin.hxx"
+ #endif
++#ifdef ENABLE_SONANTE_PRIVATE_PCM
++#include "plugins/SonantePcmOutputPlugin.hxx"
++#endif
+ #include "util/StringAPI.hxx"
+ 
+ constinit const AudioOutputPlugin *const audio_output_plugins[] = {
+@@ -36,6 +39,9 @@
+ 	&shout_output_plugin,
+ #endif
+ 	&null_output_plugin,
++#ifdef ENABLE_SONANTE_PRIVATE_PCM
++	&sonante_pcm_output_plugin,
++#endif
+ #ifdef ANDROID
+ 	&sles_output_plugin,
+ #endif
+--- /dev/null
++++ b/src/output/plugins/SonantePcmOutputPlugin.cxx
+@@ -0,0 +1,134 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Windows-only private PCM transport; source/DSP policy remains with Sonante.
++#include "SonantePcmOutputPlugin.hxx"
++#include "SonantePcmRing.hxx"
++#include "SonantePcmPause.hxx"
++#include "output/OutputAPI.hxx"
++#include "output/Error.hxx"
++#include "pcm/AudioFormat.hxx"
++#include <array>
++#include <charconv>
++#include <chrono>
++#include <stdexcept>
++#include <string_view>
++#include <utility>
++#include <windows.h>
++namespace {
++using namespace SonantePcm;
++[[noreturn]] void Fail(){throw std::runtime_error("SONANTE_PCM_CONTINUITY");}
++std::uint64_t Number(const char *s) {
++    const std::string_view v(s);std::uint64_t n=0;
++    if(v.empty()||v.size()>20) throw std::runtime_error("SONANTE_PCM_BINDING");
++    const auto result=std::from_chars(v.data(),v.data()+v.size(),n);
++    if(result.ec!=std::errc{}||result.ptr!=v.data()+v.size()) throw std::runtime_error("SONANTE_PCM_BINDING");
++    return n;
++}
++struct Inputs {
++    std::array<HANDLE,4> h{};
++    Inputs()=default;Inputs(const Inputs &)=delete;
++    Inputs(Inputs &&other) noexcept:h(std::exchange(other.h,std::array<HANDLE,4>{})){}
++    ~Inputs(){for(const auto handle:h)if(handle!=nullptr)CloseHandle(handle);}
++    static Inputs Open(const ConfigBlock &block) {
++        constexpr std::array names{"sonante_mapping_handle","sonante_readable_handle","sonante_writable_handle","sonante_stop_handle"};
++        std::array<HANDLE,4> raw{};
++        for(std::size_t i=0;i<4;++i){const auto value=Number(block.GetBlockValue(names[i],""));
++            if(value==0||value>INDEX_MAX) throw std::runtime_error("SONANTE_PCM_BINDING");
++            raw[i]=reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(value));
++            for(std::size_t j=0;j<i;++j)if(raw[i]==raw[j])throw std::runtime_error("SONANTE_PCM_BINDING");
++        }
++        // Take ownership only after rejecting duplicate/pseudo handles.
++        Inputs owned;owned.h=raw;
++        for(const auto handle:raw){DWORD flags=0;if(!GetHandleInformation(handle,&flags)||!SetHandleInformation(handle,HANDLE_FLAG_INHERIT,0))throw std::runtime_error("SONANTE_PCM_BINDING");}
++        return owned;
++    }
++};
++struct View {
++    Header *p=nullptr;
++    ~View(){if(p!=nullptr)UnmapViewOfFile(p);}
++};
++class PrivatePcmOutput final:public AudioOutput {
++    Binding binding;
++    Inputs inputs;
++    View view;
++    std::atomic_bool interrupted{false},opened{false};
++    PauseClock pause_clock;
++    void Notify() noexcept {SetEvent(inputs.h[1]);SetEvent(inputs.h[2]);}
++    void Lost() noexcept {
++        if(view.p!=nullptr&&Valid(*view.p,binding))Signal(*view.p,LOST);
++        SetEvent(inputs.h[3]);Notify();
++    }
++    bool Healthy() const noexcept {return view.p!=nullptr&&Valid(*view.p,binding)&&(Load(view.p->flags)&(LOST|STOP|EOF_FLAG))==0;}
++public:
++    explicit PrivatePcmOutput(const ConfigBlock &block):
++        AudioOutput(FLAG_PAUSE|FLAG_NEED_FULLY_DEFINED_AUDIO_FORMAT),
++        binding{0,Number(block.GetBlockValue("sonante_nonce0","")),Number(block.GetBlockValue("sonante_nonce1",""))},inputs(Inputs::Open(block)) {
++        static_assert(sizeof(std::uintptr_t)==8);
++        const auto owner=Number(block.GetBlockValue("sonante_owner_pid",""));
++        if(owner==0||owner>std::numeric_limits<std::uint32_t>::max())throw std::runtime_error("SONANTE_PCM_BINDING");
++        binding.owner=static_cast<std::uint32_t>(owner);
++        view.p=static_cast<Header *>(MapViewOfFile(inputs.h[0],FILE_MAP_ALL_ACCESS,0,0,sizeof(Header)));
++        if(view.p==nullptr||!Healthy())throw std::runtime_error("SONANTE_PCM_BINDING");
++    }
++    static AudioOutput *Create(EventLoop &,const ConfigBlock &block){return new PrivatePcmOutput(block);}
++    void Open(AudioFormat &f) override {
++        if(f.sample_rate!=RATE||f.channels!=CHANNELS||f.format!=SampleFormat::S32)throw std::runtime_error("SONANTE_PCM_FORMAT");
++        if(!Healthy()||Load(view.p->consumer)!=1||!pause_clock.Play(Load(view.p->flags)))Fail();interrupted=false;opened=true;
++    }
++    void Close() noexcept override {
++        pause_clock.Close();
++        if(opened.exchange(false)&&view.p!=nullptr&&Valid(*view.p,binding))Signal(*view.p,EOF_FLAG);
++        Notify();
++    }
++    void Interrupt() noexcept override {interrupted=true;SetEvent(inputs.h[2]);}
++    bool Pause() override {
++        if(view.p==nullptr||!Valid(*view.p,binding)||!pause_clock.Pause(Load(view.p->flags))){Lost();Fail();}
++        interrupted=false;return true;
++    }
++    std::chrono::steady_clock::duration Delay() const noexcept override {return pause_clock.Delay();}
++    void Cancel() noexcept override {
++        // Reset/seek cannot race a consumer cursor. The host must prepare a
++        // fresh generation; never discard/replay PCM while claiming continuity.
++        interrupted=false;Lost();
++    }
++    std::size_t Play(std::span<const std::byte> src) override {
++        if(!opened||!Healthy()||!pause_clock.Play(Load(view.p->flags)))Fail();
++        if(src.empty())return 0;
++        const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(250);
++        while(true){
++            if(interrupted.exchange(false))throw AudioOutputInterrupted{};
++            const auto count=Write(*view.p,binding,src);
++            if(count>0){if(!SetEvent(inputs.h[1])){Lost();Fail();}return static_cast<std::size_t>(count);}
++            if(count<0){Lost();Fail();}
++            const auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(deadline-std::chrono::steady_clock::now()).count();
++            if(remaining<=0){Lost();Fail();}
++            const std::array handles{inputs.h[3],inputs.h[2]};
++            const auto result=WaitForMultipleObjects(2,handles.data(),FALSE,static_cast<DWORD>(remaining));
++            if(result==WAIT_OBJECT_0||result==WAIT_TIMEOUT||result==WAIT_FAILED){Lost();Fail();}
++            if(result!=WAIT_OBJECT_0+1){Lost();Fail();}
++        }
++    }
++    void Drain() override {
++        const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(250);
++        while(true){
++            if(interrupted.exchange(false))throw AudioOutputInterrupted{};
++            if(!Healthy()){Lost();Fail();}
++            const auto read=Load(view.p->read),written=Load(view.p->written);
++            if(read>written||written-read>CAPACITY){Lost();Fail();}
++            if(read==written)return;
++            if(std::chrono::steady_clock::now()>=deadline){Lost();Fail();}
++            const std::array handles{inputs.h[3],inputs.h[2]};
++            const auto result=WaitForMultipleObjects(2,handles.data(),FALSE,10);
++            if(result==WAIT_OBJECT_0||result==WAIT_FAILED){Lost();Fail();}
++        }
++    }
++    std::map<std::string,std::string,std::less<>> GetAttributes() const noexcept override {
++        if(view.p==nullptr||!Valid(*view.p,binding))return{{"sonante_pcm_state","invalid"}};
++        const auto read=Load(view.p->read),written=Load(view.p->written),after=Load(view.p->read);
++        const auto flags=Load(view.p->flags);
++        std::map<std::string,std::string,std::less<>> result{{"sonante_pcm_abi","1"},{"sonante_pcm_format","48000:32:2"},{"sonante_pcm_state",(flags&(LOST|STOP))?"lost":(flags&EOF_FLAG)?"eof":opened?"open":"ready"}};
++        if(read==after&&read<=written&&written-read<=CAPACITY){result["sonante_pcm_written_frames"]=std::to_string(written);result["sonante_pcm_read_frames"]=std::to_string(read);}
++        return result;
++    }
++};
++}
++const struct AudioOutputPlugin sonante_pcm_output_plugin={"sonante_private_pcm",nullptr,&PrivatePcmOutput::Create,nullptr};
+--- /dev/null
++++ b/src/output/plugins/SonantePcmOutputPlugin.hxx
+@@ -0,0 +1,3 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++extern const struct AudioOutputPlugin sonante_pcm_output_plugin;
+--- /dev/null
++++ b/src/output/plugins/SonantePcmPause.hxx
+@@ -0,0 +1,33 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <string_view>
++
++namespace SonantePcm {
++// Only this Windows transport preserves its FIFO on pause. Explicit Cancel
++// retains its terminal LOST semantics; no counter/claim/EOF is reset.
++constexpr bool PreservePause(std::string_view plugin) noexcept {
++    return plugin == "sonante_private_pcm";
++}
++class PauseClock {
++    std::atomic_bool paused{false};
++public:
++    bool Pause(std::uint32_t flags) noexcept {
++        // EOF may be set by the parent to drain a held generation. Pausing it
++        // does not reopen it or admit another frame; Play still requires zero.
++        if (flags & ~1u) return false;
++        paused.store(true);return true;
++    }
++    bool Play(std::uint32_t flags) noexcept {
++        if (flags != 0) return false;
++        paused.store(false);return true;
++    }
++    void Close() noexcept { paused.store(false); }
++    std::chrono::steady_clock::duration Delay() const noexcept {
++        return paused.load() ? std::chrono::steady_clock::duration::max()
++                             : std::chrono::steady_clock::duration::zero();
++    }
++};
++}
+--- /dev/null
++++ b/src/output/plugins/SonantePcmRing.hxx
+@@ -0,0 +1,81 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Sonante Windows candidate transport only. No DSP, timers or global object names.
++#pragma once
++#include <algorithm>
++#include <atomic>
++#include <bit>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++#include <span>
++
++namespace SonantePcm {
++constexpr std::uint64_t MAGIC = 0x31304d43504e4f53;
++constexpr std::uint32_t VERSION = 1, CAPACITY = 4096, FRAME_BYTES = 8;
++constexpr std::uint32_t RATE = 48000, CHANNELS = 2, S32_LE = 1;
++constexpr std::uint32_t EOF_FLAG = 1, LOST = 2, STOP = 4;
++constexpr std::uint64_t INDEX_MAX = 0x7fffffffffffffff;
++struct Binding { std::uint32_t owner; std::uint64_t nonce0, nonce1; };
++struct alignas(64) Header {
++    std::uint64_t magic;
++    std::uint32_t version, header_bytes, capacity, rate, channels, frame_bytes, format, owner;
++    std::uint64_t nonce0, nonce1, reserved;
++    alignas(64) std::uint64_t written;
++    std::byte pad_written[56];
++    alignas(64) std::uint64_t read;
++    std::byte pad_read[56];
++    alignas(64) std::uint32_t flags;
++    std::uint32_t consumer;
++    std::byte pad_flags[56];
++    alignas(64) std::byte data[CAPACITY * FRAME_BYTES];
++};
++static_assert(std::endian::native == std::endian::little);
++static_assert(std::atomic_ref<std::uint64_t>::is_always_lock_free);
++static_assert(std::atomic_ref<std::uint32_t>::is_always_lock_free);
++static_assert(offsetof(Header, written) == 64 && offsetof(Header, read) == 128);
++static_assert(offsetof(Header, flags) == 192 && offsetof(Header, consumer) == 196 && offsetof(Header, data) == 256);
++static_assert(sizeof(Header) == 33024 && alignof(Header) == 64);
++template<typename T> inline T Load(T &v) noexcept {
++    return std::atomic_ref<T>(v).load(std::memory_order_acquire);
++}
++template<typename T> inline void Store(T &v, T next) noexcept {
++    std::atomic_ref<T>(v).store(next, std::memory_order_release);
++}
++inline bool Valid(Header &h, Binding b) noexcept {
++    return b.owner != 0 && (b.nonce0 | b.nonce1) != 0 &&
++        Load(h.magic) == MAGIC && Load(h.version) == VERSION && Load(h.header_bytes) == 256 &&
++        Load(h.capacity) == CAPACITY && Load(h.rate) == RATE && Load(h.channels) == CHANNELS &&
++        Load(h.frame_bytes) == FRAME_BYTES && Load(h.format) == S32_LE &&
++        Load(h.owner) == b.owner && Load(h.nonce0) == b.nonce0 && Load(h.nonce1) == b.nonce1 &&
++        Load(h.reserved) == 0 && Load(h.consumer) <= 1 && (Load(h.flags) & ~(EOF_FLAG | LOST | STOP)) == 0;
++}
++inline void Signal(Header &h, std::uint32_t flag) noexcept {
++    std::atomic_ref<std::uint32_t>(h.flags).fetch_or(flag, std::memory_order_acq_rel);
++}
++// Only the single producer writes written/data; only the single reader writes
++// read. Release publishes bytes before written, acquire prevents early reuse.
++// 0 means bounded backpressure; negatives are terminal/invalid, never success.
++inline std::ptrdiff_t Write(Header &h, Binding b, std::span<const std::byte> src) noexcept {
++    if (!Valid(h, b)) return -1;
++    const auto flags = Load(h.flags);
++    if ((flags & (LOST | STOP)) != 0) return -2;
++    if ((flags & EOF_FLAG) != 0) return -3;
++    if (src.size() % FRAME_BYTES != 0) return -4;
++    const auto read = Load(h.read), written = Load(h.written);
++    if (read > written || written > INDEX_MAX || written - read > CAPACITY) return -1;
++    const auto frames = std::min<std::uint64_t>({src.size() / FRAME_BYTES, CAPACITY - (written - read), 512});
++    if (frames == 0) return 0;
++    if (written > INDEX_MAX - frames) return -1;
++    const auto bytes = static_cast<std::size_t>(frames * FRAME_BYTES);
++    const auto offset = static_cast<std::size_t>(written % CAPACITY) * FRAME_BYTES;
++    const auto first = std::min(bytes, sizeof(h.data) - offset);
++    std::memcpy(h.data + offset, src.data(), first);
++    std::memcpy(h.data, src.data() + first, bytes - first);
++    // Cancellation is terminal. The host invalidates the whole generation;
++    // never clear/reset counters or retry this channel after LOST/STOP.
++    if ((Load(h.flags) & (LOST | STOP)) != 0) return -2;
++    Store(h.written, written + frames);
++    return static_cast<std::ptrdiff_t>(bytes);
++}
++}
+--- a/src/output/plugins/meson.build
++++ b/src/output/plugins/meson.build
+@@ -138,6 +138,11 @@
+   output_plugins_sources += 'SolarisOutputPlugin.cxx'
+ endif
+ 
++output_features.set('ENABLE_SONANTE_PRIVATE_PCM', is_windows)
++if is_windows
++  output_plugins_sources += 'SonantePcmOutputPlugin.cxx'
++endif
++
+ output_features.set('ENABLE_WINMM_OUTPUT', is_windows)
+ if is_windows
+   output_plugins_sources += 'WinmmOutputPlugin.cxx'
+--- a/src/output/plugins/wasapi/WasapiOutputPlugin.cxx
++++ b/src/output/plugins/wasapi/WasapiOutputPlugin.cxx
+@@ -290,6 +290,11 @@
+ class WasapiOutput final : public AudioOutput {
+ 	const bool is_exclusive;
+ 	const bool enumerate_devices;
++    // Sonante Windows candidate: native exclusive with NO format fallback.
++    const bool sonante_direct_strict;
++    const std::string sonante_device_id;
++    mutable Mutex sonante_attributes_mutex;
++    std::map<std::string, std::string, std::less<>> sonante_attributes;
+ #ifdef ENABLE_DSD
+ 	const bool dop_setting;
+ #endif
+@@ -364,7 +369,15 @@
+ 	friend IAudioClient *wasapi_output_get_client(WasapiOutput &output) noexcept;
+ 
+ 	void DoDisable() noexcept;
+-	void DoOpen(AudioFormat &audio_format);
++    std::map<std::string, std::string, std::less<>> GetAttributes() const noexcept override {
++        const std::lock_guard lock{sonante_attributes_mutex};
++        return sonante_attributes;
++    }
++    void ClearSonanteAttributes() noexcept {
++        const std::lock_guard lock{sonante_attributes_mutex};
++        sonante_attributes.clear();
++    }
++    void DoOpen(AudioFormat &audio_format);
+ 
+ 	void ChooseDevice();
+ 	bool TryFormatExclusive(const AudioFormat &audio_format);
+@@ -515,17 +528,27 @@
+ 	:AudioOutput(FLAG_ENABLE_DISABLE | FLAG_PAUSE),
+ 	 is_exclusive(block.GetBlockValue("exclusive", false)),
+ 	 enumerate_devices(block.GetBlockValue("enumerate", false)),
++     sonante_direct_strict(block.GetBlockValue("sonante_direct_strict", false)),
++     sonante_device_id(block.GetBlockValue("sonante_device_id", "")),
+ #ifdef ENABLE_DSD
+ 	 dop_setting(block.GetBlockValue("dop", false)),
+ #endif
+ 	 device_config(block.GetBlockValue("device", ""))
+ {
++    if (sonante_direct_strict && !is_exclusive)
++        throw std::runtime_error("Sonante Direct strict requires exclusive WASAPI");
++    if (sonante_direct_strict && sonante_device_id.empty())
++        throw std::runtime_error("Sonante Direct strict requires an explicit endpoint ID");
++    if (!sonante_device_id.empty() && (!device_config.empty() || sonante_device_id.size() > 4096 ||
++        sonante_device_id.find_first_of("\r\n") != std::string::npos || sonante_device_id.find('\0') != std::string::npos))
++        throw std::runtime_error("Invalid Sonante WASAPI endpoint binding");
+ }
+ 
+ /// run inside COMWorkerThread
+ void
+ WasapiOutput::DoDisable() noexcept
+ {
++    ClearSonanteAttributes();
+ 	assert(!thread);
+ 
+ 	device.reset();
+@@ -535,6 +558,8 @@
+ void
+ WasapiOutput::DoOpen(AudioFormat &audio_format)
+ {
++    ClearSonanteAttributes();
++    const AudioFormat plugin_input = audio_format;
+ 	client.reset();
+ 
+ 	if (GetState(*device) != DEVICE_STATE_ACTIVE) {
+@@ -545,11 +570,15 @@
+ 	client = Activate<IAudioClient>(*device);
+ 
+ 	if (audio_format.channels > 8) {
++        if (sonante_direct_strict)
++            throw std::runtime_error("Sonante Direct strict: unsupported channel count");
+ 		audio_format.channels = 8;
+ 	}
+ 
+ #ifdef ENABLE_DSD
+ 	if (!dop_setting && audio_format.format == SampleFormat::DSD) {
++        if (sonante_direct_strict)
++            throw std::runtime_error("Sonante Direct strict: DSD requires explicit DoP");
+ 		SetDSDFallback(audio_format);
+ 	}
+ #endif
+@@ -620,7 +649,7 @@
+ 			    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, buffer_duration,
+ 			    buffer_duration,
+ 			    reinterpret_cast<WAVEFORMATEX *>(&device_format), nullptr);
+-		    FAILED(result)) {
++            FAILED(result) || (sonante_direct_strict && result != S_OK)) {
+ 			if (result == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
+ 				// https://docs.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize
+ 				UINT32 buffer_size_in_frames =
+@@ -642,7 +671,7 @@
+ 					nullptr);
+ 			}
+ 
+-			if (FAILED(result)) {
++            if (FAILED(result) || (sonante_direct_strict && result != S_OK)) {
+ 				throw MakeHResultError(result, "Unable to initialize audio client");
+ 			}
+ 		}
+@@ -657,6 +686,15 @@
+ 		}
+ 	}
+ 
++    // Bind readback to the endpoint actually opened, never an enumeration index.
++    LPWSTR raw_id = nullptr;
++    const HRESULT id_result = device->GetId(&raw_id);
++    AtScopeExit(raw_id) { CoTaskMemFree(raw_id); };
++    if (id_result != S_OK || raw_id == nullptr)
++        throw MakeHResultError(id_result, "Sonante endpoint identity read failed");
++    const std::string endpoint_id = WideCharToMultiByte(CP_UTF8, raw_id).c_str();
++    if (!sonante_device_id.empty() && endpoint_id != sonante_device_id)
++        throw std::runtime_error("Sonante endpoint identity changed");
+ 	auto render_client = GetService<IAudioRenderClient>(*client);
+ 
+ 	const UINT32 buffer_size_in_frames = GetBufferSizeInFrames(*client);
+@@ -665,12 +703,26 @@
+ 	thread.emplace(*client, std::move(render_client), FrameSize(),
+ 		       buffer_size_in_frames, is_exclusive);
+ 
++    {
++        const std::lock_guard lock{sonante_attributes_mutex};
++        sonante_attributes = {
++            {"sonante_endpoint_id", endpoint_id},
++            {"sonante_exclusive", is_exclusive ? "yes" : "no"},
++            {"sonante_direct_strict", sonante_direct_strict ? "yes" : "no"},
++            {"sonante_plugin_input", fmt::format("{}", plugin_input)},
++            {"sonante_render_rate", std::to_string(device_format.Format.nSamplesPerSec)},
++            {"sonante_render_channels", std::to_string(device_format.Format.nChannels)},
++            {"sonante_render_container_bits", std::to_string(device_format.Format.wBitsPerSample)},
++            {"sonante_render_valid_bits", std::to_string(device_format.Samples.wValidBitsPerSample)},
++        };
++    }
+ 	paused = false;
+ }
+ 
+ void
+ WasapiOutput::Close() noexcept
+ {
++    ClearSonanteAttributes();
+ 	assert(thread);
+ 
+ 	try {
+@@ -791,7 +843,15 @@
+ 		}
+ 	}
+ 
+-	if (!device_config.empty()) {
++    if (!sonante_device_id.empty()) {
++        const auto wide_id = MultiByteToWideChar(CP_UTF8, sonante_device_id);
++        IMMDevice *selected = nullptr;
++        const HRESULT result = enumerator->GetDevice(wide_id.c_str(), &selected);
++        ComPtr<IMMDevice> bound{selected};
++        if (result != S_OK || selected == nullptr)
++            throw MakeHResultError(result, "Sonante endpoint unavailable");
++        device = std::move(bound);
++    } else if (!device_config.empty()) {
+ 		unsigned int id;
+ 		if (!SafeSilenceTry([this, &id]() { id = std::stoul(device_config); })) {
+ 			device = SearchDevice(*enumerator, device_config);
+@@ -819,7 +879,7 @@
+ 			 test_format.Format.wBitsPerSample,
+ 			 test_format.Samples.wValidBitsPerSample,
+ 			 result_string);
+-		if (SUCCEEDED(result)) {
++        if (result == S_OK || (!sonante_direct_strict && SUCCEEDED(result))) {
+ 			device_format = test_format;
+ 			return true;
+ 		}
+@@ -834,6 +894,30 @@
+ void
+ WasapiOutput::FindExclusiveFormatSupported(AudioFormat &audio_format)
+ {
++    if (sonante_direct_strict) {
++        if (TryFormatExclusive(audio_format)) return;
++        // Same reversible integer expansion allowed by Linux strict Direct.
++        // Never reduce precision, alter rate/channels, or convert DSD/float.
++        const auto precision = [](SampleFormat format) constexpr -> unsigned {
++            switch (format) {
++            case SampleFormat::S8: return 8;
++            case SampleFormat::S16: return 16;
++            case SampleFormat::S24_P32: return 24;
++            case SampleFormat::S32: return 32;
++            default: return 0;
++            }
++        };
++        const SampleFormat original = audio_format.format;
++        if (precision(original) != 0) {
++            for (const SampleFormat candidate : {SampleFormat::S32, SampleFormat::S24_P32, SampleFormat::S16, SampleFormat::S8}) {
++                if (candidate == original || precision(candidate) < precision(original)) continue;
++                audio_format.format = candidate;
++                if (TryFormatExclusive(audio_format)) return;
++            }
++            audio_format.format = original;
++        }
++        throw std::runtime_error("Sonante Direct strict: source format unsupported");
++    }
+ 	for (uint8_t channels : {0, 2, 6, 8, 7, 1, 4, 5, 3}) {
+ 		if (audio_format.channels == channels) {
+ 			continue;

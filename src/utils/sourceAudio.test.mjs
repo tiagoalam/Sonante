@@ -57,7 +57,7 @@ const compile=(path,extra={})=>{const out={};new Function('require','exports',ts
 const {SourceAudioBadges}=compile('../components/SourceAudioBadges.tsx');deps['./SourceAudioBadges']={SourceAudioBadges};
 const hooks={...React,default:React,useEffect(){},useState:v=>[v,()=>{}],useRef:v=>({current:v})};
 const nullView=()=>null;
-const {PlayerBar}=compile('../components/PlayerBar.tsx',{'react':hooks,'./PlaybackOptionsControls':{PlaybackOptionsControls:nullView},'./SignalPath':{SignalPath:nullView},'./PlexImage':{PlexImage:nullView},'../utils/frontendDiagnostics':{logError(){}},'../services/audio':{audioService:new Proxy({},{get(){return()=>assert.fail('unexpected playback command');}})}});
+const {PlayerBar}=compile('../components/PlayerBar.tsx',{'react':hooks,'./playerBar.css':{},'./PlaybackOptionsControls':{PlaybackOptionsControls:nullView},'./SignalPath':{SignalPath:nullView},'./PlexImage':{PlexImage:nullView},'../utils/frontendDiagnostics':{logError(){}},'../services/audio':{audioService:new Proxy({},{get(){return()=>assert.fail('unexpected playback command');}})}});
 const {NowPlayingPresentation}=compile('../components/NowPlayingPresentation.tsx',{'./TrackArtwork':{TrackArtwork:nullView},'./SignalPath':{SignalPath:nullView},'./visualizer/VisualizerPanel':{VisualizerPanel:nullView},'./nowPlaying.css':{}});
 const playback={title:'Fixture',artist:'Artist',album:'Album',state:'play',elapsed:1,duration:100,audio_format:'192000:32:2',current_media:media(),volume:{backend:'pipewire',available:true,writable:true,value:50},is_updating:false};
 const health={state:'available'};

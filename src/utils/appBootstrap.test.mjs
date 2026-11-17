@@ -1,17 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { initialMediaSource, createMainSectionPreference, MAIN_SECTION_STORAGE_KEY } from "./appBootstrap.ts";
+import { initialMediaSource, initialSqliteMediaSource, createMainSectionPreference, MAIN_SECTION_STORAGE_KEY, SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY,
+  SQLITE_EXPERIMENTAL_PLEX_LIBRARY_STORAGE_KEY, SQLITE_EXPERIMENTAL_LOCAL_SOURCE_STORAGE_KEY,
+  preferredSqlitePlexLibrary, saveSqlitePlexLibraryPreference, readSqliteLocalSourcePreference, saveSqliteLocalSourcePreference } from "./appBootstrap.ts";
 import { PlayerNavigationRequests, visitPlayerTarget } from "./playerNavigation.ts";
 
 const config = { first_run: false, plex_token: "fixture-token" };
-function preference(saved) {
+function preference(saved, storageKey = MAIN_SECTION_STORAGE_KEY, initial = initialMediaSource) {
   const published = [], writes = [];
   let reads = 0;
   const controller = createMainSectionPreference(value => published.push(value), () => ({
-    getItem(key) { assert.equal(key, MAIN_SECTION_STORAGE_KEY); reads++; return saved; },
+    getItem(key) { assert.equal(key, storageKey); reads++; return saved; },
     setItem(key, value) { writes.push([key, value]); saved = value; },
-  }));
+  }), storageKey, initial);
   return { controller, published, writes, reads: () => reads };
 }
 
@@ -49,6 +51,21 @@ test("invalid or absent preference preserves the existing initial source", () =>
       assert.deepEqual(state.writes, []);
     }
   }
+});
+
+test("legacy Equalizer preference restores the independent Equalizer page and remains navigable", () => {
+  const state = preference("equalizer");
+  state.controller.restore({ ...config, usage_mode: "full" });
+  assert.equal(state.published.at(-1), "equalizer");
+  assert.deepEqual(state.writes, []);
+
+  state.controller.navigate("equalizer");
+  assert.equal(state.published.at(-1), "equalizer");
+  assert.deepEqual(state.writes, [[MAIN_SECTION_STORAGE_KEY, "equalizer"]]);
+  const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(app, /setSettingsInitialPage\("audio"\); setShowSettings\(true\)/);
+  assert.match(app, /label=\{t\("equalizer\.title"\)\}/);
+  assert.doesNotMatch(app, /label=\{t\("settings\.pages\.audio"\)\}/);
 });
 
 test("first run ignores storage and wizard completion keeps its existing initial choice", () => {
@@ -132,14 +149,20 @@ test("Storage absent or throwing never prevents bootstrap or navigation", () => 
   }
 });
 
-test("App persists sidebar and contextual section navigation, never bootstrap or wizard", () => {
+test("App restores the saved experimental section without replacing it during bootstrap", () => {
   const source = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const bootstrap = source.slice(source.indexOf("// Carga inicial de configurações"), source.indexOf("NOW_PLAYING_READY_EVENT", source.indexOf("// Carga inicial de configurações")));
   assert.match(bootstrap, /if \(disposed\) return;[\s\S]*?setConfig\(cfg\);[\s\S]*?mainSectionPreference\.restore\(cfg\)/);
-  assert.doesNotMatch(bootstrap, /\.navigate\(/);
+  assert.doesNotMatch(bootstrap, /\.navigate\(|finishSetup\(cfg\)/);
+  assert.match(source, /createMainSectionPreference\(setMediaSource, undefined,[\s\S]*sqliteMode \? SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY : MAIN_SECTION_STORAGE_KEY,[\s\S]*sqliteMode \? initialSqliteMediaSource : initialMediaSource/);
+  assert.match(source, /mainSectionPreference\.finishSetup\(newConfig\)/);
+  assert.match(source, /preferredSqlitePlexLibrary\(libs, config\?\.plex_server_id\)/);
+  assert.match(source, /saveSqlitePlexLibraryPreference\(config\?\.plex_server_id, library\.key\)/);
   assert.match(source, /if \(config && config\.first_run\)[\s\S]*?onFinish=[\s\S]*?mainSectionPreference\.finishSetup\(newConfig\)/);
   const sidebar = source.slice(source.indexOf("{/* Barra Lateral */}"), source.indexOf("{/* Painel Central */}"));
   for (const section of ["search", "local", "plex", "favorites", "playlists", "explore"]) assert.ok(sidebar.includes(section === "local" ? 'navigateLocalSubview("browser")' : section === "explore" ? "navigateExplore()" : `mainSectionPreference.navigate("${section}")`));
+  assert.ok(sidebar.includes('label={t("equalizer.title")}'));
+  assert.doesNotMatch(sidebar, /label=\{t\("settings\.pages\.audio"\)\}/);
   const player = source.slice(source.indexOf("<PlayerBar"), source.indexOf("{(configSavePhase || configSaveNotice)"));
   assert.ok(player.includes('onNavigateToArtist={playerSourceKind === "upnp" ? undefined : () => navigateFromPlayer("artist")}'));
   assert.ok(player.includes('onNavigateToAlbum={playerSourceKind === "upnp" ? undefined : () => navigateFromPlayer("album")}'));
@@ -147,6 +170,60 @@ test("App persists sidebar and contextual section navigation, never bootstrap or
   assert.doesNotMatch(source, /setMediaSource\(/); // All state writes belong to the controller.
   assert.match(source, /mainSectionPreference\.plexDiscoveryFinished\(libs\.length > 0\)/);
   assert.match(source, /if \(!disposed\) \{\s*mainSectionPreference\.plexDiscoveryFinished\(false\)/);
+});
+
+test("SQLite profile persists only its own screen preference and async discovery cannot overwrite Local", () => {
+  const state = preference("local", SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY, initialSqliteMediaSource);
+  state.controller.restore(config);
+  assert.equal(state.published.at(-1), "local");
+  for (const available of [true, false]) {
+    state.controller.plexDiscoveryFinished(available);
+    assert.equal(state.published.at(-1), "local");
+  }
+  state.controller.navigate("plex");
+  assert.deepEqual(state.writes, [[SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY, "plex"]]);
+});
+
+test("SQLite profile defaults to Local, restores an available saved Plex screen and falls back safely", () => {
+  const noPreference = preference(null, SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY, initialSqliteMediaSource);
+  noPreference.controller.restore(config);
+  assert.equal(noPreference.published.at(-1), "local");
+  const savedPlex = preference("plex", SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY, initialSqliteMediaSource);
+  savedPlex.controller.restore(config);
+  assert.equal(savedPlex.published.at(-1), "plex");
+  savedPlex.controller.plexDiscoveryFinished(true);
+  assert.equal(savedPlex.published.at(-1), "plex");
+  const unavailablePlex = preference("plex", SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY, initialSqliteMediaSource);
+  unavailablePlex.controller.restore({ ...config, plex_token: "" });
+  assert.equal(unavailablePlex.published.at(-1), "local");
+});
+
+test("SQLite Plex library preference restores only a library still available on the same server", () => {
+  let stored = null;
+  const storage = () => ({
+    getItem(key) { assert.equal(key, SQLITE_EXPERIMENTAL_PLEX_LIBRARY_STORAGE_KEY); return stored; },
+    setItem(key, value) { assert.equal(key, SQLITE_EXPERIMENTAL_PLEX_LIBRARY_STORAGE_KEY); stored = value; },
+  });
+  const libraries = [{ key: "music-a", title: "Music A" }, { key: "music-b", title: "Music B" }];
+  assert.equal(preferredSqlitePlexLibrary(libraries, "server-1", storage).key, "music-a");
+  saveSqlitePlexLibraryPreference("server-1", "music-b", storage);
+  assert.equal(preferredSqlitePlexLibrary(libraries, "server-1", storage).key, "music-b");
+  assert.equal(preferredSqlitePlexLibrary(libraries, "server-2", storage).key, "music-a");
+  assert.equal(preferredSqlitePlexLibrary(libraries.slice(0, 1), "server-1", storage).key, "music-a");
+  assert.equal(preferredSqlitePlexLibrary([], "server-1", storage), null);
+});
+
+test("SQLite Local source selection is persisted in its own profile key and empty selection is safe", () => {
+  let stored = null;
+  const storage = () => ({
+    getItem(key) { assert.equal(key, SQLITE_EXPERIMENTAL_LOCAL_SOURCE_STORAGE_KEY); return stored; },
+    setItem(key, value) { assert.equal(key, SQLITE_EXPERIMENTAL_LOCAL_SOURCE_STORAGE_KEY); stored = value; },
+  });
+  assert.equal(readSqliteLocalSourcePreference(storage), null);
+  saveSqliteLocalSourcePreference("sqlite-2", storage);
+  assert.equal(readSqliteLocalSourcePreference(storage), "sqlite-2");
+  saveSqliteLocalSourcePreference(null, storage);
+  assert.equal(readSqliteLocalSourcePreference(storage), null);
 });
 
 test("actual guarded player handler persists only a resolved destination, not contextual data", async () => {
@@ -161,19 +238,47 @@ test("actual guarded player handler persists only a resolved destination, not co
       : kind === "plex" ? { kind, server_id: "server", part_key: "/library/parts/1/file.flac", queue_index: 0 } : kind === "navidrome" ? {kind,connection_id:"session",song_id:"song",queue_index:0} : null;
     let session = null;
     const handler = new Function("playbackStatus", "mainSectionPreference", "playerNavigationRequests", "localCatalog", "plexService", "audioService", "navidromeService",
-      "setPlayerNavigationError", "setPlayerNavigation", "visitPlayerTarget", "centralSection", `return view => {${body}};`)(
+      "setPlayerNavigationError", "setPlayerNavigation", "visitPlayerTarget", "centralSection", "sqliteMode", "sqliteLibrary", `return view => {${body}};`)(
       { current_media: media, artist: "Artist" }, state.controller, new PlayerNavigationRequests(), {
         loaded: true, albums: [{ id: "one", folder_path: "Source/Album", source_id: "Source", artist: "Artist", discs: [] }],
       }, { resolvePlayerNavigation: async input => ({ media: input, navigation: {
         album: { rating_key: "album-1", artist_rating_key: "artist-1" }, artist_rating_key: "artist-1", artist_name: "Artist",
       } }) }, { getLocalAlbumTracks: async () => [{ tracks: [{ item_type: "file", path: "Source/Album/one.flac" }] }] }, {resolvePlayerNavigation:async media=>({...media,account_id:"a".repeat(64),album_id:"album",artist_id:"artist"})},
-      () => {}, update => { session = update(session); }, visitPlayerTarget, "playlists");
+      () => {}, update => { session = update(session); }, visitPlayerTarget, "playlists", false, { albumForTrack: async () => null });
     handler(view);
     for (let i = 0; i < 4; i++) await Promise.resolve();
     assert.equal(state.published.at(-1), expected ?? "playlists");
     assert.deepEqual(state.writes, expected ? [[MAIN_SECTION_STORAGE_KEY, expected]] : []);
     if (expected) assert.equal(session.returnSection, "playlists");
   }
+});
+
+test("actual player handler routes an opaque SQLite now-playing locator through its exact catalog association", async () => {
+  const source = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = source.match(/const navigateFromPlayer = \(view: "album" \| "artist"\) => \{([\s\S]*?)\n  \};/)?.[1];
+  assert.ok(body);
+  const state = preference("local"); state.controller.restore(config);
+  const locator = "sqlite-track://17/QWxidW0vMDMud2F2";
+  const albumId = "sqlite:17:YWxidW0";
+  let session = null, navigationError = null; const calls = [];
+  const handler = new Function("playbackStatus", "mainSectionPreference", "playerNavigationRequests", "localCatalog", "plexService", "audioService", "navidromeService",
+    "setPlayerNavigationError", "setPlayerNavigation", "visitPlayerTarget", "centralSection", "sqliteMode", "sqliteLibrary", `return view => {${body}};`)(
+    { current_media: { kind: "local", uri: locator, queue_index: 0 }, artist: "Guest Artist" }, state.controller,
+    new PlayerNavigationRequests(), { loaded: true, albums: [{ id: albumId, folder_path: "sqlite-album://" + albumId,
+      source_id: "sqlite-17", artist: "Various Artists", artist_names: ["Guest Artist"], discs: [] }] },
+    { resolvePlayerNavigation: async () => { throw Error("Plex must not be queried"); } },
+    { getLocalAlbumTracks: async id => { calls.push(["tracks", id]); return [{ disc: { number: 1 }, tracks: [{ item_type: "file", path: "opaque-track" }] }]; } },
+    { resolvePlayerNavigation: async () => { throw Error("Navidrome must not be queried"); } },
+    value => { navigationError = value; }, update => { session = update(session); }, visitPlayerTarget, "local", true,
+    { albumForTrack: async value => { calls.push(["resolve", value]); return albumId; } });
+  handler("artist");
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.deepEqual(calls, [["resolve", locator], ["tracks", albumId]]);
+  assert.equal(session.target.kind, "local");
+  assert.equal(session.target.albumId, albumId);
+  assert.equal(session.target.artistName, "Guest Artist");
+  assert.equal(navigationError, false);
+  assert.equal(state.published.at(-1), "local");
 });
 
 

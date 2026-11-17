@@ -42,6 +42,7 @@ function fixture(){
   const code=ts.transpileModule(readFileSync(file,'utf8'),{fileName:file,compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
   new Function('require','exports',code)(id=>{
    if(id==='@tauri-apps/api/core')return {invoke};
+   if(id.endsWith('/sqliteExperimentalMode'))return {isSqliteCatalogEnabled:()=>true};
    if(id==='i18next')return {t:key=>key};
    if(id.endsWith('/directVolumeChoice.ts'))return {hasDirectVolumeChoice:()=>true,confirmDirectVolumeConfig:async value=>value};
    if(id.endsWith('/frontendDiagnostics'))return {diagnosticInvoke:(native,command,args)=>native(command,args)};

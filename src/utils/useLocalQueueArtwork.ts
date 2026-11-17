@@ -6,6 +6,8 @@ import { artworkReadBlocked } from "./localArtwork";
 import { queueItemArtwork } from "./nowPlayingPresentation";
 import { localAlbumForMedia } from "./playerNavigation";
 import { VisibleQueueArtwork } from "./visibleQueueArtwork";
+import { VisibleSqliteQueueAlbums } from "./visibleSqliteQueueAlbums";
+import { sqliteLibrary } from "../services/sqliteLibrary";
 import { audioService } from "../services/audio";
 import { logError } from "./frontendDiagnostics";
 
@@ -66,17 +68,34 @@ export function useLocalQueueArtwork(items: TrackMetadata[], start: number, end:
       return null;
     }
   }, (album, publish) => localArtworkResolver.subscribe(album.id, publish), () => redraw(value => value + 1)), []);
+  const sqliteAlbums = useMemo(() => new VisibleSqliteQueueAlbums(locator => sqliteLibrary.albumForTrack(locator),
+    () => redraw(value => value + 1)), []);
   useLayoutEffect(() => {
     controller.begin(session);
     return () => controller.begin(null);
   }, [controller, session]);
-  const albums = visible.filter(item => !item.thumb && !item.plex_image)
-    .map(item => localAlbumForMedia(localMedia(item), catalog.albums)).filter(album => album !== null);
+  useLayoutEffect(() => {
+    sqliteAlbums.begin(session);
+    return () => sqliteAlbums.begin(null);
+  }, [sqliteAlbums, session]);
+  const visibleArtworkItems = visible.filter(item => !item.thumb && !item.plex_image && item.media_locator?.kind !== "plex");
+  const sqliteLocators = visibleArtworkItems.map(item => localMedia(item)?.uri ?? "")
+    .filter(uri => uri.startsWith("sqlite-track://") || uri.startsWith("sqlite-cue://"));
+  const sqliteVisibleKey = JSON.stringify(sqliteLocators);
+  useEffect(() => { sqliteAlbums.show(sqliteLocators); }, [sqliteAlbums, session, sqliteVisibleKey]);
+  const albumForItem = (item: TrackMetadata) => {
+    const media = localMedia(item);
+    const pathAlbum = localAlbumForMedia(media, catalog.albums);
+    if (pathAlbum || !media || (!media.uri.startsWith("sqlite-track://") && !media.uri.startsWith("sqlite-cue://"))) return pathAlbum;
+    const id = sqliteAlbums.get(session, media.uri);
+    return id ? catalog.albums.find(album => album.id === id) ?? null : null;
+  };
+  const albums = visibleArtworkItems.map(albumForItem).filter(album => album !== null);
   const visibleKey = JSON.stringify(albums.map(album => album.id));
   useEffect(() => { controller.show(albums); }, [controller, session, visibleKey]);
   return (item: TrackMetadata): TrackMetadata => {
     if (readBlocked || item.thumb || item.plex_image || item.media_locator?.kind === "plex") return item;
-    const cover = controller.get(session, localAlbumForMedia(localMedia(item), catalog.albums));
+    const cover = controller.get(session, albumForItem(item));
     return cover ? { ...item, thumb: cover } : item;
   };
 }

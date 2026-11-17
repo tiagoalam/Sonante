@@ -262,6 +262,27 @@ fn route(
                 _ => error(404, "artwork_missing"),
             }
         }
+        ("GET", path) if path.starts_with("/api/v1/queue-artwork/") => {
+            let key = path.trim_start_matches("/api/v1/queue-artwork/");
+            if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return error(404, "artwork_missing");
+            }
+            match backend.queue_artwork(key, current.clone()) {
+                Ok(Some((mime, bytes))) if current() && bytes.len() <= 2 * 1024 * 1024 => {
+                    Response {
+                        status: 200,
+                        mime: match mime.as_str() {
+                            "image/png" => "image/png",
+                            "image/jpeg" => "image/jpeg",
+                            "image/webp" => "image/webp",
+                            _ => return error(404, "artwork_missing"),
+                        },
+                        body: bytes,
+                    }
+                }
+                _ => error(404, "artwork_missing"),
+            }
+        }
         ("POST", "/api/v1/control") => {
             let Ok(control) = serde_json::from_slice::<Control>(&req.body) else {
                 return error(400, "invalid");
@@ -431,6 +452,14 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(None)
         }
+        fn queue_artwork(
+            &self,
+            _key: &str,
+            _current: Guard,
+        ) -> Result<Option<(String, Vec<u8>)>, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
     }
     fn scene() -> (Arc<Shared>, Arc<Fake>, String) {
         let shared = Arc::new(Shared::default());
@@ -495,6 +524,7 @@ mod tests {
             "/api/v1/state",
             "/api/v1/queue?offset=0",
             "/api/v1/artwork/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "/api/v1/queue-artwork/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
             assert_eq!(
                 run(
@@ -511,6 +541,27 @@ mod tests {
             run(request("GET", "/", "", None), shared, backend).status,
             200
         );
+    }
+    #[test]
+    fn queue_artwork_requires_a_paired_token_and_unknown_opaque_keys_stay_private() {
+        let (shared, backend, token) = scene();
+        let key = "a".repeat(64);
+        assert_eq!(run(request("GET", &format!("/api/v1/queue-artwork/{key}"), "", None), shared.clone(), backend.clone()).status, 401);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+        let missing = run(request("GET", &format!("/api/v1/queue-artwork/{key}"), &token, None), shared, backend.clone());
+        assert_eq!(missing.status, 404);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&missing.body).unwrap()["error"], "artwork_missing");
+    }
+    #[test]
+    fn remote_queue_endpoint_preserves_a_legitimate_empty_queue_as_a_valid_response() {
+        let (shared, backend, token) = scene();
+        let response = run(request("GET", "/api/v1/queue?offset=0", &token, None), shared, backend);
+        assert_eq!(response.status, 200);
+        let page: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(page["total"], 0);
+        assert_eq!(page["offset"], 0);
+        assert_eq!(page["tracks"], serde_json::json!([]));
     }
     #[test]
     fn remote_dns_rebinding_and_cross_origin_requests_are_refused_before_authentication_or_effects()

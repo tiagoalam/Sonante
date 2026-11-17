@@ -27,7 +27,7 @@ function signalComponent(t, view="SignalPath") {
   return exports[view];
 }
 
-test("confirmed route is minimal and never publishes arbitrary PCM names or configuration secrets", () => {
+test("configured route projection is minimal and never publishes arbitrary PCM names or configuration secrets", () => {
   assert.deepEqual(configuredSignalRoute(config), { mode: "direct", endpoint: config.alsa_device });
   for (const choice of [{ audio_output_type: "pipewire" }, { alsa_device: "default" }]) {
     assert.deepEqual(configuredSignalRoute({ ...config, ...choice }), { mode: "shared", endpoint: "default" });
@@ -46,8 +46,22 @@ test("known decoded PCM structures are parsed, without codec or source quality i
     assert.deepEqual(parseReportedMpdFormat(value), { kind: "pcm", rateKhz: rate, bits, channels: 2 });
   }
   assert.deepEqual(parseReportedMpdFormat(""), { kind: "absent" });
-  for (const value of ["48000:dop:2", "48000:f:2", "FLAC", "0:24:2", "96000:24:0", "96000:24:999", "secret /private"]) {
+  assert.deepEqual(parseReportedMpdFormat("352800:f:2"), { kind: "pcm_float", rateKhz: 352.8, channels: 2 });
+  for (const value of ["48000:dop:2", "0:f:2", "48000:f:0", "FLAC", "0:24:2", "96000:24:0", "96000:24:999", "secret /private"]) {
     assert.deepEqual(parseReportedMpdFormat(value), { kind: "unknown" });
+  }
+});
+
+test("float32 MPD format is shown as decoded PCM, never as the source file codec", async () => {
+  for (const language of ["en", "pt-BR"]) {
+    const i18n = i18next.createInstance();
+    await i18n.init({ lng: language, resources: { [language]: { translation: resource(language) } }, interpolation: { escapeValue: false } });
+    const t = i18n.t.bind(i18n), SignalPath = signalComponent(t);
+    const playback = { ...status, audio_format: "352800:f:2", current_media: { kind: "plex" } };
+    const html = renderToStaticMarkup(React.createElement(SignalPath, { route: configuredSignalRoute(config), status: playback, health }));
+    assert.ok(html.includes(t("signalPath.reported")));
+    assert.ok(html.includes(t("signalPath.pcmFloat", { rate: 352.8, channels: 2 })));
+    assert.doesNotMatch(html, /DSD64|DoP|Formato não reconhecido|Unrecognized format/);
   }
 });
 
@@ -119,7 +133,7 @@ test("snapshot route follows confirmed config and shared presentation leaves pla
   const presentation = readFileSync(new URL("../components/NowPlayingPresentation.tsx", import.meta.url), "utf8");
   assert.match(presentation, /<SignalPath route=\{props.snapshot\?\.route \?\? null\}/);
   const player = readFileSync(new URL("../components/PlayerBar.tsx", import.meta.url), "utf8");
-  assert.match(player, /<footer className="h-28 /);
+  assert.match(player, /<footer className="player-compact-grid /);
   for (const callback of ["handlePlayToggle", "handleSeekCommit", "handleNext", "handlePrevious", "handleVolumeChange", "onToggleQueue", "onNavigateToAlbum", "onNavigateToArtist"]) assert.ok(player.includes(callback));
   const component = readFileSync(new URL("../components/SignalPath.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(component, /audioService|invoke\(|setInterval|setTimeout/);
@@ -208,6 +222,7 @@ test("compact route shows route and MPD format without a fidelity explanation di
   for(const state of ["play","pause","stop"]){
    const html=renderToStaticMarkup(React.createElement(Main,{route:{mode:'direct',endpoint:'hw:Fixture,0'},status:{...status,state},health,compact:true}));
    assert.match(html,/data-signal-summary/);assert.doesNotMatch(html,/data-signal-info|aria-haspopup="dialog"|<dialog/);
+   assert.match(html,/data-signal-route/);assert.match(html,/data-signal-state/);
    assert.doesNotMatch(html,/hw:Fixture|<dialog|data-route-conditions/);
    if(state==="play") { assert.match(html,/96 kHz/); assert.match(html,/24-bit/); }
    if(state==="stop") assert.doesNotMatch(html,/kHz|24-bit/);
@@ -305,7 +320,7 @@ test("DSD transport remains visible only when engine, MPD transport and observed
   }
 });
 
-test("actual App status polling carries and clears ALSA and engine evidence through its existing request and timer", async () => {
+test("actual App polling carries route evidence and clears it when a newer snapshot cannot confirm it", async () => {
   const source = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const ast = ts.createSourceFile("App.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let effect;
@@ -315,18 +330,26 @@ test("actual App status polling carries and clears ALSA and engine evidence thro
   }; visit(ast); assert.ok(effect);
   const observation = { state: "observed", configured_endpoint: config.alsa_device, card: 2, device: 0, subdevice: 0, format: "S32_LE", rate: 96000, channels: 2 };
   const identified = { state: "identified", evidence_id: "mpd-pcm-eof-20261017", scope: "pcm24_96000_stereo_gapless", pcm_eof_flush: true };
+  const audioRoute = { generation: 7, operationId: "mpd:3", operation: "stable", route: null, applied: null, evidence: [], diagnostic: null, pcmAcquired: null, exclusiveAccessConfirmed: null, legacyIssues: [] };
   for (const output of [observation, null, undefined]) for (const engine of [identified, null, undefined]) {
-    let requests = 0, timers = 0; const values = [], updates = [];
-    const vars = { audioService: { async getMpdStatusSnapshot() { requests++; return { health, playback: status, output_observation: output, engine_evidence: engine }; } }, statusRequestGenerationRef: { current: 0 },
+    let requests = 0, timers = 0; const values = [], updates = [], timerCallbacks = [];
+    const vars = { audioService: { async getMpdStatusSnapshot() { const route = requests++ === 0 ? audioRoute : null; return { health, playback: status, output_observation: output, engine_evidence: engine, audio_route: route }; } }, statusRequestGenerationRef: { current: 0 },
+      audioRouteGenerationRef: { current: -1 }, audioRouteSnapshotRef: { current: null }, acceptsAudioRouteGeneration: (candidate, latest) => Number.isSafeInteger(candidate) && candidate >= latest,
       localAlbumCatalog: { onMpdStatus: value => updates.push(value) }, setMpdHealth() {}, setPlaybackStatus: value => values.push(value), logError() { assert.fail("unexpected error"); },
-      window: { setTimeout(fn, milliseconds) { assert.equal(milliseconds,1000); timers++; return 1; }, clearTimeout() {} } };
+      window: { setTimeout(fn, milliseconds) { assert.equal(milliseconds,1000); timers++; timerCallbacks.push(fn); return timers; }, clearTimeout() {} } };
     const effectJs = ts.transpileModule(`const effect = (${effect});`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
     const cleanup = new Function(...Object.keys(vars), `${effectJs}; return effect();`)(...Object.values(vars));
     for (let i=0;i<10;i++) await Promise.resolve();
     assert.equal(requests,1); assert.equal(timers,1); assert.equal(values.length,1);
-    assert.deepEqual(values[0], { ...status, output_observation: output ?? null, engine_evidence: engine ?? null, shared_dsp: null });
+    assert.deepEqual(values[0], { ...status, output_observation: output ?? null, engine_evidence: engine ?? null, shared_dsp: null, audio_route: audioRoute });
+    assert.equal(vars.audioRouteGenerationRef.current, audioRoute.generation);
+    assert.equal(vars.audioRouteSnapshotRef.current, audioRoute);
     assert.equal(values[0].output_observation, output ?? null);
-    assert.deepEqual(status.output_observation, undefined); assert.equal(status.engine_evidence, undefined); cleanup();
+    assert.deepEqual(status.output_observation, undefined); assert.equal(status.engine_evidence, undefined);
+    await timerCallbacks[0]();
+    assert.equal(requests,2); assert.equal(timers,2); assert.equal(values[1].audio_route,null);
+    assert.equal(vars.audioRouteSnapshotRef.current,null);
+    cleanup();
   }
 });
 
@@ -348,4 +371,28 @@ test("the grid reserves one column per real stage, including Shared EQ's sixth o
       assert.match(stages, /PipeWire/);
     }
   }
+});
+
+test("horizontal Shared route puts EQ facts in a full-width compact band and keeps limitations accessible", async () => {
+  const i18n = i18next.createInstance();
+  await i18n.init({ lng: "en", resources: { en: { translation: resource("en") } } });
+  const SignalPath = signalComponent(i18n.t.bind(i18n));
+  const playback = { ...status, shared_dsp: {
+    in_path: true, phase: "active", verified: true,
+    applied: { name: "Fixture preset" },
+    protection: { effective_preamp_db: -2, requested_preamp_db: 0 },
+  } };
+  const html = renderToStaticMarkup(React.createElement(SignalPath, {
+    route: { mode: "shared", endpoint: "default" }, status: playback, health, horizontal: true,
+  }));
+  assert.match(html, /data-shared-dsp="true" class="np-signal-dsp/);
+  assert.ok(html.includes("Fixture preset"));
+  assert.ok(html.includes(i18n.t("equalizer.sharedProcessingHelp")));
+  assert.ok(html.includes(i18n.t("settings.signal.details")));
+  assert.match(html, /<details class="np-signal-dsp-details">/);
+
+  const css = readFileSync(new URL("../components/nowPlaying.css", import.meta.url), "utf8");
+  assert.match(css, /\.np-signal-path \[data-shared-dsp\]\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/);
+  assert.match(css, /@container signal-strip \(max-width:\s*540px\)[\s\S]*?\.np-signal-path \[data-shared-dsp\]\s*\{\s*grid-column:\s*1/);
+  assert.match(css, /\.np-signal-dsp\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\) auto/);
 });

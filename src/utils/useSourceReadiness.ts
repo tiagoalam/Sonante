@@ -8,11 +8,12 @@ import { navidromeService } from '../services/navidrome';
 import { localSourceReadiness, remoteSourceReadiness, type SourceReadiness } from './sourceReadiness';
 interface Inputs {
   config: AppConfig | null; available: boolean; unavailable: boolean; updating: boolean; catalog: LocalAlbumCatalogState;
+  sqliteMode?: boolean;
   plexIdentity: object; plexCurrent: boolean; plexLoading: boolean; plexError: boolean; plexAttempt: number; retryPlex: () => void;
   navConfigured: boolean; navRevision: number;
 }
 export function useSourceReadiness(input: Inputs) {
-  const { config, available, unavailable, updating, catalog, plexIdentity, plexCurrent, plexLoading, plexError, plexAttempt, retryPlex, navConfigured, navRevision } = input;
+  const { config, available, unavailable, updating, catalog, sqliteMode = false, plexIdentity, plexCurrent, plexLoading, plexError, plexAttempt, retryPlex, navConfigured, navRevision } = input;
   const local = sourceEnabled(config, 'local') && !config?.first_run;
   const plex = sourceEnabled(config, 'plex') && !config?.first_run;
   const nav = sourceEnabled(config, 'navidrome') && !config?.first_run;
@@ -21,7 +22,7 @@ export function useSourceReadiness(input: Inputs) {
   const plexContext = useMemo(() => ({}), [plexIdentity, plexAttempt]);
   const [probe, setProbe] = useState<{ context: object; phase: SourceReadiness } | null>(null);
   const [observed, setObserved] = useState<Partial<Record<EditionSource, { context: object; phase: 'ready' | 'error' }>>>({});
-  useEffect(() => { if (local && config?.local_folders.length) localAlbumCatalog.ensureLoaded(updating, available); }, [local, config?.local_folders, updating, available, catalog.loaded, catalog.loading]);
+  useEffect(() => { if (!sqliteMode && local && config?.local_folders.length) localAlbumCatalog.ensureLoaded(updating, available); }, [sqliteMode, local, config?.local_folders, updating, available, catalog.loaded, catalog.loading]);
   useEffect(() => {
     if (!nav || !navConfigured || !available) return;
     let current = true;
@@ -40,8 +41,11 @@ export function useSourceReadiness(input: Inputs) {
     })().catch(() => { if (current) setProbe({ context: navContext, phase: 'error' }); });
     return () => { current = false; };
   }, [navContext, nav, navConfigured, available]);
+  const localStatus: SourceReadiness = sqliteMode
+    ? !local ? 'disabled' : catalog.error ? 'error' : catalog.loading ? 'busy' : catalog.loaded ? 'ready' : 'checking'
+    : localSourceReadiness(local, !!config?.local_folders.length, available, unavailable, updating, catalog);
   const statuses: Record<EditionSource, SourceReadiness> = {
-    local: localSourceReadiness(local, !!config?.local_folders.length, available, unavailable, updating, catalog),
+    local: localStatus,
     plex: remoteSourceReadiness(plex, !!config?.plex_server_id && !!config?.plex_token, plexCurrent, plexLoading, plexError),
     navidrome: !nav ? 'disabled' : !navConfigured ? 'unconfigured' : probe?.context === navContext ? probe.phase : 'checking',
   };

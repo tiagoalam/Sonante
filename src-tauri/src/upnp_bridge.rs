@@ -276,16 +276,48 @@ fn require_full_mode(app: &AppHandle) -> Result<(), String> {
     let config = state.0.lock().map_err(|_| "UPNP_BUSY")?;
     if config.full_mode() && !config.first_run { Ok(()) } else { Err("UPNP_MODE_DISABLED".into()) }
 }
+fn same_active_receiver(
+    status: &upnp::Status,
+    current: &Preferences,
+    requested: &Preferences,
+) -> bool {
+    status.enabled
+        && status.requested_enabled
+        && requested.enabled
+        && current.enabled
+        && current.name == requested.name
+        && current.id == requested.id
+}
 pub(crate) fn usage_mode_changed(app: &AppHandle) {
+    if crate::null_output_test_mode() {
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || restore(&app));
 }
 pub fn restore(app: &AppHandle) {
     let state = app.state::<upnp::State>();
+    if crate::null_output_test_mode() {
+        state.shutdown();
+        return;
+    }
+    let transactions = app.state::<ConfigTransactionState>();
+    if transactions.shutdown_requested() || transactions.shutdown_started() {
+        return;
+    }
     let Ok(_serial) = state.operation.lock() else { return; };
+    if transactions.shutdown_requested() || transactions.shutdown_started() {
+        return;
+    }
     if require_full_mode(app).is_err() { state.shutdown(); return; }
     match load() {
         Ok(Some(prefs)) => {
+            let current = state.preferences().ok();
+            if let (Ok(status), Some(current)) = (state.status(), current.as_ref()) {
+                if same_active_receiver(&status, current, &prefs) {
+                    return;
+                }
+            }
             if let Err(error) = app
                 .state::<upnp::State>()
                 .configure(prefs, Arc::new(Adapter(app.clone())))
@@ -299,6 +331,9 @@ pub fn restore(app: &AppHandle) {
 }
 #[tauri::command]
 pub fn get_upnp_receiver(app: AppHandle) -> Result<Status, String> {
+    if crate::null_output_test_mode() {
+        return Err("NULL_OUTPUT_TEST_UPNP_DISABLED".into());
+    }
     app.state::<upnp::State>().status()
 }
 #[tauri::command]
@@ -307,6 +342,9 @@ pub async fn set_upnp_receiver(
     enabled: bool,
     name: String,
 ) -> Result<Status, String> {
+    if crate::null_output_test_mode() {
+        return Err("NULL_OUTPUT_TEST_UPNP_DISABLED".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let transactions = app.state::<ConfigTransactionState>();
         if transactions.shutdown_requested() || transactions.shutdown_started() {
@@ -340,4 +378,34 @@ pub async fn set_upnp_receiver(
     })
     .await
     .map_err(|_| "UPNP_WORKER_UNAVAILABLE")?
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::{same_active_receiver, Preferences, upnp};
+
+    #[test]
+    fn repeated_restore_recognizes_the_same_running_receiver_without_restarting_it() {
+        let requested = Preferences {
+            enabled: true,
+            name: "Living room".into(),
+            id: "00000000-0000-4000-8000-000000000001".into(),
+        };
+        let current = requested.clone();
+        let running = upnp::Status {
+            enabled: true,
+            requested_enabled: true,
+            name: requested.name.clone(),
+            port: Some(40001),
+            error: None,
+        };
+        assert!(same_active_receiver(&running, &current, &requested));
+
+        let mut disabled = running.clone();
+        disabled.enabled = false;
+        assert!(!same_active_receiver(&disabled, &current, &requested));
+        let mut changed = requested.clone();
+        changed.name.push_str(" 2");
+        assert!(!same_active_receiver(&running, &current, &changed));
+    }
 }

@@ -12,6 +12,14 @@ type RejectReason = "context" | "admission" | "key" | "image_incomplete" | "sour
   | "canvas_unavailable" | "canvas_failed" | "jpeg_invalid" | "thumbnail_size" | "reduction_failed" | "changed" | "capacity";
 type RestoreReason = "absent" | "restored" | "disabled" | "oversized" | "invalid_record" | "context_mismatch" | "invalid_entry" | "storage_error";
 type Trigger = "on_load" | "already_complete";
+
+export function sqliteAlbumThumbnailContext(sources: readonly { id: number; generation: number }[]): string[] {
+  return [...sources]
+    .filter(source => Number.isSafeInteger(source.id) && source.id > 0
+      && Number.isSafeInteger(source.generation) && source.generation > 0)
+    .sort((left, right) => left.id - right.id)
+    .map(source => `/sonante-sqlite-library/source/${source.id}/generation/${source.generation}`);
+}
 export interface ThumbnailDiagnostic {
   stage: "restore" | "summary" | "final";
   restore: RestoreReason;
@@ -232,7 +240,9 @@ export class LocalAlbumThumbnails {
       this.stats.writes++; this.stats.stored = this.images.size;
     } catch {
       this.stats.write_failures++;
-      try { this.storage().removeItem(LOCAL_ALBUM_THUMBNAILS_KEY); } catch { /* Optional cache. */ }
+      // Keep the previously committed thumbnail record if quota or storage
+      // prevents replacing it. A failed cache update is not grounds to erase
+      // the last usable covers.
     }
     this.scheduleDiagnostic();
   }

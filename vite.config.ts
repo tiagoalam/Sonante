@@ -4,10 +4,12 @@ import tailwindcss from "@tailwindcss/vite";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 const host = process.env.TAURI_DEV_HOST;
+const cacheRoot = process.env.XDG_CACHE_HOME || `${process.env.HOME}/.cache`;
 
 // https://vite.dev/config/
 export default defineConfig(() => ({
   plugins: [react(),tailwindcss(),],
+  cacheDir: `${cacheRoot}/sonante-064-vite`,
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

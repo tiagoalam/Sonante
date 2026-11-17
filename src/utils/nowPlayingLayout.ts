@@ -7,6 +7,9 @@ export const NOW_PLAYING_LOOK_KEY = "sonante.nowPlaying.look.v1";
 export const nowPlayingLayout = (value: unknown): NowPlayingLayout =>
   NOW_PLAYING_LAYOUTS.find(layout => layout === value) ?? "audiophile";
 
+export const nowPlayingVisualizersEnabled = (layout: NowPlayingLayout): boolean =>
+  layout === "audiophile" || layout === "psycho";
+
 export function parseNowPlayingLook(value: string | null): NowPlayingLook {
   try {
     const data: unknown = value ? JSON.parse(value) : null;

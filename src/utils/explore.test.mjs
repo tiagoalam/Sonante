@@ -66,7 +66,7 @@ for (const language of ["pt-BR", "en"]) {
 const hooksUrl = dataModule(`import React from ${JSON.stringify(import.meta.resolve("react"))}; export default React;
  ${["useState", "useRef", "useMemo", "useEffect", "useLayoutEffect", "useSyncExternalStore"].map(name => `export const ${name} = (...args) => globalThis.__exploreHost.${name}(...args);`).join("\n")}`);
 const translationUrl = dataModule('export const useTranslation = () => ({t: (...args) => globalThis.__exploreTranslation.t(...args)});');
-const artworkUrl = dataModule('export const localArtworkResolver = { get: id => globalThis.__exploreResolver?.get(id) ?? globalThis.__exploreCached?.(id) ?? null, subscribe: (id, fn) => globalThis.__exploreResolver?.subscribe(id, fn) ?? (() => {}), resolve: (album, online, blocked, phase, interested) => globalThis.__exploreResolver ? globalThis.__exploreResolver.resolve(album, online, blocked, phase, interested) : globalThis.__exploreCover(album, () => blocked() || !interested()) };');
+const artworkUrl = dataModule('export const localArtworkResolver = { get: id => globalThis.__exploreResolver?.get(id) ?? globalThis.__exploreCached?.(id) ?? null, seedPersistedLocal: (id, cover) => globalThis.__exploreResolver?.seedPersistedLocal(id, cover), subscribe: (id, fn) => globalThis.__exploreResolver?.subscribe(id, fn) ?? (() => {}), resolve: (album, online, blocked, phase, interested) => globalThis.__exploreResolver ? globalThis.__exploreResolver.resolve(album, online, blocked, phase, interested) : globalThis.__exploreCover(album, () => blocked() || !interested()) }; export const localAlbumThumbnails = { get: album => globalThis.__exploreThumbnail?.(album) ?? null };');
 const plexImageUrl = dataModule('export const PlexImage = () => null;');
 const genreSliceUrl = dataModule('export const ExploreGenreSlice = () => null;');
 const placeholderUrl = dataModule('export const AlbumArtworkPlaceholder = () => null;');
@@ -190,8 +190,8 @@ test("existing Plex discovery captures library failures and discards responses a
   for (const scenario of ["success", "error", "disposed"]) {
     const pending=deferred(), identity={}, errors=[], libraries=[], loading=[], selected=[]; let calls=0;
     const setters=["setAlbums","setCollections","setActiveAlbum","setActiveCollection","setActiveArtist","setFallbackPlexArtist","setSelectedPlexDecade","setSelectedPlexYear","setSelectedPlexUnknownYear","setSelectedPlexGenre"];
-    const run=new Function("sourceEnabled","config","mainSectionPreference","setLoadingLibraries","setLibraries","setSelectedLibrary","setPlexLibrariesError","setPlexLibrariesIdentity","plexConnectionIdentity","plexService","logError",...setters,`return (${effect(".getLibraries()")});`)(
-      sourceEnabled,{plex_token:"SYNTHETIC"},{plexDiscoveryFinished(){}},v=>loading.push(v),v=>libraries.push(v),v=>selected.push(v),v=>errors.push(v),v=>assert.equal(v,identity),identity,{getLibraries(){calls++;return pending.promise;}},()=>{},...setters.map(()=>()=>{}));
+    const run=new Function("sourceEnabled","config","sqliteMode","mainSectionPreference","setLoadingLibraries","setLibraries","setSelectedLibrary","setPlexLibrariesError","setPlexLibrariesIdentity","plexConnectionIdentity","plexService","logError",...setters,`return (${effect(".getLibraries()")});`)(
+      sourceEnabled,{plex_token:"SYNTHETIC"},false,{plexDiscoveryFinished(){}},v=>loading.push(v),v=>libraries.push(v),v=>selected.push(v),v=>errors.push(v),v=>assert.equal(v,identity),identity,{getLibraries(){calls++;return pending.promise;}},()=>{},...setters.map(()=>()=>{}));
     const cleanup=run(); assert.equal(calls,1); assert.equal(loading.at(-1),true);
     if(scenario==="disposed")cleanup();
     if(scenario==="error")pending.reject(Error("DO_NOT_EXPOSE"));else pending.resolve([{key:"exact",title:"Library"}]);
@@ -227,7 +227,7 @@ test("player visits preserve Explore as the return section without replacing its
   let visit=visitPlayerTarget(null,localTarget,"explore");s.syncContext(c,false);
   visit=visitPlayerTarget(visit,plexTarget,"plex");assert.equal(visit.returnSection,"explore");
   s.syncContext(c,true);assert.deepEqual(s.getSnapshot().selected,before);
-  assert.match(appSource,/const centralSection = playerReturnSection \?\? \(mediaSource === "equalizer" \? eqReturnSectionRef.current : mediaSource\)/);
+  assert.match(appSource,/const centralSection = playerReturnSection \?\? \(mediaSource === "equalizer" \? eqReturnSectionRef\.current : mediaSource\)/);
   assert.match(appSource,/else if \(playerTarget\) \{\s*closePlayerNavigation\(\);\s*\} else if \(exploreDetail\)/);
 });
 
@@ -848,11 +848,11 @@ test("loading pauses retained suggestions and slice without exposing provisional
 
 
 // Execute the producer expression from App rather than reproducing its wiring.
-const appPresentation = new Function("localExplorePresentation", "localExploreConfigured", "mpdHealth", "isPlaybackAvailable", "playbackStatus", "localCatalog", "configSavePhase", "localSavePhase", "configSaveNotice",
+const appPresentation = new Function("localExplorePresentation", "localExploreConfigured", "mpdHealth", "isPlaybackAvailable", "playbackStatus", "localCatalog", "configSavePhase", "localSavePhase", "configSaveNotice", "sqliteMode",
   source("../App.tsx").match(/const \{ state: localExploreState, activity: exploreLoadingActivity \} = localExplorePresentation\([\s\S]*?\);/)[0] + "return {state:localExploreState,activity:exploreLoadingActivity};");
 const present = (catalog, overrides={}) => {
   const x={configured:true,starting:false,available:true,updating:false,savePhase:null,uncertain:false,statusUnavailable:false,...overrides};
-  return appPresentation(localExplorePresentation,x.configured,{state:x.starting?"starting":"ready"},x.available,{is_updating:x.updating},catalog,x.savePhase?"local":null,x.savePhase,{uncertain:x.uncertain,statusUnavailable:x.statusUnavailable});
+  return appPresentation(localExplorePresentation,x.configured,{state:x.starting?"starting":"ready"},x.available,{is_updating:x.updating},catalog,x.savePhase?"local":null,x.savePhase,{uncertain:x.uncertain,statusUnavailable:x.statusUnavailable},false);
 };
 
 test("App producer separates confirmed activity from real errors, offline and uncertain save blocks", () => {

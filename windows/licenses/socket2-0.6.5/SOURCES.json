@@ -1,0 +1,13 @@
+{
+  "package": "socket2",
+  "version": "0.6.5",
+  "source": "registry+https://github.com/rust-lang/crates.io-index",
+  "crateSha256": "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4",
+  "repository": "https://github.com/rust-lang/socket2",
+  "license": "MIT OR Apache-2.0",
+  "licenseFilesSha256": {
+    "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+    "LICENSE-MIT": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+  },
+  "note": "Same exact locked crate used by Linux0.6.2. Windows target dependency for original UPnP protocol and socket options."
+}

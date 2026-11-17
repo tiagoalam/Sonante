@@ -11,9 +11,14 @@ interface Props {
 export const AboutModal: React.FC<Props> = ({ onClose }) => {
   const { t } = useTranslation();
   const [channelError, setChannelError] = useState(false);
+  const [sponsorError, setSponsorError] = useState(false);
   const openChannel = async (url: string) => {
     setChannelError(false);
     try { await openUrl(url); } catch { setChannelError(true); }
+  };
+  const openSponsor = async () => {
+    setSponsorError(false);
+    try { await openUrl("https://github.com/sponsors/tiagoalam"); } catch { setSponsorError(true); }
   };
 
   return (
@@ -29,7 +34,7 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
               <div className="flex items-center space-x-2">
                 <h2 className="text-lg font-black tracking-wider text-[color:var(--theme-fg-accent,#E5A00D)]">SONANTE</h2>
                 <span className="text-[10px] font-mono font-bold bg-[#E5A00D] text-black px-1.5 py-0.5 rounded-sm">
-                  v0.6.3
+                  {t("about.version", { version: "0.7.0" })}
                 </span>
               </div>
               <p className="text-[11px] text-[color:var(--theme-fg-muted,#888888)]">{t("about.tagline")}</p>
@@ -115,6 +120,15 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
           <p className="text-[11px] text-[color:var(--theme-fg-muted,#888888)] leading-relaxed">
             {t("about.license", { license: "GPL-3.0-only" })}
           </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1">
+            <button type="button" onClick={() => void openSponsor()} aria-label={t("about.supportDevelopment")}
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11px] text-[color:var(--theme-fg-muted,#888888)] hover:bg-[var(--theme-surface-raised,#252525)] hover:text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--theme-fg-accent,#E5A00D)] transition-colors cursor-pointer">
+              <Heart size={13} aria-hidden="true" />
+              <span>{t("about.supportDevelopment")}</span>
+              <ExternalLink size={11} aria-hidden="true" />
+            </button>
+            {sponsorError && <p role="alert" className="text-[11px] text-[color:var(--theme-fg-muted,#888888)]">{t("about.sponsorOpenError")}</p>}
+          </div>
         </div>
 
         {/* Rodapé */}

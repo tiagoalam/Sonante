@@ -135,7 +135,7 @@ export function analyzeLocalAlbumTagForm(
   ) as unknown as LocalAlbumTagBatchUpdate;
   const inspection = draft.inspection;
   const blockedReason = inspection.cue_virtual_count > 0
-    || inspection.tracks.some((track) => track.kind === "cue_virtual") ? "cue"
+    || inspection.tracks.some((track) => track.kind === "cue_virtual" || track.issue?.code === "cue_virtual") ? "cue"
     : !inspection.inspection_complete || inspection.physical_track_count === 0
       || inspection.tracks.some((track) => track.issue || !track.tags)
       || localAlbumTagFields.some((field) => blocksEditing(draft.fields[field].summary.state)) ? "inspection"
@@ -155,6 +155,7 @@ export function buildLocalAlbumTagBatchPreflightRequest(
   const analysis = analyzeLocalAlbumTagForm(draft);
   return {
     album_id: draft.inspection.album_id,
+    catalog_generation: draft.inspection.catalog_generation ?? null,
     tracks: draft.inspection.tracks.map((track) => ({
       uri: track.uri,
       kind: track.kind,
@@ -240,6 +241,7 @@ export function freezeLocalAlbumTagBatchRequest(request: LocalAlbumTagBatchPrefl
 export function validateLocalAlbumTagBatchResult(result: LocalAlbumTagBatchResult, request: LocalAlbumTagBatchPreflightRequest): void {
   if (!result || result.album_id !== request.album_id || !Array.isArray(result.tracks)
     || typeof result.applicable !== "boolean" || typeof result.partial_commit !== "boolean") throw new Error("invalid_result");
+  if (result.catalog_reconciled !== undefined && typeof result.catalog_reconciled !== "boolean") throw new Error("invalid_result");
   const expected = new Map(request.tracks.map((track) => [track.uri, track.revision]));
   const seen = new Set<string>();
   const counts = { unchanged: 0, committed: 0, failed: 0, not_attempted: 0 };
@@ -260,8 +262,9 @@ export function validateLocalAlbumTagBatchResult(result: LocalAlbumTagBatchResul
     || result.partial_commit !== (counts.committed > 0 && (counts.failed > 0 || counts.not_attempted > 0))) throw new Error("invalid_result");
 }
 
-export function localAlbumTagApplyErrorKind(cause: unknown): "conflict" | "unknown" {
+export function localAlbumTagApplyErrorKind(cause: unknown): "conflict" | "access_disabled" | "unknown" {
   const code = cause && typeof cause === "object" && "code" in cause ? cause.code : null;
+  if (code === "experimental_features_disabled") return "access_disabled";
   // AlbumCatalogFailure also represents a failed blocking task, which may have written.
   return ["revision_conflict", "membership_changed", "invalid_snapshot", "duplicate_expected_uri", "album_not_found"].includes(String(code))
     ? "conflict" : "unknown";

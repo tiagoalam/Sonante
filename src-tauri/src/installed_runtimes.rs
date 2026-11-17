@@ -79,17 +79,50 @@ fn verify_file(path: &Path, expected: &str, owner: u32, executable: bool) -> Res
     Ok(())
 }
 
+fn validate_root_ancestry(root: &Path, owner: u32) -> Result<(), String> {
+    if !root.is_absolute()
+        || root.components().any(|component| {
+            matches!(component, std::path::Component::ParentDir | std::path::Component::CurDir)
+        })
+    {
+        return Err(UNTRUSTED.into());
+    }
+    for parent in root.ancestors() {
+        let meta = fs::symlink_metadata(parent)
+            .map_err(|error| if error.kind() == std::io::ErrorKind::NotFound {
+                MISSING
+            } else {
+                UNTRUSTED
+            })?;
+        if !trusted(&meta, owner, true) {
+            return Err(UNTRUSTED.into());
+        }
+    }
+    Ok(())
+}
+
+fn configured_root(
+    experimental_package: bool,
+    configured: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    if !experimental_package {
+        return Ok(PathBuf::from(ROOT));
+    }
+    let raw = configured.ok_or(MISSING)?;
+    let root = PathBuf::from(raw);
+    validate_root_ancestry(&root, 0)?;
+    Ok(root)
+}
+
 pub(crate) fn resolve(kind: Kind) -> Result<PathBuf, String> {
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) { return Err(MISSING.into()); }
-    let root = Path::new(ROOT);
+    let root = configured_root(
+        cfg!(feature = "experimental-package"),
+        std::env::var_os("SONANTE_EXPERIMENTAL_RUNTIME_ROOT"),
+    )?;
     // Root-owned immutable ancestry prevents replacement between verification and spawn.
     // A package upgrade can still replace a file: MPD's owned-child hash check remains active.
-    for parent in root.ancestors() {
-        let meta = fs::symlink_metadata(parent).map_err(|e|
-            if e.kind() == std::io::ErrorKind::NotFound { MISSING } else { UNTRUSTED })?;
-        if !trusted(&meta, 0, true) { return Err(UNTRUSTED.into()); }
-    }
-    verify_at(root, kind, 0)
+    verify_at(&root, kind, 0)
 }
 
 pub(crate) fn release(kind: Kind, override_name: &str) -> Result<PathBuf, String> {
@@ -99,14 +132,14 @@ pub(crate) fn release(kind: Kind, override_name: &str) -> Result<PathBuf, String
     resolve(kind)
 }
 
-pub(crate) fn configure_camilla(command: &mut std::process::Command) {
+pub(crate) fn configure_camilla(command: &mut std::process::Command, runtime_root: &Path) {
     if !cfg!(debug_assertions) {
         // Isolate this client DLL from MPD: Shared ALSA must load its host-matched client.
         // Scope only this owned client, never the user's PipeWire daemon/config.
-        command.env("LD_LIBRARY_PATH",format!("{ROOT}/lib/camilla"))
-            .env("PIPEWIRE_MODULE_DIR",format!("{ROOT}/lib/pipewire-0.3"))
-            .env("SPA_PLUGIN_DIR",format!("{ROOT}/lib/spa-0.2"))
-            .env("PIPEWIRE_CONFIG_DIR",format!("{ROOT}/share/pipewire"))
+        command.env("LD_LIBRARY_PATH",runtime_root.join("lib/camilla"))
+            .env("PIPEWIRE_MODULE_DIR",runtime_root.join("lib/pipewire-0.3"))
+            .env("SPA_PLUGIN_DIR",runtime_root.join("lib/spa-0.2"))
+            .env("PIPEWIRE_CONFIG_DIR",runtime_root.join("share/pipewire"))
             .env_remove("PIPEWIRE_CONFIG_NAME");
     }
 }
@@ -121,6 +154,22 @@ mod tests {
         assert_eq!(m["schema"],2); assert_eq!(m["install_root"],ROOT);
         assert_eq!(m["binaries"].as_object().unwrap().len(),3);
         for k in [Kind::Direct,Kind::Eq,Kind::Camilla] { assert_eq!(m["binaries"][k.name()].as_str().unwrap().len(),64); }
+    }
+
+    #[test]
+    fn experimental_root_is_explicit_and_default_resolution_is_unchanged() {
+        let root = PathBuf::from("/usr/lib");
+        validate_root_ancestry(&root, 0).unwrap();
+        assert_eq!(configured_root(false, None).unwrap(), PathBuf::from(ROOT));
+        assert_eq!(
+            configured_root(true, Some(root.clone().into_os_string())).unwrap(),
+            root
+        );
+        assert_eq!(configured_root(true, None).unwrap_err(), MISSING);
+        assert_eq!(
+            configured_root(true, Some("relative-runtime".into())).unwrap_err(),
+            UNTRUSTED
+        );
     }
     #[test]
     fn rejects_missing_altered_symlink_nonexec_writable_and_wrong_owner() {

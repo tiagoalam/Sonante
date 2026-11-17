@@ -158,7 +158,7 @@ export const AlbumView: React.FC<Props> = ({
   return (
     <div className="flex-1 flex flex-col h-full bg-[var(--theme-surface-base,#121212)] overflow-hidden select-none">
       <PlaybackRequestNotice failure={request.failure} />
-      {queueActions.notice}{queueActions.menu}{selection.toolbar}
+      {queueActions.notice}{queueActions.menu}
       <div className="p-8 pb-4 border-b border-[color:var(--theme-border-soft,#222222)] flex items-center">
         <button
           onClick={onBack}
@@ -259,9 +259,12 @@ export const AlbumView: React.FC<Props> = ({
         </div>
 
         <div className="bg-[var(--theme-surface-base,#141414)] border border-[color:var(--theme-border-soft,#222222)] rounded-xl overflow-hidden divide-y divide-[color:var(--theme-border-soft,#1D1D1D)]">
-          <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[color:var(--theme-fg-muted,#666666)] uppercase tracking-wider bg-[var(--theme-surface-panel,#181818)]">
+          <div className="grid grid-cols-12 items-center gap-2 px-4 py-2.5 text-[11px] font-bold text-[color:var(--theme-fg-muted,#666666)] uppercase tracking-wider bg-[var(--theme-surface-panel,#181818)]">
             <span className="col-span-1 text-center">#</span>
-            <span className="col-span-7">{t("common.trackTitle")}</span>
+            <div className="col-span-7 flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+              <span>{t("common.trackTitle")} ({tracks.length})</span>
+              {!loading && tracks.length > 0 && selection.toolbar}
+            </div>
             <span className="col-span-4 text-right flex items-center justify-end space-x-1">
               <Clock size={12} />
               <span>{t("common.duration")}</span>

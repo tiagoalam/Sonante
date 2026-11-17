@@ -4,23 +4,25 @@ import { useTranslation } from 'react-i18next';
 import type { AppConfig } from '../types/config';
 import type { EditionEntry } from '../utils/albumEditions';
 import { editionDisplayTitle, editionTrackName, type EditionProfile } from '../utils/albumEditionAnalysis';
-import { abError, abFailure, abStart, type ABFailure, type ABSample, type ABSeconds, type ABSide, type ABTrack } from '../utils/albumAB';
+import { AB_RATE, alignABSamples, cropABSamples, abError, abFailure, abStart, type ABFailure, type ABSample, type ABSeconds, type ABSide, type ABTrack } from '../utils/albumAB';
 import { AlbumABGraph } from '../utils/albumABGraph';
 import { beginPlaybackIntent, playbackIntentToken, subscribePlaybackRequests, type PlaybackIntent } from '../utils/playbackIntent';
 import { albumABService as service } from '../services/albumAB';
+import { startABSync } from '../services/albumABSync';
+import { interpretLegacyAudioRoute } from '../utils/audioRoute.ts';
 const control = 'rounded-lg border border-[color:var(--theme-border-soft,#444)] bg-[var(--theme-surface-base,#121212)] px-3 py-2 text-sm disabled:opacity-40';
 const button = control + ' inline-flex items-center justify-center gap-2 font-semibold hover:bg-[var(--theme-surface-hover,#292929)] focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]';
 const matchTrack = (title: string, tracks: ABTrack[]) => { const names = tracks.filter(track => editionTrackName(track.title) === editionTrackName(title)); return names.length === 1 ? names[0].key : ''; };
 interface Props { entries: readonly EditionEntry[]; profiles: ReadonlyMap<string, EditionProfile | null>; config: AppConfig; active: boolean; context: object }
-interface Prepared { token: string; a: ABSample; b: ABSample; scope: object; fields: string }
+interface Prepared { token: string; a: ABSample; b: ABSample; scope: object; fields: string; autoSync: { side: ABSide; seconds: number } | null }
 interface Running { graph: AlbumABGraph; intent: PlaybackIntent; nativeIntent: string | null; token: string; timer?: ReturnType<typeof setInterval>; unsubscribe?: () => void; checking: boolean }
 export function AlbumABComparison({ entries, profiles, config, active, context }: Props) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const signature = JSON.stringify(entries.map(entry => entry.key));
   const [versions, setVersions] = useState({ a: entries[0]?.key ?? '', b: entries[1]?.key ?? '' });
   const a = entries.find(entry => entry.key === versions.a) ?? entries[0];
   const b = entries.find(entry => entry.key === versions.b && entry.key !== a?.key) ?? entries.find(entry => entry.key !== a?.key);
-  const shared = ['shared', 'pipewire'].includes(config.audio_output_type);
+  const shared = interpretLegacyAudioRoute(config.audio_output_type, config.alsa_device).route.access === 'shared';
   const supported = a?.source !== 'navidrome' && b?.source !== 'navidrome';
   const [trackRetry, setTrackRetry] = useState(0);
   const scope = useMemo(() => ({}), [context, signature, a?.key, b?.key, active, shared, supported, trackRetry]);
@@ -30,12 +32,13 @@ export function AlbumABComparison({ entries, profiles, config, active, context }
   const [seconds, setSeconds] = useState<ABSeconds>(30), [start, setStart] = useState('0:00'), [offset, setOffset] = useState(0);
   const [equal, setEqual] = useState(true), [volume, setVolume] = useState(0.6), [side, setSide] = useState<ABSide>('a');
   const [prepared, setPrepared] = useState<Prepared | null>(null), [busy, setBusy] = useState<ABSide | null>(null);
+  const [syncing, setSyncing] = useState(false);
   const [playback, setPlayback] = useState<'idle' | 'starting' | 'playing' | 'paused'>('idle');
   const [position, setPosition] = useState(0), [error, setError] = useState<ABFailure | null>(null), [notice, setNotice] = useState(false);
   const sideRef = useRef(side); sideRef.current = side;
   const fields = JSON.stringify([choices, seconds, start, offset]);
   const live = useRef({ scope, fields, active }); live.current = { scope, fields, active };
-  const mounted = useRef(true), operation = useRef(0), token = useRef<string | null>(null), running = useRef<Running | null>(null);
+  const mounted = useRef(true), operation = useRef(0), token = useRef<string | null>(null), running = useRef<Running | null>(null), syncJob = useRef<{ cancel(): void } | null>(null);
   const stop = (interrupted = false, silent = false) => {
     const session = running.current; running.current = null;
     if (session) {
@@ -46,8 +49,9 @@ export function AlbumABComparison({ entries, profiles, config, active, context }
   };
   const clear = (silent = false) => {
     operation.current++; stop(false, silent);
+    syncJob.current?.cancel(); syncJob.current = null;
     const previous = token.current; token.current = null; if (previous) void service.cancel(previous).catch(() => {});
-    if (!silent && mounted.current) { setPrepared(null); setBusy(null); setError(null); }
+    if (!silent && mounted.current) { setPrepared(null); setBusy(null); setSyncing(false); setError(null); }
   };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; clear(true); }; }, []);
   useEffect(() => { clear(); return () => clear(true); }, [scope, fields]);
@@ -78,10 +82,22 @@ export function AlbumABComparison({ entries, profiles, config, active, context }
       const acquired = await service.begin();
       if (!valid()) { void service.cancel(acquired).catch(() => {}); return; } token.current = acquired;
       preparingSide = 'a';
-      const left = await service.sample(acquired, 'a', a, choices.a, at, seconds, valid); if (!valid()) return;
-      preparingSide = 'b'; setBusy('b'); const right = await service.sample(acquired, 'b', b, choices.b, bStart, seconds, valid); if (!valid()) return;
-      setPrepared({ token: acquired, a: left, b: right, scope, fields }); setSide('a'); setBusy(null);
-    } catch (cause) { if (valid()) { const previous = token.current; token.current = null; if (previous) void service.cancel(previous).catch(() => {}); setBusy(null); setError(abFailure(cause, preparingSide)); } }
+      const left = await service.sample(acquired, 'a', a, choices.a, at, seconds, valid, true); if (!valid()) return;
+      preparingSide = 'b'; setBusy('b'); const right = await service.sample(acquired, 'b', b, choices.b, bStart, seconds, valid, true); if (!valid()) return;
+      setSyncing(true);
+      const sync = startABSync(left, right); syncJob.current = sync;
+      const estimate = await sync.promise;
+      if (!valid()) return;
+      syncJob.current = null;
+      const targetFrames = Math.min(seconds * AB_RATE, left.frames, right.frames);
+      const aligned = estimate ? alignABSamples(left, right, targetFrames, estimate.offsetFrames) : null;
+      const cropped = aligned ?? cropABSamples(left, right, targetFrames);
+      if (!cropped) throw 'AB_TOO_SHORT';
+      setPrepared({ token: acquired, a: cropped[0], b: cropped[1], scope, fields, autoSync: aligned && estimate ? {
+        side: estimate.offsetFrames >= 0 ? 'b' : 'a', seconds: Math.abs(estimate.offsetFrames) / AB_RATE,
+      } : null });
+      setSide('a'); setBusy(null); setSyncing(false);
+    } catch (cause) { syncJob.current?.cancel(); syncJob.current = null; if (valid()) { const previous = token.current; token.current = null; if (previous) void service.cancel(previous).catch(() => {}); setBusy(null); setSyncing(false); setError(abFailure(cause, preparingSide)); } }
   };
   const play = async () => {
     if (!prepared || prepared.scope !== scope || prepared.fields !== fields || !active) return;
@@ -149,7 +165,12 @@ export function AlbumABComparison({ entries, profiles, config, active, context }
       <details className="text-sm text-[color:var(--theme-fg-secondary,#aaa)]"><summary className="cursor-pointer">{t('ab.alignment')}</summary><p className="mt-2 max-w-3xl text-xs">{t('ab.alignmentHint')}</p><label className="mt-3 flex flex-wrap items-center gap-3"><span>{t('ab.offset')}</span><input type="number" value={offset} min={-60000} max={60000} step={10} disabled={!!busy || playback === 'starting'} onChange={event => setOffset(Number(event.target.value))} className={control + ' w-32'} /><span>{t('ab.milliseconds')}</span></label></details>
       {!validStart && <p role="status" className="text-sm text-[color:var(--theme-fg-error,#ff9999)]">{t('ab.errors.invalid')}</p>}
       {error && <p role="alert" className="text-sm text-[color:var(--theme-fg-error,#ff9999)]">{error.side && <strong>{t('ab.failedSample', { side: error.side.toUpperCase() })}{' '}</strong>}{t(`ab.errors.${error.code}`)}{(error.codec || error.sampleRate || error.channels) && <span className="mt-1 block">{t('ab.detectedFormat', { codec: error.codec ?? t('ab.unknownCodec'), rate: error.sampleRate ? t('ab.rate', { rate: error.sampleRate }) : t('ab.unknownRate'), channels: error.channels ? t('ab.channels', { count: error.channels }) : t('ab.unknownChannels') })}</span>}</p>}
-      <div className="flex flex-wrap items-center gap-3">{busy ? <><p role="status" className="flex items-center gap-2 text-sm"><LoaderCircle className="animate-spin" size={17} />{t('ab.preparing', { side: busy.toUpperCase() })}</p><button type="button" className={button} onClick={() => clear()}><X size={15} />{t('ab.cancel')}</button></> : <button type="button" className={button} onClick={() => void prepare()} disabled={!active || !lists || !!lists.error || !choices.a || !choices.b || !validStart || playback === 'starting'}>{t(usable ? 'ab.prepareAgain' : 'ab.prepare')}</button>}
+      {usable && prepared.autoSync && <p role="status" className="text-sm text-[color:var(--theme-fg-secondary,#aaa)]">{t('ab.autoSync', {
+        side: prepared.autoSync.side.toUpperCase(), other: prepared.autoSync.side === 'a' ? 'B' : 'A',
+        offset: `+${new Intl.NumberFormat(i18n?.language ?? 'en', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(prepared.autoSync.seconds)}`,
+      })}</p>}
+      {usable && (prepared.a.convertedFromDsd || prepared.b.convertedFromDsd) && <p role="status" className="text-sm text-[color:var(--theme-fg-secondary,#aaa)]">{t('ab.dsdConverted')}</p>}
+      <div className="flex flex-wrap items-center gap-3">{busy ? <><p role="status" className="flex items-center gap-2 text-sm"><LoaderCircle className="animate-spin" size={17} />{t(syncing ? 'ab.analyzing' : 'ab.preparing', { side: busy.toUpperCase() })}</p><button type="button" className={button} onClick={() => clear()}><X size={15} />{t('ab.cancel')}</button></> : <button type="button" className={button} onClick={() => void prepare()} disabled={!active || !lists || !!lists.error || !choices.a || !choices.b || !validStart || playback === 'starting'}>{t(usable ? 'ab.prepareAgain' : 'ab.prepare')}</button>}
         {usable && <button type="button" className={button} disabled={playback === 'starting'} onClick={() => void play()}>{playback === 'starting' ? <LoaderCircle size={16} className="animate-spin" /> : playback === 'playing' ? <Pause size={16} /> : <Play size={16} />}{t(playback === 'playing' ? 'ab.pause' : playback === 'paused' ? 'ab.resume' : playback === 'starting' ? 'ab.starting' : 'ab.listen')}</button>}
         {running.current && <button type="button" className={button} onClick={() => stop()}><Square size={14} />{t('ab.stop')}</button>}
       </div>

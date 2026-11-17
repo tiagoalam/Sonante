@@ -159,6 +159,7 @@ function navigationFixture() {
   };
   let reset;
   const scope = () => { const bindings = {
+    sqliteMode: false,
     localAlbumCatalog: { getSnapshot: () => catalog },
     ...state, activeGenre: state.selectedGenre, activePlexGenre: state.selectedPlexGenre,
     initialAlbumId: undefined, playerTarget: null, playerNavigationRequests: { invalidate() {} },
@@ -282,7 +283,7 @@ test("Local genre page reuses the virtual grid and real album identities, isolat
     activeGenre: "jazz", genreAlbums: [album], activeSourceId: "opaque", albumSearch: "", albumSortMode: "album-asc",
     scrollContainer: {}, favoriteIds: new Set(), handleToggleFavoriteLocal() {}, handleSelectAlbum() {}, handlePlayEntireAlbum() {},
     catalog: { albums: [album], loading: false, loaded: true, error: null, mpdBusy: false, saveBlocked: false },
-    artworkBlocked: false, metadataMode: false, isPlaybackAvailable: true, onlineArtworkEnabled: false, isLibraryUpdating: false, emptyCatalogState: "ready", genreOptions: deriveAlbumGenres([album]), setSelectedGenre() {} };
+    artworkBlocked: false, metadataMode: false, sqliteBacked: false, isPlaybackAvailable: true, onlineArtworkEnabled: false, isLibraryUpdating: false, emptyCatalogState: "ready", genreOptions: deriveAlbumGenres([album]), isLocalAlbumFavorite: () => false, setSelectedGenre() {} };
   assert.match(renderToStaticMarkup(renderGenreBranch(localSource, "viewMode", ') : viewMode === "years" ? (', base)), /opaque\/cue/);
   assert.equal(calls[0].items[0], album);
   assert.equal(calls[0].getItemKey(album), album.id);

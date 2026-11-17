@@ -1,0 +1,26 @@
+{
+  "Linux_source_sha256": "7bf432feaed4399b287ad7509c7f0f8cbdd26185de8ac6aac66118772726e8da",
+  "Root_Linux_unchanged": true,
+  "constants_sha256": "1cf772d590c7809f7ec6109c0a67e31d3a2b67f579e7fc7a3f0a96ac6bf1e255",
+  "core_body_sha256": "67a2881a41147bf999e6ecc6ddf41d33e33dc5ffa13abb1a11bcfba873120323",
+  "level_body_sha256": "3881389e76cc7ca1134a04fbfa4867f3b89a850973f1e432f929d47b57496aa5",
+  "candidate_math_sha256": "7be3e8802cbff7065970f44b05666f7f311bf0a2d4a77ceedc65a69ca29e2a79",
+  "source_ranges": [
+    [
+      608,
+      931
+    ],
+    [
+      932,
+      4672
+    ],
+    [
+      23267,
+      24221
+    ]
+  ],
+  "math_body_exact": true,
+  "rustfft_version_identical": "6.4.1",
+  "imports_only_adapted": "Direct Windows-only rustfft=6.4.1/defaultfeaturesfalse, SAME existing locked dependency; realfft does not actually reexport rustfft. Core source bodies unchanged. Lock only rootdependency edge; verify all packages/features exact to2.",
+  "stage": "CANDIDATE only, no Root/pin/IPC/UI/reader changes yet"
+}

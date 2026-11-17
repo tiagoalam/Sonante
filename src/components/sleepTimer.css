@@ -14,7 +14,11 @@
 .sleep-timer button:disabled { opacity: .4; cursor: wait; }
 .sleep-timer-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--theme-fg-error,#f88); }
 
-/* Stack under the existing actions: an active timer consumes no extra player-bar width. */
-.sleep-timer-compact summary { padding: 2px 4px; border: 0; gap: 4px; }
-.sleep-timer-compact summary > svg { width: 13px; height: 13px; }
+/* Compact timer shares the player action buttons' 36px target and border. */
+.sleep-timer-compact summary { box-sizing: border-box; width: 36px; height: 36px; padding: 0; justify-content: center; gap: 3px; border-color: var(--theme-border-soft,#2d2d2d); border-radius: 9px; color: var(--theme-fg-muted,#999); transition: background-color .15s ease,color .15s ease,border-color .15s ease; }
+.sleep-timer-compact summary:hover { background: var(--theme-surface-raised,#202020); color: var(--theme-fg-primary,#fff); }
+.sleep-timer-compact summary > svg { width: 17px; height: 17px; }
+.sleep-timer-compact .sleep-timer-summary-active { width: 36px; min-width: 36px; padding: 0; border-color: var(--theme-border-accent,#e5a00d); }
+.sleep-timer-compact .sleep-timer-summary-active > span:not(.sleep-timer-dot), .sleep-timer-compact .sleep-timer-cancel { display: none; }
+.sleep-timer-compact summary > span:not(.sleep-timer-dot) { font-size: 10px; font-variant-numeric: tabular-nums; }
 .sleep-timer-compact .sleep-timer-cancel { padding: 2px !important; }

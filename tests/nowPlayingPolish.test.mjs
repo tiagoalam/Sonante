@@ -57,11 +57,11 @@ function fixture(embedded=true){
  return{render,key,element,stored,analyzer,native,listeners,setModal:value=>{modal=value},get fullscreen(){return actualFullscreen},get collapse(){return collapse},async dispose(){slots.forEach(slot=>slot?.cleanup?.());await flush();globalThis.window=before.window;globalThis.document=before.document}};
 }
 
-test('actual host layout keys work in both windows and Local/Plex without restarting analyzer or touching playback',async()=>{
+test('actual host layout keys gate analyzer capture by selected visuals without touching playback',async()=>{
  for(const embedded of [true,false]){
   const f=fixture(embedded);
   try{
-   let tree=f.render();await flush();tree=f.render();const native=[...f.native],analyzer=[...f.analyzer];
+   let tree=f.render();await flush();tree=f.render();const native=[...f.native];
    for(const kind of ['local','plex']){
     tree=f.render({snapshot:{health:{state:'available'},playback:{state:'play',elapsed:10,title:'Synthetic',current_media:{kind},volume:{backend:'unavailable'}}}});
     for(const [index,layout]of layouts.NOW_PLAYING_LAYOUTS.entries()){
@@ -69,7 +69,7 @@ test('actual host layout keys work in both windows and Local/Plex without restar
      if(layout!=='audiophile'||f.stored.has(layouts.NOW_PLAYING_LOOK_KEY))assert.equal(JSON.parse(f.stored.get(layouts.NOW_PLAYING_LOOK_KEY)).layout,layout);
     }
    }
-   assert.deepEqual(f.native,native);assert.deepEqual(f.analyzer,analyzer,'layout keys preserve analyzer ownership and its initial listener lease');
+   await flush();assert.deepEqual(f.native,native);assert.equal(f.analyzer.filter(event=>event==='start').length,1,'a rapid return to a visual layout may be canceled before listeners are ready');assert.equal(f.analyzer.filter(event=>event==='stop').length,1,'leaving the visual layouts stops capture');assert.equal(f.analyzer.filter(event=>event==='listen').length,4);assert.equal(f.analyzer.filter(event=>event==='unlisten').length,4);
   }finally{await f.dispose()}
   assert.equal(f.listeners.size,0);
  }

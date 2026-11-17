@@ -1,0 +1,65 @@
+.settings-page-content,
+.settings-section-list {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.settings-section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding-block: 16px;
+  border-top: 1px solid var(--theme-border-soft, #2b2b2b);
+}
+
+.settings-page-content > .settings-section:first-child,
+.settings-section-list > .settings-section:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.settings-section > legend,
+.settings-section-title {
+  display: flex;
+  max-width: 100%;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  color: var(--theme-fg-accent, #e5a00d);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.settings-subsection-title {
+  margin: 0;
+  color: var(--theme-fg-primary, #fff);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.settings-section-note {
+  margin: 0;
+  padding-block: 12px;
+  border-top: 1px solid var(--theme-border-soft, #2b2b2b);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-page-content > .settings-section-note:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+@media (max-width: 520px) {
+  .settings-section { padding-block: 14px; }
+  .settings-section-list > .settings-section:first-child,
+  .settings-page-content > .settings-section:first-child { padding-top: 0; }
+}

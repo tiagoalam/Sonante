@@ -1,0 +1,59 @@
+--- a/src/output/plugins/SonantePcmOutputPlugin.cxx
++++ b/src/output/plugins/SonantePcmOutputPlugin.cxx
+@@ -52,6 +52,12 @@
+     View view;
+     std::atomic_bool interrupted{false},opened{false};
+     PauseClock pause_clock;
++    std::atomic_bool completed_drain{false};
++    bool FullyConsumedEof() const noexcept {
++        return view.p!=nullptr && Valid(*view.p,binding) &&
++            Load(view.p->flags)==EOF_FLAG && Load(view.p->read)==Load(view.p->written) &&
++            Load(view.p->written)<=INDEX_MAX;
++    }
+     void Notify() noexcept {SetEvent(inputs.h[1]);SetEvent(inputs.h[2]);}
+     void Lost() noexcept {
+         if(view.p!=nullptr&&Valid(*view.p,binding))Signal(*view.p,LOST);
+@@ -72,7 +78,7 @@
+     static AudioOutput *Create(EventLoop &,const ConfigBlock &block){return new PrivatePcmOutput(block);}
+     void Open(AudioFormat &f) override {
+         if(f.sample_rate!=RATE||f.channels!=CHANNELS||f.format!=SampleFormat::S32)throw std::runtime_error("SONANTE_PCM_FORMAT");
+-        if(!Healthy()||Load(view.p->consumer)!=1||!pause_clock.Play(Load(view.p->flags)))Fail();interrupted=false;opened=true;
++        if(!Healthy()||Load(view.p->consumer)!=1||!pause_clock.Play(Load(view.p->flags)))Fail();interrupted=false;completed_drain=false;opened=true;
+     }
+     void Close() noexcept override {
+         pause_clock.Close();
+@@ -88,11 +94,20 @@
+     void Cancel() noexcept override {
+         // Reset/seek cannot race a consumer cursor. The host must prepare a
+         // fresh generation; never discard/replay PCM while claiming continuity.
+-        interrupted=false;Lost();
++        interrupted=false;
++        // MPD RELEASE closes via Cancel even after successful Drain. No bytes
++        // remain and no new Play occurred: publish terminal EOF, not LOST.
++        // This never resets counters/claim or permits reuse of this generation.
++        if (FullyConsumedEof() || (completed_drain.exchange(false) && Healthy() &&
++                Load(view.p->read)==Load(view.p->written) && Load(view.p->written)<=INDEX_MAX)) {
++            opened=false; pause_clock.Close(); Signal(*view.p,EOF_FLAG); Notify(); return;
++        }
++        completed_drain=false;Lost();
+     }
+     std::size_t Play(std::span<const std::byte> src) override {
+         if(!opened||!Healthy()||!pause_clock.Play(Load(view.p->flags)))Fail();
+         if(src.empty())return 0;
++        completed_drain=false;
+         const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(250);
+         while(true){
+             if(interrupted.exchange(false))throw AudioOutputInterrupted{};
+@@ -111,10 +126,11 @@
+         const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(250);
+         while(true){
+             if(interrupted.exchange(false))throw AudioOutputInterrupted{};
++            if(FullyConsumedEof()){completed_drain=true;return;}
+             if(!Healthy()){Lost();Fail();}
+             const auto read=Load(view.p->read),written=Load(view.p->written);
+             if(read>written||written-read>CAPACITY){Lost();Fail();}
+-            if(read==written)return;
++            if(read==written){completed_drain=true;return;}
+             if(std::chrono::steady_clock::now()>=deadline){Lost();Fail();}
+             const std::array handles{inputs.h[3],inputs.h[2]};
+             const auto result=WaitForMultipleObjects(2,handles.data(),FALSE,10);

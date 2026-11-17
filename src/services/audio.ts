@@ -9,8 +9,14 @@ import type { LocalSourceAvailabilityObservation, LocalSourceAvailabilityRow } f
 import type { OnlineCacheStatus } from "../utils/localArtwork";
 
 import { diagnosticInvoke } from "../utils/frontendDiagnostics";
+import { isSqliteCatalogEnabled } from "../utils/sqliteExperimentalMode";
 const invoke = <T>(command: string, args?: Record<string, unknown>): Promise<T> =>
   diagnosticInvoke<T>(nativeInvoke<T>, command, args);
+const rejectUnresolvedSqliteLocators = (uris: readonly string[]): void => {
+  if (uris.some(uri => typeof uri === "string" && (uri.startsWith("sqlite-track://") || uri.startsWith("sqlite-cue://")))) {
+    throw new Error("SQLITE_LOCAL_PLAYBACK_NOT_CONNECTED");
+  }
+};
 const readLocalCover = createLocalCoverBatch(paths =>
   runLocalSourceRead(() => invoke<LocalCoverReply[]>("get_local_covers", { paths })));
 
@@ -84,10 +90,14 @@ export const audioService = {
   next: (): Promise<void> => requestedPlayback<void>("next_track",{},beginPlaybackIntent()),
   previous: (): Promise<void> => requestedPlayback<void>("previous_track",{},beginPlaybackIntent()),
   seek: (seconds: number): Promise<void> => invoke<void>("seek_playback", { seconds }),
-  playUris: async (uris: string[], startIndex: number, intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> =>
-    requestedPlayback<void>("play_uris", { uris, startIndex },intent),
-  playTracks: async (tracks: TrackMetadata[], startIndex: number, intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> =>
-    requestedPlayback<void>("play_tracks", { tracks, startIndex },intent),
+  playUris: async (uris: string[], startIndex: number, intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> => {
+    rejectUnresolvedSqliteLocators(uris);
+    return requestedPlayback<void>("play_uris", { uris, startIndex },intent);
+  },
+  playTracks: async (tracks: TrackMetadata[], startIndex: number, intent: PlaybackIntent = beginPlaybackIntent()): Promise<void> => {
+    rejectUnresolvedSqliteLocators(tracks.map(track => track.uri ?? ""));
+    return requestedPlayback<void>("play_tracks", { tracks, startIndex },intent);
+  },
   setDirectMute: async (request: { muted: boolean; token: string }): Promise<void> => {
     if(!request.muted){const intent=beginPlaybackIntent();await playbackIntentToken(intent);await ensureDirectOutputChoice(intent);if(!intent.current())throw 'PLAYBACK_SUPERSEDED';}
     return invoke<void>("set_direct_mute",request);
@@ -100,6 +110,7 @@ export const audioService = {
     return runLocalSourceRead.control(() => { if (!intent.current()) throw "PLAYBACK_SUPERSEDED"; return invoke<void>("edit_queue", { revision, action, intent: token }); });
   },
   enqueueTracks: async (tracks: TrackMetadata[], placement: "next" | "end", intent: PlaybackIntent): Promise<number> => {
+    rejectUnresolvedSqliteLocators(tracks.map(track => track.uri ?? ""));
     const token = await playbackIntentToken(intent);
     return runLocalSourceRead.control(() => {
       if (!intent.current()) throw "PLAYBACK_SUPERSEDED";
@@ -136,11 +147,23 @@ export const audioService = {
     if (!observation) throw new Error("LOCAL_SOURCE_AVAILABILITY_UNCONFIRMED");
     return observation;
   }),
-  searchLocalTracks: (query: string): Promise<{ tracks: LocalItem[]; limited: boolean }> =>
-    runLocalSourceRead(() => invoke<{ tracks: LocalItem[]; limited: boolean }>("search_local_tracks", { query })),
-  getLocalAlbums: (): Promise<LocalAlbum[]> => runLocalSourceRead(() => invoke<LocalAlbum[]>("get_local_albums")),
+  searchLocalTracks: (query: string): Promise<{ tracks: LocalItem[]; limited: boolean }> => {
+    const read = () => invoke<{ tracks: LocalItem[]; limited: boolean }>(
+      isSqliteCatalogEnabled() ? "sqlite_library_search_tracks" : "search_local_tracks",
+      { query },
+    );
+    // SQLite catalog reads do not touch MPD-managed roots and must not queue
+    // behind the legacy filesystem-read admission path.
+    return isSqliteCatalogEnabled() ? read() : runLocalSourceRead(read);
+  },
+  getLocalAlbums: (): Promise<LocalAlbum[]> => {
+    const read = () => invoke<LocalAlbum[]>(
+      isSqliteCatalogEnabled() ? "sqlite_library_local_albums" : "get_local_albums",
+    );
+    return isSqliteCatalogEnabled() ? read() : runLocalSourceRead(read);
+  },
   getLocalAlbumTracks: (albumId: string): Promise<LocalAlbumDiscTracks[]> =>
-    invoke<LocalAlbumDiscTracks[]>("get_local_album_tracks", { albumId }),
+    invoke<LocalAlbumDiscTracks[]>(isSqliteCatalogEnabled() ? "sqlite_library_local_album_tracks" : "get_local_album_tracks", { albumId }),
   resolveLocalLibraryPath: (path: string): Promise<string> =>
     invoke<string>("resolve_local_library_path", { path }),
   pickDirectory: (): Promise<string | null> => invoke<string | null>("pick_directory"),

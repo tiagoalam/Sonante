@@ -59,7 +59,7 @@ export const PlaylistsView: React.FC<{ config: AppConfig; isPlaybackAvailable: b
   );
 
   const selectionContext = useMemo(() => ({}), [selectedId, selected?.updated_at]);
-  const selection = useTrackSelection(selectionContext, selected?.items.map(item => ({ ...item.metadata, duration: item.metadata.duration ?? undefined, media_locator: item.media_locator })) ?? [], isPlaybackAvailable && !busy && !preparingPlayback);
+  const selection = useTrackSelection(selectionContext, selected?.items.map(item => ({ ...item.metadata, duration: item.metadata.duration ?? undefined, media_locator: item.media_locator })) ?? [], isPlaybackAvailable && !busy && !preparingPlayback, false);
   useEffect(() => {
     setPlaybackFeedback(null);
   }, [selectedId]);
@@ -438,7 +438,6 @@ export const PlaylistsView: React.FC<{ config: AppConfig; isPlaybackAvailable: b
                     <span>{t("playlists.resolving")}</span>
                   </div>
                 )}
-                {selection.toolbar}
                 <div className="divide-y divide-[color:var(--theme-border-soft,#242424)]">
                   {selected.items.map((item, index) => {
                     const missing = availability[item.id] === "missing";

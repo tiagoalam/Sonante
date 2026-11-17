@@ -1,0 +1,21 @@
+{
+  "version": "0.24.18-sonante-windows-audio-candidate-4",
+  "sha256": "c9b0666bd07c5039fc89338bee5337b77dd9762b6c0cfe3127bde3ac0d40f46d",
+  "sourceVersion": "0.24.18",
+  "candidate": true,
+  "nativeValidated": false,
+  "scope": "Inherits candidate 3 natural drained PrivatePCM EOF fix. Adds restricted PCM-only format negotiation in strict WASAPI Exclusive: original format first; finite exact-support candidates may change rate or bit depth while preserving channels. No DSD conversion, Shared fallback, or bit-perfect claim.",
+  "sourceMaterialsSha256": "e466dfa7b024fcda03ae0c28b6f7889bef04432bf77ed272259dfba0fa8289a2",
+  "sourceMaterialsFile": "audio-source-candidate-4.tar.xz",
+  "sourcePatchSha256": "b29bf161462aa22ff6bfedaebd5fc535823b8ea2a756c52a22f0f822cc56b45b",
+  "sourceBaseMaterialsSha256": "9228fc75f83ca44d583e87783faa1b5c5cd9f92e47e8eb8b2dfde82a3c3b6837",
+  "nativeValidation": {
+    "restricted_pcm_policy_fixture_host_passed": true,
+    "full_windows_cross_build_passed": true,
+    "native_windows_executed": false,
+    "native_ipc_exercised_by_maintainer": false,
+    "gui_or_physical_output_qualified": false,
+    "direct_qualified": false,
+    "agent_executed_windows_or_audio": false
+  }
+}

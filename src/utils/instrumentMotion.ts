@@ -17,6 +17,7 @@ export class InstrumentMotion {
   readonly frame = empty();
   private target = empty();
   private holds = Array(INSTRUMENT_BANDS).fill(0);
+  private meterHolds = [0, 0];
   setTarget(levels: AudioLevelFrame, active: boolean) {
     this.target.rms[0] = active ? unitLevel(levels.leftRms) : 0;
     this.target.rms[1] = active ? unitLevel(levels.rightRms) : 0;
@@ -34,17 +35,25 @@ export class InstrumentMotion {
     let moving = false;
     for (let i = 0; i < 2; i++) {
       this.frame.rms[i] = smooth(this.frame.rms[i], this.target.rms[i]);
-      this.frame.peak[i] = snap ? this.target.peak[i] : Math.max(this.target.peak[i], this.frame.peak[i] - dt * .002);
-      moving ||= this.frame.rms[i] !== this.target.rms[i] || this.frame.peak[i] !== this.target.peak[i];
+      if (snap) {
+        this.frame.peak[i] = this.target.peak[i]; this.meterHolds[i] = 0;
+      } else if (this.target.peak[i] >= this.frame.peak[i]) {
+        this.frame.peak[i] = this.target.peak[i]; this.meterHolds[i] = 760;
+      } else {
+        const held = Math.min(dt, this.meterHolds[i]);
+        this.meterHolds[i] = Math.max(0, this.meterHolds[i] - dt);
+        this.frame.peak[i] = Math.max(this.target.peak[i], this.frame.peak[i] - (dt - held) * .0018);
+      }
+      moving ||= this.frame.rms[i] !== this.target.rms[i] || this.frame.peak[i] !== this.target.peak[i] || this.meterHolds[i] > 0;
     }
     for (let i = 0; i < INSTRUMENT_BANDS; i++) {
       const target = this.target.spectrum[i];
       this.frame.spectrum[i] = smooth(this.frame.spectrum[i], target);
       if (snap || target >= this.frame.spectrumPeaks[i]) {
-        this.frame.spectrumPeaks[i] = target; this.holds[i] = snap ? 0 : 180;
+        this.frame.spectrumPeaks[i] = target; this.holds[i] = snap ? 0 : 360;
       } else {
         this.holds[i] = Math.max(0, this.holds[i] - dt);
-        if (this.holds[i] === 0) this.frame.spectrumPeaks[i] = Math.max(target, this.frame.spectrumPeaks[i] - dt * .001);
+        if (this.holds[i] === 0) this.frame.spectrumPeaks[i] = Math.max(target, this.frame.spectrumPeaks[i] - dt * .00135);
       }
       moving ||= this.frame.spectrum[i] !== target || this.frame.spectrumPeaks[i] > target + .0005;
     }

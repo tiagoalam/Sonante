@@ -6,6 +6,7 @@ import {
   localLibrarySourceOptions,
   localLibraryPathLabel,
   localLibrarySelectorPresentation,
+  reconcileLocalLibrarySourceSelection,
   validLocalLibrarySourceSelection,
 } from "./localLibraryScope.ts";
 import { virtualGridMetrics } from "./virtualGrid.ts";
@@ -47,6 +48,28 @@ test("All includes albums without a source", () => {
     album("2", "Loose", "Unknown", undefined),
   ];
   assert.deepEqual(filterLocalAlbumsByScope(albums, null, ""), albums);
+});
+
+test("All Libraries stays the aggregate selection while the asynchronous source list loads", () => {
+  const albums = [album("1", "One", "Artist", "sqlite-1"), album("2", "Two", "Artist", "sqlite-2")];
+  const selected = reconcileLocalLibrarySourceSelection(null, [], false);
+  assert.equal(selected, null);
+  assert.deepEqual(filterLocalAlbumsByScope(albums, selected, "").map(({ id }) => id), ["1", "2"]);
+  assert.equal(reconcileLocalLibrarySourceSelection(selected, [
+    { id: "sqlite-1", label: "One" }, { id: "sqlite-2", label: "Two" },
+  ], true), null, "the completed inventory must not choose its first source automatically");
+});
+
+test("an individual SQLite selection survives source loading and is validated after inventory arrives", () => {
+  const albums = [album("1", "One", "Artist", "sqlite-1"), album("2", "Two", "Artist", "sqlite-2")];
+  const saved = "sqlite-2";
+  assert.equal(reconcileLocalLibrarySourceSelection(saved, [], false), saved);
+  const options = [{ id: "sqlite-1", label: "One" }, { id: "sqlite-2", label: "Two" }];
+  const selected = reconcileLocalLibrarySourceSelection(saved, options, true);
+  assert.equal(selected, saved);
+  assert.deepEqual(filterLocalAlbumsByScope(albums, selected, "").map(({ id }) => id), ["2"]);
+  assert.equal(reconcileLocalLibrarySourceSelection(saved, options.slice(0, 1), true), null,
+    "a source removed from the authoritative inventory returns to All Libraries");
 });
 
 test("a source includes only its albums and excludes unknown sources", () => {

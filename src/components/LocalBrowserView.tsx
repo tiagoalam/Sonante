@@ -31,6 +31,7 @@ import {
   ListPlus,
   Pencil,
   Info,
+  Stethoscope,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LocalImportPreviewSection } from "./LocalImportPreviewSection";
@@ -53,6 +54,7 @@ import {
   localLibrarySourceOptions,
   localLibraryPathLabel,
   localLibrarySelectorPresentation,
+  reconcileLocalLibrarySourceSelection,
   validLocalLibrarySourceSelection,
 } from "../utils/localLibraryScope";
 import {
@@ -83,25 +85,31 @@ import { ToolbarSelect } from "./ToolbarSelect";
 import { LocalMetadataView } from "./LocalMetadataView";
 import { LocalAlbumTagEditorModal } from "./LocalAlbumTagEditorModal";
 import { LibraryDoctorModal } from "./LibraryDoctorModal";
-import { libraryDoctorAvailable } from "../utils/libraryDoctor";
+import { libraryDoctorAvailable, sqliteLibraryDoctorAvailable, sqliteLibraryDoctorVersion } from "../utils/libraryDoctor";
+import { localTagEditingAvailable } from "../utils/localTagCapabilities";
 import type { DoctorReviewContext } from "../utils/libraryDoctorReview";
 import { LocalFileInfoModal } from "./LocalFileInfoModal";
 import { LocalTagEditorModal } from "./LocalTagEditorModal";
+import type { Source as SqliteSource, SqliteIndexProgress } from "../services/sqliteLibrary";
 import type { LocalTrackTags } from "../types/localTags";
 import { createAlbumTracksLoader, type AlbumTracksState } from "../utils/localAlbumTracks";
 import { artworkReadBlocked } from "../utils/localArtwork";
 import { validAlbumGenre } from "../utils/albumGenres";
 import { deriveLocalGenreFamilies, filterLocalAlbumsByFamily } from "../utils/localGenreFamilies";
 import { AlbumGenreGrid } from "./AlbumGenreGrid";
+import { LibraryActivityPanel } from "./LibraryActivityPanel";
+import { readSqliteLocalSourcePreference, saveSqliteLocalSourcePreference } from "../utils/appBootstrap";
+import { useExperimentalFeatures } from "./ExperimentalFeatures";
 
 export { localAlbumCatalog } from "../utils/localAlbumCatalogSession";
 
-async function getLocalAlbumCover(album: LocalAlbum, onlineEnabled: boolean | (() => boolean), libraryUpdating: boolean | (() => boolean), consumerActive: () => boolean = () => true): Promise<string | null> {
+async function getLocalAlbumCover(album: LocalAlbum, onlineEnabled: boolean | (() => boolean), libraryUpdating: boolean | (() => boolean), consumerActive: () => boolean = () => true, sqliteBacked = false): Promise<string | null> {
   const version = localAlbumCatalog.getSnapshot().albums;
-  return localArtworkResolver.resolve(album, onlineEnabled, () => {
+  return localArtworkResolver.resolve(album, sqliteBacked ? false : onlineEnabled, () => {
     const catalog = localAlbumCatalog.getSnapshot();
     const updating = typeof libraryUpdating === "function" ? libraryUpdating() : libraryUpdating;
-    return artworkReadBlocked(updating, catalog) || catalog.albums !== version || !catalog.albums.includes(album);
+    const blocked = sqliteBacked ? updating || catalog.loading || !catalog.loaded || !!catalog.error : artworkReadBlocked(updating, catalog);
+    return blocked || catalog.albums !== version || !catalog.albums.includes(album);
   }, undefined, consumerActive);
 }
 
@@ -120,13 +128,17 @@ const LocalAlbumCard: React.FC<{
   onlineArtworkEnabled: boolean;
   isLibraryUpdating: boolean;
   readEnabled: boolean;
-}> = ({ layout = "grid", album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable, onlineArtworkEnabled, isLibraryUpdating, readEnabled }) => {
+  sqliteBacked?: boolean;
+}> = ({ layout = "grid", album, isFavorite, onToggleFavorite, onClick, onPlayQuick, isPlaybackAvailable, onlineArtworkEnabled, isLibraryUpdating, readEnabled, sqliteBacked = false }) => {
   const { t } = useTranslation();
   const artworkEnabled = layout !== "details";
   const cardContext = useMemo(() => ({}), [album, readEnabled, layout]);
   const cardActions = useQueueInsertion(cardContext, readEnabled && isPlaybackAvailable);
   const albumRequest = { track: { title: album.title, artist: album.artist, album: album.title }, scope: "album" as const, load: () => loadLocalAlbumQueue(album) };
-  const [cover, setCover] = useState<string | null>(() => readEnabled && artworkEnabled ? localArtworkResolver.get(album.id) : null);
+  // A saved thumbnail is a temporary paint fallback, never proof that the
+  // full-resolution album artwork has been resolved for this view.
+  const [cover, setCover] = useState<string | null>(() => readEnabled && artworkEnabled
+    ? localArtworkResolver.get(album.id) : null);
   const [failedCover, setFailedCover] = useState<string | null>(null);
 
   const cardRef = useRef<HTMLDivElement>(null);
@@ -144,9 +156,17 @@ const LocalAlbumCard: React.FC<{
   useEffect(() => {
     setCoverChecked(false);
     if (!readEnabled || !artworkEnabled) { setCover(null); return; }
-    setCover(localArtworkResolver.get(album.id));
-    return localArtworkResolver.subscribe(album.id, setCover);
-  }, [album, readEnabled, artworkEnabled]);
+    const unsubscribe = localArtworkResolver.subscribe(album.id, setCover);
+    const persistedThumbnail = sqliteBacked ? localAlbumThumbnails.get(album) : null;
+    if (persistedThumbnail) {
+      localArtworkResolver.seedPersistedLocal(album.id, persistedThumbnail);
+      setCover(persistedThumbnail);
+      setCoverChecked(true);
+    } else {
+      setCover(localArtworkResolver.get(album.id));
+    }
+    return unsubscribe;
+  }, [album, readEnabled, artworkEnabled, sqliteBacked]);
 
   useEffect(() => {
     if (!artworkEnabled) return;
@@ -171,14 +191,24 @@ const LocalAlbumCard: React.FC<{
 
   useEffect(() => {
     if (!readEnabled || !artworkEnabled || !visible || cover) return;
+    const persistedThumbnail = sqliteBacked ? localAlbumThumbnails.get(album) : null;
+    if (persistedThumbnail) {
+      localArtworkResolver.seedPersistedLocal(album.id, persistedThumbnail);
+      setCover(persistedThumbnail);
+      setCoverChecked(true);
+      return;
+    }
     let active = true;
     const version = localAlbumCatalog.getSnapshot().albums;
     const current = () => {
       const catalog = localAlbumCatalog.getSnapshot();
-      return active && readEnabledRef.current && catalog.albums === version && catalog.albums.includes(album)
-        && !artworkReadBlocked(libraryUpdatingRef.current, catalog);
+      const blocked = sqliteBacked
+        ? libraryUpdatingRef.current || catalog.loading || !catalog.loaded || !!catalog.error
+        : artworkReadBlocked(libraryUpdatingRef.current, catalog);
+      return active && readEnabledRef.current && catalog.albums === version && catalog.albums.includes(album) && !blocked;
     };
-    getLocalAlbumCover(album, () => onlineEnabledRef.current, () => libraryUpdatingRef.current, () => active && readEnabledRef.current)
+    getLocalAlbumCover(album, () => sqliteBacked ? false : onlineEnabledRef.current, () => libraryUpdatingRef.current,
+      () => active && readEnabledRef.current, sqliteBacked)
       .then((found) => {
         if (!active) return;
         if (found) { setCover(found); setCoverChecked(true); }
@@ -186,13 +216,15 @@ const LocalAlbumCard: React.FC<{
       })
       .catch((error) => logError("artwork.album-load", error));
     return () => { active = false; };
-  }, [album, visible, cover, onlineArtworkEnabled, isLibraryUpdating, readEnabled, artworkEnabled]);
+  }, [album, visible, cover, onlineArtworkEnabled, isLibraryUpdating, readEnabled, artworkEnabled, sqliteBacked]);
 
   const captureResolvedImage = (image: HTMLImageElement, trigger: "on_load" | "already_complete") => {
     if (!artworkEnabled || !readEnabled || !cover || displayCover !== cover || (image.currentSrc || image.src) !== cover) return;
     localAlbumThumbnails.capture(album, image, () => {
       const current = localAlbumCatalog.getSnapshot();
-      return current.albums.includes(album) && !artworkReadBlocked(libraryUpdatingRef.current, current);
+      return current.albums.includes(album) && (sqliteBacked
+        ? !libraryUpdatingRef.current && current.loaded && !current.loading && !current.error
+        : !artworkReadBlocked(libraryUpdatingRef.current, current));
     }, trigger);
   };
 
@@ -293,6 +325,21 @@ export interface LocalBrowserViewProps {
   isLibraryUpdating: boolean;
   onlineArtworkEnabled: boolean;
   configuredLocalFolders: readonly string[];
+  windowsLibraryStatus?: React.ReactNode;
+  hideWindowsCatalogActivity?: boolean;
+  sqliteBacked?: boolean;
+  sqliteTagEditorEarlyAccessEnabled?: boolean;
+  sqliteIndexing?: boolean;
+  sqliteProgress?: SqliteIndexProgress | null;
+  sqliteSources?: SqliteSource[];
+  sqliteSourcesLoaded?: boolean;
+  sqliteActivityHidden?: boolean;
+  onSqliteActivityDismiss?: (operationId: string) => void;
+  onSqliteAddFolder?: () => void;
+  legacySqliteSourcesPending?: number;
+  onImportLegacySqliteSources?: () => void;
+  onSqliteVerifySource?: (sourceId: string) => Promise<boolean>;
+  onSqliteReindexSource?: (sourceId: string) => Promise<void>;
 }
 
 export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
@@ -314,8 +361,25 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   isLibraryUpdating,
   onlineArtworkEnabled,
   configuredLocalFolders,
+  windowsLibraryStatus,
+  hideWindowsCatalogActivity = false,
+  sqliteBacked = false,
+  sqliteTagEditorEarlyAccessEnabled = false,
+  sqliteIndexing = false,
+  sqliteProgress = null,
+  sqliteSources = [],
+  sqliteSourcesLoaded = false,
+  sqliteActivityHidden = false,
+  onSqliteActivityDismiss,
+  onSqliteAddFolder,
+  legacySqliteSourcesPending = 0,
+  onImportLegacySqliteSources,
+  onSqliteVerifySource,
+  onSqliteReindexSource,
 }) => {
   const { t } = useTranslation();
+  const experimentalEnabled = useExperimentalFeatures();
+  const localPlaybackAvailable = isPlaybackAvailable;
   const catalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
   const artworkStatus = useSyncExternalStore(localArtworkEnrichment.subscribe, localArtworkEnrichment.getSnapshot);
   const albums = localCatalogPresentationAlbums(catalog);
@@ -330,12 +394,16 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const playerAlbum = useMemo(() => playerTarget
     ? albums.find(item => item.id === playerTarget.albumId) ?? null : null, [playerTarget, albums]);
   const [viewMode, setViewMode] = useState<"albums" | "artists" | "years" | "genres" | "folders">(playerTarget?.view === "artist" ? "artists" : "albums");
-  const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, isLibraryUpdating);
-  const catalogActivity = localCatalogActivity(isLibraryUpdating, catalog);
+  // In SQLite mode, MPD update state belongs to a different catalog. Only the
+  // explicit SQLite operation may show Local indexing/organization activity.
+  const catalogUpdating = sqliteBacked ? sqliteIndexing : isLibraryUpdating;
+  const emptyCatalogState = emptyLocalAlbumCatalogState(catalog, catalogUpdating);
+  const catalogActivity = localCatalogActivity(catalogUpdating, catalog);
   const [albumSearch, setAlbumSearch] = useState("");
   const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
   const [artistSearch, setArtistSearch] = useState("");
-  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(playerAlbum?.source_id ?? initialAlbum?.source_id ?? null);
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(() =>
+    playerAlbum?.source_id ?? initialAlbum?.source_id ?? (sqliteBacked ? readSqliteLocalSourcePreference() : null));
   const [albumPresentation, setAlbumPresentation] = useState<AlbumPresentation>(()=>readAlbumPresentation("local"));
   const changeAlbumPresentation = (next: AlbumPresentation) => { setAlbumPresentation(next); saveAlbumPresentation("local", next); };
   const [albumSortMode, setAlbumSortMode] = useState<LocalAlbumSortMode>("album-asc");
@@ -352,12 +420,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const [trackState, setTrackState] = useState<AlbumTracksState>({ albumId: null, phase: "waiting", groups: [], error: null, catalogVersion: null });
   const tracksLoader = useMemo(() => createAlbumTracksLoader(createPlayerAlbumLookup(
     playerTarget, () => localAlbumCatalog.getSnapshot().albums, audioService.getLocalAlbumTracks,
-  ), setTrackState, () => localAlbumCatalog.waitForMpd()), []);
+  ), setTrackState, () => { if (!sqliteBacked) localAlbumCatalog.waitForMpd(); }), []);
   const catalogConfirmed = !detailUnavailable && confirmedCatalogPlaybackAllowed(catalog, isLibraryUpdating);
   // A check permits playback of confirmed tracks, not editing/inspecting a
   // generation while its writer owns it. Keep those existing guards strict.
-  const catalogInspectionAllowed = catalogConfirmed && !isLibraryUpdating && !catalog.manualCheckPlayback;
-  const artworkBlocked = metadataMode || artworkReadBlocked(isLibraryUpdating, catalog);
+  const catalogInspectionAllowed = !sqliteBacked && catalogConfirmed && !isLibraryUpdating && !catalog.manualCheckPlayback;
+  const canDiagnoseAlbum = (albumId: string) => sqliteBacked
+    ? sqliteLibraryDoctorAvailable(albumId, sqliteSources, sqliteIndexing, albums.map(album => album.id))
+    : libraryDoctorAvailable(localAlbumCatalog.getSnapshot(), libraryUpdatingRef.current, albumId);
+  const artworkBlocked = sqliteBacked
+    ? metadataMode || sqliteIndexing || !catalog.loaded || catalog.loading || !!catalog.error
+    : metadataMode || artworkReadBlocked(isLibraryUpdating, catalog);
   const tracksReady = catalogConfirmed && trackState.catalogVersion === albums && trackState.phase === "ready" && trackState.albumId === selectedAlbum?.id;
   const { tracks: albumTracks, sections: albumSections } = useMemo(
     () => flattenAlbumDiscs(tracksReady ? trackState.groups : []), [tracksReady, trackState.groups],
@@ -385,9 +458,20 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   libraryUpdatingForTags.current = isLibraryUpdating;
   const albumTagEditingAvailable = (albumId: string) => {
     const current = localAlbumCatalog.getSnapshot();
-    return !detailUnavailable && current.loaded && !current.loading && !current.error && !current.mpdBusy
-      && !current.saveBlocked && !current.manualCheckPlayback && !libraryUpdatingForTags.current
-      && current.albums.some((album) => album.id === albumId);
+    return localTagEditingAvailable({
+      sqliteBacked,
+      earlyAccessEnabled: sqliteTagEditorEarlyAccessEnabled,
+      sqliteEditSupported: sqliteBacked && albums.some(album => album.id === albumId),
+      detailUnavailable,
+      catalogLoaded: current.loaded,
+      catalogLoading: current.loading,
+      catalogError: !!current.error,
+      mpdBusy: current.mpdBusy,
+      saveBlocked: current.saveBlocked,
+      manualCheckPlayback: !!current.manualCheckPlayback,
+      libraryUpdating: libraryUpdatingForTags.current,
+      albumPresent: current.albums.some((album) => album.id === albumId),
+    });
   };
   const [tagEditorTrack, setTagEditorTrack] = useState<LocalItem | null>(null);
   const [fileInfoTrack, setFileInfoTrack] = useState<{ track: LocalItem; catalog: ReturnType<typeof localAlbumCatalog.getSnapshot> } | null>(null);
@@ -414,7 +498,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [sqliteBacked]);
 
   useEffect(() => {
     if (!initialCatalogMountHandled.current) {
@@ -443,26 +527,35 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   }, [catalogRefreshRevision]);
 
   useEffect(() => {
-    if (!artworkBlocked && !initialAlbumId) {
+    if (!sqliteBacked && !artworkBlocked && !initialAlbumId) {
       localArtworkEnrichment.setCatalog(catalog.albums);
     }
-  }, [catalog.albums, artworkBlocked, initialAlbumId]);
+  }, [catalog.albums, artworkBlocked, initialAlbumId, sqliteBacked]);
 
   useEffect(() => {
     if (!selectedAlbum || metadataMode) return;
-    const cached = localArtworkResolver.get(selectedAlbum.id);
-    if (cached) setAlbumCover(cached);
+    const persistedThumbnail = sqliteBacked ? localAlbumThumbnails.get(selectedAlbum) : null;
+    if (persistedThumbnail) localArtworkResolver.seedPersistedLocal(selectedAlbum.id, persistedThumbnail);
+    const cached = persistedThumbnail ?? localArtworkResolver.get(selectedAlbum.id);
+    setAlbumCover(cached);
     return localArtworkResolver.subscribe(selectedAlbum.id, setAlbumCover);
-  }, [selectedAlbum, metadataMode]);
+  }, [selectedAlbum, metadataMode, sqliteBacked]);
 
   useEffect(() => {
     if (!selectedAlbum || artworkBlocked) return;
+    const persistedThumbnail = sqliteBacked ? localAlbumThumbnails.get(selectedAlbum) : null;
+    if (persistedThumbnail) {
+      localArtworkResolver.seedPersistedLocal(selectedAlbum.id, persistedThumbnail);
+      setAlbumCover(persistedThumbnail);
+      return;
+    }
     let active = true;
-    void getLocalAlbumCover(selectedAlbum, () => onlineEnabledRef.current, () => artworkBlockedRef.current, () => active && browserReads.current)
+    void getLocalAlbumCover(selectedAlbum, () => sqliteBacked ? false : onlineEnabledRef.current,
+      () => artworkBlockedRef.current, () => active && browserReads.current, sqliteBacked)
       .then(cover => { if (active && cover) setAlbumCover(cover); })
       .catch(error => logError("artwork.album-load", error));
     return () => { active = false; };
-  }, [selectedAlbum, artworkBlocked]);
+  }, [selectedAlbum, artworkBlocked, sqliteBacked]);
 
   useEffect(() => {
     if (initialArtist) {
@@ -483,12 +576,15 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     if (!browserReads.current) return;
     setSelectedSourceId(album.source_id ?? null);
     setSelectedAlbum(playerTarget.view === "album" ? album : null);
-    setSelectedArtist(playerTarget.view === "artist" ? album.artist : null);
+    setSelectedArtist(playerTarget.view === "artist"
+      ? playerTarget.artistName && album.artist_names?.includes(playerTarget.artistName)
+        ? playerTarget.artistName : album.artist
+      : null);
     setViewMode(playerTarget.view === "artist" ? "artists" : "albums");
   }, [playerTarget, playerAlbum, tagEditorAlbum, fileInfoTrack]);
 
   useEffect(() => {
-    if (!selectedAlbum || !catalog.loaded || metadataMode || albumLocations?.album === selectedAlbum) return;
+    if (sqliteBacked || !selectedAlbum || !catalog.loaded || metadataMode || albumLocations?.album === selectedAlbum) return;
     let active = true;
     const album = selectedAlbum;
     const sources = albumLocationSources(album);
@@ -508,11 +604,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     return () => {
       active = false;
     };
-  }, [selectedAlbum, metadataMode, catalog.loaded]);
+  }, [selectedAlbum, metadataMode, catalog.loaded, sqliteBacked]);
 
   useEffect(() => {
     let active = true;
-    if (!metadataMode && viewMode === "folders") {
+    if (!sqliteBacked && !metadataMode && viewMode === "folders") {
       setLoadingFolders(true);
       audioService.listLocalDirectory(currentPath)
         .then((data) => {
@@ -522,11 +618,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         .finally(() => { if (active) setLoadingFolders(false); });
     }
     return () => { active = false; };
-  }, [currentPath, viewMode, metadataMode]);
+  }, [currentPath, viewMode, metadataMode, sqliteBacked]);
 
   useEffect(() => { setFolderCover(null); }, [currentPath]);
   useEffect(() => {
-    if (viewMode !== "folders" || artworkBlocked) return;
+    if (sqliteBacked || viewMode !== "folders" || artworkBlocked) return;
     let active = true;
     const version = catalog.albums;
     void audioService.getLocalCover(currentPath).then(cover => {
@@ -534,19 +630,19 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       if (active && currentCatalog.albums === version && !artworkReadBlocked(libraryUpdatingRef.current, currentCatalog)) setFolderCover(cover);
     }).catch(error => logError("artwork.folder-load", error));
     return () => { active = false; };
-  }, [currentPath, viewMode, artworkBlocked, catalog.albums]);
+  }, [currentPath, viewMode, artworkBlocked, catalog.albums, sqliteBacked]);
 
   const handleToggleFavoriteLocal = async (e: React.MouseEvent, album: LocalAlbum, cov: string | null) => {
     e.stopPropagation();
     const current = localAlbumCatalog.getSnapshot();
     if (!current.loaded || !current.albums.includes(album)) return;
     const favItem: FavoriteAlbum = {
-      id: album.folder_path,
+      id: sqliteBacked ? album.id : album.folder_path,
       source: "local",
       title: album.title,
       artist: album.artist,
       year: album.year,
-      thumb: cov,
+      thumb: sqliteBacked ? null : cov,
       path_or_key: album.folder_path,
       exists: true,
     };
@@ -554,14 +650,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       const added = await favoritesService.toggleFavorite(favItem);
       setFavoriteIds((prev) => {
         const next = new Set(prev);
-        if (added) next.add(album.folder_path);
-        else next.delete(album.folder_path);
+        const id = sqliteBacked ? album.id : album.folder_path;
+        if (added) next.add(id);
+        else next.delete(id);
         return next;
       });
     } catch (err) {
       logError("local.favorite-toggle", err);
     }
   };
+
+  const isLocalAlbumFavorite = (album: LocalAlbum) => favoriteIds.has(sqliteBacked ? album.id : album.folder_path);
 
   const handleSelectAlbum = async (album: LocalAlbum) => {
     if (!localAlbumCatalog.getSnapshot().loaded) return;
@@ -594,15 +693,16 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     subview, viewMode, currentPath, selectedAlbum?.id, selectedArtist, selectedSourceId,
     selectedGenre, selectedDecade, selectedYear, unknownYearSelected, albumSearch, artistSearch,
     initialAlbumId, playerTarget, albums, catalogRefreshRevision, configuredLocalFolders,
-    isPlaybackAvailable, catalogConfirmed,
+    localPlaybackAvailable, catalogConfirmed,
   ]);
   const localPlayback = usePlaybackAttempt(playbackContext, "local.album-play");
   const runLocalPlayback = localPlayback.run;
   const playbackFailure = localPlayback.failure;
-  const queueActions = useQueueInsertion(playbackContext, isPlaybackAvailable && catalogConfirmed && !isLibraryUpdating && !catalog.manualCheckPlayback);
-  const selectableTracks = useMemo(() => (selectedAlbum ? albumTracks : items.filter(item => item.item_type !== "directory")).map(track => localQueueTrack(track, selectedAlbum, selectedAlbum ? albumCover : folderCover)), [selectedAlbum, albumTracks, items, albumCover, folderCover]);
-  const selection = useTrackSelection(playbackContext, selectableTracks, isPlaybackAvailable && catalogConfirmed && !isLibraryUpdating && !catalog.manualCheckPlayback);
-  const folderSelectionIndices = new Map(items.filter(item => item.item_type !== "directory").map((item, index) => [item.path, index]));
+  const queueActions = useQueueInsertion(playbackContext, localPlaybackAvailable && catalogConfirmed && !isLibraryUpdating && !catalog.manualCheckPlayback);
+  const selectableTracks = useMemo(() => selectedAlbum
+    ? albumTracks.map(track => localQueueTrack(track, selectedAlbum, albumCover)) : [], [selectedAlbum, albumTracks, albumCover]);
+  const selection = useTrackSelection(playbackContext, selectableTracks,
+    Boolean(selectedAlbum && tracksReady && localPlaybackAvailable && catalogConfirmed && !isLibraryUpdating && !catalog.manualCheckPlayback));
   const queueRequest = (track: LocalItem, album?: LocalAlbum | null) => ({
     track: localQueueTrack(track, album, album ? albumCover : folderCover),
     album: album && tracksReady ? async () => albumTracks.map(item => localQueueTrack(item, album, albumCover)) : () => loadQueuedAlbum(localQueueTrack(track, album)),
@@ -611,21 +711,23 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   const handlePlayEntireAlbum = (album: LocalAlbum, trackItems?: LocalItem[], startIdx = 0) => runLocalPlayback(async intent => {
     if (!isPlaybackAvailable || !catalogConfirmed || (trackItems && !tracksReady)) return;
     const files = trackItems ?? flattenAlbumDiscs(await loadAlbumDiscTracks(album)).tracks;
-    const cov = (selectedAlbum?.id === album.id ? albumCover : null) || await localArtworkResolver.resolveLocalOnly(album, () => artworkReadBlocked(libraryUpdatingRef.current, localAlbumCatalog.getSnapshot())).catch(error => {
+    const cov = (selectedAlbum?.id === album.id ? albumCover : null)
+      || (sqliteBacked ? localAlbumThumbnails.get(album) : null)
+      || (sqliteBacked ? null : await localArtworkResolver.resolveLocalOnly(album, () => artworkReadBlocked(libraryUpdatingRef.current, localAlbumCatalog.getSnapshot())).catch(error => {
       // Optional artwork must not reject a valid playback request when the
       // catalog writer owns its read scope. Native music/queue errors still fail.
       logError("local.album-artwork", error);
       return null;
-    });
+    }));
     const currentCatalog = localAlbumCatalog.getSnapshot();
     if (currentCatalog.albums !== albums || !confirmedCatalogPlaybackAllowed(currentCatalog, libraryUpdatingRef.current)) return;
-    const meta = files.map((f) => ({
+    const meta = files.map((f) => sqliteBacked ? localQueueTrack(f, album, cov) : ({
       title: f.title || f.name,
       artist: f.artist || album.artist,
       album: f.album || album.title,
       thumb: cov,
       uri: f.path,
-	duration: f.duration,
+      duration: f.duration,
     }));
     if (meta.length > 0) {
       await audioService.playTracks(meta, startIdx, intent);
@@ -667,17 +769,33 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   };
 
   const [checkingLibrary, setCheckingLibrary] = useState(false);
-  const [checkFeedback, setCheckFeedback] = useState<{scope: string; kind: "updated" | "unchanged" | "failed" | "other-source-unavailable"} | null>(null);
+  const [checkFeedback, setCheckFeedback] = useState<{scope: string; kind: "updated" | "unchanged" | "failed" | "unconfirmed" | "other-source-unavailable"} | null>(null);
+  useEffect(() => {
+    if (!checkFeedback || typeof window === "undefined") return;
+    const feedback = checkFeedback;
+    const timer = window.setTimeout(() => setCheckFeedback(current => current === feedback ? null : current), 30_000);
+    return () => window.clearTimeout(timer);
+  }, [checkFeedback]);
   const libraryCheckInFlight = useRef(false);
   const browserMounted = useRef(true);
   useEffect(() => { browserMounted.current = true; return () => { browserMounted.current = false; }; }, []);
 
-  const sourceOptions = useMemo(() => localLibrarySourceOptions(albums), [albums]);
-  const libraryPresentation = localLibrarySelectorPresentation(configuredLocalFolders);
+  const sourceOptions = useMemo(() => sqliteBacked
+    ? sqliteSources.map(source => ({ id: `sqlite-${source.id}`, label: source.displayName }))
+    : localLibrarySourceOptions(albums), [albums, sqliteBacked, sqliteSources]);
+  const libraryPresentation = sqliteBacked
+    ? sourceOptions.length === 0 ? { mode: "empty" as const }
+      : sourceOptions.length === 1 ? { mode: "single" as const, label: sourceOptions[0].label }
+        : { mode: "multiple" as const }
+    : localLibrarySelectorPresentation(configuredLocalFolders);
   const librarySelectOptions = useMemo(() => [
     { value: "", label: t("localBrowser.allLibraries") },
-    ...sourceOptions.map((source) => ({ value: source.id, label: source.label })),
-  ], [sourceOptions, t]);
+    ...sourceOptions.map((source) => {
+      const catalogSource = sqliteBacked ? sqliteSources.find(item => `sqlite-${item.id}` === source.id) : undefined;
+      return { value: source.id, label: catalogSource
+        ? `${source.label} · ${catalogSource.trackCount} ${t("sqliteLibrary.sourceTrackCount")}` : source.label };
+    }),
+  ], [sourceOptions, sqliteBacked, sqliteSources, t]);
   const localAlbumSortOptions = useMemo(() => [
     { value: "album-asc", label: t("localBrowser.sortAlbumAsc") },
     { value: "album-desc", label: t("localBrowser.sortAlbumDesc") },
@@ -692,13 +810,51 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     { value: "artist-asc", label: t("localBrowser.sortArtistAsc") },
     { value: "artist-desc", label: t("localBrowser.sortArtistDesc") },
   ], [t]);
-  const activeSourceId = validLocalLibrarySourceSelection(selectedSourceId, sourceOptions);
+  const activeSourceId = sqliteBacked && !sqliteSourcesLoaded
+    ? null
+    : validLocalLibrarySourceSelection(selectedSourceId, sourceOptions);
   // No source ID uses the same all-folder check as Settings. A bound ID limits discovery.
-  const canSelectLibraryCheck = configuredLocalFolders.length > 0;
+  const canSelectLibraryCheck = sqliteBacked ? sourceOptions.length > 0 : configuredLocalFolders.length > 0;
   const libraryCheckScope = JSON.stringify([configuredLocalFolders, activeSourceId]);
   const checkDisabled = checkingLibrary || !catalog.loaded || catalog.loading || catalog.saveBlocked
-    || catalog.mpdBusy || !!catalog.error || isLibraryUpdating || !isPlaybackAvailable
+    || catalog.mpdBusy || !!catalog.error || (!sqliteBacked && isLibraryUpdating) || (!sqliteBacked && !isPlaybackAvailable)
+    || (sqliteBacked && !activeSourceId)
+    || (sqliteBacked && sqliteIndexing)
     || !!(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack);
+  const artworkProgressVisible = artworkStatus.active || artworkStatus.outcome !== "idle";
+  const artworkProcessed = artworkStatus.total > 0
+    ? Math.min(artworkStatus.processed, artworkStatus.active ? Math.max(0, artworkStatus.total - 1) : artworkStatus.total)
+    : 0;
+  const artworkProgress = viewMode === "albums" && (
+    <div role="status" aria-label={t("artwork.progressLabel")} aria-live={artworkProgressVisible ? "polite" : "off"} aria-atomic="false"
+      aria-hidden={!artworkProgressVisible} className={`ml-auto flex h-9 w-32 shrink-0 flex-col justify-center overflow-hidden sm:w-52${artworkProgressVisible ? "" : " invisible"}`}>
+      <div className="flex min-w-0 items-center justify-end gap-1 whitespace-nowrap text-[9px] leading-3 tabular-nums">
+        <Search size={11} aria-hidden="true" className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" />
+        <span className="shrink-0 text-[color:var(--theme-fg-secondary,#BBBBBB)]">
+          {artworkStatus.active
+            ? artworkStatus.total > 0 ? t("artwork.progressCount", { processed: artworkProcessed, total: artworkStatus.total }) : t("artwork.progressLabel")
+            : artworkStatus.outcome === "completed" ? t("artwork.progressCompleted", { processed: artworkStatus.processed, total: artworkStatus.total })
+              : artworkStatus.outcome === "partial" ? t("artwork.progressPartial", { failed: artworkStatus.failed })
+                : artworkStatus.outcome === "cancelled" ? t("artwork.progressCancelled", { processed: artworkStatus.processed, total: artworkStatus.total })
+                  : t("artwork.progressLabel")}
+        </span>
+        {artworkStatus.onlineFound > 0 && <>
+          <span className="hidden shrink-0 text-[color:var(--theme-fg-muted,#777777)] sm:inline">
+            {t("artwork.progressOnline", { count: artworkStatus.onlineFound })}
+          </span>
+          <span className="sr-only sm:hidden">
+            {t("artwork.progressOnline", { count: artworkStatus.onlineFound })}
+          </span>
+        </>}
+      </div>
+      <div className={`mt-1 h-1 w-full overflow-hidden rounded-full bg-[var(--theme-surface-raised,#1E1E1E)]${artworkStatus.total > 0 && artworkProgressVisible ? "" : " invisible"}`}>
+        {artworkStatus.total > 0 && artworkProgressVisible && <div role="progressbar" aria-label={t("artwork.progressBarLabel")}
+          aria-valuemin={0} aria-valuemax={artworkStatus.total} aria-valuenow={artworkProcessed}
+          className="h-full rounded-full bg-[color:var(--theme-fg-muted,#777777)]"
+          style={{ width: `${Math.min(100, artworkProcessed / artworkStatus.total * 100)}%` }} />}
+      </div>
+    </div>
+  );
   const handleLibraryCheck = async () => {
     if (!canSelectLibraryCheck || checkDisabled || libraryCheckInFlight.current) return;
     libraryCheckInFlight.current = true;
@@ -707,14 +863,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     setCheckingLibrary(true);
     setCheckFeedback(null);
     try {
-      const changed = await refreshCatalogAfterSuccessfulCheck(
-        () => audioService.checkLocalLibrary(source, configuredLocalFolders), () => localAlbumCatalog.requestRefresh(),
-      );
+      const changed = sqliteBacked
+        ? await onSqliteVerifySource?.(source ?? "") ?? false
+        : await refreshCatalogAfterSuccessfulCheck(
+            () => audioService.checkLocalLibrary(source, configuredLocalFolders), () => localAlbumCatalog.requestRefresh(),
+          );
       if (browserMounted.current) setCheckFeedback({scope, kind: changed ? "updated" : "unchanged"});
     } catch (error) {
       logError("library.check-changes", error);
       if (browserMounted.current) setCheckFeedback({scope, kind:
-        error === "LOCAL_INCREMENTAL_CHECK_OTHER_SOURCE_UNAVAILABLE" ? "other-source-unavailable" : "failed"});
+        error === "LOCAL_INCREMENTAL_CHECK_OTHER_SOURCE_UNAVAILABLE" ? "other-source-unavailable"
+          : error === "windows_library_check_unconfirmed" ? "unconfirmed" : "failed"});
     } finally {
       libraryCheckInFlight.current = false;
       if (browserMounted.current) setCheckingLibrary(false);
@@ -803,8 +962,20 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     : yearNavigation.decades.find((item) => item.decade === selectedDecade) ?? null;
 
   useEffect(() => {
-    if (selectedSourceId !== activeSourceId) setSelectedSourceId(activeSourceId);
-  }, [activeSourceId, selectedSourceId]);
+    if (!catalog.loaded || catalog.loading) return;
+    const nextSelection = reconcileLocalLibrarySourceSelection(
+      selectedSourceId, sourceOptions, !sqliteBacked || sqliteSourcesLoaded,
+    );
+    if (selectedSourceId !== nextSelection) setSelectedSourceId(nextSelection);
+  }, [catalog.loaded, catalog.loading, selectedSourceId, sourceOptions, sqliteBacked, sqliteSourcesLoaded]);
+
+  useEffect(() => {
+    if (!sqliteBacked || !sqliteSourcesLoaded || !catalog.loaded || catalog.loading) return;
+    // A saved source can be checked only after the asynchronous source list is
+    // available. Do not overwrite it with the temporary all-sources view while
+    // that list is still loading.
+    saveSqliteLocalSourcePreference(activeSourceId);
+  }, [sqliteBacked, sqliteSourcesLoaded, catalog.loaded, catalog.loading, activeSourceId]);
 
   useEffect(() => {
     if (!selectedArtist || !catalog.loaded || catalog.loading) return;
@@ -916,8 +1087,8 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     setMetadataAlbumId(albumId);
   };
   const openMetadataEditor = (albumId: string) => {
-    if (tagEditorOpen.current || doctorAlbum || localAlbumCatalog.getSnapshot() !== catalog || !albumTagEditingAvailable(albumId)) return;
-    const album = catalog.albums.find(item => item.id === albumId);
+    if (tagEditorOpen.current || doctorAlbum || (!sqliteBacked && localAlbumCatalog.getSnapshot() !== catalog) || !albumTagEditingAvailable(albumId)) return;
+    const album = albums.find(item => item.id === albumId);
     if (!album) return;
     tagEditorOpen.current = true;
     setDoctorAlbum(null);
@@ -925,15 +1096,15 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
     setTagEditorAlbum(album);
   };
   const diagnoseMetadataAlbum = (albumId: string) => {
-    if (tagEditorOpen.current || doctorAlbum || localAlbumCatalog.getSnapshot() !== catalog
-      || !libraryDoctorAvailable(localAlbumCatalog.getSnapshot(), libraryUpdatingRef.current, albumId)) return;
-    const album = catalog.albums.find(item => item.id === albumId);
+    if (tagEditorOpen.current || doctorAlbum || (!sqliteBacked && localAlbumCatalog.getSnapshot() !== catalog)
+      || !canDiagnoseAlbum(albumId)) return;
+    const album = albums.find(item => item.id === albumId);
     if (album) setDoctorAlbum(album);
   };
 
   return (
     <main className="flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)] select-none">
-      {queueActions.notice}{queueActions.menu}{selection.toolbar}
+      {queueActions.notice}{queueActions.menu}
       {detailUnavailable && <div role="status" className="space-y-3 p-6 text-sm text-[color:var(--theme-fg-secondary,#BBBBBB)]">
         <p>{t("explore.detailUnavailable")}</p>
         <button type="button" disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)}
@@ -946,7 +1117,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           onBack={() => { if (!tagEditorOpen.current && !doctorAlbum) onSubviewChange?.("browser"); }} />
       </div>
       <div className={metadataMode ? "hidden" : "contents"}>
-      <div className="flex flex-wrap items-center justify-between gap-4 px-8 pt-8 pb-4">
+      <div className={sqliteBacked
+        ? "grid h-[84px] min-h-[84px] shrink-0 grid-cols-[minmax(0,0.4fr)_minmax(0,2.6fr)_auto] items-center gap-2 px-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.8fr)_auto] sm:gap-3 sm:px-8"
+        : windowsLibraryStatus !== undefined
+          ? "flex items-center justify-between gap-3 px-8 pt-8 pb-4"
+          : "flex flex-wrap items-center justify-between gap-4 px-8 pt-8 pb-4"}>
         <div className="flex min-w-0 flex-1 items-center space-x-3">
           {showContextBack && !(externalBackNavigation && (initialAlbumId && (!selectedAlbum || selectedAlbum.id === initialAlbumId) || initialArtist && !selectedAlbum)) && (
             <button
@@ -965,32 +1140,26 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               : "mt-1 text-sm font-medium tabular-nums text-[color:var(--theme-fg-secondary,#BBBBBB)]"} truncate`}>{headerCount}</p>
           </div>
         </div>
-        {viewMode === "albums" && (
-          <div role="status" aria-live={artworkStatus.active ? "polite" : "off"} aria-atomic="false"
-            aria-hidden={!artworkStatus.active} className={`ml-auto flex h-9 w-32 shrink-0 flex-col justify-center overflow-hidden sm:w-52${artworkStatus.active ? "" : " invisible"}`}>
-            <div className="flex min-w-0 items-center justify-end gap-1 whitespace-nowrap text-[9px] leading-3 tabular-nums">
-              <Search size={11} aria-hidden="true" className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" />
-              <span className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]">{t("artwork.progressLabel")}</span>
-              <span className="shrink-0 text-[color:var(--theme-fg-secondary,#BBBBBB)]">
-                {Math.min(artworkStatus.processed, artworkStatus.total)}/{artworkStatus.total}
-              </span>
-              {artworkStatus.onlineFound > 0 && <>
-                <span className="hidden shrink-0 text-[color:var(--theme-fg-muted,#777777)] sm:inline">
-                  {t("artwork.progressOnline", { count: artworkStatus.onlineFound })}
-                </span>
-                <span className="sr-only sm:hidden">
-                  {t("artwork.progressOnline", { count: artworkStatus.onlineFound })}
-                </span>
-              </>}
-            </div>
-            <div className={`mt-1 h-1 w-full overflow-hidden rounded-full bg-[var(--theme-surface-raised,#1E1E1E)]${artworkStatus.total > 0 ? "" : " invisible"}`}>
-              {artworkStatus.total > 0 && <div role="progressbar" aria-label={t("artwork.progressBarLabel")}
-                aria-valuemin={0} aria-valuemax={artworkStatus.total} aria-valuenow={Math.min(artworkStatus.processed, artworkStatus.total)}
-                className="h-full rounded-full bg-[color:var(--theme-fg-muted,#777777)]"
-                style={{ width: `${Math.min(100, artworkStatus.processed / artworkStatus.total * 100)}%` }} />}
-            </div>
+        {!sqliteBacked && (windowsLibraryStatus === undefined ? artworkProgress : (
+          <div className="flex min-w-0 max-w-[48%] shrink-0 items-center justify-end gap-3 sm:max-w-[55%]">
+            {windowsLibraryStatus}{artworkProgress}
           </div>
-        )}
+        ))}
+        {sqliteBacked && <div className="h-14 min-w-0 sm:h-16">
+          {artworkStatus.active && viewMode === "albums" ? artworkProgress
+            : <LibraryActivityPanel activity={sqliteProgress} hidden={sqliteActivityHidden} onDismiss={onSqliteActivityDismiss} />}
+        </div>}
+        {sqliteBacked && <div className="ml-auto flex max-w-full shrink-0 items-center gap-2">
+          {legacySqliteSourcesPending > 0 && <button type="button" onClick={onImportLegacySqliteSources} disabled={sqliteIndexing}
+            title={t("sqliteLibrary.legacyImportDescription", { count: legacySqliteSourcesPending })}
+            className="max-w-44 truncate rounded-lg border border-[color:var(--theme-border-soft,#383838)] px-2.5 py-2 text-center text-[11px] font-medium text-[color:var(--theme-fg-secondary,#cccccc)] hover:bg-[var(--theme-surface-raised,#1e1e1e)] disabled:opacity-50">
+            {t("sqliteLibrary.legacyImportButton", { count: legacySqliteSourcesPending })}
+          </button>}
+          <button type="button" onClick={onSqliteAddFolder} disabled={sqliteIndexing}
+            className="w-32 shrink-0 rounded-lg bg-[#E5A00D] px-3 py-2 text-center text-xs font-semibold text-black disabled:opacity-50">
+            {sqliteIndexing ? t("sqliteLibrary.indexing") : t("sqliteLibrary.addFolder")}
+          </button>
+        </div>}
       </div>
 
       {!selectedAlbum && !selectedArtist && (
@@ -1000,7 +1169,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
             ["artists", Users, t("localBrowser.tabArtists")],
             ["years", CalendarDays, t("localBrowser.tabYears")],
             ["genres", Tags, t("common.genresLabel")],
-            ["folders", ListTree, t("localBrowser.tabFolders")],
+            ...(!sqliteBacked ? [["folders", ListTree, t("localBrowser.tabFolders")] as const] : []),
           ] as const).map(([mode, Icon, label]) => (
             <button
               key={mode}
@@ -1018,9 +1187,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
       )}
 
       {!selectedAlbum && viewMode !== "folders" && (
-        <div className="flex flex-wrap items-center gap-3 border-b border-[color:var(--theme-border-soft,#222222)] px-8 py-3">
-          {libraryPresentation.mode !== "empty" && <div className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
-            <span>{t("localBrowser.libraryScope")}</span>
+        <div className="grid grid-cols-1 gap-y-2 border-b border-[color:var(--theme-border-soft,#222222)] px-4 py-3 sm:px-8">
+          <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+          {libraryPresentation.mode !== "empty" && <div className="flex min-w-0 items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
+            <span className="shrink-0">{t("localBrowser.libraryScope")}</span>
             {libraryPresentation.mode === "single" ? (
               <span className="max-w-44 truncate text-[color:var(--theme-fg-primary,#ffffff)]" title={libraryPresentation.label}>{libraryPresentation.label}</span>
             ) : <ToolbarSelect
@@ -1030,14 +1200,21 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
               label={t("localBrowser.libraryScope")}
               className="max-w-44"
             />}
+            {sqliteBacked && activeSourceId && <span className="ml-1 inline-flex shrink-0 items-center gap-1">
+              <button type="button" disabled={sqliteIndexing || !onSqliteReindexSource} onClick={() => {
+                if (onSqliteReindexSource) void onSqliteReindexSource(activeSourceId).catch(error => logError("sqlite-library.reindex", error));
+              }}
+                className="rounded px-2 py-1 text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] disabled:opacity-50"
+                title={t("sqliteLibrary.reindexSource")} aria-label={t("sqliteLibrary.reindexSource")}>{t("sqliteLibrary.reindexShort")}</button>
+            </span>}
           </div>}
           {(viewMode === "albums" || (viewMode === "genres" && activeGenre !== null)) && (
             <>
-              <div className="relative flex w-64 max-w-full items-center">
+              <div className="relative flex min-w-0 w-full max-w-64 flex-1 items-center sm:flex-none">
                 <Search size={14} className="absolute left-3 text-[color:var(--theme-fg-muted,#666666)]" />
                 <input type="text" value={albumSearch} onChange={(event) => setAlbumSearch(event.target.value)} placeholder={t("localBrowser.filterPlaceholder")} className="w-full rounded-lg border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#1A1A1A)] py-1.5 pl-9 pr-3 text-xs text-[color:var(--theme-fg-primary,#ffffff)] placeholder-[color:var(--theme-fg-muted,#666666)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)]" />
               </div>
-              <div className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
+              <div className="flex min-w-0 items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                 <span>{t("localBrowser.sortLabel")}</span>
                 <ToolbarSelect
                   value={albumSortMode}
@@ -1051,11 +1228,11 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           )}
           {viewMode === "artists" && !selectedArtist && (
             <>
-              <div className="relative flex w-64 max-w-full items-center">
+              <div className="relative flex min-w-0 w-full max-w-64 flex-1 items-center sm:flex-none">
                 <Search size={14} className="absolute left-3 text-[color:var(--theme-fg-muted,#666666)]" />
                 <input type="text" value={artistSearch} onChange={(event) => setArtistSearch(event.target.value)} placeholder={t("localBrowser.artistSearchPlaceholder")} className="w-full rounded-lg border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#1A1A1A)] py-1.5 pl-9 pr-3 text-xs text-[color:var(--theme-fg-primary,#ffffff)] placeholder-[color:var(--theme-fg-muted,#666666)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)]" />
               </div>
-              <div className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
+              <div className="flex min-w-0 items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
                 <span>{t("localBrowser.sortLabel")}</span>
                 <ToolbarSelect
                   value={artistSortMode}
@@ -1069,21 +1246,23 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
           )}
           {(viewMode === 'albums' || !!selectedArtist || activeGenre !== null || selectedYear !== null || unknownYearSelected) && <AlbumViewControls value={albumPresentation} onChange={changeAlbumPresentation} />}
           {canSelectLibraryCheck && <div className="ml-auto flex min-w-0 shrink-0 items-center gap-2">
-            {checkFeedback?.scope === libraryCheckScope && <span role="status"
-              title={checkFeedback.kind === "other-source-unavailable" ? t("localBrowser.checkLibrary.otherSourceUnavailableHelp") : undefined}
-              className="max-w-40 truncate text-[11px] text-[color:var(--theme-fg-muted,#888888)]">
-              {t(checkFeedback.kind === "updated" ? "localBrowser.checkLibrary.updated"
-                : checkFeedback.kind === "unchanged" ? "localBrowser.checkLibrary.unchanged"
-                : checkFeedback.kind === "other-source-unavailable" ? "localBrowser.checkLibrary.otherSourceUnavailable" : "localBrowser.checkLibrary.failed")}
-            </span>}
             <button type="button" onClick={handleLibraryCheck} disabled={checkDisabled} aria-busy={checkingLibrary}
               title={t(checkingLibrary ? "localBrowser.checkLibrary.checking" : activeSourceId !== null || libraryPresentation.mode === "single"
                 ? "localBrowser.checkLibrary.help" : "localBrowser.checkLibrary.helpAll")}
               className="inline-flex shrink-0 items-center gap-1.5 rounded px-2 py-1 text-xs text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:cursor-default disabled:opacity-50">
               <RefreshCw size={12} aria-hidden="true" className={checkingLibrary ? "animate-spin motion-reduce:animate-none" : ""} />
-              {t("localBrowser.checkLibrary.button")}
+              {sqliteBacked ? t("sqliteLibrary.verifyChanges") : t("localBrowser.checkLibrary.button")}
             </button>
+            {checkFeedback?.scope === libraryCheckScope && <span role="status"
+              title={checkFeedback.kind === "other-source-unavailable" ? t("localBrowser.checkLibrary.otherSourceUnavailableHelp") : undefined}
+              className="max-w-40 truncate text-[11px] text-[color:var(--theme-fg-muted,#888888)]">
+              {t(checkFeedback.kind === "unconfirmed" ? "windowsPort.errors.windows_library_check_unconfirmed"
+                : checkFeedback.kind === "updated" ? "localBrowser.checkLibrary.updated"
+                : checkFeedback.kind === "unchanged" ? "localBrowser.checkLibrary.unchanged"
+                : checkFeedback.kind === "other-source-unavailable" ? "localBrowser.checkLibrary.otherSourceUnavailable" : "localBrowser.checkLibrary.failed")}
+            </span>}
           </div>}
+          </div>
         </div>
       )}
 
@@ -1128,16 +1307,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         </nav>
       )}
 
-      <div aria-hidden={!catalogActivity} className="h-9 min-w-0 shrink-0 px-8 text-xs text-[color:var(--theme-fg-accent,#E5A00D)] flex items-center gap-2 border-b border-[color:var(--theme-border-soft,#222222)]">
-        {catalogActivity && (
-          <>
-            <Disc3 aria-hidden="true" size={14} className="animate-spin shrink-0" />
-            <span className="min-w-0 truncate" title={t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}>
-              {t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
-            </span>
-          </>
-        )}
-      </div>
+      {!sqliteBacked && <div aria-hidden={!catalogActivity} className={`${hideWindowsCatalogActivity ? "hidden" : "h-9 min-w-0 shrink-0 px-8 text-xs text-[color:var(--theme-fg-accent,#E5A00D)] flex items-center gap-2 border-b border-[color:var(--theme-border-soft,#222222)]"}`}>
+        {catalogActivity && <><Disc3 aria-hidden="true" size={14} className="animate-spin shrink-0" />
+          <span className="min-w-0 truncate" title={t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}>
+            {t(catalogActivity === "indexing" ? "sidebar.indexingTooltip" : "localBrowser.organizing")}
+          </span></>}
+      </div>}
       {playbackFailure && (
         <div role="alert" className="px-8 py-2 text-xs text-[color:var(--theme-fg-error,var(--color-red-400))] border-b border-[color:var(--theme-border-soft,#222222)]">
           {t(`player.requestError.${playbackFailure}`)}
@@ -1207,12 +1382,26 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                 <div className="pt-2 flex flex-wrap items-center gap-3">
                   <button
                     onClick={() => handlePlayEntireAlbum(selectedAlbum, albumTracks.length ? albumTracks : undefined, 0)}
-                    disabled={!isPlaybackAvailable || !tracksReady}
+                    disabled={!isPlaybackAvailable || !catalogConfirmed || !tracksReady}
                     className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Play size={16} fill="black" />
                     <span>{t("localBrowser.playAlbum")}</span>
                   </button>
+                  {sqliteBacked && experimentalEnabled && <button
+                    type="button"
+                    disabled={!canDiagnoseAlbum(selectedAlbum.id) || Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)}
+                    onClick={() => diagnoseMetadataAlbum(selectedAlbum.id)}
+                    className="flex items-center gap-1.5 rounded px-2 py-1.5 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)] hover:bg-[var(--theme-surface-hover,#282828)] disabled:cursor-not-allowed disabled:opacity-40"
+                    title={t("libraryDoctor.open")}
+                  ><Stethoscope size={15} /><span>{t("libraryDoctor.open")}</span></button>}
+                  {sqliteBacked && experimentalEnabled && sqliteTagEditorEarlyAccessEnabled && <button
+                    type="button"
+                    disabled={!albumTagEditingAvailable(selectedAlbum.id) || Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)}
+                    onClick={() => openMetadataEditor(selectedAlbum.id)}
+                    className="flex items-center gap-1.5 rounded px-2 py-1.5 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)] hover:bg-[var(--theme-surface-hover,#282828)] disabled:cursor-not-allowed disabled:opacity-40"
+                    title={t("tagEditor.edit")}
+                  ><Pencil size={14} /><span>{t("tagEditor.edit")}</span></button>}
 
                   <button
                     type="button"
@@ -1233,15 +1422,15 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   <button
                     onClick={(e) => handleToggleFavoriteLocal(e, selectedAlbum, albumCover)}
                     className="p-2.5 rounded-xl bg-[var(--theme-surface-raised,#1E1E1E)] border border-[color:var(--theme-border-soft,#2B2B2B)] hover:bg-[var(--theme-surface-hover,#282828)] text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer"
-                    title={favoriteIds.has(selectedAlbum.folder_path) ? t("favorites.removeFavorite") : t("favorites.title")}
+                    title={isLocalAlbumFavorite(selectedAlbum) ? t("favorites.removeFavorite") : t("favorites.title")}
                   >
                     <Heart
                       size={16}
-                      className={favoriteIds.has(selectedAlbum.folder_path) ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#888888)]"}
-                      fill={favoriteIds.has(selectedAlbum.folder_path) ? "#E5A00D" : "none"}
+                      className={isLocalAlbumFavorite(selectedAlbum) ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#888888)]"}
+                      fill={isLocalAlbumFavorite(selectedAlbum) ? "#E5A00D" : "none"}
                     />
                   </button>
-                  <button
+                  {!sqliteBacked && <button
                     type="button"
                     disabled={Boolean(tagEditorAlbum || tagEditorTrack || doctorAlbum || fileInfoTrack)}
                     onClick={() => {
@@ -1255,7 +1444,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   >
                     <Pencil size={15} />
                     <span>{t("localMetadata.review")}</span>
-                  </button>
+                  </button>}
                 </div>
               </div>
             </div>
@@ -1266,9 +1455,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   {catalogConfirmed && trackState.albumId === selectedAlbum.id && trackState.phase === "error" ? trackState.error : t(catalogConfirmed && trackState.phase === "loading" ? "localBrowser.loadingTracks" : "localBrowser.waitingTracks")}
                 </div>
               )}
-              <div className="grid grid-cols-[2rem_minmax(0,1fr)_auto] px-4 py-2.5 text-[11px] font-bold text-[color:var(--theme-fg-muted,#666666)] uppercase tracking-wider bg-[var(--theme-surface-panel,#181818)]">
+              <div className="grid grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-2 px-4 py-2.5 text-[11px] font-bold text-[color:var(--theme-fg-muted,#666666)] uppercase tracking-wider bg-[var(--theme-surface-panel,#181818)]">
                 <span className="text-center">#</span>
-                <span className="min-w-0">{t("plex.tracks")}</span>
+                <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <span className="min-w-0">{t("plex.tracks")} ({tracksReady ? albumTracks.length : selectedAlbum.track_count})</span>
+                  {tracksReady && albumTracks.length > 0 && selection.toolbar}
+                </div>
                 <span className="text-right flex items-center justify-end space-x-1">
                   <Clock size={12} />
                   <span>{t("localBrowser.duration")}</span>
@@ -1287,9 +1479,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       key={track.path}
                       onClick={event => { if (!selection.click(event, section.startIndex + idx)) void handlePlayEntireAlbum(selectedAlbum, albumTracks, section.startIndex + idx); }}
                       onContextMenu={event => queueActions.open(event, queueRequest(track, selectedAlbum))}
-                  aria-disabled={!isPlaybackAvailable}
+                  aria-disabled={!isPlaybackAvailable || !catalogConfirmed}
                   className={`${selection.checked(section.startIndex + idx) ? "track-selected " : ""}grid grid-cols-[2rem_minmax(0,1fr)_auto] px-4 py-3 text-xs items-center transition-colors group ${
-                    isPlaybackAvailable
+                    isPlaybackAvailable && catalogConfirmed
                       ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                       : "opacity-60 cursor-not-allowed"
                   }`}
@@ -1328,12 +1520,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     </button>
                     <button
                       type="button"
+                      disabled={sqliteBacked || !catalogInspectionAllowed}
                       onClick={(event) => {
                         event.stopPropagation();
                         if (catalogInspectionAllowed) setTagEditorTrack(track);
                       }}
-                      className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
-                      title={t("tagEditor.edit")}
+                      className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] disabled:cursor-not-allowed disabled:opacity-40"
+                      title={sqliteBacked ? t("sqliteLibrary.tagEditingUnavailable") : t("tagEditor.edit")}
                       aria-label={t("tagEditor.editTrack", { title: track.title || track.name })}
                     >
                       <Pencil size={14} />
@@ -1366,7 +1559,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   <LocalAlbumCard layout={albumPresentation.layout}
                     readEnabled={!metadataMode && catalog.loaded}
                     album={album}
-                    isFavorite={favoriteIds.has(album.folder_path)}
+                    isFavorite={isLocalAlbumFavorite(album)}
                     onToggleFavorite={handleToggleFavoriteLocal}
                     onClick={() => handleSelectAlbum(album)}
                     onPlayQuick={(e) => {
@@ -1376,6 +1569,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     isPlaybackAvailable={isPlaybackAvailable}
                     onlineArtworkEnabled={onlineArtworkEnabled && !catalog.manualCheckPlayback}
                     isLibraryUpdating={artworkBlocked}
+                    sqliteBacked={sqliteBacked}
                   />
                 )}
               />
@@ -1404,7 +1598,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   <LocalAlbumCard layout={albumPresentation.layout}
                     readEnabled={!metadataMode && catalog.loaded}
                     album={album}
-                    isFavorite={favoriteIds.has(album.folder_path)}
+                    isFavorite={isLocalAlbumFavorite(album)}
                     onToggleFavorite={handleToggleFavoriteLocal}
                     onClick={() => handleSelectAlbum(album)}
                     onPlayQuick={(e) => {
@@ -1414,6 +1608,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     isPlaybackAvailable={isPlaybackAvailable && catalogConfirmed}
                     onlineArtworkEnabled={onlineArtworkEnabled && !catalog.manualCheckPlayback}
                     isLibraryUpdating={artworkBlocked}
+                    sqliteBacked={sqliteBacked}
                   />
                 )}
               />
@@ -1467,7 +1662,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   <LocalAlbumCard layout={albumPresentation.layout}
                     readEnabled={!metadataMode && catalog.loaded}
                     album={album}
-                    isFavorite={favoriteIds.has(album.folder_path)}
+                    isFavorite={isLocalAlbumFavorite(album)}
                     onToggleFavorite={handleToggleFavoriteLocal}
                     onClick={() => handleSelectAlbum(album)}
                     onPlayQuick={(event) => {
@@ -1477,6 +1672,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     isPlaybackAvailable={isPlaybackAvailable}
                     onlineArtworkEnabled={onlineArtworkEnabled && !catalog.manualCheckPlayback}
                     isLibraryUpdating={artworkBlocked}
+                    sqliteBacked={sqliteBacked}
                   />
                 )}
               />
@@ -1506,7 +1702,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                   <LocalAlbumCard layout={albumPresentation.layout}
                     readEnabled={!metadataMode && catalog.loaded}
                     album={album}
-                    isFavorite={favoriteIds.has(album.folder_path)}
+                    isFavorite={isLocalAlbumFavorite(album)}
                     onToggleFavorite={handleToggleFavoriteLocal}
                     onClick={() => handleSelectAlbum(album)}
                     onPlayQuick={(event) => {
@@ -1516,6 +1712,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     isPlaybackAvailable={isPlaybackAvailable}
                     onlineArtworkEnabled={onlineArtworkEnabled && !catalog.manualCheckPlayback}
                     isLibraryUpdating={artworkBlocked}
+                    sqliteBacked={sqliteBacked}
                   />
                 )}
               />
@@ -1601,11 +1798,10 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                     <div
                       key={item.path}
                       onContextMenu={isDir ? undefined : event => queueActions.open(event, queueRequest(item))}
-                      onClick={event => {
-                        if (!isDir && selection.click(event, folderSelectionIndices.get(item.path)!)) return;
+                      onClick={() => {
                         if (isDir) {
                           setCurrentPath(item.path);
-                        } else if (isPlaybackAvailable) {
+                        } else if (localPlaybackAvailable) {
                           const meta = [
                             {
                               title: item.title || item.name,
@@ -1619,9 +1815,9 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                           void runLocalPlayback(intent => audioService.playTracks(meta, 0, intent));
                         }
                       }}
-                      aria-disabled={!isDir && !isPlaybackAvailable}
-                      className={`${!isDir && selection.checked(folderSelectionIndices.get(item.path)!) ? "track-selected " : ""}flex items-center justify-between p-3 transition-colors group ${
-                        isDir || isPlaybackAvailable
+                      aria-disabled={!isDir && !localPlaybackAvailable}
+                      className={`flex items-center justify-between p-3 transition-colors group ${
+                        isDir || localPlaybackAvailable
                           ? "hover:bg-[var(--theme-surface-raised,#1E1E1E)] cursor-pointer"
                           : "opacity-60 cursor-not-allowed"
                       }`}
@@ -1629,9 +1825,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                       <div className="flex items-center space-x-3 truncate mr-4">
                         {isDir ? (
                           <Folder size={18} className="text-[color:var(--theme-fg-accent,#E5A00D)] shrink-0" />
-                        ) : (
-                          selection.checkbox(folderSelectionIndices.get(item.path)!)
-                        )}
+                        ) : <Disc3 size={18} className="shrink-0 text-[color:var(--theme-fg-muted,#777777)]" />}
                         <span className="text-xs font-medium text-[color:var(--theme-fg-primary,#ffffff)] truncate">
                           {isDir && !currentPath ? localLibraryPathLabel(item.path, sourceOptions) : item.title || item.name}
                         </span>
@@ -1661,12 +1855,13 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
                           </button>
                           <button
                             type="button"
+                            disabled={sqliteBacked || !catalogInspectionAllowed}
                             onClick={(event) => {
                               event.stopPropagation();
                               if (catalogInspectionAllowed) setTagEditorTrack(item);
                             }}
-                            className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"
-                            title={t("tagEditor.edit")}
+                            className="rounded-md p-1.5 text-[color:var(--theme-fg-muted,#777777)] hover:bg-[var(--theme-surface-hover,#2A2A2A)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] disabled:cursor-not-allowed disabled:opacity-40"
+                            title={sqliteBacked ? t("sqliteLibrary.tagEditingUnavailable") : t("tagEditor.edit")}
                             aria-label={t("tagEditor.editTrack", { title: item.title || item.name })}
                           >
                             <Pencil size={14} />
@@ -1702,11 +1897,12 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         <LocalAlbumTagEditorModal
           albumId={tagEditorAlbum.id}
           displayName={tagEditorAlbum.title}
-          available={catalogInspectionAllowed && albums.some((album) => album.id === tagEditorAlbum.id)}
+          available={(sqliteBacked ? !sqliteIndexing : catalogInspectionAllowed) && albums.some((album) => album.id === tagEditorAlbum.id)}
           catalogVersion={catalog}
           reviewContext={doctorReviewContext}
-          isAvailable={() => localAlbumCatalog.getSnapshot() === catalog && albumTagEditingAvailable(tagEditorAlbum.id)}
+          isAvailable={() => (sqliteBacked || localAlbumCatalog.getSnapshot() === catalog) && albumTagEditingAvailable(tagEditorAlbum.id)}
           onBatchFinished={(result) => {
+            if (sqliteBacked && result?.catalog_reconciled === false) return;
             if (result?.tracks.some((track) => track.mpd_refresh.state === "accepted")) {
               localAlbumCatalog.waitForMpd();
             } else {
@@ -1720,13 +1916,17 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
         <LibraryDoctorModal
           albumId={doctorAlbum.id}
           displayName={doctorAlbum.title}
-          available={catalogInspectionAllowed && albums.some(album => album.id === doctorAlbum.id)}
-          catalogVersion={catalog}
+          available={canDiagnoseAlbum(doctorAlbum.id)}
+          catalogVersion={sqliteBacked
+            ? sqliteLibraryDoctorVersion(doctorAlbum.id, sqliteSources)
+            : catalog}
           isAvailable={() => localAlbumCatalog.getSnapshot() === catalog
             && doctorSelectedAlbum.current === doctorAlbum.id
             && !tagEditorOpen.current
-            && libraryDoctorAvailable(localAlbumCatalog.getSnapshot(), libraryUpdatingRef.current, doctorAlbum.id)}
-          onReview={context => {
+            && (sqliteBacked
+              ? sqliteLibraryDoctorAvailable(doctorAlbum.id, sqliteSources, sqliteIndexing, albums.map(album => album.id))
+              : libraryDoctorAvailable(localAlbumCatalog.getSnapshot(), libraryUpdatingRef.current, doctorAlbum.id))}
+          onReview={!sqliteBacked ? context => {
             if (tagEditorOpen.current || context.albumId !== doctorAlbum.id
               || doctorSelectedAlbum.current !== context.albumId || localAlbumCatalog.getSnapshot() !== catalog
               || !albumTagEditingAvailable(context.albumId)) return false;
@@ -1735,7 +1935,7 @@ export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
             setDoctorReviewContext(context);
             setTagEditorAlbum(doctorAlbum);
             return true;
-          }}
+          } : undefined}
           onClose={() => setDoctorAlbum(null)}
         />
       )}

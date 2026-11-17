@@ -14,6 +14,9 @@ use std::{
 };
 pub(crate) type Guard = Arc<dyn Fn() -> bool + Send + Sync>;
 pub(crate) const DEFAULT_PORT: u16 = 8787;
+/// Keep the opt-in listener's initial port distinct from the installed profile.
+/// The service is still off by default and a port collision fails closed.
+pub(crate) const ISOLATED_PROFILE_DEFAULT_PORT: u16 = 8788;
 pub(crate) const CLIENT_LIFETIME: u64 = 30 * 24 * 3600;
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -60,6 +63,7 @@ pub(crate) struct QueueTrack {
     pub artist: String,
     pub album: String,
     pub duration: Option<f64>,
+    pub artwork: Option<String>,
 }
 #[derive(Serialize)]
 pub(crate) struct QueuePage {
@@ -124,6 +128,7 @@ pub(crate) trait Backend: Send + Sync + 'static {
     fn queue(&self, offset: usize) -> Result<QueuePage, String>;
     fn control(&self, command: Command, current: Guard) -> Result<(), String>;
     fn artwork(&self, key: &str, current: Guard) -> Result<Option<(String, Vec<u8>)>, String>;
+    fn queue_artwork(&self, key: &str, current: Guard) -> Result<Option<(String, Vec<u8>)>, String>;
 }
 pub(crate) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -499,6 +504,20 @@ pub(crate) struct Status {
     pub devices: Vec<String>,
 }
 impl State {
+    pub(crate) fn isolated_profile() -> Self {
+        Self {
+            operation: Mutex::new(()),
+            runtime: Mutex::new(Runtime {
+                preferences: Preferences {
+                    enabled: false,
+                    port: ISOLATED_PROFILE_DEFAULT_PORT,
+                },
+                worker: None,
+            }),
+            enabled: AtomicBool::new(false),
+        }
+    }
+
     pub(crate) fn configure(
         &self,
         prefs: Preferences,
@@ -674,6 +693,17 @@ mod tests {
         assert!(!status.enabled);
         assert!(!status.requested_enabled);
         assert_eq!(status.port, 8787);
+        assert!(state.shared().is_none());
+    }
+
+    #[test]
+    fn isolated_profile_has_its_own_disabled_remote_port_default() {
+        let state = State::isolated_profile();
+        let status = state.status(Vec::new()).unwrap();
+        assert!(!status.enabled);
+        assert!(!status.requested_enabled);
+        assert_eq!(status.port, ISOLATED_PROFILE_DEFAULT_PORT);
+        assert_ne!(status.port, DEFAULT_PORT);
         assert!(state.shared().is_none());
     }
     #[test]
@@ -897,6 +927,9 @@ mod tests {
                 panic!("no player work")
             }
             fn artwork(&self, _: &str, _: Guard) -> Result<Option<(String, Vec<u8>)>, String> {
+                panic!("no player work")
+            }
+            fn queue_artwork(&self, _: &str, _: Guard) -> Result<Option<(String, Vec<u8>)>, String> {
                 panic!("no player work")
             }
         }

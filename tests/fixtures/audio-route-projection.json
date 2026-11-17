@@ -1,0 +1,34 @@
+{
+  "generation": 9,
+  "operationId": "dsp:4",
+  "operation": "stable",
+  "route": {
+    "state": "confirmed",
+    "requested": {
+      "destination": { "kind": "system_default" },
+      "access": "shared",
+      "processing": "equalizer"
+    },
+    "confirmed": {
+      "destination": { "kind": "system_default" },
+      "access": "shared",
+      "processing": "equalizer"
+    }
+  },
+  "applied": {
+    "destination": { "kind": "system_default" },
+    "access": "shared",
+    "processing": "off"
+  },
+  "evidence": [
+    "persisted_configuration",
+    "supervisor_output_applied",
+    "mpd_protocol_available",
+    "playback_snapshot_consistent",
+    "dsp_graph_verified"
+  ],
+  "diagnostic": null,
+  "pcmAcquired": null,
+  "exclusiveAccessConfirmed": null,
+  "legacyIssues": []
+}

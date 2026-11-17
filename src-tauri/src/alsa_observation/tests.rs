@@ -65,7 +65,7 @@ impl Fixture {
 }
 #[test]
 fn physical_addresses_reject_paths_plugins_and_extra_arguments() {
-    for value in ["hw:2,0", "hw:CARD=FixtureDAC,DEV=0", "hw:FixtureDAC,0"] {
+    for value in ["hw:2,0", "hw:2", "hw:CARD=FixtureDAC,DEV=0", "hw:FixtureDAC,0"] {
         assert!(address(value).is_some(), "{value}");
     }
     for value in [
@@ -74,7 +74,6 @@ fn physical_addresses_reject_paths_plugins_and_extra_arguments() {
         "hw:../../private,0",
         "hw:2,0,0",
         "hw:2,0?token=secret",
-        "hw:2",
         "hw:2,-1",
         "hw:2,256",
         "hw:CARD=,DEV=0",
@@ -132,7 +131,7 @@ fn observes_only_the_selected_running_substream_owned_by_mpd_thread() {
     };
     assert_eq!(f.observe(), Ok(expected));
     f.write("110/task/115/status", "Pid: 115\nTgid: 999\n");
-    assert_eq!(f.observe(), Err(Reason::NotOwned));
+    assert_eq!(f.observe(), Err(Reason::Occupied));
 }
 #[test]
 fn resolves_symbolic_card_alias_only_when_kernel_id_agrees() {
@@ -152,11 +151,10 @@ fn resolves_symbolic_card_alias_only_when_kernel_id_agrees() {
 #[test]
 fn closed_prepared_unrelated_missing_and_duplicate_streams_never_verify() {
     let f = Fixture::new();
-    f.sub(1, 999); // Unrelated identical-format stream is not evidence.
-    assert!(matches!(
-        f.observe(),
-        Ok(Observation::Observed { subdevice: 0, .. })
-    ));
+    f.sub(1, 999);
+    f.write("999/status", "Name:\tother\nPid:\t999\nTgid:\t998\n");
+    assert_eq!(f.observe(), Err(Reason::Occupied)); // Another process holds the same PCM.
+    fs::remove_dir_all(f.root.join("asound/card2/pcm0p/sub1")).unwrap();
     f.sub(1, 115);
     assert_eq!(f.observe(), Err(Reason::Ambiguous));
     f.write("asound/card2/pcm0p/sub1/status", "closed\n");
@@ -171,6 +169,65 @@ fn closed_prepared_unrelated_missing_and_duplicate_streams_never_verify() {
     assert_eq!(f.observe(), Err(Reason::NotOwned));
     fs::remove_dir_all(f.root.join("asound/card2/pcm0p")).unwrap();
     assert_eq!(f.observe(), Err(Reason::Unreadable));
+}
+
+#[test]
+fn shared_to_direct_release_observation_is_read_only_bounded_and_identity_bound() {
+    let f = Fixture::new();
+    let identity = resolve_device_identity_in(&f.root, &f.root.join("sys"), "hw:2,0", &mut |p| f.read(p)).unwrap();
+    assert_eq!(identity.card, 2);
+    assert_eq!(identity.device, 0);
+    assert_eq!(pcm_release_state_in(&f.root, &f.root.join("sys"), &identity, &mut |p| f.read(p)), Ok(PcmReleaseState::Occupied));
+    f.write("asound/card2/pcm0p/sub0/status", "closed\n");
+    assert_eq!(pcm_release_state_in(&f.root, &f.root.join("sys"), &identity, &mut |p| f.read(p)), Ok(PcmReleaseState::Released));
+    fs::remove_dir_all(f.root.join("asound/card2/pcm0p/sub0")).unwrap();
+    assert_eq!(pcm_release_state_in(&f.root, &f.root.join("sys"), &identity, &mut |p| f.read(p)), Err(Reason::Unavailable));
+    f.write("asound/card2/id", "Replacement\n");
+    assert_eq!(pcm_release_state_in(&f.root, &f.root.join("sys"), &identity, &mut |p| f.read(p)), Err(Reason::Changed));
+}
+
+#[test]
+fn release_wait_observes_until_deadline_without_opening_a_second_pcm() {
+    let mut calls = 0;
+    let mut waits = Vec::new();
+    wait_for_pcm_release_with(Duration::from_secs(1), Duration::from_millis(50), || {
+        calls += 1;
+        Ok(if calls == 1 { PcmReleaseState::Occupied } else { PcmReleaseState::Released })
+    }, |duration| waits.push(duration)).unwrap();
+    assert_eq!(calls, 2);
+    assert_eq!(waits, [Duration::from_millis(50)]);
+
+    let mut calls = 0;
+    let mut waits = Vec::new();
+    assert_eq!(wait_for_pcm_release_with(Duration::ZERO, Duration::from_millis(50), || {
+        calls += 1;
+        Ok(PcmReleaseState::Occupied)
+    }, |duration| waits.push(duration)), Err(Reason::Occupied));
+    assert_eq!(calls, 1);
+    assert!(waits.is_empty());
+}
+
+#[test]
+fn owned_pcm_confirmation_retries_only_pending_observations_and_rejects_foreign_owners() {
+    let f = Fixture::new();
+    let identity = resolve_device_identity_in(&f.root, &f.root.join("sys"), "hw:2,0", &mut |p| f.read(p)).unwrap();
+    let expected = Observation::Observed {
+        configured_endpoint: "hw:2,0".into(), card: 2, device: 0, subdevice: 0,
+        format: "S32_LE".into(), rate: 96000, channels: 2, usb_device: None, kernel_release: None,
+    };
+    let mut samples = vec![Observation::unverified(Reason::NotOwned), expected.clone()].into_iter();
+    let mut waits = Vec::new();
+    let got = wait_for_owned_pcm_with(&identity, Duration::from_secs(1), Duration::from_millis(25),
+        || samples.next().unwrap(), || Ok(()), |duration| waits.push(duration)).unwrap();
+    assert_eq!(got, expected);
+    assert_eq!(waits, [Duration::from_millis(25)]);
+
+    assert_eq!(wait_for_owned_pcm_with(&identity, Duration::ZERO, Duration::from_millis(25),
+        || Observation::unverified(Reason::NotOwned), || Ok(()), |_| panic!("timeout must not sleep")), Err(Reason::NotOwned));
+    assert_eq!(wait_for_owned_pcm_with(&identity, Duration::from_secs(1), Duration::from_millis(25),
+        || Observation::unverified(Reason::Occupied), || Ok(()), |_| panic!("foreign owner must fail immediately")), Err(Reason::Occupied));
+    assert_eq!(wait_for_owned_pcm_with(&identity, Duration::from_secs(1), Duration::from_millis(25),
+        || expected.clone(), || Err(Reason::Changed), |_| panic!("identity change must fail immediately")), Err(Reason::Changed));
 }
 #[test]
 fn rejects_format_owner_and_process_identity_changes_during_sample() {
@@ -417,5 +474,5 @@ fn kernel_release_is_bounded_and_only_reported_with_owned_current_observation() 
     assert!(matches!(f.observe(), Ok(Observation::Observed { kernel_release: None, .. })));
     f.write("sys/kernel/osrelease", "6.12.108-1-MANJARO");
     f.write("110/task/115/status", "Pid: 115\nTgid: 999\n");
-    assert_eq!(f.observe(), Err(Reason::NotOwned));
+    assert_eq!(f.observe(), Err(Reason::Occupied));
 }

@@ -6,6 +6,7 @@ interface SpectrumSegmentedProps {
   spectrum: number[];
   active: boolean;
   label: string;
+  compact?: boolean;
   fullscreen?: boolean;
 }
 

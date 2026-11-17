@@ -1,5 +1,6 @@
 import type { DeviceAvailability } from "../types/audio";
 import type { AppConfig } from "../types/config";
+import { interpretLegacyAudioRoute } from "./audioRoute.ts";
 
 export interface AvailabilityQueryState {
   checking: boolean;
@@ -10,6 +11,12 @@ export interface AvailabilityQueryState {
 export function newPhysicalOutputChoice(original: AppConfig | null, proposed: AppConfig): boolean {
   return proposed.audio_output_type === "alsa" && proposed.alsa_device.startsWith("hw:")
     && Boolean(original && (original.alsa_device !== proposed.alsa_device || original.audio_output_type !== "alsa"));
+}
+
+export function releasesSharedBeforeDirect(original: AppConfig | null, proposed: AppConfig): boolean {
+  if (!original || original.first_run || proposed.audio_output_type !== "alsa") return false;
+  return interpretLegacyAudioRoute(original.audio_output_type, original.alsa_device).route.access === "shared"
+    && interpretLegacyAudioRoute(proposed.audio_output_type, proposed.alsa_device).route.access === "exclusive";
 }
 
 // Contextual gestures query only an enumerated physical choice, never the known

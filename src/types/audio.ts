@@ -1,5 +1,47 @@
 import type { DspSnapshot } from "./equalizer";
 import type { PlexImageRef } from "./plex";
+import type { AudioRouteSnapshot, AudioRoute, LegacyRouteIssue } from "../utils/audioRoute";
+
+export type AudioRouteOperationState = "stable" | "transitioning" | "failed" | "uncertain";
+export type AudioRouteEvidence =
+  | "persisted_configuration"
+  | "supervisor_output_applied"
+  | "mpd_protocol_available"
+  | "playback_snapshot_consistent"
+  | "direct_pcm_observed"
+  | "dsp_graph_verified"
+  | "windows_session_observed";
+export type AudioRouteDiagnostic =
+  | "configuration_unavailable"
+  | "invalid_configuration"
+  | "ambiguous_legacy_configuration"
+  | "supervisor_unavailable"
+  | "supervisor_failed"
+  | "configuration_failed"
+  | "configuration_uncertain"
+  | "output_not_applied"
+  | "output_configuration_changed"
+  | "playback_snapshot_inconsistent"
+  | "direct_pcm_not_observed"
+  | "dsp_not_verified"
+  | "dsp_failed"
+  | "dsp_requires_shared_access"
+  | "null_output_test_mode"
+  | "windows_exclusive_not_observable";
+
+/** Read-only runtime projection. A confirmed software route does not claim audible output. */
+export interface AudioRouteProjection {
+  generation: number;
+  operationId: string | null;
+  operation: AudioRouteOperationState;
+  route: AudioRouteSnapshot | null;
+  applied: AudioRoute | null;
+  evidence: AudioRouteEvidence[];
+  diagnostic: AudioRouteDiagnostic | null;
+  pcmAcquired: boolean | null;
+  exclusiveAccessConfirmed: boolean | null;
+  legacyIssues: LegacyRouteIssue[];
+}
 
 export type MediaLocator =
   | { kind: "navidrome"; connection_id: string; song_id: string; account_id?: string | null }
@@ -65,7 +107,7 @@ export interface PlaybackOptions {
 export type PlaybackOptionAction = "cycle_repeat" | "toggle_random";
 
 export type OutputObservation =
-  | { state: "unverified"; reason: "unavailable" | "not_playing" | "shared" | "unreadable" | "malformed" | "not_owned" | "ambiguous" | "changed" | "limit" | "busy" }
+  | { state: "unverified"; reason: "unavailable" | "not_playing" | "shared" | "occupied" | "unreadable" | "malformed" | "not_owned" | "ambiguous" | "changed" | "limit" | "busy" }
   | { state: "observed"; configured_endpoint: string; card: number; device: number; subdevice: number; format: string; rate: number; channels: number; kernel_release?: string | null; usb_device?: { vendor_id: string; product_id: string; model: string } | null };
 
 export interface SignalProcessing {
@@ -100,6 +142,7 @@ export interface PlaybackStatus {
   volume: VolumeStatus;
   is_updating: boolean; // <-- Necessário para o ícone de indexação/sincronização
   playback_error?: PlaybackDiagnostic | null;
+  audio_route?: AudioRouteProjection | null;
 }
 
 export type MpdUnavailableReason =
@@ -120,6 +163,7 @@ export interface MpdStatusSnapshot {
   output_observation?: OutputObservation | null;
   engine_evidence?: EngineEvidence | null;
   shared_dsp?: DspSnapshot | null;
+  audio_route?: AudioRouteProjection | null;
   health: MpdHealth;
   playback: PlaybackStatus | null;
 }

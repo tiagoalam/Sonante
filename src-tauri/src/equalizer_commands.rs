@@ -1,4 +1,5 @@
-//! UI/persistence and lifecycle orchestration; preset data never activates on load.
+//! UI/persistence and lifecycle orchestration; a saved EQ request is restored
+//! only through the existing confirmed Shared-route lifecycle.
 use crate::equalizer::{EqPreset, EqualizerConfig, EqualizerStore, PresetRef};
 use crate::shared_dsp;
 use crate::*;
@@ -15,7 +16,33 @@ pub(crate) struct Catalog {
     runtime: shared_dsp::Snapshot,
     shared: bool,
     runtime_available: bool,
+    runtime_diagnostic: Option<&'static str>,
     pulse_audio: bool,
+}
+
+fn camilla_runtime_diagnostic(error: shared_dsp::Error) -> &'static str {
+    match error {
+        shared_dsp::Error::RuntimeMissing => "EQ_CAMILLA_RUNTIME_MISSING",
+        shared_dsp::Error::RuntimeUntrusted => "EQ_CAMILLA_RUNTIME_UNTRUSTED",
+        _ => "EQ_CAMILLA_RUNTIME_UNAVAILABLE",
+    }
+}
+
+fn mpd_eq_runtime_diagnostic(error: &str) -> &'static str {
+    if error == "EQ_MPD_RUNTIME_MISSING" {
+        "EQ_MPD_RUNTIME_MISSING"
+    } else {
+        "EQ_MPD_RUNTIME_UNAVAILABLE"
+    }
+}
+
+fn runtime_diagnostic() -> Option<&'static str> {
+    if let Err(error) = shared_dsp::binary_path() {
+        return Some(camilla_runtime_diagnostic(error));
+    }
+    crate::mpd_engine::MpdEngine::resolve_eq()
+        .err()
+        .map(|error| mpd_eq_runtime_diagnostic(&error))
 }
 fn revision(config: &EqualizerConfig) -> Result<String, String> {
     let bytes = serde_json::to_vec(config).map_err(|_| "EQ_STORE_FAILED")?;
@@ -39,6 +66,63 @@ fn shared_config(app: &AppHandle) -> Result<AppConfig, String> {
         return Err("EQ_SHARED_ONLY".into());
     }
     Ok(config)
+}
+
+fn startup_restore_allowed(
+    desired: bool,
+    shared_configured: bool,
+    owned_mpd_running: bool,
+    confirmed_shared_route: bool,
+    queue_ready: bool,
+    null_output_test: bool,
+    eq_pipe_present: bool,
+    runtime_idle: bool,
+    shutdown: bool,
+) -> bool {
+    desired
+        && shared_configured
+        && owned_mpd_running
+        && confirmed_shared_route
+        && queue_ready
+        && !null_output_test
+        && !eq_pipe_present
+        && runtime_idle
+        && !shutdown
+}
+
+fn startup_restore_confirmed(snapshot: &shared_dsp::Snapshot) -> bool {
+    snapshot.verified
+        && snapshot.in_path == Some(true)
+        && matches!(snapshot.phase, shared_dsp::Phase::Active | shared_dsp::Phase::Ready)
+        && (snapshot.applied.is_some() || snapshot.comparison.is_some())
+}
+
+#[derive(Clone)]
+enum PreferenceUpdate {
+    SetEnabled(bool),
+    RequireEnabledRevision(String),
+}
+
+fn update_preference(store: &EqualizerStore, update: &PreferenceUpdate) -> Result<(), String> {
+    match update {
+        PreferenceUpdate::SetEnabled(enabled) => persist_enabled_preference(store, *enabled),
+        PreferenceUpdate::RequireEnabledRevision(expected) => {
+            let (config, actual) = load_from_store(store)?;
+            if config.enabled && &actual == expected {
+                Ok(())
+            } else {
+                Err("EQ_STARTUP_RESTORE_SUPERSEDED".into())
+            }
+        }
+    }
+}
+
+fn load_from_store(store: &EqualizerStore) -> Result<(EqualizerConfig, String), String> {
+    let config = store
+        .load()
+        .map_err(|_| "EQ_STORE_UNAVAILABLE_PRESERVED")?;
+    let revision = revision(&config)?;
+    Ok((config, revision))
 }
 
 fn runtime_snapshot(app: &AppHandle) -> shared_dsp::Snapshot {
@@ -65,16 +149,15 @@ pub(crate) async fn get_equalizer(app: AppHandle) -> Result<Catalog, String> {
         load().map(|loaded| {
             // Availability is not activation. Hash resources and query server
             // compatibility without starting audio engines or holding locks.
-            let available = shared_dsp::binary_path().is_ok()
-                && crate::mpd_engine::MpdEngine::resolve_eq().is_ok();
+            let diagnostic = runtime_diagnostic();
+            let available = diagnostic.is_none();
             let pulse_audio = shared_dsp::availability::pulse_audio_in_use();
-            (loaded, available, pulse_audio)
+            (loaded, available, diagnostic, pulse_audio)
         })
     })
         .await
         .map_err(|_| "EQ_STORE_UNAVAILABLE")??;
-    let ((mut config, revision), runtime_available, pulse_audio) = result;
-    config.enabled = false; // Stored desire is never runtime truth.
+    let ((config, revision), runtime_available, runtime_diagnostic, pulse_audio) = result;
     let shared = app
         .state::<ConfigState>()
         .0
@@ -82,13 +165,14 @@ pub(crate) async fn get_equalizer(app: AppHandle) -> Result<Catalog, String> {
         .map(|c| crate::is_shared_output(&c))
         .unwrap_or(false);
     Ok(Catalog {
-        built_ins: crate::equalizer::built_in_presets(),
-        builtin_groups: crate::equalizer::builtin_groups(),
+        built_ins: crate::equalizer::catalog_built_ins(&config),
+        builtin_groups: crate::equalizer::builtin_groups(&config),
         config,
         revision,
         runtime: runtime_snapshot(&app),
         shared,
         runtime_available,
+        runtime_diagnostic,
         pulse_audio,
     })
 }
@@ -202,7 +286,14 @@ fn edit_store(store: &EqualizerStore, expected_revision: &str, edit: Edit) -> Re
         crate::equalizer::validate_v1(p).map_err(|_| "EQ_PRESET_INVALID")?;
     }
     result.map_err(|_| "EQ_PRESET_INVALID")?;
-    config.set_enabled(false).map_err(|_| "EQ_PRESET_INVALID")?;
+    store
+        .save(&config)
+        .map_err(|_| "EQ_STORE_WRITE_UNCONFIRMED".to_string())
+}
+
+fn persist_enabled_preference(store: &EqualizerStore, enabled: bool) -> Result<(), String> {
+    let mut config = store.load().map_err(|_| "EQ_STORE_UNAVAILABLE_PRESERVED")?;
+    config.set_enabled(enabled).map_err(|_| "EQ_PRESET_INVALID")?;
     store
         .save(&config)
         .map_err(|_| "EQ_STORE_WRITE_UNCONFIRMED".to_string())
@@ -218,9 +309,11 @@ fn failure_callback(app: &AppHandle) -> Arc<dyn Fn() + Send + Sync> {
                 .snapshot()
                 .error
                 .unwrap_or(shared_dsp::Error::ControlFailed);
+            shared_dsp::diagnostics::event("dsp.failure_callback", "started", Some(0), serde_json::json!({"error": error}));
             let tx = app.state::<ConfigTransactionState>();
             loop {
                 if tx.shutdown_requested() {
+                    shared_dsp::diagnostics::event("dsp.failure_callback", "cancelled", None, serde_json::json!({"reason": "shutdown"}));
                     return;
                 }
                 match tx.operations.try_begin_background() {
@@ -230,13 +323,45 @@ fn failure_callback(app: &AppHandle) -> Arc<dyn Fn() + Send + Sync> {
                         })
                         .await;
                     }
-                    Err(config_save_operation::BackgroundAdmission::Blocked) => return,
-                    Ok(_guard) => {
-                        if shared_config(&app).is_ok() {
-                            let result = set_route_admitted(&app, None, false).await;
+                    Err(config_save_operation::BackgroundAdmission::Blocked) => {
+                        shared_dsp::diagnostics::event("dsp.failure_callback", "blocked", None, serde_json::json!({"reason": "background_admission_blocked"}));
+                        return;
+                    }
+                    Ok(mut guard) => {
+                        if let Ok(config) = shared_config(&app) {
+                            let requested = match crate::configured_audio_route(
+                                &config,
+                                crate::audio_route::AudioProcessing::Off,
+                            ) {
+                                Ok(route) => route,
+                                Err(_) => {
+                                    shared_dsp::diagnostics::event("dsp.failure_bypass", "error", None, serde_json::json!({"code": "route_invalid"}));
+                                    app.state::<shared_dsp::State>().record_failure(error);
+                                    return;
+                                }
+                            };
+                            let generation = match guard.begin_audio_transition(
+                                requested,
+                                config_save_operation::AudioTransitionKind::Equalizer,
+                            ) {
+                                Ok(generation) => generation,
+                                Err(_) => {
+                                    shared_dsp::diagnostics::event("dsp.failure_bypass", "error", None, serde_json::json!({"code": "route_admission_failed"}));
+                                    app.state::<shared_dsp::State>().record_failure(error);
+                                    return;
+                                }
+                            };
+                            let route = tx.operations.audio_transition_handle(generation);
+                            let result = set_route_admitted(&app, None, false, route.clone()).await;
+                            if result.is_ok() { route.confirm(); } else { route.fail(); }
                             if result.is_err() {
+                                shared_dsp::diagnostics::event("dsp.failure_bypass", "error", None, serde_json::json!({"code": result.as_ref().err().map(|error| shared_dsp::diagnostics::safe_error_code(error))}));
                                 eprintln!("[Equalizer] fallback=unconfirmed");
+                            } else {
+                                shared_dsp::diagnostics::event("dsp.failure_bypass", "ok", None, serde_json::json!({}));
                             }
+                        } else {
+                            shared_dsp::diagnostics::event("dsp.failure_bypass", "error", None, serde_json::json!({"code": "profile_config_unavailable"}));
                         }
                         app.state::<shared_dsp::State>().record_failure(error);
                         return;
@@ -254,18 +379,76 @@ pub(crate) async fn apply_equalizer(
     bypass_expected: Option<EqPreset>,
     app: AppHandle,
 ) -> Result<shared_dsp::Snapshot, String> {
+    let mut attempt = shared_dsp::diagnostics::Attempt::begin();
+    let initial = app.state::<shared_dsp::State>().snapshot();
+    attempt.event(
+        "tauri.command",
+        "started",
+        Some(0),
+        serde_json::json!({
+            "enabled": enabled,
+            "preset_present": preset.is_some(),
+            "initial_phase": initial.phase,
+            "initial_dsp_verified": initial.verified,
+            "initial_preset_present": initial.applied.is_some(),
+            "initial_error": initial.error,
+        }),
+    );
+    let result = apply_equalizer_inner(
+        enabled,
+        preset,
+        bypass_expected,
+        PreferenceUpdate::SetEnabled(enabled),
+        app,
+    )
+    .await;
+    let code = result
+        .as_ref()
+        .err()
+        .map(|error| shared_dsp::diagnostics::safe_error_code(error))
+        .unwrap_or("confirmed");
+    attempt.finish(if result.is_ok() { "ok" } else { "error" }, code);
+    result
+}
+
+async fn apply_equalizer_inner(
+    enabled: bool,
+    preset: Option<EqPreset>,
+    bypass_expected: Option<EqPreset>,
+    preference: PreferenceUpdate,
+    app: AppHandle,
+) -> Result<shared_dsp::Snapshot, String> {
     if enabled {
         // Recheck the live server; a catalog observation is not authorization
         // to activate after the system audio server changes. Bypass stays usable.
-        tauri::async_runtime::spawn_blocking(shared_dsp::availability::require_supported)
-            .await.map_err(|_| "EQ_AVAILABILITY_UNCONFIRMED")??;
+        let availability_started = std::time::Instant::now();
+        let availability = tauri::async_runtime::spawn_blocking(shared_dsp::availability::require_supported)
+            .await;
+        match availability {
+            Ok(Ok(())) => shared_dsp::diagnostics::event("audio.server_admission", "ok", Some(availability_started.elapsed().as_millis()), serde_json::json!({"supported_server": true})),
+            Ok(Err(error)) => {
+                shared_dsp::diagnostics::event("audio.server_admission", "error", Some(availability_started.elapsed().as_millis()), serde_json::json!({"code": shared_dsp::diagnostics::safe_error_code(&error)}));
+                return Err(error);
+            }
+            Err(_) => {
+                shared_dsp::diagnostics::event("audio.server_admission", "error", Some(availability_started.elapsed().as_millis()), serde_json::json!({"code": "availability_worker_failed"}));
+                return Err("EQ_AVAILABILITY_UNCONFIRMED".into());
+            }
+        }
     }
     app.state::<AudioState>().0.lock().map_err(|_|"EQ_AUDIO_UNAVAILABLE")?.note_eq_intervention();
     if enabled {
         shared_config(&app)?;
-        let preset = preset.ok_or("EQ_PRESET_REQUIRED")?;
+        let preset = preset.as_ref().ok_or("EQ_PRESET_REQUIRED")?;
         crate::equalizer::validate_v1(&preset).map_err(|_| "EQ_PRESET_INVALID")?;
         shared_dsp::safety::assess(&preset, 48000).map_err(|_| "EQ_UNSAFE_HEADROOM")?;
+    } else {
+        let current = app.state::<shared_dsp::State>().snapshot();
+        confirm_level_return(&current, bypass_expected.as_ref())?;
+    }
+
+    if enabled {
+        let preset = preset.ok_or("EQ_PRESET_REQUIRED")?;
         let state=app.state::<shared_dsp::State>().snapshot();
         if (state.applied.is_some()||state.comparison.is_some())
             && app
@@ -277,9 +460,11 @@ pub(crate) async fn apply_equalizer(
                 .is_some()
         {
             let worker = app.clone();
+            let preference = preference.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let tx = worker.state::<ConfigTransactionState>();
                 let _guard = tx.begin()?;
+                update_preference(&EqualizerStore::default(), &preference)?;
                 shared_config(&worker)?;
                 worker
                     .state::<shared_dsp::State>()
@@ -289,12 +474,146 @@ pub(crate) async fn apply_equalizer(
             .await
             .map_err(|_| "EQ_APPLY_FAILED")??;
         } else {
-            set_route(&app, Some(preset), None).await?;
+            set_route(&app, Some(preset), None, preference).await?;
         }
     } else {
-        set_route(&app, None, bypass_expected).await?;
+        set_route(&app, None, bypass_expected, preference).await?;
     }
     Ok(runtime_snapshot(&app))
+}
+
+/// One-shot startup restoration, invoked only after the already-owned MPD and
+/// its cached queue have completed startup restoration. It never starts a
+/// playback request or creates another supervisor.
+pub(crate) async fn restore_desired_on_startup(app: AppHandle) {
+    let loaded = tauri::async_runtime::spawn_blocking(load).await;
+    let (config, saved_revision) = match loaded {
+        Ok(Ok(value)) => value,
+        Ok(Err(code)) => {
+            shared_dsp::diagnostics::event("eq.startup_restore", "unavailable", None, serde_json::json!({"code": code}));
+            return;
+        }
+        Err(_) => {
+            shared_dsp::diagnostics::event("eq.startup_restore", "unavailable", None, serde_json::json!({"code": "EQ_STORE_UNAVAILABLE"}));
+            return;
+        }
+    };
+    if !config.enabled {
+        shared_dsp::diagnostics::event("eq.startup_restore", "disabled", None, serde_json::json!({}));
+        return;
+    }
+
+    let shared_configured = app.state::<ConfigState>().0.lock()
+        .map(|value| !value.first_run && crate::is_shared_output(&value))
+        .unwrap_or(false);
+    if !shared_configured {
+        // Direct is a supported user choice. Keep the desired preference for a
+        // later Shared session, but do not touch its device or claim EQ active.
+        shared_dsp::diagnostics::event("eq.startup_restore", "deferred", None, serde_json::json!({"reason": "shared_route_required"}));
+        return;
+    }
+
+    let (owned_mpd_running, confirmed_shared_route, null_output_test, eq_pipe_present) = {
+        let supervisor_state = app.state::<SupervisorState>();
+        let mut supervisor = match supervisor_state.0.lock() {
+            Ok(value) => value,
+            Err(_) => {
+                app.state::<shared_dsp::State>().record_failure(shared_dsp::Error::ControlFailed);
+                return;
+            }
+        };
+        let running = matches!(supervisor.observe_health(), Ok(MpdProcessObservation::Running))
+            && supervisor.observed_process_pid().is_some();
+        let route = supervisor.audio_route_observation();
+        let shared = route.applied.as_ref().is_some_and(|route| {
+            route.access == crate::audio_route::AudioAccess::Shared
+                && route.processing == crate::audio_route::AudioProcessing::Off
+        });
+        (running, shared, route.null_output_test, route.eq_pipe_configured)
+    };
+    let queue_ready = app.state::<AudioState>().0.lock()
+        .map(|audio| audio.ensure_startup_queue_ready().is_ok())
+        .unwrap_or(false);
+    let current = runtime_snapshot(&app);
+    let runtime_active = startup_restore_confirmed(&current);
+    let runtime_idle = current.phase == shared_dsp::Phase::Off
+        && current.applied.is_none()
+        && current.comparison.is_none();
+    let shutdown = app.state::<ConfigTransactionState>().shutdown_requested();
+    if !startup_restore_allowed(
+        config.enabled,
+        shared_configured,
+        owned_mpd_running,
+        confirmed_shared_route,
+        queue_ready,
+        null_output_test,
+        eq_pipe_present || runtime_active,
+        runtime_idle,
+        shutdown,
+    ) {
+        shared_dsp::diagnostics::event(
+            "eq.startup_restore",
+            "deferred",
+            None,
+            serde_json::json!({
+                "owned_mpd_running": owned_mpd_running,
+                "confirmed_shared_route": confirmed_shared_route,
+                "queue_ready": queue_ready,
+                "null_output_test": null_output_test,
+                "existing_eq_pipe": eq_pipe_present,
+                "runtime_idle": runtime_idle,
+                "shutdown": shutdown,
+            }),
+        );
+        if !shutdown && (!owned_mpd_running || !confirmed_shared_route || !queue_ready || eq_pipe_present) {
+            app.state::<shared_dsp::State>().record_failure(shared_dsp::Error::ControlFailed);
+        }
+        return;
+    }
+
+    let preset = match config.preset(&config.active_preset) {
+        Ok(value) => value,
+        Err(_) => {
+            app.state::<shared_dsp::State>().record_failure(shared_dsp::Error::ApplyFailed);
+            return;
+        }
+    };
+    if crate::equalizer::validate_v1(&preset).is_err()
+        || shared_dsp::safety::assess(&preset, 48000).is_err()
+    {
+        app.state::<shared_dsp::State>().record_failure(shared_dsp::Error::ApplyFailed);
+        return;
+    }
+    if !app.state::<shared_dsp::State>().begin_restore() {
+        return;
+    }
+
+    shared_dsp::diagnostics::event("eq.startup_restore", "started", None, serde_json::json!({"preset_present": true}));
+    match apply_equalizer_inner(
+        true,
+        Some(preset),
+        None,
+        PreferenceUpdate::RequireEnabledRevision(saved_revision),
+        app.clone(),
+    )
+    .await
+    {
+        Ok(snapshot) if startup_restore_confirmed(&snapshot) => {
+            shared_dsp::diagnostics::event("eq.startup_restore", "confirmed", None, serde_json::json!({"revision": snapshot.revision}));
+        }
+        Ok(_) => {
+            shared_dsp::diagnostics::event("eq.startup_restore", "unconfirmed", None, serde_json::json!({"code": "EQ_RUNTIME_UNCONFIRMED"}));
+            app.state::<shared_dsp::State>().record_failure(shared_dsp::Error::ControlFailed);
+        }
+        Err(error) if error == "EQ_STARTUP_RESTORE_SUPERSEDED" => {
+            shared_dsp::diagnostics::event("eq.startup_restore", "cancelled", None, serde_json::json!({"reason": "preference_changed"}));
+            app.state::<shared_dsp::State>().cancel_restore();
+        }
+        Err(error) => {
+            shared_dsp::diagnostics::event("eq.startup_restore", "error", None, serde_json::json!({"code": shared_dsp::diagnostics::safe_error_code(&error)}));
+            app.state::<shared_dsp::State>().record_failure(shared_dsp::Error::ControlFailed);
+        }
+    }
 }
 
 /// Live DSP configuration only; never calls a queue, playback or output-switch method.
@@ -339,22 +658,49 @@ async fn set_route(
     app: &AppHandle,
     preset: Option<EqPreset>,
     bypass_expected: Option<EqPreset>,
+    preference: PreferenceUpdate,
 ) -> Result<(), String> {
     let transactions = app.state::<ConfigTransactionState>();
-    let _guard = transactions.begin()?;
     let current = app.state::<shared_dsp::State>().snapshot();
     if preset.is_none() {
         confirm_level_return(&current, bypass_expected.as_ref())?;
     }
+    let config = shared_config(app)?;
+    let processing = if preset.is_some() {
+        crate::audio_route::AudioProcessing::Equalizer
+    } else {
+        crate::audio_route::AudioProcessing::Off
+    };
+    let requested = crate::configured_audio_route(&config, processing)?;
+    // Serialize the preference update/check with the route operation. Startup
+    // restoration uses a revision check here so a late restore cannot override
+    // a newer explicit disable.
+    let store = EqualizerStore::default();
+    let (_route_transaction, route) = transactions.begin_audio_transition(
+        requested,
+        crate::config_save_operation::AudioTransitionKind::Equalizer,
+        || update_preference(&store, &preference),
+    )?;
     // A failed DSP cleanup is not a healthy transition eligible for autoplay.
     let may_resume = preset.is_some() || (current.verified && (current.applied.is_some()||current.comparison.is_some()));
-    set_route_admitted(app, preset, may_resume).await
+    let result = set_route_admitted(app, preset, may_resume, route.clone()).await;
+    if result.is_ok() {
+        route.confirm();
+    } else {
+        // Preflight failures are known failures. Once output mutation begins,
+        // switch_output marks the operation uncertain and resolves it only
+        // after a verified rollback or a successful transition.
+        route.fail();
+    }
+    result
 }
 async fn set_route_admitted(
     app: &AppHandle,
     preset: Option<EqPreset>,
     resume_requested: bool,
+    route: config_save_operation::AudioTransitionHandle,
 ) -> Result<(), String> {
+    let preflight_started = std::time::Instant::now();
     let watch = if resume_requested {
         Some(
             app.state::<AudioState>()
@@ -371,6 +717,15 @@ async fn set_route_admitted(
         return Err("EQ_CANCELLED".into());
     }
     let config = shared_config(app)?;
+    shared_dsp::diagnostics::event(
+        "audio.route_selected",
+        "info",
+        Some(preflight_started.elapsed().as_millis()),
+        serde_json::json!({
+            "route": match config.audio_output_type.as_str() { "pipewire" => "pipewire_shared", "shared" => "shared", "alsa" => "alsa_direct", _ => "other" },
+            "eq_route_supported": crate::is_shared_output(&config),
+        }),
+    );
     managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())?;
     let current_pipe = app
         .state::<SupervisorState>()
@@ -389,70 +744,88 @@ async fn set_route_admitted(
         .await
         .map_err(|_| "EQ_STOP_FAILED")?;
     }
+    shared_dsp::diagnostics::event(
+        "route.preflight",
+        "ok",
+        Some(preflight_started.elapsed().as_millis()),
+        serde_json::json!({"enabling": preset.is_some(), "existing_eq_pipe": current_pipe.is_some()}),
+    );
     let plex = app
         .state::<PlexState>()
         .0
         .lock()
         .map_err(|_| "EQ_QUEUE_UNAVAILABLE")?
         .clone();
-    // Prepare dependency/config/graph BEFORE pausing or altering the old output.
-    let prepared = if let Some(preset) = preset {
-        let worker = app.clone();
-        let callback = failure_callback(app);
-        Some(
-            tauri::async_runtime::spawn_blocking(move || {
-                worker
-                    .state::<shared_dsp::State>()
-                    .prepare(preset, callback)
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .map_err(|_| "EQ_PREPARE_FAILED")??,
-        )
-    } else {
-        None
-    };
-    let resolved = match resolve_device_switch_queue(&app.state::<AudioState>().0, &plex).await {
-        Ok(q) => q,
+    let sqlite_library = app.state::<SqliteLibraryState>().clone();
+    let queue_started = std::time::Instant::now();
+    let resolved = match resolve_device_switch_queue(&app.state::<AudioState>().0, &plex, Some(&sqlite_library), &config.local_folders).await {
+        Ok(q) => {
+            shared_dsp::diagnostics::event("route.queue_resolved", "ok", Some(queue_started.elapsed().as_millis()), serde_json::json!({"resolved": true}));
+            q
+        },
         Err(e) => {
-            // Only a newly prepared dependency belongs to this failed attempt.
-            // Bypass resolution refusal must leave an existing DSP untouched.
-            if prepared.is_some() {
-                let worker = app.clone();
-                let _ = tauri::async_runtime::spawn_blocking(move || {
-                    worker.state::<shared_dsp::State>().stop()
-                })
-                .await;
-            }
+            shared_dsp::diagnostics::event("route.queue_resolved", "error", Some(queue_started.elapsed().as_millis()), serde_json::json!({"code": shared_dsp::diagnostics::safe_error_code(&e)}));
             return Err(e);
         }
     };
     let worker = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        switch_output(&worker, &config, &resolved, prepared, watch)
+    let switch_started = std::time::Instant::now();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let result = switch_output(&worker, &config, &resolved, preset, watch, &route);
+        if result.is_ok() { route.confirm(); } else { route.fail(); }
+        result
     })
     .await
-    .map_err(|_| "EQ_SWITCH_FAILED")?
+    .map_err(|_| "EQ_SWITCH_FAILED")?;
+    shared_dsp::diagnostics::event(
+        "route.switch",
+        if result.is_ok() { "ok" } else { "error" },
+        Some(switch_started.elapsed().as_millis()),
+        serde_json::json!({"code": if result.is_ok() { "confirmed" } else { "switch_failed" }}),
+    );
+    let final_state = app.state::<shared_dsp::State>().snapshot();
+    shared_dsp::diagnostics::event(
+        "dsp.final_state",
+        if result.is_ok() && final_state.verified { "confirmed" } else { "unconfirmed" },
+        Some(switch_started.elapsed().as_millis()),
+        serde_json::json!({
+            "phase": final_state.phase,
+            "verified": final_state.verified,
+            "preset_present": final_state.applied.is_some(),
+            "error": final_state.error,
+        }),
+    );
+    result
+}
+
+fn prepare_eq_after_playback_suspension<T>(
+    snapshot: Option<audio::DeviceSwitchSnapshot>,
+    prepare: impl FnOnce() -> Result<T, String>,
+    restore_paused: impl FnOnce(Option<audio::DeviceSwitchSnapshot>) -> Result<(), String>,
+) -> Result<T, (String, Result<(), String>)> {
+    match prepare() {
+        Ok(prepared) => Ok(prepared),
+        Err(cause) => Err((cause, restore_paused(snapshot))),
+    }
 }
 
 fn switch_output(
     app: &AppHandle,
     config: &AppConfig,
     queue: &ResolvedDeviceSwitchQueue,
-    prepared: Option<shared_dsp::Prepared>,
+    preset: Option<EqPreset>,
     watch: Option<audio::EqTransitionWatch>,
+    route: &config_save_operation::AudioTransitionHandle,
 ) -> Result<(), String> {
+    let switch_started = std::time::Instant::now();
     let tx = app.state::<ConfigTransactionState>();
     let dsp = app.state::<shared_dsp::State>();
-    let is_enabling = prepared.is_some();
+    let is_enabling = preset.is_some();
     let result = (|| {
         let _restart = tx.try_begin_restart().ok_or("EQ_CANCELLED")?;
         shared_config(app)?;
         if watch.as_ref().is_some_and(|w| !w.current()) {
             return Err("EQ_SUPERSEDED".into());
-        }
-        if prepared.as_ref().is_some_and(|p| !dsp.verify_prepared(p)) {
-            return Err("EQ_CANCELLED".into());
         }
         let audio = app.state::<AudioState>();
         let supervisor = app.state::<SupervisorState>();
@@ -469,8 +842,12 @@ fn switch_output(
                 .prepare_reserved_device_switch(queue)
         };
         let snapshot = match preparation {
-            Ok(s) => s,
+            Ok(s) => {
+                shared_dsp::diagnostics::event("playback.suspended", "ok", Some(switch_started.elapsed().as_millis()), serde_json::json!({}));
+                s
+            }
             Err(error) => {
+                shared_dsp::diagnostics::event("playback.suspended", "error", Some(switch_started.elapsed().as_millis()), serde_json::json!({"code": shared_dsp::diagnostics::safe_error_code(&error.cause)}));
                 if error.snapshot.is_some() {
                     return Err(error_with_rollback(
                         error.cause,
@@ -480,12 +857,23 @@ fn switch_output(
                 return Err(error.cause);
             }
         };
-        let restore_paused = || -> Result<(), String> {
+        let restore_paused = |saved| -> Result<(), String> {
             let outcome = audio
                 .0
                 .lock()
                 .map_err(|_| "EQ_AUDIO_UNAVAILABLE")?
-                .restore_eq_switch(snapshot, queue)?;
+                .restore_eq_switch(saved, queue)?;
+            if outcome != audio::DeviceSwitchRestoreOutcome::Complete {
+                return Err("EQ_POSITION_NOT_RESTORED".into());
+            }
+            Ok(())
+        };
+        let restore_failed_transition_paused = |saved| -> Result<(), String> {
+            let outcome = audio
+                .0
+                .lock()
+                .map_err(|_| "EQ_AUDIO_UNAVAILABLE")?
+                .restore_for_route_save(saved, queue)?;
             if outcome != audio::DeviceSwitchRestoreOutcome::Complete {
                 return Err("EQ_POSITION_NOT_RESTORED".into());
             }
@@ -507,10 +895,11 @@ fn switch_output(
             Err(_) => {
                 return Err(error_with_rollback(
                     "EQ_ANALYZER_UNAVAILABLE".into(),
-                    restore_paused(),
+                        restore_failed_transition_paused(snapshot),
                 ))
             }
         };
+        shared_dsp::diagnostics::event("analyzer.suspended", "ok", Some(switch_started.elapsed().as_millis()), serde_json::json!({}));
         let mut resume = AnalyzerSwitchResume::new(|capture| {
             app.state::<AnalyzerState>()
                 .0
@@ -519,27 +908,93 @@ fn switch_output(
                 .resume_after_output_switch(capture, app, || tx.shutdown_requested())
         });
         resume.capture = capture;
+
+        // The PipeWire/ALSA admission must observe a quiescent Sonante stream.
+        // Starting Camilla while the previous MPD output is still playing can
+        // expose an incomplete `/proc/asound/.../streamN` report and falsely
+        // reject the selected AUX stereo sink. The queue has already been
+        // captured and stopped above; prepare only after that point.
+        let prepared = if let Some(preset) = preset {
+            let prepare_started = std::time::Instant::now();
+            shared_dsp::diagnostics::event(
+                "route.dsp_prepare",
+                "started",
+                Some(switch_started.elapsed().as_millis()),
+                serde_json::json!({"playback_suspended": true}),
+            );
+            let worker = app.clone();
+            let callback = failure_callback(app);
+            match prepare_eq_after_playback_suspension(
+                snapshot,
+                || {
+                    worker
+                        .state::<shared_dsp::State>()
+                        .prepare(preset, callback)
+                        .map_err(|error| error.to_string())
+                },
+                &restore_failed_transition_paused,
+            ) {
+                Ok(prepared) => {
+                    shared_dsp::diagnostics::event(
+                        "route.dsp_prepare",
+                        "ok",
+                        Some(prepare_started.elapsed().as_millis()),
+                        serde_json::json!({"generation": prepared.generation}),
+                    );
+                    Some(prepared)
+                }
+                Err((cause, rollback)) => {
+                    shared_dsp::diagnostics::event(
+                        "route.dsp_prepare",
+                        "error",
+                        Some(prepare_started.elapsed().as_millis()),
+                        serde_json::json!({
+                            "code": shared_dsp::diagnostics::safe_error_code(&cause),
+                            "queue_restored_paused": rollback.is_ok(),
+                        }),
+                    );
+                    return Err(error_with_rollback(cause, resume.after_rollback(rollback)));
+                }
+            }
+        } else {
+            None
+        };
         let pipe = prepared.as_ref().map(|p| p.pipe.clone());
         let changed = Cell::new(false);
         let applied = (|| {
             if tx.shutdown_requested() {
                 return Err("EQ_CANCELLED".into());
             }
+            if prepared.as_ref().is_some_and(|p| !dsp.verify_prepared(p)) {
+                return Err("EQ_CANCELLED".into());
+            }
+            // Mark before the first process/output mutation (including DSP
+            // stop); successful rollback can later refine this to Failed.
+            route.mark_uncertain();
             if pipe.is_none() {
                 dsp.stop().map_err(|e| e.to_string())?;
             }
             changed.set(true); // start may stop the old process before failing.
-            supervisor
+            let mpd_started = std::time::Instant::now();
+            let output_result = supervisor
                 .0
                 .lock()
                 .map_err(|_| "EQ_SUPERVISOR_UNAVAILABLE")?
-                .start_shared_eq_output(config, pipe)?;
+                .start_shared_eq_output(config, pipe);
+            if let Err(error) = output_result {
+                shared_dsp::diagnostics::event("mpd.eq_output_start", "error", Some(mpd_started.elapsed().as_millis()), serde_json::json!({"code": shared_dsp::diagnostics::safe_error_code(&error), "enabling": is_enabling}));
+                return Err(error);
+            }
+            shared_dsp::diagnostics::event("mpd.eq_output_start", "ok", Some(mpd_started.elapsed().as_millis()), serde_json::json!({"enabling": is_enabling}));
             if tx.shutdown_requested() {
                 return Err("EQ_CANCELLED".into());
             }
-            restore_paused()?;
+            let restore_started = std::time::Instant::now();
+            restore_paused(snapshot)?;
+            shared_dsp::diagnostics::event("playback.position_restored", "ok", Some(restore_started.elapsed().as_millis()), serde_json::json!({}));
             if is_enabling {
                 dsp.commit().map_err(|e| e.to_string())?;
+                shared_dsp::diagnostics::event("dsp.route_committed", "ok", Some(switch_started.elapsed().as_millis()), serde_json::json!({}));
             }
             if let Some(watch) = &watch {
                 if tx.shutdown_requested() {
@@ -551,9 +1006,13 @@ fn switch_output(
                     .map_err(|_| "EQ_AUDIO_UNAVAILABLE")?
                     .resume_eq_switch(snapshot, queue, watch);
                 match result {
-                    Ok(outcome) => dsp.record_transition(outcome),
+                    Ok(outcome) => {
+                        dsp.record_transition(outcome);
+                        shared_dsp::diagnostics::event("playback.resumed", "ok", Some(switch_started.elapsed().as_millis()), serde_json::json!({"transition": outcome}));
+                    },
                     Err(e) => {
                         dsp.record_transition("unconfirmed");
+                        shared_dsp::diagnostics::event("playback.resumed", "error", Some(switch_started.elapsed().as_millis()), serde_json::json!({"code": "transition_unconfirmed"}));
                         return Err(e);
                     }
                 }
@@ -561,10 +1020,17 @@ fn switch_output(
             Ok(())
         })();
         if let Err(original) = applied {
+            shared_dsp::diagnostics::event(
+                "route.apply_stage",
+                "error",
+                Some(switch_started.elapsed().as_millis()),
+                serde_json::json!({"code": shared_dsp::diagnostics::safe_error_code(&original), "output_changed": changed.get()}),
+            );
             if tx.shutdown_requested() {
                 return Err(format!("{original};EQ_CANCELLED"));
             }
             let rollback = (|| {
+                shared_dsp::diagnostics::event("route.rollback", "started", Some(switch_started.elapsed().as_millis()), serde_json::json!({"changed_output": changed.get()}));
                 if changed.get() {
                     dsp.stop().map_err(|e| e.to_string())?;
                     supervisor
@@ -573,8 +1039,21 @@ fn switch_output(
                         .map_err(|_| "EQ_SUPERVISOR_UNAVAILABLE")?
                         .start_shared_eq_output(config, None)?;
                 }
-                restore_paused()
+                restore_failed_transition_paused(snapshot)
             })();
+            if changed.get() {
+                if rollback.is_ok() {
+                    route.fail_after_rollback();
+                } else {
+                    route.mark_uncertain();
+                }
+            }
+            shared_dsp::diagnostics::event(
+                "route.rollback",
+                if rollback.is_ok() { "ok" } else { "error" },
+                Some(switch_started.elapsed().as_millis()),
+                serde_json::json!({"code": rollback.as_ref().err().map(|error| shared_dsp::diagnostics::safe_error_code(error))}),
+            );
             return Err(error_with_rollback(
                 original,
                 resume.after_rollback(rollback),
@@ -586,8 +1065,10 @@ fn switch_output(
     // A dependency prepared before a refused queue/suspension cannot stay
     // published as applied. Do not stop an existing DSP on a preflight refusal.
     if result.is_err() && is_enabling {
-        let _ = dsp.stop();
+        let stop_result = dsp.stop();
+        shared_dsp::diagnostics::event("dsp.cleanup_after_error", if stop_result.is_ok() { "ok" } else { "error" }, Some(switch_started.elapsed().as_millis()), serde_json::json!({"code": if stop_result.is_ok() { "stopped" } else { "stop_failed" }}));
     }
+    shared_dsp::diagnostics::event("audio.switch_result", if result.is_ok() { "ok" } else { "error" }, Some(switch_started.elapsed().as_millis()), serde_json::json!({"code": result.as_ref().err().map(|error| shared_dsp::diagnostics::safe_error_code(error))}));
     result
 }
 
@@ -617,6 +1098,226 @@ pub(crate) fn stop_for_output_switch(app: &AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn failed_eq_prepare_restores_queue_without_autoplay_for_playing_paused_and_stopped_origins() {
+        for origin in [audio::PlaybackState::Playing, audio::PlaybackState::Paused, audio::PlaybackState::Stopped] {
+            // `prepare_reserved_device_switch` has already stopped an active
+            // MPD stream before this helper is called.
+            let playback = Arc::new(Mutex::new(audio::PlaybackState::Stopped));
+            let effects = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+            let snapshot = Some(audio::DeviceSwitchSnapshot {
+                queue_index: 2,
+                elapsed: 31.25,
+                state: origin,
+            });
+            let prepare_playback = playback.clone();
+            let prepare_effects = effects.clone();
+            let restore_playback = playback.clone();
+            let restore_effects = effects.clone();
+
+            let result = prepare_eq_after_playback_suspension(
+                snapshot,
+                move || {
+                    assert_eq!(
+                        *prepare_playback.lock().unwrap(),
+                        audio::PlaybackState::Stopped
+                    );
+                    prepare_effects.lock().unwrap().push("prepare_dsp");
+                    Err::<(), _>("graph_invalid".into())
+                },
+                move |saved| {
+                    assert_eq!(saved, snapshot);
+                    restore_effects.lock().unwrap().push("restore_queue_paused");
+                    *restore_playback.lock().unwrap() = match origin {
+                        audio::PlaybackState::Playing | audio::PlaybackState::Paused => audio::PlaybackState::Paused,
+                        audio::PlaybackState::Stopped => audio::PlaybackState::Stopped,
+                    };
+                    Ok(())
+                },
+            );
+
+            let (cause, rollback) = result.unwrap_err();
+            assert_eq!(cause, "graph_invalid");
+            assert!(rollback.is_ok());
+            assert_eq!(
+                *effects.lock().unwrap(),
+                ["prepare_dsp", "restore_queue_paused"]
+            );
+            assert_eq!(
+                *playback.lock().unwrap(),
+                match origin {
+                    audio::PlaybackState::Playing | audio::PlaybackState::Paused => audio::PlaybackState::Paused,
+                    audio::PlaybackState::Stopped => audio::PlaybackState::Stopped,
+                }
+            );
+            assert!(!effects.lock().unwrap().contains(&"resume_playback"));
+        }
+    }
+
+    #[test]
+    fn runtime_admission_errors_are_distinct_and_sanitized() {
+        assert_eq!(
+            camilla_runtime_diagnostic(shared_dsp::Error::RuntimeMissing),
+            "EQ_CAMILLA_RUNTIME_MISSING"
+        );
+        assert_eq!(
+            camilla_runtime_diagnostic(shared_dsp::Error::RuntimeUntrusted),
+            "EQ_CAMILLA_RUNTIME_UNTRUSTED"
+        );
+        assert_eq!(
+            mpd_eq_runtime_diagnostic("EQ_MPD_RUNTIME_MISSING"),
+            "EQ_MPD_RUNTIME_MISSING"
+        );
+        assert_eq!(
+            mpd_eq_runtime_diagnostic("private path /home/user/runtime"),
+            "EQ_MPD_RUNTIME_UNAVAILABLE"
+        );
+    }
+
+    fn private_equalizer_store(label: &str) -> (std::path::PathBuf, EqualizerStore) {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sonante-eq-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let store = EqualizerStore::new(root.join("eq.json"));
+        (root, store)
+    }
+
+    #[test]
+    fn enabled_intent_and_selected_preset_survive_edits_and_restart_load() {
+        let (root, store) = private_equalizer_store("intent");
+        let initial = store.load().unwrap();
+        let mut tuned = crate::equalizer::flat_preset();
+        tuned.bands[0].enabled = true;
+        tuned.bands[0].gain_db = 3.5;
+        edit_store(
+            &store,
+            &revision(&initial).unwrap(),
+            Edit::Create { name: "Desk".into(), source: None, preset: Some(tuned.clone()) },
+        )
+        .unwrap();
+        let created = store.load().unwrap();
+        let selected = created.active_preset.clone();
+        let selected_id = match &selected { PresetRef::User { id } => id.clone(), _ => panic!("user preset expected") };
+        assert_eq!(created.preset(&selected).unwrap().bands[0].gain_db, 3.5);
+
+        assert!(!created.enabled, "a newly created EQ remains explicitly disabled");
+        assert!(!startup_restore_allowed(created.enabled, true, true, true, true, false, false, true, false));
+
+        update_preference(&store, &PreferenceUpdate::SetEnabled(true)).unwrap();
+        let enabled = store.load().unwrap();
+        edit_store(
+            &store,
+            &revision(&enabled).unwrap(),
+            Edit::Rename { id: selected_id, name: "Desk revised".into() },
+        )
+        .unwrap();
+        // A fresh load models the next application launch: the desired bit and
+        // complete preset data are restored from the private store.
+        let restarted = store.load().unwrap();
+        assert!(restarted.enabled);
+        assert_eq!(restarted.active_preset, selected);
+        let restored_preset = restarted.preset(&restarted.active_preset).unwrap();
+        assert_eq!(restored_preset.bands, tuned.bands);
+        assert_eq!(restored_preset.name, "Desk revised");
+        let (_, saved_revision) = load_from_store(&store).unwrap();
+        update_preference(
+            &store,
+            &PreferenceUpdate::RequireEnabledRevision(saved_revision.clone()),
+        )
+        .unwrap();
+        assert!(startup_restore_allowed(true, true, true, true, true, false, false, true, false));
+
+        update_preference(&store, &PreferenceUpdate::SetEnabled(false)).unwrap();
+        assert!(!store.load().unwrap().enabled);
+        assert_eq!(
+            update_preference(
+                &store,
+                &PreferenceUpdate::RequireEnabledRevision(saved_revision)
+            ),
+            Err("EQ_STARTUP_RESTORE_SUPERSEDED".into()),
+            "a stale startup request cannot re-enable an explicitly disabled EQ"
+        );
+        assert_eq!(store.load().unwrap().active_preset, selected);
+        std::fs::remove_file(root.join("eq.json")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn startup_restore_requires_owned_shared_ready_and_idle_audio() {
+        let safe = (true, true, true, true, true, false, false, true, false);
+        assert!(startup_restore_allowed(safe.0, safe.1, safe.2, safe.3, safe.4, safe.5, safe.6, safe.7, safe.8));
+        for index in 0..9 {
+            let mut conditions = safe;
+            match index {
+                0 => conditions.0 = false, // Explicitly disabled.
+                1 => conditions.1 = false, // Direct or first-run route.
+                2 => conditions.2 = false, // No owned MPD process.
+                3 => conditions.3 = false, // Shared route not confirmed.
+                4 => conditions.4 = false, // Startup queue not ready.
+                5 => conditions.5 = true,  // Isolated null output test.
+                6 => conditions.6 = true,  // Existing EQ pipe.
+                7 => conditions.7 = false, // Runtime is not idle.
+                _ => conditions.8 = true,   // Shutdown requested.
+            }
+            assert!(
+                !startup_restore_allowed(
+                    conditions.0, conditions.1, conditions.2, conditions.3,
+                    conditions.4, conditions.5, conditions.6, conditions.7, conditions.8
+                ),
+                "unsafe startup condition {index} must defer restoration"
+            );
+        }
+
+        let state = shared_dsp::State::new();
+        assert!(state.begin_restore());
+        let preparing = state.snapshot();
+        assert_eq!(preparing.phase, shared_dsp::Phase::Preparing);
+        assert!(!preparing.verified);
+        assert!(!startup_restore_confirmed(&preparing));
+        state.cancel_restore();
+        assert_eq!(state.snapshot().phase, shared_dsp::Phase::Off);
+        state.begin_shutdown();
+        assert!(!state.begin_restore());
+        state.join();
+
+        let confirmed = shared_dsp::Snapshot {
+            phase: shared_dsp::Phase::Ready,
+            applied: Some(crate::equalizer::flat_preset()),
+            in_path: Some(true),
+            verified: true,
+            ..Default::default()
+        };
+        assert!(startup_restore_confirmed(&confirmed));
+        assert!(!startup_restore_confirmed(&shared_dsp::Snapshot {
+            in_path: Some(false),
+            ..confirmed
+        }));
+        assert!(!startup_restore_confirmed(&shared_dsp::Snapshot {
+            phase: shared_dsp::Phase::Error,
+            error: Some(shared_dsp::Error::ApplyFailed),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn normal_dsp_shutdown_does_not_change_saved_eq_intent() {
+        let (root, store) = private_equalizer_store("shutdown");
+        update_preference(&store, &PreferenceUpdate::SetEnabled(true)).unwrap();
+        let dsp = shared_dsp::State::new();
+        dsp.begin_shutdown();
+        dsp.join();
+        assert!(store.load().unwrap().enabled);
+        std::fs::remove_file(root.join("eq.json")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
     #[test]
     fn private_crud_cas_does_not_activate_and_preserves_corruption() {
         let dir = std::env::temp_dir().join(format!("sonante-eq-crud-{}", std::process::id()));

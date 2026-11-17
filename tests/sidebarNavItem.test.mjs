@@ -28,22 +28,35 @@ const renderItem = props => renderToStaticMarkup(React.createElement(exports.Sid
   ...props,
 }));
 
-test("available sidebar items use secondary text and retain primary hover and active styling", () => {
+test("available sidebar items keep primary contrast, visible focus, and selected state", () => {
   for (const sourceEnabled of [undefined, true]) {
     const html = renderItem({ sourceEnabled });
-    assert.match(html, /text-\[color:var\(--theme-fg-secondary,#CCCCCC\)\] hover:bg-/);
-    assert.match(html, /group-hover:text-\[color:var\(--theme-fg-primary,#ffffff\)\]/);
+    assert.match(html, /hover:bg-\[var\(--theme-surface-raised,#202020\)\]/);
+    assert.match(html, /text-\[color:var\(--theme-fg-primary,#ffffff\)\]/);
+    assert.match(html, /focus-visible:ring-1 focus-visible:ring-\[color:var\(--theme-border-accent,#E5A00D\)\]/);
     assert.doesNotMatch(html, /<span class="[^"]*text-\[color:var\(--theme-fg-muted/);
   }
 
   const active = renderItem({ sourceEnabled: true, active: true });
   assert.match(active, /aria-current="page"/);
-  assert.match(active, /bg-\[var\(--theme-surface-raised,#242424\)\] text-\[color:var\(--theme-fg-primary,#ffffff\)\]/);
+  assert.match(active, /bg-\[var\(--theme-surface-raised,#242424\)\] text-\[color:var\(--theme-fg-primary,#ffffff\)\] font-semibold/);
   assert.match(active, /text-\[color:var\(--theme-fg-accent,#E5A00D\)\]/);
+  assert.match(active, /aria-hidden="true" class="absolute inset-y-2 left-0 w-0\.5 rounded-r bg-\[var\(--theme-fg-accent,#E5A00D\)\]"/);
 });
 
-test("disabled sources keep muted text and icon colors", () => {
+test("an unavailable source remains high-contrast when its navigation action is enabled", () => {
   const html = renderItem({ sourceEnabled: false });
-  assert.match(html, /<svg[^>]*class="[^"]*text-\[color:var\(--theme-fg-muted,#777777\)\]/);
-  assert.match(html, /<span class="[^"]*text-\[color:var\(--theme-fg-muted,#8A8A8A\)\]">Available item<\/span>/);
+  assert.match(html, /text-\[color:var\(--theme-fg-primary,#ffffff\)\]/);
+  assert.match(html, /<svg[^>]*class="[^"]*text-\[color:var\(--theme-fg-primary,#ffffff\)\]/);
+  assert.match(html, /<span class="min-w-0 flex-1 truncate">Available item<\/span>/);
+  assert.doesNotMatch(html, /<button[^>]*\sdisabled(?:="")?(?:\s|>)/);
+  assert.doesNotMatch(html, /aria-disabled="true"/);
+});
+
+test("only an actually disabled action is attenuated and non-interactive", () => {
+  const html = renderItem({ sourceEnabled: true, disabled: true });
+  assert.match(html, /<button[^>]*disabled=""/);
+  assert.match(html, /aria-disabled="true"/);
+  assert.match(html, /cursor-not-allowed opacity-55 disabled:hover:bg-transparent/);
+  assert.match(html, /focus-visible:ring-1 focus-visible:ring-/);
 });

@@ -1,0 +1,1307 @@
+[
+  {
+    "id": "flat",
+    "name": "Flat",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 31.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_02",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 63.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_03",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 125.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "gentle_bass",
+    "name": "Gentle bass",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 80.0,
+        "gain_db": 3.0,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 63.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_03",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 125.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "voices",
+    "name": "Voices",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 100.0,
+        "gain_db": -1.5,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 350.0,
+        "gain_db": -1.0,
+        "q": 0.65
+      },
+      {
+        "id": "flat_03",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 2.0,
+        "q": 0.65
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "smooth",
+    "name": "Smooth",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 120.0,
+        "gain_db": 0.8,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 4000.0,
+        "gain_db": -2.0,
+        "q": 0.707
+      },
+      {
+        "id": "flat_03",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 125.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "light_loudness",
+    "name": "Light loudness",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 80.0,
+        "gain_db": 2.5,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 650.0,
+        "gain_db": -0.7,
+        "q": 0.6
+      },
+      {
+        "id": "flat_03",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 6500.0,
+        "gain_db": 1.5,
+        "q": 0.707
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "style_rock",
+    "name": "Rock",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 90.0,
+        "gain_db": 2.0,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 350.0,
+        "gain_db": -1.2,
+        "q": 0.65
+      },
+      {
+        "id": "flat_03",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 2200.0,
+        "gain_db": 1.2,
+        "q": 0.65
+      },
+      {
+        "id": "flat_04",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 8500.0,
+        "gain_db": 0.7,
+        "q": 0.707
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "style_reggae",
+    "name": "Reggae",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 70.0,
+        "gain_db": 3.0,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 350.0,
+        "gain_db": -0.8,
+        "q": 0.65
+      },
+      {
+        "id": "flat_03",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 5500.0,
+        "gain_db": -0.8,
+        "q": 0.707
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "style_jazz",
+    "name": "Jazz",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 100.0,
+        "gain_db": 0.7,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 2200.0,
+        "gain_db": 0.9,
+        "q": 0.6
+      },
+      {
+        "id": "flat_03",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 9000.0,
+        "gain_db": 0.5,
+        "q": 0.707
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "style_electronic",
+    "name": "Electronic",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 60.0,
+        "gain_db": 3.5,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 400.0,
+        "gain_db": -1.0,
+        "q": 0.65
+      },
+      {
+        "id": "flat_03",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 7000.0,
+        "gain_db": 1.5,
+        "q": 0.707
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "style_pop",
+    "name": "Pop",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 90.0,
+        "gain_db": 1.8,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 2300.0,
+        "gain_db": 1.2,
+        "q": 0.65
+      },
+      {
+        "id": "flat_03",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 9500.0,
+        "gain_db": 0.8,
+        "q": 0.707
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "style_acoustic",
+    "name": "Acoustic",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 150.0,
+        "gain_db": -1.0,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 1700.0,
+        "gain_db": 1.3,
+        "q": 0.65
+      },
+      {
+        "id": "flat_03",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 9500.0,
+        "gain_db": 0.7,
+        "q": 0.707
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "mood_balanced",
+    "name": "Balanced",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 100.0,
+        "gain_db": 0.7,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 7500.0,
+        "gain_db": 0.5,
+        "q": 0.707
+      },
+      {
+        "id": "flat_03",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 125.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "mood_relaxing",
+    "name": "Relaxing",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 150.0,
+        "gain_db": 1.2,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 2500.0,
+        "gain_db": -1.8,
+        "q": 0.707
+      },
+      {
+        "id": "flat_03",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 125.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "mood_energetic",
+    "name": "Energetic",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 80.0,
+        "gain_db": 2.2,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "peak",
+        "frequency_hz": 2600.0,
+        "gain_db": 1.4,
+        "q": 0.7
+      },
+      {
+        "id": "flat_03",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 9000.0,
+        "gain_db": 0.8,
+        "q": 0.707
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  },
+  {
+    "id": "mood_cozy",
+    "name": "Cozy",
+    "preamp_db": 0.0,
+    "bands": [
+      {
+        "id": "flat_01",
+        "enabled": true,
+        "filter_type": "low_shelf",
+        "frequency_hz": 180.0,
+        "gain_db": 1.5,
+        "q": 0.707
+      },
+      {
+        "id": "flat_02",
+        "enabled": true,
+        "filter_type": "high_shelf",
+        "frequency_hz": 4500.0,
+        "gain_db": -1.5,
+        "q": 0.707
+      },
+      {
+        "id": "flat_03",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 125.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_04",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 250.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_05",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 500.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_06",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 1000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_07",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 2000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_08",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 4000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_09",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 8000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      },
+      {
+        "id": "flat_10",
+        "enabled": false,
+        "filter_type": "peak",
+        "frequency_hz": 16000.0,
+        "gain_db": 0.0,
+        "q": 1.0
+      }
+    ]
+  }
+]

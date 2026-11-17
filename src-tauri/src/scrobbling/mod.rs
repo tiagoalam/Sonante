@@ -160,6 +160,7 @@ pub struct ServiceStatus {
 pub struct Status {
     revision: u64,
     ready: bool,
+    service_available: bool,
     storage_error: bool,
     lastfm_authorizing: bool,
     lastfm: ServiceStatus,
@@ -191,9 +192,16 @@ pub struct State {
     view: Arc<Mutex<Status>>,
     stopped: AtomicBool,
     active: AtomicBool,
+    actor_available: AtomicBool,
     revision: AtomicU64,
 }
 impl State {
+    fn actor_stopped(&self) {
+        self.actor_available.store(false, Ordering::Release);
+        if let Ok(mut sender) = self.sender.lock() {
+            sender.take();
+        }
+    }
     fn snapshot(&self) -> Status {
         self.view
             .lock()
@@ -204,8 +212,23 @@ impl State {
                 ..Status::default()
             })
     }
+    fn status(&self) -> Status {
+        let mut status = self.snapshot();
+        if !self.actor_available.load(Ordering::Acquire) {
+            status.ready = true;
+            status.service_available = false;
+        }
+        status
+    }
 }
 pub(crate) fn start(app: &AppHandle) {
+    if crate::null_output_test_mode() {
+        return;
+    }
+    let transactions = app.state::<crate::ConfigTransactionState>();
+    if transactions.shutdown_requested() || transactions.shutdown_started() {
+        return;
+    }
     let state = app.state::<State>();
     let Ok(mut sender) = state.sender.lock() else {
         return;
@@ -214,6 +237,7 @@ pub(crate) fn start(app: &AppHandle) {
         return;
     }
     let (tx, rx) = mpsc::channel(128);
+    state.actor_available.store(false, Ordering::Release);
     *sender = Some(tx);
     let view = state.view.clone();
     let handle = app.clone();
@@ -225,6 +249,7 @@ pub(crate) fn start(app: &AppHandle) {
 pub(crate) fn shutdown(app: &AppHandle) {
     let state = app.state::<State>();
     state.stopped.store(true, Ordering::Release);
+    state.actor_available.store(false, Ordering::Release);
     if let Ok(mut slot) = state.task.lock() {
         if let Some(task) = slot.take() {
             task.abort();
@@ -236,10 +261,13 @@ pub(crate) fn shutdown(app: &AppHandle) {
 }
 #[tauri::command]
 pub fn get_scrobbling(state: tauri::State<'_, State>) -> Status {
-    state.snapshot()
+    state.status()
 }
 #[tauri::command]
 pub async fn set_scrobbling(app: AppHandle, action: Action) -> Result<ActionResult, String> {
+    if crate::null_output_test_mode() {
+        return Err("NULL_OUTPUT_TEST_SERVICES_DISABLED".into());
+    }
     match &action {
         Action::LastfmBegin {
             api_key,
@@ -349,6 +377,7 @@ impl Worker {
         Status {
             revision: self.app.state::<State>().revision.load(Ordering::Acquire),
             ready: true,
+            service_available: true,
             storage_error: self.storage_error,
             lastfm_authorizing: self
                 .auth
@@ -722,6 +751,13 @@ impl Worker {
         self.publish();
     }
 }
+struct ActorAvailabilityGuard(AppHandle);
+impl Drop for ActorAvailabilityGuard {
+    fn drop(&mut self) {
+        self.0.state::<State>().actor_stopped();
+    }
+}
+
 async fn run(app: AppHandle, view: Arc<Mutex<Status>>, mut rx: mpsc::Receiver<Command>) {
     let path = crate::persistence::sonante_config_dir().join("scrobbling.json");
     let initial = app
@@ -747,10 +783,16 @@ async fn run(app: AppHandle, view: Arc<Mutex<Status>>, mut rx: mpsc::Receiver<Co
         auth: None,
         storage_error,
     };
-    worker.publish();
+    let _availability = ActorAvailabilityGuard(worker.app.clone());
     let Ok(mut api) = Api::new() else {
         return;
     };
+    worker
+        .app
+        .state::<State>()
+        .actor_available
+        .store(true, Ordering::Release);
+    worker.publish();
     loop {
         let delay = if worker.storage_error {
             Duration::from_secs(3600)
@@ -778,6 +820,31 @@ async fn run(app: AppHandle, view: Arc<Mutex<Status>>, mut rx: mpsc::Receiver<Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_scrobbling_profile_has_no_provider_opt_in_or_pending_network_work() {
+        let data = File::default();
+        let since = [Instant::now(), Instant::now()];
+        assert!(Provider::all().into_iter().all(|provider| !data.enabled(provider)));
+        assert!(data.targets(&since).into_iter().all(|target| target.is_none()));
+        assert!(data.pending.is_empty());
+        let status = State::default().status();
+        assert!(status.ready);
+        assert!(!status.service_available);
+    }
+
+    #[test]
+    fn actor_initialization_failure_releases_sender_for_a_safe_later_start() {
+        let state = State::default();
+        let (sender, _receiver) = mpsc::channel(1);
+        *state.sender.lock().unwrap() = Some(sender);
+        state.actor_available.store(true, Ordering::Release);
+
+        state.actor_stopped();
+
+        assert!(state.sender.lock().unwrap().is_none());
+        assert!(!state.actor_available.load(Ordering::Acquire));
+    }
+
     #[test]
     fn non_hex_lastfm_session_survives_private_store_round_trip_without_affecting_listenbrainz() {
         let mut data = File::default();
@@ -881,6 +948,19 @@ mod navidrome_tests {
   let nav=CurrentMedia::Navidrome{connection_id:"fixture-session".into(),song_id:"song-a".into(),queue_index:0};
   for mask in 0..8 {let sources=EnabledSources{local:mask&1!=0,plex:mask&2!=0,navidrome:mask&4!=0};assert_eq!(media_key(&nav,sources).is_some(),sources.navidrome);
    assert!(media_key(&CurrentMedia::Radio{station_id:"radio".into(),queue_index:0},sources).is_none());assert!(media_key(&CurrentMedia::Upnp{session_id:"remote".into(),queue_index:0},sources).is_none());}
+ }
+
+ #[test]
+ fn sqlite_locator_is_only_an_internal_deduplication_key_and_never_enters_provider_track_data(){
+  use crate::{audio::CurrentMedia,config::EnabledSources};
+  let media=CurrentMedia::Local{uri:"sqlite-track://source-17/track-91".into(),queue_index:3};
+  let key=media_key(&media,EnabledSources{local:true,plex:false,navidrome:false}).unwrap();
+  assert!(key.contains("sqlite-track://source-17/track-91"));
+  let track=Track::new("Fixture Artist","Fixture Track","Fixture Album",180.).unwrap();
+  let provider_payload=serde_json::to_string(&track).unwrap();
+  assert!(!provider_payload.contains("sqlite-track://"));
+  assert!(!provider_payload.contains("source-17"));
+  assert!(!provider_payload.contains("/home/"));
  }
  #[test]
  fn navidrome_uses_the_existing_listening_threshold_once_per_provider_and_sends_no_source_references(){

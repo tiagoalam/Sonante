@@ -13,10 +13,11 @@ interface Props {
   active: boolean;
   inactiveLabel: string;
   inactiveHelp?: string;
+  compact?: boolean;
 }
 const silence: AudioLevelFrame = { leftRms: 0, rightRms: 0, leftPeak: 0, rightPeak: 0, spectrum: [] };
 
-export const PsychoVisualizer: React.FC<Props> = ({ levels, active, inactiveLabel, inactiveHelp }) => {
+export const PsychoVisualizer: React.FC<Props> = ({ levels, active, inactiveLabel, inactiveHelp, compact = false }) => {
   const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef(levels);
@@ -104,7 +105,7 @@ export const PsychoVisualizer: React.FC<Props> = ({ levels, active, inactiveLabe
     setPreferences(next); savePsychoPreferences(next);
   };
   const pauseLabel = t(reducedMotion ? "nowPlaying.look.reducedMotion" : frozen ? "nowPlaying.look.resumeEffects" : "nowPlaying.look.pauseEffects");
-  return <section className="np-psycho-stage" data-psycho-scene={scene} aria-label={t("nowPlaying.layouts.psycho")}>
+  return <section className={`np-psycho-stage${compact ? " np-psycho-stage-compact" : ""}`} data-psycho-density={compact ? "compact" : "standard"} data-psycho-scene={scene} aria-label={t("nowPlaying.layouts.psycho")}>
     <canvas ref={canvasRef} aria-hidden="true" />
     <div className="np-psycho-caption"><span>{t("nowPlaying.look.psychoCaption")}</span>
       <div className="np-psycho-toolbar">

@@ -5,33 +5,48 @@ import { navidromeService } from './navidrome';
 import { localSourceReadQueue } from '../utils/localSourceReadQueue';
 import { navidromeQueueTrack } from '../utils/navidromeTracks';
 import { sessionAlbum } from '../utils/listeningSessions';
+import { isSqliteCatalogEnabled } from '../utils/sqliteExperimentalMode';
+import { sqliteLibrary } from './sqliteLibrary';
 import type { SessionCandidate } from '../types/listeningSession';
 import type { SmartSource } from '../types/smartPlaylist';
 import type { LocalAlbum } from '../types/local';
 let localAlbums = new Map<string, LocalAlbum>();
 export const sessionLocalAlbum = (id: string) => localAlbums.get(id);
 const check = (current: () => boolean) => { if (!current()) throw 'SESSION_CANCELLED'; };
-export async function checkSessionSource(source: SmartSource, current: () => boolean): Promise<void> {
+export async function sessionSources(localEnabled: boolean) {
+  const sources = await smartPlaylistsService.sources();
+  if (!isSqliteCatalogEnabled()) return sources;
+  if (!localEnabled) return { ...sources, local: false };
+  const local = await sqliteLibrary.sources();
+  return { ...sources, local: local.length > 0 };
+}
+export async function checkSessionSource(source: SmartSource, current: () => boolean, localEnabled: boolean): Promise<void> {
   check(current);
+  if (source.kind === 'local' && isSqliteCatalogEnabled()) {
+    if (!localEnabled) throw 'SESSION_SOURCE';
+    const sources = await sqliteLibrary.sources(); check(current);
+    if (!sources.length) throw 'SESSION_SOURCE';
+    return;
+  }
   const available = await smartPlaylistsService.sources(); check(current);
   if (source.kind === 'local' ? !available.local : source.kind === 'plex' ? available.plex_server_id !== source.server_id
     : available.navidrome_account_id !== source.account_id) throw 'SESSION_SOURCE';
 }
-export async function sessionCatalog(source: SmartSource, current: () => boolean): Promise<SessionCandidate[]> {
-  await checkSessionSource(source, current);
+export async function sessionCatalog(source: SmartSource, current: () => boolean, localEnabled: boolean): Promise<SessionCandidate[]> {
+  await checkSessionSource(source, current, localEnabled);
   if (source.kind !== 'local') return smartPlaylistsService.catalog(source, current);
   // getLocalAlbums already schedules its own source read. Wrapping it in the
   // same queue would make the outer job wait forever on its own inner job.
   const albums = await audioService.getLocalAlbums();
-  check(current); await checkSessionSource(source, current);
+  check(current); await checkSessionSource(source, current, localEnabled);
   localAlbums = new Map(albums.map(album => [album.id, album]));
   return albums.map(album => ({ id: album.id, title: album.title, artist: album.artist,
     year: album.year ? parseInt(album.year, 10) || null : null, genres: album.genres ?? [],
     added_at: album.added_at ? Date.parse(album.added_at) / 1000 || null : null,
     scope_id: album.source_id ?? undefined, scope_label: album.source_label ?? undefined }));
 }
-export async function sessionAlbumTracks(source: SmartSource, album: SessionCandidate, current: () => boolean) {
-  await checkSessionSource(source, current);
+export async function sessionAlbumTracks(source: SmartSource, album: SessionCandidate, current: () => boolean, localEnabled: boolean) {
+  await checkSessionSource(source, current, localEnabled);
   let tracks;
   if (source.kind === 'local') {
     const groups = await localSourceReadQueue(() => { check(current); return audioService.getLocalAlbumTracks(album.id); });
@@ -52,7 +67,7 @@ export async function sessionAlbumTracks(source: SmartSource, album: SessionCand
     if (confirmed.connection_id !== nav.connection_id || confirmed.account_id !== source.account_id) throw 'SESSION_SOURCE';
     tracks = [...detail.songs].sort((a, b) => a.disc - b.disc || a.track - b.track).map(song => navidromeQueueTrack(nav, song));
   }
-  check(current); await checkSessionSource(source, current);
+  check(current); await checkSessionSource(source, current, localEnabled);
   sessionAlbum(album, tracks, source, 'discovery'); // Refuse incomplete/foreign batches, never truncate albums.
   return tracks;
 }

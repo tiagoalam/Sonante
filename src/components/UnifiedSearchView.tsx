@@ -12,6 +12,7 @@ import { Search, Disc3, Users, Music2, ArrowLeft, ArrowUpRight, Play, LoaderCirc
 import { useTranslation } from "react-i18next";
 import type { AppConfig } from "../types/config";
 import type { PlaybackStatus } from "../types/audio";
+import type { Source as SqliteSource } from "../services/sqliteLibrary";
 import { audioService } from "../services/audio";
 import { plexService } from "../services/plex";
 import { localAlbumCatalog } from "../utils/localAlbumCatalogSession";
@@ -22,6 +23,7 @@ import { logError } from "../utils/frontendDiagnostics";
 import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { LocalBrowserView } from "./LocalBrowserView";
+import { SearchAlbumArtwork } from "./SearchAlbumArtwork";
 import { AlbumView } from "./AlbumView";
 import { ArtistView } from "./ArtistView";
 
@@ -35,10 +37,14 @@ interface Props {
   catalogRefreshRevision: number;
   active: boolean;
   onFavoritesChanged: () => void;
+  sqliteBacked?: boolean;
+  sqliteIndexing?: boolean;
+  sqliteSources?: SqliteSource[];
+  sqliteTagEditorEarlyAccessEnabled?: boolean;
 }
 type DetailRow = Exclude<SearchRow, { kind: "track" }>;
 
-export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured=false, navidromeRevision=0, plexIdentity, status, isPlaybackAvailable, catalogRefreshRevision, active, onFavoritesChanged }) => {
+export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured=false, navidromeRevision=0, plexIdentity, status, isPlaybackAvailable, catalogRefreshRevision, active, onFavoritesChanged, sqliteBacked = false, sqliteIndexing = false, sqliteSources = [], sqliteTagEditorEarlyAccessEnabled = false }) => {
   const { t } = useTranslation();
   const [text, setText] = useState("");
   const [source, setSource] = useState<SearchSource>("all");
@@ -46,13 +52,15 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
   const [retry, setRetry] = useState(0);
   const [detail, setDetail] = useState<{ row: DetailRow; identity: unknown } | null>(null);
   const catalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
-  const localConfigured = sourceEnabled(config, "local") && config.local_folders.length > 0;
+  const localConfigured = sourceEnabled(config, "local") && (sqliteBacked || config.local_folders.length > 0);
   const plexConfigured = sourceEnabled(config, "plex") && Boolean(config.plex_token.trim());
   const navConfigured=sourceEnabled(config,"navidrome")&&navidromeConfigured;
   const navIdentity=useMemo(()=>({}),[navConfigured,navidromeRevision]);
   const scope = source === "navidrome"&&!navConfigured || source === "local" && !localConfigured || source === "plex" && !plexConfigured ? "all" : source;
   const query = searchQuery(text);
-  const localReady = isPlaybackAvailable && confirmedCatalogPlaybackAllowed(catalog, status.is_updating);
+  const localReady = sqliteBacked
+    ? catalog.loaded && !catalog.loading && !catalog.error
+    : isPlaybackAvailable && confirmedCatalogPlaybackAllowed(catalog, status.is_updating);
   const roots = JSON.stringify(config.local_folders);
   const localIdentity = useMemo(() => ({}), [catalog.albums, roots]);
   // Search responses follow catalog generations; an open destination follows its
@@ -148,6 +156,8 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
       : row.track.album_rating_key ? async () => (await plexService.getAlbumTracks(row.track.album_rating_key!)).map(item => plexQueueTrack(item)) : undefined,
   });
   const live = useRef({ active, localReady, currentDetail, scope }); live.current = { active, localReady, currentDetail, scope };
+  const canPlayTrack = (_row: Extract<SearchRow, { kind: "track" }>) =>
+    isPlaybackAvailable;
   const isCurrent = (row: SearchRow) => live.current.active && !live.current.currentDetail
     && (live.current.scope === "all" || live.current.scope === row.source)
     && configuredFor(row)
@@ -157,7 +167,7 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
   const open = (row: SearchRow, button: HTMLElement) => {
     if (!isCurrent(row)) return;
     if (row.kind === "track") {
-      if (isPlaybackAvailable) void request.run(async intent => {
+      if (canPlayTrack(row)) void request.run(async intent => {
         if (isCurrent(row) && intent.current()) await audioService.playTracks([searchTrackMetadata(row)], 0, intent);
       });
     } else {
@@ -167,8 +177,8 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
   const rows = query ? sortSearchRows([
     ...(showLocal && localReady ? [...localMetadata.rows, ...local.value?.rows ?? []] : []), ...(showPlex ? plex.value?.rows ?? [] : []), ...(showNav ? nav.value?.rows ?? [] : []),
   ], query) : [];
-  const selectionRows = rows.filter((row): row is Extract<SearchRow, { kind: "track" }> => row.kind === "track");
-  const selection = useTrackSelection(playbackContext, selectionRows.map(searchTrackMetadata), active && !currentDetail && isPlaybackAvailable && !status.is_updating);
+  const selectionRows = rows.filter((row): row is Extract<SearchRow, { kind: "track" }> => row.kind === "track" && canPlayTrack(row));
+  const selection = useTrackSelection(playbackContext, selectionRows.map(searchTrackMetadata), active && !currentDetail && isPlaybackAvailable && !status.is_updating, false);
 
   const visibleRows = (["album", "artist", "track"] as const).flatMap(group =>
     kind === "all" || kind === group ? rows.filter(row => row.kind === group) : []);
@@ -182,7 +192,9 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
   const chip = "rounded-full border px-4 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]";
   const selectedChip = "border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-accent,#332b15)] text-[color:var(--theme-fg-accent,#E5A00D)]";
   const idleChip = "border-[color:var(--theme-border-soft,#333333)] text-[color:var(--theme-fg-secondary,#AAAAAA)] hover:bg-[var(--theme-surface-raised,#262626)]";
-  const localUnavailable = Boolean(catalog.error) || !isPlaybackAvailable || catalog.saveBlocked && !catalog.manualCheckPlayback;
+  const localUnavailable = sqliteBacked
+    ? Boolean(catalog.error) || catalog.loading || !catalog.loaded
+    : Boolean(catalog.error) || !isPlaybackAvailable || catalog.saveBlocked && !catalog.manualCheckPlayback;
   const searching = Boolean(query && (showLocal && !localUnavailable && (!localReady || local.phase === "idle" || local.phase === "loading")
     || showPlex && (plex.phase === "idle" || plex.phase === "loading") || showNav&&(nav.phase==="idle"||nav.phase==="loading")));
   const sourceStatus = (name: string, loading: boolean, failed: boolean, partial = false) => <span className="inline-flex items-center gap-2">
@@ -242,7 +254,7 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
       </header>
       <div ref={scroll} onScroll={event => { if (!currentDetail) position.current = event.currentTarget.scrollTop; }} className="min-h-0 flex-1 overflow-y-auto px-6 py-6 sm:px-8">
         <PlaybackRequestNotice failure={request.failure} />
-        {queueActions.notice}{queueActions.menu}{selection.toolbar}
+        {queueActions.notice}{queueActions.menu}
         {!query || !localConfigured && !plexConfigured && !navConfigured ? <div className="mx-auto max-w-xl py-16 text-center"><Search size={42} className="mx-auto mb-5 text-[color:var(--theme-fg-accent,#E5A00D)]" /><h2 className="text-lg font-semibold">{t("unifiedSearch.startTitle")}</h2><p className="mt-3 text-sm leading-relaxed text-[color:var(--theme-fg-muted,#888888)]">{t(localConfigured || plexConfigured || navConfigured ? "unifiedSearch.startHint" : "unifiedSearch.configureHint")}</p></div> : <>
           <div role="status" className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-[color:var(--theme-fg-muted,#888888)]">
             {showLocal && sourceStatus(t("explore.sources.local"), !localUnavailable && (!localReady || local.phase === "loading" || local.phase === "idle"), localUnavailable || local.phase === "error", local.value?.tracksUnavailable)}
@@ -258,17 +270,22 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
             return <section key={group} aria-label={kinds[group]} className="mb-8"><h2 className="mb-3 flex items-center gap-2 text-base font-semibold"><Icon size={19} className="text-[color:var(--theme-fg-accent,#E5A00D)]" />{kinds[group]}<span className="ml-1 rounded-full bg-[var(--theme-surface-raised,#262626)] px-2 py-0.5 text-xs text-[color:var(--theme-fg-muted,#888888)]">{entries.length}</span></h2>
               <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">{entries.map(row => {
                 const text = rowText(row), Origin = row.source === "local" ? Folder : Server;
-                return <div key={row.key} className={`relative ${row.kind === "track" && selection.checked(selectionRows.indexOf(row)) ? "track-selected" : ""}`} onContextMenu={row.kind === "track" ? event => queueActions.open(event, queueRequest(row)) : undefined}>
+                const playable = row.kind === "track" && canPlayTrack(row);
+                const selectionIndex = row.kind === "track" && playable ? selectionRows.indexOf(row) : -1;
+                return <div key={row.key} className={`relative ${selectionIndex >= 0 && selection.checked(selectionIndex) ? "track-selected" : ""}`} onContextMenu={playable ? event => queueActions.open(event, queueRequest(row as Extract<SearchRow, { kind: "track" }>)) : undefined}>
                   <button type="button" data-search-result={row.key}
-                  ref={button => { if (button) resultButtons.current.set(row.key, button); else resultButtons.current.delete(row.key); }} disabled={!active || row.kind === "track" && !isPlaybackAvailable}
+                  ref={button => { if (button) resultButtons.current.set(row.key, button); else resultButtons.current.delete(row.key); }} disabled={!active || row.kind === "track" && !playable}
                   title={[text.title, text.subtitle].filter(Boolean).join(" · ")}
-                  onClick={event => { if (row.kind !== "track" || !selection.click(event, selectionRows.indexOf(row))) open(row, event.currentTarget); }} aria-label={`${row.kind === "track" ? t("unifiedSearch.playTrack") : t("unifiedSearch.open")}: ${text.title} · ${t(`explore.sources.${row.source}`)}`}
+                  onClick={event => { if (row.kind !== "track" || !playable || !selection.click(event, selectionIndex)) open(row, event.currentTarget); }} aria-label={`${row.kind === "track" ? t("unifiedSearch.playTrack") : t("unifiedSearch.open")}: ${text.title} · ${t(`explore.sources.${row.source}`)}`}
                   className={`group flex w-full min-w-0 items-center gap-3 rounded-xl border border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-panel,#181818)] px-4 py-3 text-left transition-colors hover:border-[color:var(--theme-border-accent,#E5A00D)]/60 hover:bg-[var(--theme-surface-raised,#222222)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-40 ${row.kind === "track" ? "pr-24" : ""}`}>
-                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--theme-surface-accent,#332b15)] text-[color:var(--theme-fg-accent,#E5A00D)]"><Icon size={22} /></span>
+                  {row.kind === "album"
+                    ? <SearchAlbumArtwork row={row} active={active} localReady={localReady} sqliteBacked={sqliteBacked}
+                      onlineArtworkEnabled={config.online_artwork_enabled} isLibraryUpdating={status.is_updating} plexIdentity={plexIdentity} />
+                    : <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--theme-surface-accent,#332b15)] text-[color:var(--theme-fg-accent,#E5A00D)]"><Icon size={22} /></span>}
                   <span className="min-w-0 flex-1"><span title={text.title} className="block truncate text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)]">{text.title}</span><span title={text.subtitle || undefined} className="mt-0.5 block truncate text-xs text-[color:var(--theme-fg-muted,#888888)]">{text.subtitle || t(row.kind === "artist" ? "unifiedSearch.artistAction" : "unifiedSearch.open")}</span></span>
                   <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-[color:var(--theme-border-soft,#333333)] px-2.5 py-1 text-[11px] text-[color:var(--theme-fg-secondary,#AAAAAA)]"><Origin size={12} />{t(`explore.sources.${row.source}`)}</span>
                   {row.kind === "track" ? <Play size={17} className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" /> : <ArrowUpRight size={17} className="shrink-0 text-[color:var(--theme-fg-muted,#888888)] group-hover:text-[color:var(--theme-fg-accent,#E5A00D)]" />}
-                </button>{row.kind === "track" && <span className="absolute right-2 top-1/2 flex items-center gap-2 -translate-y-1/2">{selection.checkbox(selectionRows.indexOf(row))}{queueActions.trigger(queueRequest(row))}</span>}</div>;
+                </button>{playable && <span className="absolute right-2 top-1/2 flex items-center gap-2 -translate-y-1/2">{selection.checkbox(selectionIndex)}{queueActions.trigger(queueRequest(row as Extract<SearchRow, { kind: "track" }>))}</span>}</div>;
               })}</div></section>;
           })}
           {!searching && !rows.some(row => kind === "all" || row.kind === kind) && <p className="py-12 text-center text-sm text-[color:var(--theme-fg-muted,#888888)]">{t("unifiedSearch.empty")}</p>}
@@ -281,7 +298,9 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
         initialAlbumId={currentDetail.kind === "album" ? currentDetail.album.id : undefined}
         initialArtist={currentDetail.kind === "artist" ? currentDetail.artist.name : undefined} onClearInitialArtist={back}
         onAlbumNavigationBack={back} catalogRefreshRevision={catalogRefreshRevision} isPlaybackAvailable={isPlaybackAvailable}
-        isLibraryUpdating={status.is_updating} onlineArtworkEnabled={config.online_artwork_enabled} configuredLocalFolders={config.local_folders} />
+        isLibraryUpdating={status.is_updating} onlineArtworkEnabled={config.online_artwork_enabled} configuredLocalFolders={config.local_folders}
+        sqliteBacked={sqliteBacked} sqliteIndexing={sqliteIndexing} sqliteSources={sqliteSources}
+        sqliteTagEditorEarlyAccessEnabled={sqliteTagEditorEarlyAccessEnabled} />
       : currentDetail.source === "navidrome" ? currentDetail.kind === "album" ? <NavidromeView key={currentDetail.key} embedded available={isPlaybackAvailable&&active} initialAlbum={{account_id:currentDetail.connection.account_id!,id:currentDetail.album.id}} onAlbumBack={back} backLabel={t("unifiedSearch.back")}/>
       : <NavidromeArtistView key={currentDetail.key} artist={{account_id:currentDetail.connection.account_id!,id:currentDetail.artist.id}} revision={navidromeRevision} onBack={back} backLabel={t("unifiedSearch.back")} available={isPlaybackAvailable} active={active}/>
       : currentDetail.kind === "album" ? <AlbumView album={currentDetail.album} active={active} onBack={back} backLabel={t("unifiedSearch.back")} isPlaybackAvailable={isPlaybackAvailable}

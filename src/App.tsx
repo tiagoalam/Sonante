@@ -20,7 +20,6 @@ import { useQueueInsertion } from "./components/QueueInsertionMenu";
 import { plexQueueTrack } from "./utils/queueActions";
 import {plexTrackArtist,plexTrackDurationSeconds} from './utils/plexTrackMetadata';
 import { canToggleMute, directMuteRequest, sharedMuteRequest } from "./utils/signalPath";
-import { SlidersHorizontal } from "lucide-react";
 import { LibraryRecoveryPanel } from "./components/LibraryRecoveryPanel";
 import { LocalWatchNotice } from "./components/LocalWatchNotice";
 import { usePlaybackAttempt } from "./utils/usePlaybackAttempt";
@@ -35,6 +34,7 @@ import { NowPlayingHost } from "./components/NowPlayingHost";
 import { NowPlayingHosting, capturePagePresentation } from "./utils/nowPlayingHosting";
 import { claimAudioAnalyzerHost, closeDetachedWindow, exchangeDetachedHost, onDetachedWindowClosed, releaseAudioAnalyzerHost, REINCORPORATE_EVENT, NAVIGATE_EVENT } from "./services/nowPlayingWindow";
 import { configuredSignalRoute } from "./utils/signalPath";
+import { equalizerIsActive } from "./utils/audioExperience";
 import { logError, installInteractionProbe, recordInteractionState } from "./utils/frontendDiagnostics";
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo, useSyncExternalStore, memo } from "react";
 import {
@@ -60,6 +60,7 @@ import {
   ExternalLink,
   ListPlus,
   Compass,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlayerBar } from "./components/PlayerBar";
@@ -80,14 +81,19 @@ import { PlexCatalogCoordinator } from "./utils/plexCatalogCoordinator";
 import { LocalBrowserView, localAlbumCatalog, type LocalSubview } from "./components/LocalBrowserView";
 import { localExplorePresentation } from "./utils/localExploreState";
 import { localArtworkEnrichment, localArtworkResolver, localAlbumThumbnails } from "./utils/localArtworkSession";
+import { sqliteAlbumThumbnailContext } from "./utils/localAlbumThumbnails";
+import { isSqliteCatalogEnabled } from "./utils/sqliteExperimentalMode";
 import { artworkReadBlocked } from "./utils/localArtwork";
-import { initialMediaSource, createMainSectionPreference, type MainSection } from "./utils/appBootstrap";
+import { initialMediaSource, initialSqliteMediaSource, createMainSectionPreference, MAIN_SECTION_STORAGE_KEY, SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY,
+  preferredSqlitePlexLibrary, saveSqlitePlexLibraryPreference, type MainSection } from "./utils/appBootstrap";
+import { createLibraryActivityVisibility } from "./utils/libraryActivityLifecycle";
 import { FavoritesView } from "./components/FavoritesView";
 import { PlaylistPickerModal } from "./components/PlaylistPickerModal";
 import type { SettingsPage } from "./components/SettingsPages";
 import { SettingsModal, QueueClearConfirmationDialog, formatConfigError } from "./components/SettingsModal";
 import { KeyboardShortcutsHelp } from "./components/KeyboardShortcutsHelp";
 import { WelcomeWizard } from "./components/WelcomeWizard";
+import { DirectVolumeChoiceDialog } from "./components/DirectVolumeChoiceDialog";
 import { PlexImage } from "./components/PlexImage";
 import type { VirtualAlbumGridHandle } from "./components/VirtualAlbumGrid";
 import { AlbumCatalog } from "./components/AlbumCatalog";
@@ -101,6 +107,7 @@ import { AlbumGenreGrid } from "./components/AlbumGenreGrid";
 import { SidebarNavItem } from "./components/SidebarNavItem";
 import { plexService } from "./services/plex";
 import { audioService, LOCAL_LIBRARY_RECONCILED_EVENT } from "./services/audio";
+import { sqliteLibrary, type Source as SqliteSource, type SqliteIndexProgress } from "./services/sqliteLibrary";
 import { configService } from "./services/config";
 import { createImportArtworkCache } from "./utils/importArtworkCache";
 import { createLocalImportPreview } from "./utils/localImportPreview";
@@ -125,7 +132,8 @@ import {
   PlexTrack,
   PlexImageRef,
 } from "./types/plex";
-import { PlaybackStatus, AudioDevice, MpdHealth } from "./types/audio";
+import { PlaybackStatus, AudioDevice, MpdHealth, AudioRouteProjection } from "./types/audio";
+import { acceptsAudioRouteGeneration } from "./utils/audioRoute";
 import { AppConfig } from "./types/config";
 import { FavoriteAlbum } from "./types/favorite";
 import type { NewPlaylistItem } from "./types/playlist";
@@ -151,6 +159,14 @@ import {
   plexAlbumsForYear,
   plexAlbumsWithoutYear,
 } from "./utils/plexYearNavigation";
+
+const createSqliteOperationId = () => typeof crypto !== "undefined" && "randomUUID" in crypto
+  ? crypto.randomUUID()
+  : `sqlite-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+const safeSqliteError = (error: unknown) => (error instanceof Error ? error.message : String(error))
+  .replace(/(?:\/(?:[^\s/:]+\/)*[^\s/:]+|[A-Za-z]:\\[^\s]+)/g, "[path]")
+  .replace(/\s+/g, " ").trim().slice(0, 180) || "SQLITE_OPERATION_FAILED";
 
 interface CollectionAlbumsCacheEntry {
   promise: Promise<PlexAlbum[]>;
@@ -399,23 +415,61 @@ PlexAlbumCard.displayName = "PlexAlbumCard";
 
 export function App() {
   const { t, i18n } = useTranslation();
+  const sqliteMode = isSqliteCatalogEnabled();
   const localCatalog = useSyncExternalStore(localAlbumCatalog.subscribe, localAlbumCatalog.getSnapshot);
   const [config, setConfigState] = useState<AppConfig | null>(null);
+  const configRef = useRef(config);
+  configRef.current = config;
+  const [sqliteSources, setSqliteSources] = useState<SqliteSource[]>([]);
+  const [sqliteSourcesLoaded, setSqliteSourcesLoaded] = useState(false);
+  const [legacySqliteSourcesPending, setLegacySqliteSourcesPending] = useState(0);
+  const sqliteArtworkContextRequest = useRef(0);
   const fullMode = fullModeEnabled(config);
   const experimental = experimentalFeaturesEnabled(config) && !config?.first_run;
   const navidromeConfiguration=useNavidromeConfiguration(sourceEnabled(config,"navidrome"));
   useLayoutEffect(() => { frontendStartup.mark("shell_committed"); }, []);
   useLayoutEffect(() => { if (config) frontendStartup.mark("config_committed"); }, [Boolean(config)]);
   const setConfig = useCallback((next: AppConfig) => {
-    localAlbumThumbnails.setContext(next.first_run || !sourceEnabled(next, "local") ? [] : next.local_folders);
-    localPlaybackThumbnail.setContext(next.first_run || !sourceEnabled(next, "local") ? [] : next.local_folders);
+    const artworkFolders = sqliteMode ? [] : next.local_folders;
     localAlbumCatalog.setPresentationContext(next.first_run || !sourceEnabled(next, "local") ? [] : next.local_folders);
+    if (sqliteMode && !next.first_run && sourceEnabled(next, "local")) {
+      const request = ++sqliteArtworkContextRequest.current;
+      setSqliteSourcesLoaded(false);
+      localAlbumThumbnails.setContext([]);
+      void sqliteLibrary.sources()
+        .then(sources => {
+          if (request === sqliteArtworkContextRequest.current) {
+            setSqliteSources(sources);
+            localAlbumThumbnails.setContext(sqliteAlbumThumbnailContext(sources));
+            setSqliteSourcesLoaded(true);
+          }
+        })
+        .catch(error => {
+          logError("artwork.local-enrich", error);
+          if (request === sqliteArtworkContextRequest.current) {
+            setSqliteSources([]);
+            localAlbumThumbnails.setContext([]);
+          }
+        });
+    } else {
+      sqliteArtworkContextRequest.current++;
+      setSqliteSourcesLoaded(false);
+      localAlbumThumbnails.setContext(next.first_run || !sourceEnabled(next, "local") ? [] : artworkFolders);
+    }
+    localPlaybackThumbnail.setContext(next.first_run || !sourceEnabled(next, "local") ? [] : artworkFolders);
     setConfigState(next);
-  }, []);
+  }, [sqliteMode]);
+  const refreshSqliteArtworkContext = useCallback(async () => {
+    if (!sqliteMode) return;
+    setSqliteSourcesLoaded(false);
+    const sources = await sqliteLibrary.sources();
+    setSqliteSources(sources);
+    localAlbumThumbnails.setContext(sqliteAlbumThumbnailContext(sources));
+    setSqliteSourcesLoaded(true);
+  }, [sqliteMode]);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const eqReturnSectionRef=useRef<MainSection>("local");
-  const eqReturnViewRef=useRef(false);
-  const [mediaSource, setMediaSource] = useState<MainSection | null>(null);
+  const [mediaSource, setMediaSource] = useState<MainSection | null>(sqliteMode ? "local" : null);
+  const eqReturnSectionRef = useRef<MainSection>("local");
   const [playerNavigation, setPlayerNavigation] = useState<PlayerNavigationSession | null>(null);
   const playerTarget = playerNavigation?.target ?? null;
   const [exploreDetail, setExploreDetail] = useState<ExploreEntry | null>(null);
@@ -438,7 +492,9 @@ export function App() {
   const centralSection = playerReturnSection ?? (mediaSource === "equalizer" ? eqReturnSectionRef.current : mediaSource);
   const mainSectionPreferenceRef = useRef<ReturnType<typeof createMainSectionPreference> | null>(null);
   if (!mainSectionPreferenceRef.current) {
-    mainSectionPreferenceRef.current = createMainSectionPreference(setMediaSource);
+    mainSectionPreferenceRef.current = createMainSectionPreference(setMediaSource, undefined,
+      sqliteMode ? SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY : MAIN_SECTION_STORAGE_KEY,
+      sqliteMode ? initialSqliteMediaSource : initialMediaSource);
   }
   const mainSectionPreference = mainSectionPreferenceRef.current;
   const [editionAnchor, setEditionAnchor] = useState<EditionAnchor | null>(null);
@@ -447,6 +503,18 @@ export function App() {
   const [playlistItems, setPlaylistItems] = useState<NewPlaylistItem[] | null>(null);
   const [localSelectedArtist, setLocalSelectedArtist] = useState<string | null>(null);
   const [localCatalogRevision, setLocalCatalogRevision] = useState(0);
+  const [sqliteIndexing, setSqliteIndexing] = useState(false);
+  const [sqliteProgress, setSqliteProgress] = useState<SqliteIndexProgress | null>(null);
+  const [hiddenSqliteActivityId, setHiddenSqliteActivityId] = useState<string | null>(null);
+  const sqliteActivityVisibilityRef = useRef<ReturnType<typeof createLibraryActivityVisibility> | null>(null);
+  if (!sqliteActivityVisibilityRef.current) {
+    sqliteActivityVisibilityRef.current = createLibraryActivityVisibility(setHiddenSqliteActivityId);
+  }
+  useEffect(() => {
+    sqliteActivityVisibilityRef.current?.update(sqliteProgress);
+  }, [sqliteProgress?.operationId, sqliteProgress?.phase]);
+  useEffect(() => () => sqliteActivityVisibilityRef.current?.dispose(), []);
+  const sqliteOperationIdRef = useRef<string | null>(null);
   const [libraries, setLibraries] = useState<PlexLibrary[]>([]);
   const [loadingLibraries, setLoadingLibraries] = useState(true);
   const [selectedLibrary, setSelectedLibrary] = useState<PlexLibrary | null>(null);
@@ -501,7 +569,7 @@ export function App() {
   const [selectedPlexGenre, setSelectedPlexGenre] = useState<string | null>(null);
   const [plexArtistSortMode, setPlexArtistSortMode] = useState<PlexArtistSortMode>("artist_asc");
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>("general");
+  const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>("interface");
   const [localFoldersDraft, setLocalFoldersDraft] = useState<AppConfig | null>(null);
   const queueClearFlowRef = useRef(createQueueClearConfirmationFlow());
   const [queueClearConfirmation, setQueueClearConfirmation] = useState<QueueClearConfirmation | null>(null);
@@ -567,11 +635,14 @@ export function App() {
   });
   const [mpdHealth, setMpdHealth] = useState<MpdHealth>({ state: "starting" });
   const isPlaybackAvailable = mpdHealth.state === "available";
-  const sourceReadiness = useSourceReadiness({ config, available: isPlaybackAvailable, unavailable: mpdHealth.state === 'unavailable', updating: playbackStatus.is_updating, catalog: localCatalog,
+  const equalizerActive = fullMode && equalizerIsActive(playbackStatus.shared_dsp, playbackStatus.audio_route);
+  const sourceReadiness = useSourceReadiness({ config, available: isPlaybackAvailable, unavailable: mpdHealth.state === 'unavailable', updating: playbackStatus.is_updating, catalog: localCatalog, sqliteMode,
     plexIdentity: plexConnectionIdentity, plexCurrent: plexLibrariesIdentity === plexConnectionIdentity, plexLoading: loadingLibraries, plexError: plexLibrariesError,
     plexAttempt: plexDiscoveryAttempt, retryPlex: () => setPlexDiscoveryAttempt(value => value + 1),
     navConfigured: navidromeConfiguration.configured, navRevision: navidromeConfiguration.revision });
   const statusRequestGenerationRef = useRef(0);
+  const audioRouteGenerationRef = useRef(-1);
+  const audioRouteSnapshotRef = useRef<AudioRouteProjection | null>(null);
   const plexLibraryRequestGenerationRef = useRef(0);
   const plexSearchRequestGenerationRef = useRef(0);
   const plexGridRef = useRef<VirtualAlbumGridHandle>(null);
@@ -588,12 +659,23 @@ export function App() {
     queueClearConfirmation, playlistItems, localCatalog.saveBlocked, localCatalog.loading, localCatalog.albums.length]);
 
   const statusRef = useRef(playbackStatus);
+  const sqliteArtworkAlbumsRef = useRef(localCatalog.albums);
   useLayoutEffect(() => {
     // Publish the artwork gate before child passive effects start cover queries.
-    const blocked = artworkReadBlocked(playbackStatus.is_updating, localCatalog);
+    // The isolated SQLite browser has no MPD readiness state; its own catalog
+    // load/error state is the only relevant gate for local cover reads.
+    if (sqliteMode && sqliteArtworkAlbumsRef.current !== localCatalog.albums) {
+      // A confirmed SQLite generation change invalidates in-memory local covers;
+      // matching persisted thumbnails are re-seeded by the browser components.
+      localArtworkResolver.clearLocalCovers();
+      sqliteArtworkAlbumsRef.current = localCatalog.albums;
+    }
+    const blocked = sqliteMode
+      ? localCatalog.loading || !localCatalog.loaded || !!localCatalog.error
+      : artworkReadBlocked(playbackStatus.is_updating, localCatalog);
     localArtworkResolver.setContext(blocked, localCatalog.albums);
-    localArtworkEnrichment.setUpdating(blocked || localCatalog.manualCheckPlayback === true);
-  }, [playbackStatus.is_updating, localCatalog]);
+    localArtworkEnrichment.setUpdating(sqliteMode || blocked || localCatalog.manualCheckPlayback === true);
+  }, [sqliteMode, playbackStatus.is_updating, localCatalog]);
   useEffect(() => {
     localArtworkEnrichment.setOnlineEnabled((sourceEnabled(config, "local") && config?.online_artwork_enabled) ?? false);
   }, [config?.online_artwork_enabled, config?.sources?.local]);
@@ -621,7 +703,7 @@ export function App() {
   // Plex labels or invalidate their in-flight read in either player host.
   const playerSourceKind = playbackStatus.current_media?.kind;
   const sourceInfoContext = useMemo(() => ({}), [playerSourceKind,
-    playerSourceKind === "local" ? config?.local_folders : null,
+    playerSourceKind === "local" ? (sqliteMode ? null : config?.local_folders) : null,
     playerSourceKind === "local" ? localCatalogRevision : null,
     playerSourceKind === "local" ? localCatalog.albums : null,
     playerSourceKind === "plex" ? config?.plex_server_id : null,
@@ -630,8 +712,9 @@ export function App() {
     playerSourceKind === "plex" ? plexBrowserCatalog : null]);
   const sourceInfo = usePlayerSourceInfo(playbackStatus.current_media, sourceInfoContext,
     fullMode && !!config && !config.first_run && !configSavePhase && isPlaybackAvailable
-      && (playerSourceKind !== "local" || (!playbackStatus.is_updating
-        && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy)));
+      && (playerSourceKind !== "local" || (sqliteMode
+        ? localCatalog.loaded && !localCatalog.loading && !localCatalog.saveBlocked && !localCatalog.error
+        : !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy)));
   useEffect(() => {
     statusRef.current = playbackStatus;
   }, [playbackStatus]);
@@ -651,6 +734,10 @@ export function App() {
   });
   const nowPlayingHosting = hostingRef.current;
   const hosting = useSyncExternalStore(nowPlayingHosting.subscribe, nowPlayingHosting.getSnapshot);
+  // The embedded host is the primary Now Playing presentation for both the
+  // original and SQLite-backed Local catalogs. SQLite only changes how the
+  // current track is resolved; it must not suppress the host that show() waits
+  // for to acknowledge readiness.
   const nowPlayingEmbedded = hosting.mode === "embedded";
   const previousPageRef = useRef<HTMLDivElement>(null);
   const restorePageRef = useRef<(() => void) | null>(null);
@@ -759,6 +846,7 @@ export function App() {
       playbackStatus.artist,
       audioService.getLocalAlbumTracks,
       navidromeService.resolvePlayerNavigation,
+      sqliteMode ? sqliteLibrary.albumForTrack : undefined,
     );
   };
 
@@ -785,6 +873,7 @@ export function App() {
   }, [nowPlayingHosting]);
 
   const refreshPlexFavorites = useCallback(() => {
+    if (sqliteMode) return;
     favoritesService
       .getFavorites()
       .then((favs) => {
@@ -794,7 +883,254 @@ export function App() {
         setPlexFavIds(new Set(ids));
       })
       .catch(error => logError("favorites.load", error));
-  }, []);
+  }, [sqliteMode]);
+
+  useEffect(() => {
+    if (!sqliteMode || !config || config.first_run || !sourceEnabled(config, "local")) return;
+    // The SQLite catalog is loaded from its saved database explicitly; this does
+    // not use LocalAlbumCatalog's MPD readiness gate or start a filesystem scan.
+    localAlbumCatalog.requestRefresh();
+  }, [sqliteMode, config?.first_run, config?.sources?.local, config?.local_folders]);
+
+  const refreshLegacySqliteMigrationStatus = useCallback(async () => {
+    if (!sqliteMode || !config || config.first_run || !sourceEnabled(config, "local")) {
+      setLegacySqliteSourcesPending(0);
+      return;
+    }
+    const status = await sqliteLibrary.legacySourceMigrationStatus();
+    setLegacySqliteSourcesPending(status.eligible ? status.pendingSources : 0);
+  }, [sqliteMode, config]);
+
+  useEffect(() => {
+    let active = true;
+    if (!sqliteMode || !config || config.first_run || !sourceEnabled(config, "local")) {
+      setLegacySqliteSourcesPending(0);
+      return () => { active = false; };
+    }
+    void sqliteLibrary.legacySourceMigrationStatus()
+      .then(status => { if (active) setLegacySqliteSourcesPending(status.eligible ? status.pendingSources : 0); })
+      .catch(error => { if (active) { setLegacySqliteSourcesPending(0); logError("sqlite-library.legacy-migration-status", error); } });
+    return () => { active = false; };
+  }, [sqliteMode, config?.first_run, config?.sources?.local, config?.local_folders]);
+
+  const importLegacySqliteSources = useCallback(async () => {
+    if (!sqliteMode || sqliteOperationIdRef.current) return;
+    const operationId = createSqliteOperationId();
+    sqliteOperationIdRef.current = operationId;
+    sqliteActivityVisibilityRef.current?.begin(operationId);
+    setSqliteIndexing(true);
+    setSqliteProgress({ operationId, operation: "legacyImport", sourceName: t("sqliteLibrary.legacyImportTitle"), phase: "scanning",
+      entriesVisited: 0, filesExamined: 0, audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0,
+      identifiedAlbums: 0, identifiedArtists: 0, countsProvisional: true });
+    let unlisten = () => {};
+    try {
+      try {
+        unlisten = await listen<SqliteIndexProgress>("sqlite-library-index-progress", event => {
+          if (sqliteOperationIdRef.current === operationId && event.payload.operationId === operationId) setSqliteProgress(event.payload);
+        });
+      } catch (error) { logError("sqlite-library.progress-listener", error); }
+      const result = await sqliteLibrary.importLegacySources(operationId);
+      localAlbumCatalog.requestRefresh();
+      setLocalCatalogRevision(revision => revision + 1);
+      try { await refreshSqliteArtworkContext(); } catch (error) { logError("artwork.local-enrich", error); }
+      try { await refreshLegacySqliteMigrationStatus(); } catch (error) { logError("sqlite-library.legacy-migration-status", error); }
+      if (result.failedSourceNames.length > 0) {
+        setSqliteProgress(() => ({
+          operationId, operation: "legacyImport", sourceName: t("sqliteLibrary.legacyImportTitle"), phase: "failed",
+          entriesVisited: 0, filesExamined: 0, audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0,
+          identifiedAlbums: 0, identifiedArtists: 0, countsProvisional: false,
+          errorMessage: t("sqliteLibrary.legacyImportFailed", { count: result.failedSourceNames.length }),
+        }));
+      } else {
+        setSqliteProgress(current => current?.operationId === operationId
+          ? { ...current, phase: "completed", countsProvisional: false }
+          : { operationId, operation: "legacyImport", sourceName: t("sqliteLibrary.legacyImportTitle"), phase: "completed",
+            entriesVisited: 0, filesExamined: 0, audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0,
+            identifiedAlbums: 0, identifiedArtists: 0, countsProvisional: false });
+      }
+    } catch (error) {
+      logError("sqlite-library.legacy-import", error);
+      setSqliteProgress(current => ({ ...(current?.operationId === operationId ? current : {
+        operationId, operation: "legacyImport" as const, sourceName: t("sqliteLibrary.legacyImportTitle"), entriesVisited: 0,
+        filesExamined: 0, audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0, identifiedAlbums: 0,
+        identifiedArtists: 0, countsProvisional: false,
+      }), phase: "failed", errorMessage: safeSqliteError(error) }));
+    } finally {
+      unlisten();
+      if (sqliteOperationIdRef.current === operationId) sqliteOperationIdRef.current = null;
+      setSqliteIndexing(false);
+    }
+  }, [sqliteMode, refreshSqliteArtworkContext, refreshLegacySqliteMigrationStatus, t]);
+
+  const addSqliteFolder = useCallback(async () => {
+    if (!sqliteMode || sqliteOperationIdRef.current) return;
+    const operationId = createSqliteOperationId();
+    sqliteOperationIdRef.current = operationId;
+    sqliteActivityVisibilityRef.current?.begin(operationId);
+    setSqliteIndexing(true);
+    setSqliteProgress(null);
+    let sourceName = "Biblioteca Local";
+    try {
+      const selected = await sqliteLibrary.chooseFolder();
+      if (!selected) return;
+      const pathParts = selected.displayPath.split(/[\\/]/).filter(Boolean);
+      sourceName = pathParts[pathParts.length - 1] || sourceName;
+      setSqliteProgress({ operationId, operation: "add", sourceName, phase: "scanning", entriesVisited: 0, filesExamined: 0, audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0, identifiedAlbums: 0, identifiedArtists: 0, countsProvisional: true });
+      let unlisten = () => {};
+      try {
+        try {
+          unlisten = await listen<SqliteIndexProgress>("sqlite-library-index-progress", event => {
+            if (sqliteOperationIdRef.current === operationId && event.payload.operationId === operationId) setSqliteProgress(event.payload);
+          });
+        } catch (error) {
+          logError("sqlite-library.progress-listener", error);
+        }
+        const result = await sqliteLibrary.addAndIndex(selected.token, operationId);
+        setSqliteProgress({ operationId, operation: "add", sourceName, phase: "completed", entriesVisited: result.metrics.entriesVisited,
+          filesExamined: result.metrics.filesExamined, audioFilesFound: result.source.trackCount, metadataProcessed: result.source.trackCount,
+          metadataTotal: result.source.trackCount, identifiedAlbums: result.view.albums.length, identifiedArtists: result.view.artists.length,
+          countsProvisional: false });
+      } finally {
+        unlisten();
+      }
+      localAlbumCatalog.requestRefresh();
+      setLocalCatalogRevision(revision => revision + 1);
+      try { await refreshSqliteArtworkContext(); } catch (error) { logError("artwork.local-enrich", error); }
+    } catch (error) {
+      logError("sqlite-library.add-index", error);
+      setSqliteProgress(current => current?.operationId === operationId
+        ? { ...current, phase: "failed", errorMessage: safeSqliteError(error) }
+        : { operationId, operation: "add", sourceName, phase: "failed", entriesVisited: 0, filesExamined: 0,
+          audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0, identifiedAlbums: 0, identifiedArtists: 0,
+          countsProvisional: false, errorMessage: safeSqliteError(error) });
+    } finally {
+      if (sqliteOperationIdRef.current === operationId) sqliteOperationIdRef.current = null;
+      setSqliteIndexing(false);
+    }
+  }, [sqliteMode, refreshSqliteArtworkContext]);
+
+  const verifySqliteSource = useCallback(async (sourceKey: string): Promise<boolean> => {
+    if (!sqliteMode) return false;
+    if (sqliteOperationIdRef.current) throw new Error("SQLITE_LIBRARY_OPERATION_IN_PROGRESS");
+    const match = /^sqlite-(\d+)$/.exec(sourceKey);
+    if (!match) throw new Error("SQLITE_SOURCE_ID_INVALID");
+    const operationId = createSqliteOperationId();
+    const sourceName = "Biblioteca Local";
+    sqliteOperationIdRef.current = operationId;
+    sqliteActivityVisibilityRef.current?.begin(operationId);
+    setSqliteIndexing(true);
+    setSqliteProgress({ operationId, operation: "verify", sourceName, phase: "scanning", entriesVisited: 0, filesExamined: 0,
+      audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0, identifiedAlbums: 0, identifiedArtists: 0, countsProvisional: false });
+    let unlisten = () => {};
+    try {
+      try {
+        unlisten = await listen<SqliteIndexProgress>("sqlite-library-index-progress", event => {
+          if (sqliteOperationIdRef.current === operationId && event.payload.operationId === operationId) setSqliteProgress(event.payload);
+        });
+      } catch (error) {
+        logError("sqlite-library.progress-listener", error);
+      }
+      const result = await sqliteLibrary.verify(Number(match[1]), operationId);
+      setSqliteProgress({ operationId, operation: "verify", sourceName: result.source.displayName, phase: "completed",
+        entriesVisited: result.metrics.entriesVisited, filesExamined: result.metrics.filesExamined,
+        audioFilesFound: result.source.trackCount, metadataProcessed: result.source.trackCount, metadataTotal: result.source.trackCount,
+        identifiedAlbums: result.view.albums.length, identifiedArtists: result.view.artists.length, countsProvisional: false,
+        resultSummary: result.metrics.filesNew + result.metrics.filesModified + result.metrics.filesRemoved > 0 ? "verifyChanged" : "verifyUnchanged" });
+      localAlbumCatalog.requestRefresh();
+      setLocalCatalogRevision(revision => revision + 1);
+      try { await refreshSqliteArtworkContext(); } catch (error) { logError("artwork.local-enrich", error); }
+      return result.metrics.filesNew + result.metrics.filesModified + result.metrics.filesRemoved > 0;
+    } catch (error) {
+      logError("sqlite-library.verify", error);
+      setSqliteProgress(current => current?.operationId === operationId
+        ? { ...current, phase: "failed", errorMessage: safeSqliteError(error) }
+        : { operationId, operation: "verify", sourceName, phase: "failed", entriesVisited: 0, filesExamined: 0,
+          audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0, identifiedAlbums: 0, identifiedArtists: 0,
+          countsProvisional: false, errorMessage: safeSqliteError(error) });
+      throw error;
+    } finally {
+      unlisten();
+      if (sqliteOperationIdRef.current === operationId) sqliteOperationIdRef.current = null;
+      setSqliteIndexing(false);
+    }
+  }, [sqliteMode, refreshSqliteArtworkContext]);
+
+  const reindexSqliteSource = useCallback(async (sourceKey: string): Promise<void> => {
+    if (!sqliteMode) return;
+    if (sqliteOperationIdRef.current) throw new Error("SQLITE_LIBRARY_OPERATION_IN_PROGRESS");
+    const match = /^sqlite-(\d+)$/.exec(sourceKey);
+    const sourceId = match ? Number(match[1]) : NaN;
+    if (!Number.isSafeInteger(sourceId) || sourceId <= 0) throw new Error("SQLITE_SOURCE_ID_INVALID");
+    const operationId = createSqliteOperationId();
+    const sourceName = sqliteSources.find(source => source.id === sourceId)?.displayName ?? "Biblioteca Local";
+    sqliteOperationIdRef.current = operationId;
+    sqliteActivityVisibilityRef.current?.begin(operationId);
+    setSqliteIndexing(true);
+    setSqliteProgress({ operationId, operation: "reindex", sourceName, phase: "scanning", entriesVisited: 0, filesExamined: 0,
+      audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0, identifiedAlbums: 0, identifiedArtists: 0, countsProvisional: false });
+    let unlisten = () => {};
+    try {
+      try {
+        unlisten = await listen<SqliteIndexProgress>("sqlite-library-index-progress", event => {
+          if (sqliteOperationIdRef.current === operationId && event.payload.operationId === operationId) setSqliteProgress(event.payload);
+        });
+      } catch (error) { logError("sqlite-library.progress-listener", error); }
+      const result = await sqliteLibrary.reindex(sourceId, operationId);
+      setSqliteProgress({ operationId, operation: "reindex", sourceName: result.source.displayName, phase: "completed",
+        entriesVisited: result.metrics.entriesVisited, filesExamined: result.metrics.filesExamined,
+        audioFilesFound: result.source.trackCount, metadataProcessed: result.source.trackCount, metadataTotal: result.source.trackCount,
+        identifiedAlbums: result.view.albums.length, identifiedArtists: result.view.artists.length, countsProvisional: false });
+      localAlbumCatalog.requestRefresh();
+      setLocalCatalogRevision(revision => revision + 1);
+      try { await refreshSqliteArtworkContext(); } catch (error) { logError("artwork.local-enrich", error); }
+    } catch (error) {
+      logError("sqlite-library.reindex", error);
+      setSqliteProgress(current => current?.operationId === operationId
+        ? { ...current, phase: "failed", errorMessage: safeSqliteError(error) }
+        : { operationId, operation: "reindex", sourceName, phase: "failed", entriesVisited: 0, filesExamined: 0,
+          audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0, identifiedAlbums: 0, identifiedArtists: 0,
+          countsProvisional: false, errorMessage: safeSqliteError(error) });
+    } finally {
+      unlisten();
+      if (sqliteOperationIdRef.current === operationId) sqliteOperationIdRef.current = null;
+      setSqliteIndexing(false);
+    }
+  }, [sqliteMode, sqliteSources, refreshSqliteArtworkContext]);
+
+  const removeSqliteSource = useCallback(async (sourceKey: string): Promise<void> => {
+    if (!sqliteMode) return;
+    if (sqliteOperationIdRef.current) throw new Error("SQLITE_LIBRARY_OPERATION_IN_PROGRESS");
+    const match = /^sqlite-(\d+)$/.exec(sourceKey);
+    const sourceId = match ? Number(match[1]) : NaN;
+    if (!Number.isSafeInteger(sourceId) || sourceId <= 0) throw new Error("SQLITE_SOURCE_ID_INVALID");
+    const operationId = createSqliteOperationId();
+    const sourceName = sqliteSources.find(source => source.id === sourceId)?.displayName ?? "Biblioteca Local";
+    sqliteOperationIdRef.current = operationId;
+    sqliteActivityVisibilityRef.current?.begin(operationId);
+    setSqliteIndexing(true);
+    setSqliteProgress({ operationId, operation: "remove", sourceName, phase: "persisting", entriesVisited: 0, filesExamined: 0,
+      audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0, identifiedAlbums: 0, identifiedArtists: 0, countsProvisional: false });
+    try {
+      const result = await sqliteLibrary.remove(sourceId);
+      setSqliteProgress({ operationId, operation: "remove", sourceName: result.displayName, phase: "completed",
+        entriesVisited: 0, filesExamined: 0, audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0,
+        identifiedAlbums: 0, identifiedArtists: 0, countsProvisional: false,
+        resultSummary: result.queueStopped ? "sourceRemovedQueueStopped" : "sourceRemoved", removedTrackCount: result.removedTrackCount });
+      localAlbumCatalog.requestRefresh();
+      setLocalCatalogRevision(revision => revision + 1);
+      try { await refreshSqliteArtworkContext(); } catch (error) { logError("artwork.local-enrich", error); }
+    } catch (error) {
+      logError("sqlite-library.remove-source", error);
+      setSqliteProgress(current => current?.operationId === operationId
+        ? { ...current, phase: "failed", errorMessage: safeSqliteError(error) }
+        : { operationId, operation: "remove", sourceName, phase: "failed", entriesVisited: 0, filesExamined: 0,
+          audioFilesFound: 0, metadataProcessed: 0, metadataTotal: 0, identifiedAlbums: 0, identifiedArtists: 0,
+          countsProvisional: false, errorMessage: safeSqliteError(error) });
+    } finally {
+      if (sqliteOperationIdRef.current === operationId) sqliteOperationIdRef.current = null;
+      setSqliteIndexing(false);
+    }
+  }, [sqliteMode, sqliteSources, refreshSqliteArtworkContext]);
 
   const beginConfigSave = (phase: "local" | "other"): boolean => {
     if (configSaveInProgressRef.current) return false;
@@ -1036,7 +1372,7 @@ export function App() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [sqliteMode]);
 
   useEffect(() => {
     nowPlayingSnapshotRef.current = {
@@ -1052,7 +1388,7 @@ export function App() {
 
   // Atualiza favoritos Plex ao alternar a fonte de mídia
   useEffect(() => {
-    refreshPlexFavorites();
+    if (!sqliteMode) refreshPlexFavorites();
   }, [mediaSource, refreshPlexFavorites]);
 
   // Fonte única de saúde e telemetria do MPD (polling encadeado, sem sobreposição).
@@ -1067,18 +1403,29 @@ export function App() {
         const snapshot = await audioService.getMpdStatusSnapshot();
         if (disposed || generation !== statusRequestGenerationRef.current) return;
 
+        if (!snapshot.audio_route || !Number.isSafeInteger(snapshot.audio_route.generation)) {
+          audioRouteSnapshotRef.current = null;
+        } else if (acceptsAudioRouteGeneration(snapshot.audio_route.generation, audioRouteGenerationRef.current)) {
+          audioRouteGenerationRef.current = snapshot.audio_route.generation;
+          audioRouteSnapshotRef.current = snapshot.audio_route;
+        }
+
         if (snapshot.health.state === "available" && snapshot.playback) {
           localAlbumCatalog.onMpdStatus(snapshot.playback.is_updating, snapshot.manual_check_playback === true, snapshot.manual_check_artwork === true);
           setMpdHealth(snapshot.health);
-          setPlaybackStatus({ ...snapshot.playback, output_observation: snapshot.output_observation ?? null, engine_evidence: snapshot.engine_evidence ?? null, shared_dsp: snapshot.shared_dsp ?? null });
+          setPlaybackStatus({ ...snapshot.playback, output_observation: snapshot.output_observation ?? null, engine_evidence: snapshot.engine_evidence ?? null, shared_dsp: snapshot.shared_dsp ?? null, audio_route: audioRouteSnapshotRef.current });
         } else if (snapshot.health.state === "available") {
           setMpdHealth({ state: "unavailable", reason: "protocol_unavailable" });
+          setPlaybackStatus(previous => ({ ...previous, audio_route: audioRouteSnapshotRef.current }));
         } else {
           setMpdHealth(snapshot.health);
+          setPlaybackStatus(previous => ({ ...previous, audio_route: audioRouteSnapshotRef.current }));
         }
       } catch (err) {
         if (!disposed && generation === statusRequestGenerationRef.current) {
           setMpdHealth({ state: "unavailable", reason: "protocol_unavailable" });
+          audioRouteSnapshotRef.current = null;
+          setPlaybackStatus(previous => ({ ...previous, audio_route: null }));
           logError("audio.health", err);
         }
       } finally {
@@ -1240,7 +1587,10 @@ export function App() {
         setPlexLibrariesIdentity(plexConnectionIdentity);
         setLibraries(libs);
         if (libs.length > 0) {
-          setSelectedLibrary(libs[0]);
+          const preferredLibrary = sqliteMode
+            ? preferredSqlitePlexLibrary(libs, config?.plex_server_id)
+            : libs[0] ?? null;
+          setSelectedLibrary(preferredLibrary);
         } else {
           setSelectedLibrary(null);
         }
@@ -1260,7 +1610,7 @@ export function App() {
     return () => {
       disposed = true;
     };
-  }, [plexConnectionIdentity, plexDiscoveryAttempt]);
+  }, [plexConnectionIdentity, plexDiscoveryAttempt, config?.plex_server_id, sqliteMode]);
 
   // Carregar o catálogo base e as coleções da biblioteca ativa uma única vez.
   useEffect(() => {
@@ -1486,17 +1836,15 @@ export function App() {
     if (!config || experimental) return;
     const fallback = initialMediaSource(config) ?? 'radio';
     if (isExperimentalSection(mediaSource)) { resetAllNavigation(); mainSectionPreference.navigate(fallback); }
-    if (isExperimentalSection(eqReturnSectionRef.current)) eqReturnSectionRef.current = fallback;
     if (isExperimentalSection(playerReturnSection)) setPlayerNavigation(previous => previous ? { ...previous, returnSection: fallback } : null);
   }, [experimental, config, mediaSource, playerReturnSection]);
 
   useEffect(() => {
     if (!config || fullMode) return;
     const fallback = initialMediaSource(config) ?? 'radio';
-    const advanced = isAdvancedSection(mediaSource) || mediaSource === 'plex' && plexArea === 'discover' || mediaSource === 'navidrome' && navidromeArea === 'explore';
+    const advanced = isAdvancedSection(mediaSource) || mediaSource === "equalizer" || mediaSource === 'plex' && plexArea === 'discover' || mediaSource === 'navidrome' && navidromeArea === 'explore';
     if (advanced) { resetAllNavigation(); mainSectionPreference.navigate(fallback); }
-    setPlexArea('library'); setNavidromeArea('library'); eqReturnViewRef.current = false;
-    if (isAdvancedSection(eqReturnSectionRef.current)) eqReturnSectionRef.current = fallback;
+    setPlexArea('library'); setNavidromeArea('library');
     if (isAdvancedSection(playerReturnSection)) setPlayerNavigation(previous => previous ? { ...previous, returnSection: fallback } : null);
   }, [fullMode, config, mediaSource, plexArea, navidromeArea, playerReturnSection]);
 
@@ -1510,12 +1858,10 @@ export function App() {
   const navigateLocalSubview = (view: LocalSubview) => {
     if (playerTarget?.kind === "local") {
       changePlayerLocalSubview(view);
-      if (mediaSource === "equalizer") mainSectionPreference.navigate(eqReturnSectionRef.current);
       return;
     }
     setLocalSubview(view);
-    if (!playerTarget && centralSection === "local") {
-      if (mediaSource === "equalizer") mainSectionPreference.navigate("local");
+    if (!playerTarget && mediaSource === "local") {
       return;
     }
     resetAllNavigation();
@@ -1542,6 +1888,7 @@ export function App() {
     setSearchQuery("");
     setSearchResults(null);
     setSelectedLibrary(library);
+    if (sqliteMode) saveSqlitePlexLibraryPreference(config?.plex_server_id, library.key);
   };
 
   const configureSource = (source: 'local' | 'plex' | 'navidrome') => {
@@ -1549,7 +1896,8 @@ export function App() {
     setSettingsInitialPage(source); setShowSettings(true);
   };
   const isPlexConnected = Boolean(sourceEnabled(config, "plex") && config?.plex_token && config.plex_token.trim().length > 0);
-  const localExploreConfigured = Boolean(sourceEnabled(config, "local") && config?.local_folders.length);
+  const localExploreConfigured = Boolean(sourceEnabled(config, "local")
+    && (sqliteMode ? config : config?.local_folders.length));
   const exploreSources = config && fullMode ? configuredExploreSources(config,navidromeConfiguration.configured) : [];
   const isExploreSection = centralSection === "explore" || centralSection === "plex" && plexArea === "discover" || centralSection === "navidrome" && navidromeArea === "explore";
   const showExploreTabs = isExploreSection && exploreSources.length > 1;
@@ -1564,7 +1912,7 @@ export function App() {
     mainSectionPreference.navigate(source === "plex" ? "plex" : source === "navidrome" ? "navidrome" : "explore");
   };
   const { state: localExploreState, activity: exploreLoadingActivity } = localExplorePresentation({
-    configured: localExploreConfigured, starting: mpdHealth.state === "starting", available: isPlaybackAvailable,
+    configured: localExploreConfigured, starting: sqliteMode ? false : mpdHealth.state === "starting", available: sqliteMode || isPlaybackAvailable,
     updating: playbackStatus.is_updating, catalog: localCatalog,
     savePhase: configSavePhase === "local" ? localSavePhase : null,
     saveStatusUncertain: Boolean(configSaveNotice?.uncertain || configSaveNotice?.statusUnavailable),
@@ -1580,14 +1928,16 @@ export function App() {
     local: { albums: exploreAlbums, state: localExploreState === "ready" && !exploreAlbums.length ? "empty" : localExploreState, sourceId: activeExploreSourceId },
   };
   const exploreLive = useRef({ context: exploreContext, visible: false });
-  exploreLive.current = { context: exploreContext, visible: mediaSource !== "equalizer" && centralSection === "explore" && !playerTarget && !exploreDetail && !showSettings && !showAbout };
+  exploreLive.current = { context: exploreContext, visible: centralSection === "explore" && !playerTarget && !exploreDetail && !showSettings && !showAbout };
   const exploreEntryCurrent = (entry: ExploreEntry) => {
     const current = exploreLive.current.context;
     return exploreEntryIsCurrent(current, entry);
   };
   const explorePlayback = useMemo(() => createLocalAlbumPlayback(
-    audioService.getLocalAlbumTracks, album => localArtworkResolver.resolveLocalOnly(album), audioService.playTracks,
-  ), []);
+    audioService.getLocalAlbumTracks,
+    album => sqliteMode ? Promise.resolve(localAlbumThumbnails.get(album)) : localArtworkResolver.resolveLocalOnly(album),
+    audioService.playTracks,
+  ), [sqliteMode]);
   useLayoutEffect(() => () => explorePlayback.cancel(), [explorePlayback, exploreAlbums, activeExploreSourceId,
     centralSection, playerTarget, exploreDetail, showSettings, showAbout, isPlaybackAvailable, playbackStatus.is_updating,
     localCatalog.albums, localCatalog.loaded, localCatalog.loading, localCatalog.saveBlocked, localCatalog.mpdBusy, localCatalog.error]);
@@ -1735,14 +2085,17 @@ export function App() {
 
   if (config && config.first_run) {
     return (
-      <WelcomeWizard
-        initialConfig={config}
-        devices={devices}
-        onFinish={(newConfig) => {
-          setConfig(newConfig);
-          mainSectionPreference.finishSetup(newConfig);
-        }}
-      />
+      <>
+        <WelcomeWizard
+          initialConfig={config}
+          devices={devices}
+          onFinish={(newConfig) => {
+            setConfig(newConfig);
+            mainSectionPreference.finishSetup(newConfig);
+          }}
+        />
+        <DirectVolumeChoiceDialog />
+      </>
     );
   }
 
@@ -1757,7 +2110,6 @@ export function App() {
             <Sparkles className="shrink-0 text-[color:var(--theme-fg-accent,#E5A00D)]" size={21} />
             <h1 className="truncate text-base font-black tracking-[0.14em] text-[color:var(--theme-fg-accent,#E5A00D)]">SONANTE</h1>
           </div>
-
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pb-3">
             <section aria-labelledby="sidebar-music-group">
               <h2 id="sidebar-music-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[color:var(--theme-fg-muted,#5F5F5F)]">
@@ -1767,7 +2119,7 @@ export function App() {
                 <SidebarNavItem diagnosticAction="search" icon={Search} label={t("unifiedSearch.menu")} trailing={<kbd className="text-[10px] opacity-60">{t("unifiedSearch.shortcut")}</kbd>}
                   active={mediaSource === "search"} onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("search"); }} />
                 {exploreSources.length > 0 && <SidebarNavItem diagnosticAction="explore" icon={Compass} label={t("explore.title")}
-                  active={mediaSource !== "equalizer" && !playerTarget && isExploreSection}
+                  active={!playerTarget && isExploreSection}
                   onClick={() => navigateExplore()} />}
 
               </nav>
@@ -1831,22 +2183,22 @@ export function App() {
                 />
               </nav>
             </section>
-            {fullMode && <section aria-labelledby="sidebar-audio-group">
-              <h2 id="sidebar-audio-group" className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[color:var(--theme-fg-muted,#5F5F5F)]">{t("equalizer.audioGroup")}</h2>
-              <nav aria-label={t("equalizer.audioGroup")} className="space-y-1">
-                <SidebarNavItem icon={SlidersHorizontal} label={t("equalizer.title")} active={mediaSource === "equalizer"}
-                  onClick={() => { if(mediaSource&&mediaSource!=="equalizer"){eqReturnSectionRef.current=mediaSource;eqReturnViewRef.current=true;} mainSectionPreference.navigate("equalizer"); }} />
-              </nav>
-            </section>}
           </div>
 
           <nav aria-label={t("sidebar.utilitiesGroup")} className="mt-auto shrink-0 space-y-0.5 pt-2">
+            {fullMode && <SidebarNavItem icon={SlidersHorizontal} label={t("equalizer.title")}
+              active={mediaSource === "equalizer"} sourceEnabled={equalizerActive}
+              onClick={() => {
+                if (mediaSource && mediaSource !== "equalizer") eqReturnSectionRef.current = mediaSource;
+                resetAllNavigation();
+                mainSectionPreference.navigate("equalizer");
+              }} />}
+            <KeyboardShortcutsHelp />
             <SidebarNavItem diagnosticAction="settings"
               icon={Settings}
               label={t("sidebar.preferences")}
-              onClick={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("general"); setShowSettings(true); } }}
+              onClick={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("interface"); setShowSettings(true); } }}
             />
-            <KeyboardShortcutsHelp />
             <SidebarNavItem diagnosticAction="about"
               icon={Info}
               label={t("sidebar.about")}
@@ -1855,8 +2207,33 @@ export function App() {
           </nav>
         </aside>
 
-        {fullMode && mediaSource === "equalizer" && <div className={nowPlayingEmbedded ? "hidden" : "contents"} inert={nowPlayingEmbedded ? true : undefined}><EqualizerView onReturn={() => mainSectionPreference.navigate(eqReturnSectionRef.current)} available={mpdHealth.state === "available"} shared={configuredSignalRoute(config)?.mode === "shared"} runtime={playbackStatus.shared_dsp} onConfigure={() => { setSettingsInitialPage("audio"); setShowSettings(true); }} /></div>}
-        {(mediaSource !== "equalizer" || eqReturnViewRef.current) && <div ref={previousPageRef} data-now-playing-previous-page className={nowPlayingEmbedded || mediaSource === "equalizer" ? "hidden" : "contents"} inert={nowPlayingEmbedded || mediaSource === "equalizer" ? true : undefined}>
+        {fullMode && mediaSource === "equalizer" && (
+          <div className={nowPlayingEmbedded || playerTarget ? "hidden" : "contents"}
+            inert={nowPlayingEmbedded || playerTarget ? true : undefined} data-equalizer-page>
+            {equalizerActive
+              ? <EqualizerView shared={configuredSignalRoute(config)?.mode === "shared"}
+                  available={isPlaybackAvailable} runtime={playbackStatus.shared_dsp}
+                  onConfigure={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("audio"); setShowSettings(true); } }}
+                  onReturn={() => mainSectionPreference.navigate(eqReturnSectionRef.current)} />
+              : <main className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-6" data-equalizer-disabled>
+                  <section className="max-w-md text-center">
+                    <SlidersHorizontal size={24} aria-hidden="true" className="mx-auto mb-3 text-[color:var(--theme-fg-muted,#888888)]" />
+                    <h1 className="text-lg font-semibold text-[color:var(--theme-fg-primary,#ffffff)]">{t("equalizer.disabledTitle")}</h1>
+                    <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-[color:var(--theme-fg-secondary,#AAAAAA)]">
+                      {configuredSignalRoute(config)?.mode === "direct"
+                        ? t("equalizer.disabledExclusive") : t("equalizer.disabledDescription")}
+                    </p>
+                    <button type="button" onClick={() => {
+                      if (!configSaveInProgressRef.current) { setSettingsInitialPage("audio"); setShowSettings(true); }
+                    }} className="mt-4 rounded-lg bg-[var(--theme-control-accent,#E5A00D)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-control-on-accent,#000000)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]">
+                      {t("equalizer.openAudioSettings")}
+                    </button>
+                  </section>
+                </main>}
+          </div>
+        )}
+
+        <div ref={previousPageRef} data-now-playing-previous-page className={nowPlayingEmbedded || mediaSource === "equalizer" ? "hidden" : "contents"} inert={nowPlayingEmbedded || mediaSource === "equalizer" ? true : undefined}>
         {/* Painel Central */}
         <div className={playerTarget ? "hidden" : "contents"}>
         <div className={isExploreSection ? "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" : "contents"}>
@@ -1865,15 +2242,18 @@ export function App() {
         <div id={showExploreTabs ? "explore-source-panel" : undefined} role={showExploreTabs ? "tabpanel" : undefined}
           aria-labelledby={showExploreTabs ? `explore-source-${activeExploreSource}` : undefined}
           className={isExploreSection ? "flex min-h-0 min-w-0 flex-1" : "contents"}>
-        {(!fullMode && isAdvancedSection(centralSection)) || (!experimental && isExperimentalSection(centralSection)) ? null : centralSection && (centralSection === 'local' || centralSection === 'plex' || centralSection === 'navidrome' || centralSection === 'explore') && !sourceEnabled(config, centralSection === 'explore' ? 'local' : centralSection) ? <main className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center"><p className="text-sm text-[color:var(--theme-fg-secondary,#999)]">{t('sources.disabledNotice')}</p><button type="button" className="rounded-lg bg-[var(--theme-control-accent,#E5A00D)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-control-on-accent,#000)]" onClick={() => configureSource(centralSection === 'explore' ? 'local' : centralSection)}>{t('sources.enableConfigure')}</button></main> : fullMode && centralSection === "navidrome" && navidromeArea === "explore" ? <NavidromeExploreView available={isPlaybackAvailable} active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} revision={navidromeConfiguration.revision} onConfigure={() => configureSource("navidrome")} /> : centralSection === "navidrome" ? <NavidromeView onCatalogAvailability={phase => sourceReadiness.report('navidrome', phase)} available={isPlaybackAvailable} active={!playerTarget&&!showSettings&&!showAbout&&!nowPlayingEmbedded} onConfigure={() => configureSource("navidrome")} /> : centralSection === "search" ? (
+        {(!fullMode && isAdvancedSection(centralSection)) || (!experimental && isExperimentalSection(centralSection)) ? null : centralSection && (centralSection === 'local' || centralSection === 'plex' || centralSection === 'navidrome' || centralSection === 'explore') && !sourceEnabled(config, centralSection === 'explore' ? 'local' : centralSection) ? <main className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center"><p className="text-sm text-[color:var(--theme-fg-secondary,#999)]">{t('sources.disabledNotice')}</p><button type="button" className="rounded-lg bg-[var(--theme-control-accent,#E5A00D)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-control-on-accent,#000)]" onClick={() => configureSource(centralSection === 'explore' ? 'local' : centralSection)}>{t('sources.enableConfigure')}</button></main> : fullMode && centralSection === "navidrome" && navidromeArea === "explore" ? <NavidromeExploreView available={isPlaybackAvailable} active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} revision={navidromeConfiguration.revision} onConfigure={() => configureSource("navidrome")} /> : centralSection === "navidrome" ? <NavidromeView onCatalogAvailability={phase => sourceReadiness.report('navidrome', phase)} available={isPlaybackAvailable} active={!playerTarget&&!showSettings&&!showAbout&&!nowPlayingEmbedded} onConfigure={() => configureSource("navidrome")} /> : centralSection === "search" ? (
           <UnifiedSearchView config={config} navidromeConfigured={navidromeConfiguration.configured} navidromeRevision={navidromeConfiguration.revision} plexIdentity={plexConnectionIdentity} status={playbackStatus}
+            sqliteBacked={sqliteMode}
+            sqliteIndexing={sqliteIndexing} sqliteSources={sqliteSources}
+            sqliteTagEditorEarlyAccessEnabled={sqliteMode && experimental}
             isPlaybackAvailable={isPlaybackAvailable} catalogRefreshRevision={localCatalogRevision}
-            active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded}
+            active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded}
             onFavoritesChanged={refreshPlexFavorites} />
         ) : centralSection === "explore" ? (
           <div className="contents">
             <div className={exploreDetail ? "hidden" : "contents"}>
-              <ExploreView context={exploreContext} active={mediaSource !== "equalizer" && !exploreDetail && !playerTarget}
+              <ExploreView context={exploreContext} sqliteBacked={sqliteMode} active={!exploreDetail && !playerTarget}
                 configurationReady={config !== null}
                 loadingActivity={exploreLoadingActivity} onConfigure={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("local"); setShowSettings(true); } }}
                 canRetryLocal={isPlaybackAvailable && !playbackStatus.is_updating && !localCatalog.saveBlocked && !localCatalog.loading && !localCatalog.mpdBusy}
@@ -1895,27 +2275,44 @@ export function App() {
           </div>
         ) : experimental && centralSection === "editions" ? (
           <AlbumEditionsView readiness={sourceReadiness.statuses} retrySource={sourceReadiness.retry} reportSource={sourceReadiness.report} config={config} available={isPlaybackAvailable} status={playbackStatus} anchor={editionAnchor}
-            active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded}
+            active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded}
             sourceIdentity={plexConnectionIdentity} navidromeRevision={navidromeConfiguration.revision} catalogRefreshRevision={localCatalogRevision} />
         ) : experimental && centralSection === "sessions" ? (
           <ListeningSessionsView config={config} available={isPlaybackAvailable} status={playbackStatus}
-            active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
+            active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
         ) : centralSection === "radio" ? (
           <RadioView available={isPlaybackAvailable} status={playbackStatus}
-            active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
+            active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
         ) : centralSection === "history" ? (
           <HistoryView config={config} plexIdentity={plexConnectionIdentity} status={playbackStatus} isPlaybackAvailable={isPlaybackAvailable} catalogRefreshRevision={localCatalogRevision}
-            active={mediaSource !== "equalizer" && !playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
+            active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
         ) : centralSection === "playlists" ? (
           <PlaylistsView config={config} isPlaybackAvailable={isPlaybackAvailable} refreshKey={playlistRevision} />
         ) : centralSection === "favorites" ? (
           <FavoritesView key={JSON.stringify(config.sources)} config={config}
             onFavoritesChanged={refreshPlexFavorites}
             isPlaybackAvailable={isPlaybackAvailable}
+            sqliteBacked={sqliteMode}
+            localAlbums={sqliteMode ? localCatalog.albums : undefined}
+            sqliteArtworkReady={sqliteMode && sqliteSourcesLoaded && localCatalog.loaded && !localCatalog.loading
+              && !localCatalog.saveBlocked && !localCatalog.mpdBusy && !localCatalog.error && !sqliteIndexing}
           />
         ) : centralSection === "local" ? (
           <LocalBrowserView
             subview={localSubview} onSubviewChange={setLocalSubview}
+            sqliteBacked={sqliteMode}
+            sqliteTagEditorEarlyAccessEnabled={sqliteMode && experimental}
+            sqliteIndexing={sqliteIndexing}
+            sqliteProgress={sqliteProgress}
+            sqliteSources={sqliteSources}
+            sqliteSourcesLoaded={sqliteSourcesLoaded}
+            sqliteActivityHidden={hiddenSqliteActivityId === sqliteProgress?.operationId}
+            onSqliteActivityDismiss={operationId => sqliteActivityVisibilityRef.current?.dismiss(operationId)}
+            onSqliteAddFolder={addSqliteFolder}
+            legacySqliteSourcesPending={legacySqliteSourcesPending}
+            onImportLegacySqliteSources={importLegacySqliteSources}
+            onSqliteVerifySource={verifySqliteSource}
+            onSqliteReindexSource={reindexSqliteSource}
             initialArtist={localSelectedArtist}
             onClearInitialArtist={() => setLocalSelectedArtist(null)}
             importPreview={importPreview}
@@ -2638,7 +3035,7 @@ export function App() {
             )}
           </div>
         )}
-        </div>}
+        </div>
         {nowPlayingEmbedded && <div className="flex-1 min-h-0 min-w-0" data-now-playing-embedded>
           <NowPlayingHost snapshot={{ usageMode: config?.usage_mode, route: configuredSignalRoute(config), health: mpdHealth, playback: presentationPlayback, sourceInfo, queueArtwork }} owner={hosting.owner} embedded busy={hosting.busy} hostingError={hosting.error}
             onReady={nowPlayingHosting.hostReady} onCollapse={() => void nowPlayingHosting.collapse()} onDetach={() => void nowPlayingHosting.detach()}
@@ -2656,8 +3053,9 @@ export function App() {
       )}
 
       <PlaybackRequestNotice failure={appPlayback.failure} />
-      {sourceEnabled(config, "local") && <LocalWatchNotice onOpenSettings={() => { setSettingsInitialPage("local"); setShowSettings(true); }} />}
+      {!sqliteMode && sourceEnabled(config, "local") && <LocalWatchNotice onOpenSettings={() => { setSettingsInitialPage("local"); setShowSettings(true); }} />}
       <PlayerBar
+        interactionDisabled={sqliteMode && !isPlaybackAvailable}
         route={configuredSignalRoute(config)}
         status={presentationPlayback}
         onArtworkLoaded={(status, image) => {
@@ -2678,7 +3076,7 @@ export function App() {
         <div
           role={configSaveNotice?.kind === "error" || configSaveNotice?.kind === "warning" ? "alert" : "status"}
           aria-live={configSaveNotice?.kind === "error" ? "assertive" : "polite"}
-          className="fixed bottom-28 right-6 z-40 max-h-[60vh] max-w-sm overflow-y-auto rounded-lg border border-[color:var(--theme-border-soft,#383838)] bg-[var(--theme-surface-panel,#1D1D1D)] p-4 text-xs text-[color:var(--theme-fg-primary,#ffffff)] shadow-xl"
+          className="fixed bottom-[var(--player-compact-height,112px)] right-6 z-40 max-h-[60vh] max-w-sm overflow-y-auto rounded-lg border border-[color:var(--theme-border-soft,#383838)] bg-[var(--theme-surface-panel,#1D1D1D)] p-4 text-xs text-[color:var(--theme-fg-primary,#ffffff)] shadow-xl"
         >
           <div className="flex items-start gap-2">
             {configSavePhase ? (
@@ -2747,9 +3145,36 @@ export function App() {
 
       {showSettings && (
         <SettingsModal
+          sqliteExperimental={sqliteMode}
+          artworkCatalogReady={sqliteMode && !!config && sourceEnabled(config, "local") && !!config.online_artwork_enabled
+            && localCatalog.loaded && !localCatalog.loading && !localCatalog.error
+            && !localCatalog.saveBlocked && !localCatalog.mpdBusy && !localCatalog.manualCheckPlayback && !localCatalog.manualCheckArtwork}
+          onSearchMissingArtwork={() => {
+            localArtworkEnrichment.searchMissing(localCatalog.albums, () => {
+              const current = localAlbumCatalog.getSnapshot();
+              const latestConfig = configRef.current;
+              return sqliteMode && !!latestConfig && !latestConfig.first_run && sourceEnabled(latestConfig, "local") && !!latestConfig.online_artwork_enabled
+                && current.albums === localCatalog.albums
+                && current.loaded && !current.loading && !current.error && !current.saveBlocked && !current.mpdBusy
+                && !current.manualCheckPlayback && !current.manualCheckArtwork;
+            });
+          }}
+          sqliteSources={sqliteSources}
+          sqliteIndexing={sqliteIndexing}
+          sqliteProgress={sqliteProgress}
+          onSqliteAddFolder={addSqliteFolder}
+          onSqliteVerifySource={verifySqliteSource}
+          onSqliteReindexSource={reindexSqliteSource}
+          onSqliteRemoveSource={removeSqliteSource}
           initialPage={settingsInitialPage}
           initialDraft={localFoldersDraft}
           initialFolderOverlap={Boolean(localFoldersDraft)}
+          equalizerAvailable={fullMode && mpdHealth.state === "available"}
+          equalizerShared={configuredSignalRoute(config)?.mode === "shared"}
+          equalizerRuntime={playbackStatus.shared_dsp}
+          audioRoute={playbackStatus.audio_route}
+          isPlaying={playbackStatus.state === "play"}
+          outputObservation={playbackStatus.output_observation}
           onClose={() => { setShowSettings(false); setLocalFoldersDraft(null); }}
           isLibraryUpdating={playbackStatus.is_updating}
           onLibraryRescanned={() => setLocalCatalogRevision((revision) => revision + 1)}
@@ -2765,7 +3190,7 @@ export function App() {
             if (warning === "position_not_restored") setConfigSaveNotice({ kind: "warning", positionNotRestored: true });
             if (audioRestartExpected) invalidateStatusRequests();
             configService.getConfig().then(setConfig).catch(error => logError("settings.reload", error));
-            refreshPlexFavorites();
+            if (!sqliteMode) refreshPlexFavorites();
           }}
         />
       )}
@@ -2778,6 +3203,7 @@ export function App() {
       )}
 
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+      <DirectVolumeChoiceDialog />
     </div></ExperimentalFeaturesContext.Provider>
   );
 }

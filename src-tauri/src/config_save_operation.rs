@@ -1,6 +1,7 @@
 //! Admission and ownership of Settings Save, including the interval between
 //! accepting a background operation and starting its worker. No disk state lives here.
 use crate::local_import_preview::{PreviewError, Scope};
+use crate::audio_route::{AudioRoute, RouteOperationState};
 use serde::Serialize;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -71,6 +72,9 @@ struct Inner {
     busy: bool,
     shutdown: bool,
     next_id: u64,
+    next_audio_transition_id: u64,
+    audio_transition: Option<AudioTransitionSnapshot>,
+    active_audio_transition_generation: Option<u64>,
     operation: Option<Snapshot>,
     purpose: Purpose,
     preview: Option<Scope>,
@@ -95,6 +99,29 @@ pub(crate) struct Coordinator {
 #[derive(Debug)]
 pub(crate) struct Transaction<'a> {
     coordinator: &'a Coordinator,
+    audio_transition_id: Option<u64>,
+}
+
+/// A generation-fenced capability for reporting the result from a blocking
+/// route worker while the owning Transaction keeps the shared admission busy.
+#[derive(Clone)]
+pub(crate) struct AudioTransitionHandle {
+    coordinator: Arc<Coordinator>,
+    generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AudioTransitionSnapshot {
+    pub generation: u64,
+    pub requested: AudioRoute,
+    pub kind: AudioTransitionKind,
+    pub state: RouteOperationState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AudioTransitionKind {
+    Configuration,
+    Equalizer,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -217,6 +244,10 @@ impl Drop for PreviewLease {
 }
 
 impl Coordinator {
+    pub(crate) fn audio_transition_handle(self: &Arc<Self>, generation: u64) -> AudioTransitionHandle {
+        AudioTransitionHandle { coordinator: Arc::clone(self), generation }
+    }
+
     pub(crate) fn shutdown_requested(&self)->bool {
         self.inner.lock().map_or(true,|inner|inner.shutdown)
     }
@@ -250,7 +281,7 @@ impl Coordinator {
         if Self::admission_error(&inner).is_some() { return Err(BackgroundAdmission::Blocked); }
         if inner.busy { return Err(BackgroundAdmission::Busy); }
         inner.busy = true;
-        Ok(Transaction { coordinator: self })
+        Ok(Transaction { coordinator: self, audio_transition_id: None })
     }
 
     pub(crate) fn begin(&self) -> Result<Transaction<'_>, String> {
@@ -278,7 +309,7 @@ impl Coordinator {
                 .map_err(|_| "Controle de Save indisponível.")?;
         }
         inner.busy = true;
-        Ok(Transaction { coordinator: self })
+        Ok(Transaction { coordinator: self, audio_transition_id: None })
     }
 
     pub(crate) fn reserve(self: &Arc<Self>) -> Result<(Snapshot, Operation), String> {
@@ -361,6 +392,24 @@ impl Coordinator {
             .map_err(|_| "Controle de Save indisponível.")?
             .operation
             .clone())
+    }
+
+    pub(crate) fn audio_transition_snapshot(&self) -> Result<Option<AudioTransitionSnapshot>, String> {
+        let inner = self.inner.lock()
+            .map_err(|_| "Coordenador de áudio indisponível.")?;
+        let mut snapshot = inner.audio_transition.clone();
+        if let Some(snapshot) = snapshot.as_mut().filter(|snapshot|
+            inner.active_audio_transition_generation == Some(snapshot.generation)
+                && snapshot.state == RouteOperationState::Uncertain
+        ) {
+            // The internal uncertainty sentinel is set before touching audio
+            // resources so Drop can preserve uncertainty after an interrupted
+            // rollback. While its owning transaction is still active, expose
+            // the operation as transitioning; only the final result is an
+            // error or an uncertain route for the UI.
+            snapshot.state = RouteOperationState::Transitioning;
+        }
+        Ok(snapshot)
     }
 
     pub(crate) fn reserve_preview(
@@ -506,13 +555,88 @@ impl Coordinator {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         inner.busy = true;
-        Transaction { coordinator: self }
+        Transaction { coordinator: self, audio_transition_id: None }
     }
 }
 
 impl Transaction<'_> {
     pub(crate) fn belongs_to(&self, coordinator: &Coordinator) -> bool {
         std::ptr::eq(self.coordinator, coordinator)
+    }
+
+    /// Attach this already-admitted transaction to the shared audio-route
+    /// operation stream. It reuses the existing Save/playback admission gate;
+    /// it does not acquire another lock or create another process owner.
+    pub(crate) fn begin_audio_transition(&mut self, requested: AudioRoute, kind: AudioTransitionKind) -> Result<u64, String> {
+        requested.validate().map_err(|_| "A rota de áudio solicitada é inválida.".to_string())?;
+        if self.audio_transition_id.is_some() {
+            return Err("Uma transição de áudio já está associada a esta operação.".into());
+        }
+        let mut inner = self.coordinator.inner.lock()
+            .map_err(|_| "Coordenador de áudio indisponível.".to_string())?;
+        if inner.shutdown || !inner.busy {
+            return Err("A operação de áudio não pode ser admitida.".into());
+        }
+        inner.next_audio_transition_id = inner.next_audio_transition_id.checked_add(1)
+            .ok_or_else(|| "Identidade da transição de áudio esgotada.".to_string())?;
+        let generation = inner.next_audio_transition_id;
+        inner.audio_transition = Some(AudioTransitionSnapshot {
+            generation,
+            requested,
+            kind,
+            state: RouteOperationState::Transitioning,
+        });
+        inner.active_audio_transition_generation = Some(generation);
+        self.audio_transition_id = Some(generation);
+        Ok(generation)
+    }
+
+    pub(crate) fn mark_audio_transition_uncertain(&self) {
+        self.set_audio_transition_state(RouteOperationState::Uncertain, false);
+    }
+
+    /// Call only when the caller has confirmed the requested route and its
+    /// required processing state. The generation check fences stale replies.
+    pub(crate) fn confirm_audio_transition(&self) {
+        self.set_audio_transition_state(RouteOperationState::Stable, true);
+    }
+
+    pub(crate) fn fail_audio_transition_after_rollback(&self) {
+        self.set_audio_transition_state(RouteOperationState::Failed, true);
+    }
+
+    fn set_audio_transition_state(&self, state: RouteOperationState, refine_uncertain: bool) {
+        let Some(generation) = self.audio_transition_id else { return; };
+        set_audio_transition_state(self.coordinator, generation, state, refine_uncertain);
+    }
+}
+
+impl AudioTransitionHandle {
+    pub(crate) fn mark_uncertain(&self) {
+        set_audio_transition_state(&self.coordinator, self.generation, RouteOperationState::Uncertain, false);
+    }
+    pub(crate) fn confirm(&self) {
+        set_audio_transition_state(&self.coordinator, self.generation, RouteOperationState::Stable, true);
+    }
+    pub(crate) fn fail(&self) {
+        set_audio_transition_state(&self.coordinator, self.generation, RouteOperationState::Failed, false);
+    }
+    pub(crate) fn fail_after_rollback(&self) {
+        set_audio_transition_state(&self.coordinator, self.generation, RouteOperationState::Failed, true);
+    }
+}
+
+fn set_audio_transition_state(
+    coordinator: &Coordinator,
+    generation: u64,
+    state: RouteOperationState,
+    refine_uncertain: bool,
+) {
+    let Ok(mut inner) = coordinator.inner.lock() else { return; };
+    if let Some(snapshot) = inner.audio_transition.as_mut().filter(|value| value.generation == generation) {
+        let can_update = snapshot.state == RouteOperationState::Transitioning
+            || (refine_uncertain && snapshot.state == RouteOperationState::Uncertain);
+        if can_update { snapshot.state = state; }
     }
 }
 
@@ -523,6 +647,19 @@ impl Drop for Transaction<'_> {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(generation) = self.audio_transition_id {
+            if let Some(snapshot) = inner.audio_transition.as_mut()
+                .filter(|value| value.generation == generation && value.state == RouteOperationState::Transitioning)
+            {
+                // Mutation sites mark uncertainty before touching resources.
+                // If still transitioning at drop, the operation failed in
+                // preflight and did not alter the route.
+                snapshot.state = RouteOperationState::Failed;
+            }
+            if inner.active_audio_transition_generation == Some(generation) {
+                inner.active_audio_transition_generation = None;
+            }
+        }
         inner.busy = false;
         self.coordinator.idle.notify_all();
     }
@@ -707,6 +844,115 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    fn test_route(access: crate::audio_route::AudioAccess, processing: crate::audio_route::AudioProcessing) -> AudioRoute {
+        use crate::audio_route::{AudioDestination, AudioRoute};
+        AudioRoute {
+            destination: if access == crate::audio_route::AudioAccess::Shared {
+                AudioDestination::SystemDefault
+            } else {
+                AudioDestination::Device("alsa:hw:CARD=Test,DEV=0".into())
+            },
+            access,
+            processing,
+        }
+    }
+
+    #[test]
+    fn audio_route_transitions_share_admission_and_cover_shared_direct_and_eq() {
+        let shared = test_route(crate::audio_route::AudioAccess::Shared, crate::audio_route::AudioProcessing::Off);
+        let direct = test_route(crate::audio_route::AudioAccess::Exclusive, crate::audio_route::AudioProcessing::Off);
+        let eq = test_route(crate::audio_route::AudioAccess::Shared, crate::audio_route::AudioProcessing::Equalizer);
+        for (from, target, kind) in [
+            (shared.clone(), direct.clone(), AudioTransitionKind::Configuration),
+            (direct, shared.clone(), AudioTransitionKind::Configuration),
+            (shared, eq.clone(), AudioTransitionKind::Equalizer),
+            (eq, test_route(crate::audio_route::AudioAccess::Shared, crate::audio_route::AudioProcessing::Off), AudioTransitionKind::Equalizer),
+        ] {
+            let state = Arc::new(Coordinator::new());
+            // The shared admission records the requested target while the
+            // existing route projection retains the previously confirmed one.
+            assert!(from.validate().is_ok());
+            let mut transaction = state.begin().unwrap();
+            let generation = transaction.begin_audio_transition(target.clone(), kind).unwrap();
+            let route = state.audio_transition_snapshot().unwrap().unwrap();
+            assert_eq!(route.generation, generation);
+            assert_eq!(route.requested, target);
+            assert_eq!(route.state, RouteOperationState::Transitioning);
+            assert_eq!(route.kind, kind);
+            assert!(matches!(state.try_begin_background(), Err(BackgroundAdmission::Busy)));
+            let handle = state.audio_transition_handle(generation);
+            handle.confirm();
+            assert_eq!(state.audio_transition_snapshot().unwrap().unwrap().state, RouteOperationState::Stable);
+            drop(transaction);
+        }
+    }
+
+    #[test]
+    fn audio_transition_failure_and_rollback_outcomes_are_distinct() {
+        let state = Arc::new(Coordinator::new());
+        let mut transaction = state.begin().unwrap();
+        let generation = transaction.begin_audio_transition(
+            test_route(crate::audio_route::AudioAccess::Exclusive, crate::audio_route::AudioProcessing::Off),
+            AudioTransitionKind::Configuration,
+        ).unwrap();
+        let route = state.audio_transition_handle(generation);
+
+        // A failed preflight has no resource mutation.
+        route.fail();
+        assert_eq!(state.audio_transition_snapshot().unwrap().unwrap().state, RouteOperationState::Failed);
+        drop(transaction);
+
+        let mut transaction = state.begin().unwrap();
+        let generation = transaction.begin_audio_transition(
+            test_route(crate::audio_route::AudioAccess::Shared, crate::audio_route::AudioProcessing::Equalizer),
+            AudioTransitionKind::Equalizer,
+        ).unwrap();
+        let route = state.audio_transition_handle(generation);
+        route.mark_uncertain();
+        assert_eq!(state.audio_transition_snapshot().unwrap().unwrap().state, RouteOperationState::Transitioning,
+            "resource mutation is still in progress, so the public snapshot must not report a terminal uncertainty");
+        route.fail_after_rollback();
+        assert_eq!(state.audio_transition_snapshot().unwrap().unwrap().state, RouteOperationState::Failed);
+        drop(transaction);
+
+        let mut transaction = state.begin().unwrap();
+        let generation = transaction.begin_audio_transition(
+            test_route(crate::audio_route::AudioAccess::Shared, crate::audio_route::AudioProcessing::Equalizer),
+            AudioTransitionKind::Equalizer,
+        ).unwrap();
+        let route = state.audio_transition_handle(generation);
+        route.mark_uncertain();
+        drop(transaction); // inconclusive rollback remains uncertain
+        assert_eq!(state.audio_transition_snapshot().unwrap().unwrap().state, RouteOperationState::Uncertain);
+        let _unrelated_transaction = state.begin().unwrap();
+        assert_eq!(state.audio_transition_snapshot().unwrap().unwrap().state, RouteOperationState::Uncertain,
+            "a later unrelated transaction must not make the old uncertain route look active");
+    }
+
+    #[test]
+    fn stale_audio_transition_reply_cannot_confirm_a_newer_generation() {
+        let state = Arc::new(Coordinator::new());
+        let mut old_transaction = state.begin().unwrap();
+        let old_generation = old_transaction.begin_audio_transition(
+            test_route(crate::audio_route::AudioAccess::Shared, crate::audio_route::AudioProcessing::Equalizer),
+            AudioTransitionKind::Equalizer,
+        ).unwrap();
+        let stale = state.audio_transition_handle(old_generation);
+        drop(old_transaction); // abandoned work is uncertain and releases admission
+
+        let mut current_transaction = state.begin().unwrap();
+        let current_generation = current_transaction.begin_audio_transition(
+            test_route(crate::audio_route::AudioAccess::Exclusive, crate::audio_route::AudioProcessing::Off),
+            AudioTransitionKind::Configuration,
+        ).unwrap();
+        assert!(current_generation > old_generation);
+        stale.confirm();
+        let current = state.audio_transition_snapshot().unwrap().unwrap();
+        assert_eq!(current.generation, current_generation);
+        assert_eq!(current.state, RouteOperationState::Transitioning);
+        current_transaction.confirm_audio_transition();
+    }
 
     #[test]
     fn addition_permission_is_explicit_and_ends_before_validation() {

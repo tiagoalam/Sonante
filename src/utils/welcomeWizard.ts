@@ -13,7 +13,7 @@ export function wizardPlexConnectionReady(config: AppConfig): boolean {
 
 export type WizardSaveErrorKey = "settings.localFolderOverlap" | "wizard.configPersistenceUncertain"
   | "wizard.deviceBusy" | "wizard.deviceUnavailable" | "wizard.saveError"
-  | "wizard.libraryPreparationError" | "wizard.preparationIncomplete";
+  | "wizard.libraryPreparationError" | "wizard.preparationIncomplete" | "wizard.sqliteFolderSelectionRequired";
 
 export function wizardSaveErrorKey(error: unknown): WizardSaveErrorKey {
   const message = typeof error === "string" ? error : error instanceof Error ? error.message : "";
@@ -21,6 +21,9 @@ export function wizardSaveErrorKey(error: unknown): WizardSaveErrorKey {
   if (message.startsWith("CONFIG_PERSISTENCE_UNCERTAIN:")) return "wizard.configPersistenceUncertain";
   if (message.startsWith("FIRST_RUN_PREPARATION_INCOMPLETE:")) return "wizard.preparationIncomplete";
   if (message === "FIRST_RUN_DATABASE_UNCONFIRMED" || message.startsWith("FIRST_RUN_DATABASE_UNCONFIRMED.")) return "wizard.libraryPreparationError";
+  if (["SQLITE_WIZARD_FOLDER_SELECTION_REQUIRED", "SQLITE_WIZARD_INDEX_FAILED",
+    "SQLITE_WIZARD_SOURCE_REQUIRED", "SQLITE_WIZARD_SOURCE_NOT_INDEXED",
+    "SQLITE_WIZARD_SOURCE_UNAVAILABLE"].includes(message)) return "wizard.sqliteFolderSelectionRequired";
   if (message === "ALSA_PREFLIGHT_OUTPUT_BUSY") return "wizard.deviceBusy";
   if (message === "ALSA_PREFLIGHT_OUTPUT_UNAVAILABLE") return "wizard.deviceUnavailable";
   return "wizard.saveError";

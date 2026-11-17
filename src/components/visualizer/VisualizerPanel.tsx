@@ -32,6 +32,7 @@ interface VisualizerPanelProps {
   inactiveLabel?: string;
   inactiveHelp?: string;
   fullscreen: boolean;
+  compact?: boolean;
 }
 
 export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
@@ -40,6 +41,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
   inactiveLabel,
   inactiveHelp,
   fullscreen,
+  compact = false,
 }) => {
   const { t } = useTranslation();
   const [mode, setMode] = useState<VisualizerMode>(initialMode);
@@ -62,24 +64,25 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
 
   return (
     <section
-      data-theme-surface="instrument" className="np-visualizer relative flex flex-col rounded-2xl border border-white/10 bg-[#050708]/95 px-10 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.045),0_16px_40px_rgba(0,0,0,0.25)]"
+      data-theme-surface="instrument" data-visualizer-density={compact ? "compact" : "standard"}
+      className="np-visualizer relative flex flex-col rounded-2xl border border-[color:var(--theme-border-soft,#ffffff1a)] bg-[var(--theme-surface-base,#050708)] px-10 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.045),0_16px_40px_rgba(0,0,0,0.25)]"
       aria-label={modeLabel}
     >
-      <span className="absolute left-3 top-3 h-1.5 w-1.5 rounded-full bg-white/15 shadow-[0_0_0_1px_rgba(0,0,0,0.8)]" />
-      <span className="absolute right-3 top-3 h-1.5 w-1.5 rounded-full bg-white/15 shadow-[0_0_0_1px_rgba(0,0,0,0.8)]" />
-      <span className="absolute bottom-3 left-3 h-1.5 w-1.5 rounded-full bg-white/10 shadow-[0_0_0_1px_rgba(0,0,0,0.8)]" />
-      <span className="absolute bottom-3 right-3 h-1.5 w-1.5 rounded-full bg-white/10 shadow-[0_0_0_1px_rgba(0,0,0,0.8)]" />
+      <span data-visualizer-screw className="absolute left-3 top-3 h-1.5 w-1.5 rounded-full bg-white/15 shadow-[0_0_0_1px_rgba(0,0,0,0.8)]" />
+      <span data-visualizer-screw className="absolute right-3 top-3 h-1.5 w-1.5 rounded-full bg-white/15 shadow-[0_0_0_1px_rgba(0,0,0,0.8)]" />
+      <span data-visualizer-screw className="absolute bottom-3 left-3 h-1.5 w-1.5 rounded-full bg-white/10 shadow-[0_0_0_1px_rgba(0,0,0,0.8)]" />
+      <span data-visualizer-screw className="absolute bottom-3 right-3 h-1.5 w-1.5 rounded-full bg-white/10 shadow-[0_0_0_1px_rgba(0,0,0,0.8)]" />
       <button
         type="button"
         onClick={() => move(-1)}
-        className="absolute left-2 top-1/2 z-10 -translate-y-1/2 rounded-md border border-white/8 bg-black/30 px-1.5 py-4 text-white/35 transition hover:border-white/20 hover:bg-white/5 hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E5A00D]/60"
+        className={`absolute left-2 top-1/2 z-10 -translate-y-1/2 rounded-md border border-white/8 bg-black/30 px-1.5 ${compact ? "py-2" : "py-4"} text-white/45 transition hover:border-white/20 hover:bg-white/5 hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]`}
         title={t("nowPlaying.visualizer.previousMode")}
         aria-label={t("nowPlaying.visualizer.previousMode")}
       >
         <ChevronLeft size={20} />
       </button>
 
-      <div className="mb-2 flex shrink-0 min-h-5 items-center justify-between gap-2 border-b border-white/[0.06] pb-2 font-mono uppercase">
+      <div data-visualizer-toolbar className={`flex shrink-0 min-h-5 items-center justify-between gap-2 border-b border-white/[0.06] font-mono uppercase ${compact ? "mb-1 pb-1" : "mb-2 pb-2"}`}>
         <div className="min-w-0">
           <p className="truncate text-[10px] font-semibold tracking-[0.12em] text-white/60">
             {modeLabel}
@@ -103,7 +106,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
               </ul>
             </div>
           </details>
-          <div className="text-right text-[8px] tracking-[0.16em] text-white/25">
+          <div data-visualizer-meta className={`text-right text-[8px] tracking-[0.16em] text-white/25${compact ? " hidden" : ""}`}>
             <p>{String(currentIndex).padStart(2, "0")} / {String(MODES.length).padStart(2, "0")}</p>
             <p className="mt-1">{t("nowPlaying.visualizer.measurements")}</p>
           </div>
@@ -115,13 +118,14 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
           <p className="text-sm font-semibold leading-relaxed text-white/90">{inactiveLabel || t("nowPlaying.vuUnavailable")}</p>
           <p className="mt-2 text-xs leading-relaxed text-white/65">{inactiveHelp || t("nowPlaying.visualizer.helpRetry")}</p>
         </div> : <>
-        {mode === "combo" && <InstrumentCanvas levels={levels} active={active} mode="combo" label={modeLabel} fullscreen={fullscreen} />}
+        {mode === "combo" && <InstrumentCanvas levels={levels} active={active} mode="combo" label={modeLabel} fullscreen={fullscreen} compact={compact} />}
         {mode === "spectrum-neon" && (
           <SpectrumNeon
             spectrum={levels.spectrum}
             active={active}
             label={modeLabel}
             fullscreen={fullscreen}
+            compact={compact}
           />
         )}
         {mode === "spectrum-segmented" && (
@@ -130,6 +134,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
             active={active}
             label={modeLabel}
             fullscreen={fullscreen}
+            compact={compact}
           />
         )}
         {(mode === "vu-amber" || mode === "vu-blue" || mode === "vu-radial") && (
@@ -141,6 +146,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
             rightLabel={t("nowPlaying.visualizer.right")}
             relativeLabel={t("nowPlaying.visualizer.relativeLevel")}
             fullscreen={fullscreen}
+            compact={compact}
           />
         )}
         </>}
@@ -149,7 +155,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
       <button
         type="button"
         onClick={() => move(1)}
-        className="absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-md border border-white/8 bg-black/30 px-1.5 py-4 text-white/35 transition hover:border-white/20 hover:bg-white/5 hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E5A00D]/60"
+        className={`absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-md border border-white/8 bg-black/30 px-1.5 ${compact ? "py-2" : "py-4"} text-white/45 transition hover:border-white/20 hover:bg-white/5 hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]`}
         title={t("nowPlaying.visualizer.nextMode")}
         aria-label={t("nowPlaying.visualizer.nextMode")}
       >

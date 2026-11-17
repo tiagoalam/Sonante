@@ -9,7 +9,10 @@ export const libraryDoctorService = {
     if (readInFlight) throw "read_in_progress";
     readInFlight = true;
     try {
-      return await invoke<LibraryDoctorReport>("get_local_album_doctor", { albumId });
+      const command = albumId.startsWith("sqlite:") || albumId.startsWith("sqlite-cue-album:")
+        ? "sqlite_library_album_doctor"
+        : "get_local_album_doctor";
+      return await invoke<LibraryDoctorReport>(command, { albumId });
     } finally {
       readInFlight = false;
     }

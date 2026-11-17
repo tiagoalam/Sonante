@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use playlists::{PlaylistItem, PlaylistItemMetadata};
     use std::cell::{Cell, RefCell};
     use std::fs;
@@ -746,6 +747,17 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_cue_playlist_keeps_the_resolved_range_token_as_transient_track_uri() {
+        let locator = format!("sqlite-cue://7/{}/2", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"Album/image.cue"));
+        let playback = format!("sonante-cue-range://{}/{}/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("/synthetic/Album/image.wav"), 501, 1002);
+        let playlist = playback_playlist(vec![local_locator(&locator)]);
+        let prepared = prepare_playlist_playback(&playlist, vec![Some((playback.clone(), None))], None).unwrap();
+        assert_eq!(prepared.tracks[0].media_locator, Some(local_locator(&locator)));
+        assert_eq!(prepared.tracks[0].uri, playback);
+        assert_eq!(prepared.playback_uris[0], prepared.tracks[0].uri);
+    }
+
+    #[test]
     fn playlist_playback_skips_missing_and_unavailable_without_reordering() {
         let playlist = playback_playlist((0..5).map(|index| local_locator(&format!("{index}.flac"))).collect());
         let prepared = prepare_playlist_playback(&playlist, vec![
@@ -857,11 +869,13 @@ mod tests {
     #[test]
     fn alsa_preflight_selects_only_known_distinct_physical_endpoints() {
         for (old_type, old_device, new_type, new_device, expected) in [
-            ("pipewire", "default", "alsa", "hw:CARD=Test,DEV=0", true),
-            ("shared", "default", "alsa", "hw:0,0", true),
-            ("alsa", "default", "alsa", "hw:0,0", true),
-            ("pipewire", "hw:0,0", "alsa", "hw:0,0", true),
-            ("pipewire", "default", "alsa", "hw:0,0,0", true),
+            // Shared -> Direct defers availability until Sonante has stopped
+            // its own MPD and observed release of the shared PCM.
+            ("pipewire", "default", "alsa", "hw:CARD=Test,DEV=0", false),
+            ("alsa", "hw:CARD=Old,DEV=0", "alsa", "hw:CARD=Test,DEV=0", true),
+            ("shared", "default", "alsa", "hw:0,0", false),
+            ("alsa", "default", "alsa", "hw:0,0", false),
+            ("pipewire", "hw:0,0", "alsa", "hw:0,0", false),
             ("alsa", "hw:0,0", "alsa", "hw:1,0", true),
             (
                 "alsa",
@@ -879,10 +893,6 @@ mod tests {
             ("pipewire", "default", "pipewire", "hw:0,0", false),
             ("pipewire", "default", "shared", "hw:0,0", false),
             ("pipewire", "default", "alsa", "default", false),
-            ("pipewire", "default", "alsa", "plughw:0,0", false),
-            ("pipewire", "default", "alsa", "null", false),
-            ("pipewire", "default", "alsa", "custom", false),
-            ("pipewire", "default", "alsa", "hw:", false),
             ("pipewire", "default", "unknown", "hw:0,0", false),
         ] {
             let current = AppConfig {
@@ -905,6 +915,21 @@ mod tests {
                 calls.get(),
                 usize::from(expected),
                 "{old_type}/{old_device} -> {new_type}/{new_device}"
+            );
+        }
+
+        let current = AppConfig {
+            first_run: false,
+            audio_output_type: "pipewire".into(),
+            alsa_device: "default".into(),
+            ..AppConfig::default()
+        };
+        for invalid_endpoint in ["hw:0,0,0", "plughw:0,0", "null", "custom", "hw:"] {
+            let proposed = AppConfig { audio_output_type: "alsa".into(), alsa_device: invalid_endpoint.into(), ..current.clone() };
+            assert_eq!(
+                validate_config_change_preflight(&current, &current, &proposed, |_| panic!("invalid Direct endpoint must not be opened")),
+                Err("ALSA_DIRECT_ENDPOINT_INVALID".into()),
+                "{invalid_endpoint}"
             );
         }
     }
@@ -933,9 +958,7 @@ mod tests {
         ] {
             for playback_state in ["stop", "pause", "play"] {
                 for uri in ["Música/Álbum/faixa.flac", "https://plex.invalid/stream"] {
-                    for (old_type, old_device) in
-                        [("pipewire", "default"), ("alsa", "hw:CARD=Old,DEV=0")]
-                    {
+                    for (old_type, old_device) in [("alsa", "hw:CARD=Old,DEV=0")] {
                         let transactions = ConfigTransactionState::new();
                         let current = AppConfig {
                             first_run: false,
@@ -1219,7 +1242,7 @@ mod tests {
         for effect in [
             "operations.reserve()",
             "transaction_state.begin()",
-            "supervisor.start(&new_config)",
+            ".start(&new_config)",
         ] {
             assert!(admission < command.find(effect).unwrap());
         }
@@ -3595,7 +3618,7 @@ mod tests {
             title: "Fixture".into(), artist: "Fixture".into(), album: "Fixture".into(), thumb: None, plex_image: None,
             media_locator: None, uri: uri.into(), duration: Some(30.),
         }).collect::<Vec<_>>();
-        let queue = audio::MpdQueueStructure { playlist_version: 31, entries: tracks.iter().enumerate().map(|(pos,t)| audio::MpdQueueEntry { uri:t.uri.clone(), pos, id:70+pos as u64 }).collect() };
+        let queue = audio::MpdQueueStructure { playlist_version: 31, entries: tracks.iter().enumerate().map(|(pos,t)| audio::MpdQueueEntry { uri:t.uri.clone(), range:None, pos, id:70+pos as u64 }).collect() };
         let playback = audio::MpdPlaybackSnapshot { uris:tracks.iter().map(|t|t.uri.clone()).collect(), current_index:Some(1), elapsed:17., state:audio::PlaybackState::Playing, playlist_version:31 };
         (previous,next,sources,tracks,queue,playback)
     }
@@ -3688,6 +3711,7 @@ mod tests {
         let only_mpd = audio::MpdQueueStructure {
             entries: vec![audio::MpdQueueEntry {
                 uri: "Remove/Imagem.cue/track0001".into(),
+                range: None,
                 pos: 0,
                 id: 1,
             }],
@@ -3726,6 +3750,7 @@ mod tests {
                 .enumerate()
                 .map(|(pos, track)| audio::MpdQueueEntry {
                     uri: track.uri.clone(),
+                    range: None,
                     pos,
                     id: 71 + pos as u64,
                 })
@@ -5269,7 +5294,7 @@ mod tests {
         let queue = audio::MpdQueueStructure {
             playlist_version: 31,
             entries: removal_queue_uris().into_iter().enumerate().map(|(pos, uri)|
-                audio::MpdQueueEntry { uri, pos, id: 7 + pos as u64 }).collect(),
+                audio::MpdQueueEntry { uri, range: None, pos, id: 7 + pos as u64 }).collect(),
         };
         assert!(removal_queue_matches_remaining_sources(&plan, &logical, &queue, &catalog));
         let mut legacy_local = logical.clone();

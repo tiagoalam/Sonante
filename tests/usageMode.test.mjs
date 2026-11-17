@@ -21,7 +21,7 @@ test('Simple leaves basic routes available and refuses advanced sections, includ
   for (const section of ['local','plex','navidrome','radio','search','favorites','history','playlists']) assert.equal(isAdvancedSection(section), false);
   for (const section of ['explore','equalizer','sessions','editions']) assert.equal(isAdvancedSection(section), true);
   const calls = [], writes = [];
-  const controller = createMainSectionPreference(value => calls.push(value), () => ({ getItem: () => 'equalizer', setItem: (...args) => writes.push(args) }));
+  const controller = createMainSectionPreference(value => calls.push(value), () => ({ getItem: () => 'equalizer', setItem: (...args) => writes.push(args) }), undefined, undefined);
   controller.restore({ first_run: false, plex_token: '', usage_mode: 'simple' });
   assert.equal(calls.at(-1), 'local'); assert.deepEqual(writes, []);
   controller.restore({ first_run: false, plex_token: '', usage_mode: 'full' }); assert.equal(calls.at(-1), 'equalizer');

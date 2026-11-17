@@ -17,11 +17,20 @@ export interface LocalAlbumPresentationCache {
 
 export function localAlbumPresentationContext(folders: readonly string[]): string | null {
   if (!Array.isArray(folders) || !folders.length || folders.length > 256
-    || !folders.every(folder => typeof folder === "string" && folder.startsWith("/") && folder.length <= 8192)) return null;
+    || !folders.every(isAbsolutePresentationRoot)) return null;
   // Exact configured paths/order: a change is a cache miss, never an inferred
   // source identity. The browser origin supplies the app/storage scope.
   const context = JSON.stringify(folders);
   return context.length <= MAX_CONTEXT_LENGTH ? context : null;
+}
+
+function isAbsolutePresentationRoot(folder: unknown): folder is string {
+  if (typeof folder !== "string" || folder.length > 8192 || folder.includes("\\") || folder.includes("\0")) return false;
+  const components = folder.split("/");
+  if (components.some(part => part === "." || part === "..")) return false;
+  if (folder.startsWith("/") && !folder.startsWith("//")) return true;
+  if (/^[A-Za-z]:\/(?:[^/:*?\"<>|]+\/)*[^/:*?\"<>|]*$/.test(folder)) return true;
+  return /^\/\/[^/]+\/[^/]+(?:\/[^/]+)*\/?$/.test(folder);
 }
 
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);

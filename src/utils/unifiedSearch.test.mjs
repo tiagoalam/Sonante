@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { navidromeSearchPreview, SearchLane, searchQuery, localSearchIndex, localTrackRows, plexSearchPreview, searchTrackMetadata, sortSearchRows } from "./unifiedSearch.ts";
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
@@ -36,6 +37,19 @@ test("track actions preserve CUE URI, mapped Plex locator and millisecond durati
   assert.equal(preview.rows[0].source, "plex"); assert.equal(searchTrackMetadata(preview.rows[0]).media_locator, media_locator);
   assert.equal(searchTrackMetadata(preview.rows[0]).duration, 123.456);
   assert.throws(() => plexSearchPreview({ albums: [], artists: [], tracks: [{ rating_key: "t", media_locator: { kind: "plex", server_id: "other", part_key: "/part" } }] }, "server"));
+});
+test("SQLite album detail opened from Search keeps the SQLite playback and maintenance contracts", () => {
+  const search = readFileSync(new URL("../components/UnifiedSearchView.tsx", import.meta.url), "utf8");
+  const detail = search.slice(search.indexOf("{currentDetail.source === \"local\" ? <LocalBrowserView"), search.indexOf(": currentDetail.source === \"navidrome\""));
+  assert.match(detail, /sqliteBacked=\{sqliteBacked\}/);
+  assert.match(detail, /sqliteIndexing=\{sqliteIndexing\}/);
+  assert.match(detail, /sqliteSources=\{sqliteSources\}/);
+  assert.match(detail, /sqliteTagEditorEarlyAccessEnabled=\{sqliteTagEditorEarlyAccessEnabled\}/);
+  const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const route = app.slice(app.indexOf("<UnifiedSearchView config="), app.indexOf("/>", app.indexOf("<UnifiedSearchView config=")));
+  assert.match(route, /sqliteBacked=\{sqliteMode\}/);
+  assert.match(route, /sqliteIndexing=\{sqliteIndexing\}/);
+  assert.match(route, /sqliteSources=\{sqliteSources\}/);
 });
 test("each search lane has one running request and keeps only the newest pending query", async () => {
   const lane = new SearchLane(), first = deferred(), last = deferred(), calls = [];

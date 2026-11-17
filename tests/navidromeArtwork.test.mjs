@@ -54,9 +54,9 @@ test('actual App artwork pipeline and player hosts receive Navidrome presentatio
     const source=read('App.tsx'),file=ts.createSourceFile('App.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);const expressions={};
     function visit(node){if(ts.isVariableDeclaration(node)&&['sourceArtworkPlayback','presentationPlayback'].includes(node.name.getText(file)))expressions[node.name.getText(file)]=node.initializer.getText(file);ts.forEachChild(node,visit)}visit(file);
     const telemetry=raw(),decorated={...telemetry,thumb:image};let localInput;
-    const bindings={sourceEnabled,useNavidromePlaybackArtwork:(status,available,active)=>{assert.equal(status,telemetry);assert.ok(available&&active);return decorated},playbackStatus:telemetry,isPlaybackAvailable:true,config:{first_run:false},showSettings:false,showAbout:false};
+    const bindings={sourceEnabled,useNavidromePlaybackArtwork:(status,available,active)=>{assert.equal(status,telemetry);assert.ok(available&&active);return decorated},playbackStatus:telemetry,isPlaybackAvailable:true,config:{first_run:false},showSettings:false,showAbout:false,sqliteMode:false};
     const sourceArtworkPlayback=new Function(...Object.keys(bindings),`return (${expressions.sourceArtworkPlayback})`)(...Object.values(bindings));
-    const localBindings={sourceEnabled,useLocalPlaybackArtwork:status=>{localInput=status;return status},sourceArtworkPlayback,localCatalog:{},isPlaybackAvailable:true,config:{first_run:false},showSettings:false,showAbout:false,ensurePlaybackArtworkCatalog(){}};
+    const localBindings={sourceEnabled,useLocalPlaybackArtwork:status=>{localInput=status;return status},sourceArtworkPlayback,localCatalog:{},isPlaybackAvailable:true,config:{first_run:false},showSettings:false,showAbout:false,ensurePlaybackArtworkCatalog(){},sqliteMode:false};
     const presentation=new Function(...Object.keys(localBindings),`return (${expressions.presentationPlayback})`)(...Object.values(localBindings));assert.equal(localInput,decorated);assert.equal(presentation.thumb,image);assert.equal(telemetry.thumb,null);
     assert.match(source,/playback: presentationPlayback/);assert.match(source,/<PlayerBar[\s\S]*?status=\{presentationPlayback\}/);assert.match(source,/<NowPlayingHost[\s\S]*?playback: presentationPlayback/);assert.match(source,/<QueueDrawer[\s\S]*?status=\{presentationPlayback\}/);
 });

@@ -42,7 +42,7 @@ function fixture() {
     getQueueEditSnapshot: async () => { calls.push('snapshot'); return { revision: host.revision, tracks: host.queue }; } };
   const deps = { './ExperimentalFeatures': { BetaBadge: () => null, ExperimentalNotice: () => null }, react: hooks, 'react/jsx-runtime': jsx, 'react-i18next': { useTranslation: () => ({ t }) }, 'lucide-react': icons,
     '../services/audio': { audioService }, '../services/smartPlaylists': { smartPlaylistsService: { sources: async () => ({ local: true }) } },
-    '../services/listeningSessions': { sessionCatalog: async () => ['a', 'b', 'c'].map(candidate), sessionAlbumTracks: async (_source, album) => tracks(album.id) },
+    '../services/listeningSessions': { sessionSources: async () => ({ local: true }), sessionCatalog: async () => ['a', 'b', 'c'].map(candidate), sessionAlbumTracks: async (_source, album) => tracks(album.id) },
     '../services/plex': {}, '../services/navidrome': {}, '../services/history': {}, '../utils/navidromeArtwork': {}, '../utils/localAlbumCatalogSession': {}, '../utils/localArtworkSession': {},
     '../utils/listeningSessionGenres': { sessionUsesGenreFamilies: () => false, sessionGenreValues: () => [], sessionMatchesGenre: () => true },
     '../utils/musicSources': { sourceEnabled: (config, kind) => config.sources[kind] }, './TrackArtwork': { TrackArtwork: () => null }, './SessionAlbumChoices': { SessionAlbumChoices: () => null },

@@ -9,7 +9,7 @@ import { exploreGenreCardStyle, assignExploreGenreColors, assignExploreGenreIcon
 import { albumShelfEdges, albumShelfLayout, albumShelfTarget } from "../utils/exploreAlbumShelf";
 import type { ExploreArtistGroup, ExploreContext, ExploreEntry, ExploreShelfId } from "../utils/explore";
 import { artistPortraitInitials } from "../utils/artistInitials";
-import { localArtworkResolver } from "../utils/localArtworkSession";
+import { localArtworkResolver, localAlbumThumbnails } from "../utils/localArtworkSession";
 import { ExploreGenreSlice } from "./ExploreGenreSlice";
 import { AlbumArtworkPlaceholder } from "./AlbumArtworkPlaceholder";
 
@@ -17,7 +17,7 @@ const genreIcons = { guitar: Guitar, piano: Piano, mic: Mic2, radio: Radio, head
 
 export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => boolean; revision: number; active: boolean;
   onPlay?: (entry: ExploreEntry, current: () => boolean) => Promise<void>; isPlaybackAvailable?: boolean;
-  onlineArtworkEnabled?: boolean; artworkBlocked?: boolean; artworkOnly?: boolean; fallback?: React.ReactNode; onOpen: () => void }> = ({ entry, current, revision, active, onPlay, isPlaybackAvailable = false, onlineArtworkEnabled = false, artworkBlocked = false, artworkOnly = false, fallback, onOpen }) => {
+  onlineArtworkEnabled?: boolean; artworkBlocked?: boolean; artworkOnly?: boolean; fallback?: React.ReactNode; sqliteBacked?: boolean; onOpen: () => void }> = ({ entry, current, revision, active, onPlay, isPlaybackAvailable = false, onlineArtworkEnabled = false, artworkBlocked = false, artworkOnly = false, fallback, sqliteBacked = false, onOpen }) => {
   const { t } = useTranslation();
   const [cover, setCover] = useState<string | null>(() => localArtworkResolver.get(entry.album.id));
   const [phase, setPhase] = useState<"idle" | "loading" | "ready" | "missing" | "error">("idle");
@@ -29,6 +29,7 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
   const [playing, setPlaying] = useState(false);
   const [playError, setPlayError] = useState(false);
   const pending = useRef(false);
+  const sourcePlaybackAvailable = isPlaybackAvailable;
   const playbackEpoch = useRef(0);
   const mounted = useRef(false);
   useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -37,7 +38,7 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
     return () => { playbackEpoch.current++; };
   }, [entry, revision, active, isPlaybackAvailable, artworkBlocked]);
   const handlePlay = async () => {
-    if (pending.current || !active || !isPlaybackAvailable || artworkBlocked || !live.current() || !onPlay) return;
+    if (pending.current || !active || !sourcePlaybackAvailable || artworkBlocked || !live.current() || !onPlay) return;
     pending.current = true; setPlaying(true); setPlayError(false);
     const epoch = playbackEpoch.current;
     const valid = () => epoch === playbackEpoch.current && flags.current.active && !flags.current.artworkBlocked && live.current();
@@ -48,7 +49,7 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
     } finally { pending.current = false; if (mounted.current) setPlaying(false); }
   };
   const queueContext = useMemo(() => ({}), [entry, revision, active]);
-  const queueActions = useQueueInsertion(queueContext, active && isPlaybackAvailable && !artworkBlocked && !artworkOnly);
+  const queueActions = useQueueInsertion(queueContext, active && sourcePlaybackAvailable && !artworkBlocked && !artworkOnly);
   const albumRequest = { track: { title: entry.album.title, artist: entry.album.artist, album: entry.album.title }, scope: "album" as const,
     load: () => loadLocalAlbumQueue(entry.album), current: () => live.current() };
   const origin = `${t(`explore.sources.${entry.source}`)} · ${exploreOriginName(entry) ?? t("explore.unknownOrigin")}`;
@@ -61,12 +62,14 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
     return () => observer.disconnect();
   }, [entry.key, active]);
   useEffect(() => {
-    const cached = localArtworkResolver.get(entry.album.id);
+    const persistedThumbnail = sqliteBacked && entry.source === "local" ? localAlbumThumbnails.get(entry.album) : null;
+    if (persistedThumbnail) localArtworkResolver.seedPersistedLocal(entry.album.id, persistedThumbnail);
+    const cached = persistedThumbnail ?? localArtworkResolver.get(entry.album.id);
     setCover(cached); setPhase(cached ? "ready" : "idle");
     return localArtworkResolver.subscribe(entry.album.id, value => {
       if (flags.current.active && live.current()) { setCover(value); setPhase("ready"); }
     });
-  }, [entry.album, entry.source]);
+  }, [entry.album, entry.source, sqliteBacked]);
   useEffect(() => {
     if (!active || !visible || artworkBlocked || !live.current()) return;
     let mounted = true;
@@ -82,7 +85,7 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
       if (interested()) setPhase("error"); // Retry on a later activation, never per render or polling.
     });
     return () => { mounted = false; };
-  }, [entry.album, entry.source, active, visible, onlineArtworkEnabled, artworkBlocked]);
+  }, [entry.album, entry.source, active, visible, onlineArtworkEnabled, artworkBlocked, sqliteBacked]);
   const isAlbumArtwork = artworkOnly && !!cover;
   const artwork = <div aria-busy={phase === "loading"} role={isAlbumArtwork ? "img" : undefined}
       aria-label={isAlbumArtwork ? t("explore.artistAlbumCover", { album: entry.album.title }) : undefined}
@@ -99,7 +102,7 @@ export const ExploreAlbumCard: React.FC<{ entry: ExploreEntry; current: () => bo
       className="absolute inset-0 rounded-xl focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)] disabled:opacity-60" />
     {artwork}{queueActions.menu}{queueActions.notice}<span className="album-queue-trigger">{queueActions.trigger(albumRequest)}</span>
     {onPlay && <div data-theme-surface="contrast" className="pointer-events-none absolute top-2 left-2 right-2 aspect-square rounded-lg bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.4))] opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity flex items-center justify-center">
-      <button type="button" onClick={handlePlay} disabled={!active || !isPlaybackAvailable || artworkBlocked || playing}
+      <button type="button" onClick={handlePlay} disabled={!active || !sourcePlaybackAvailable || artworkBlocked || playing}
         aria-label={`${t("common.playAlbum")}: ${entry.album.title}`} title={t("common.playAlbum")}
         className="pointer-events-auto w-12 h-12 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-[color:var(--theme-border-soft,#ffffff)]">
         <Play size={20} className="ml-1" fill="black" aria-hidden="true" />
@@ -215,6 +218,7 @@ interface Props {
   onOpen: (entry: ExploreEntry) => void;
   onPlay?: (entry: ExploreEntry, current: () => boolean) => Promise<void>;
   isPlaybackAvailable?: boolean;
+  sqliteBacked?: boolean;
   onlineArtworkEnabled?: boolean;
   artworkBlocked?: boolean;
   configurationReady?: boolean;
@@ -223,7 +227,7 @@ interface Props {
   canRetryLocal?: boolean;
   loadingActivity?: "indexing" | "organizing" | null;
 }
-export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isCurrent, onOpen, onPlay, isPlaybackAvailable = false, sourceSelector, onlineArtworkEnabled = false, artworkBlocked = false, configurationReady = true, onConfigure, retryLocal, canRetryLocal = true, loadingActivity = null }) => {
+export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isCurrent, onOpen, onPlay, isPlaybackAvailable = false, sqliteBacked = false, sourceSelector, onlineArtworkEnabled = false, artworkBlocked = false, configurationReady = true, onConfigure, retryLocal, canRetryLocal = true, loadingActivity = null }) => {
   const { t } = useTranslation();
   const session = useMemo(() => createExploreSession(), []);
   session.syncContext(configurationReady ? context : { ...context, local: { ...context.local, state: "loading" } }, active, false);
@@ -262,7 +266,7 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
   };
   // Online enrichment is confined to suggested albums; slices may reuse the same cache.
   const albumCards = selected.map(entry => <ExploreAlbumCard key={entry.key} entry={entry}
-    revision={state.revision} active={active} onPlay={onPlay} isPlaybackAvailable={isPlaybackAvailable} onlineArtworkEnabled={!slice && onlineArtworkEnabled} artworkBlocked={artworkBlocked} current={() => (slice ? session.canUseSlice(entry, state.revision) : session.canUse(entry, state.revision)) && isCurrent(entry)}
+    revision={state.revision} active={active} onPlay={onPlay} isPlaybackAvailable={isPlaybackAvailable} onlineArtworkEnabled={!slice && onlineArtworkEnabled} artworkBlocked={artworkBlocked} sqliteBacked={sqliteBacked} current={() => (slice ? session.canUseSlice(entry, state.revision) : session.canUse(entry, state.revision)) && isCurrent(entry)}
     onOpen={() => { if ((slice ? session.canUseSlice(entry, state.revision) : session.canUse(entry, state.revision)) && isCurrent(entry)) onOpen(entry); }} />);
   const albumGrid = <div className="mt-3 grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-6">{albumCards}</div>;
   const configured = context.local.state !== "not_configured";
@@ -308,7 +312,7 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
         <p className="mt-1 text-xs text-[color:var(--theme-fg-muted,#888888)]">{slice.group.kind === "artist" ? t(`explore.sources.${slice.group.source}`) : t("explore.genreSlice")}
           {" · "}{t("explore.sliceCount", { count: slice.entries.length })}</p>
         {continuousGenre ? <ExploreGenreSlice id={slice.group.key} label={slice.group.name} entries={slice.entries}
-          active={active} positions={genrePositions.current} renderItem={entry => <ExploreAlbumCard key={entry.key} entry={entry}
+          active={active} positions={genrePositions.current} renderItem={entry => <ExploreAlbumCard key={entry.key} entry={entry} sqliteBacked={sqliteBacked}
             revision={state.revision} active={active} onPlay={onPlay} isPlaybackAvailable={isPlaybackAvailable} onlineArtworkEnabled={false} artworkBlocked={artworkBlocked}
             current={() => session.canUseSlice(entry, state.revision) && isCurrent(entry)}
             onOpen={() => { if (session.canUseSlice(entry, state.revision) && isCurrent(entry)) onOpen(entry); }} />} /> : albumGrid}
@@ -323,7 +327,7 @@ export const ExploreView: React.FC<Props> = ({ context, active, ensureLocal, isC
           active={active && !slice} waiting={waiting} positions={shelfPositions.current} resetRevision={state.resets.albums ?? 0} onRenew={() => renewShelf("albums")} />,
         state.themes.map(theme => <ExploreAlbumShelf key={theme.id} id={`explore-${theme.id}-shelf`}
           title={theme.id === "genre" ? t("explore.genreTheme", { genre: theme.label }) : t(theme.current ? "explore.currentDecade" : "explore.pastDecade", { decade: theme.value })}
-          cards={theme.selected.map(entry => <ExploreAlbumCard key={entry.key} entry={entry} revision={state.revision} active={active} onPlay={onPlay} isPlaybackAvailable={isPlaybackAvailable}
+          cards={theme.selected.map(entry => <ExploreAlbumCard key={entry.key} entry={entry} sqliteBacked={sqliteBacked} revision={state.revision} active={active} onPlay={onPlay} isPlaybackAvailable={isPlaybackAvailable}
             onlineArtworkEnabled={onlineArtworkEnabled} artworkBlocked={artworkBlocked}
             current={() => session.canUseShelf(entry, state.revision, theme.id) && isCurrent(entry)}
             onOpen={() => { if (session.canUseShelf(entry, state.revision, theme.id) && isCurrent(entry)) onOpen(entry); }} />)}

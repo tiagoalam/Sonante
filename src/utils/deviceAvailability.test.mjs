@@ -1,7 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createDeviceAvailabilityQuery, newPhysicalOutputChoice, shouldCheckContextualDevice } from "./deviceAvailability.ts";
+import { createDeviceAvailabilityQuery, newPhysicalOutputChoice, releasesSharedBeforeDirect, shouldCheckContextualDevice } from "./deviceAvailability.ts";
+
+test("only an established Shared to explicit Direct change defers availability until Sonante releases its route", () => {
+  const shared = { first_run: false, audio_output_type: "pipewire", alsa_device: "hw:DAC,0" };
+  const legacyShared = { ...shared, audio_output_type: "alsa", alsa_device: "default" };
+  const direct = { ...shared, audio_output_type: "alsa", alsa_device: "hw:DAC,0" };
+  assert.equal(releasesSharedBeforeDirect(shared, direct), true);
+  assert.equal(releasesSharedBeforeDirect(legacyShared, direct), true);
+  assert.equal(releasesSharedBeforeDirect({ ...shared, first_run: true }, direct), false);
+  assert.equal(releasesSharedBeforeDirect({ ...direct, alsa_device: "hw:Other,0" }, direct), false);
+  assert.equal(releasesSharedBeforeDirect(direct, shared), false);
+  assert.equal(releasesSharedBeforeDirect(null, direct), false);
+});
 
 const deferred = () => {
   let resolve, reject;
@@ -13,14 +25,14 @@ const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve();
 test("availability states and momentary limitations are translated", () => {
   for (const language of ["en", "pt-BR"]) {
     const labels = JSON.parse(readFileSync(new URL(`../locales/${language}.json`, import.meta.url), "utf8")).settings.deviceAvailability;
-    for (const key of ["check", "checking", "available", "busy", "indeterminate", "current_sonante", "failed", "notice", "busyAction",
+    for (const key of ["check", "checking", "available", "busy", "indeterminate", "current_sonante", "failed", "notice", "busyAction", "busyAfterRelease",
       "helpLabel", "helpObservation", "helpShared", "helpBusy", "helpLimits"]) {
       assert.ok(typeof labels[key] === "string" && labels[key].length > 0);
     }
     assert.match(labels.notice, language === "en" ? /do not reserve/ : /Não reservam/);
     assert.equal(labels.available, language === "en" ? "Available" : "Disponível");
     assert.equal(labels.busy, language === "en" ? "In use" : "Em uso");
-    assert.equal(labels.indeterminate, language === "en" ? "Not checked" : "Não verificado");
+    assert.equal(labels.indeterminate, language === "en" ? "Availability not checked" : "Disponibilidade não verificada");
     assert.match(labels.helpObservation, language === "en" ? /last check/ : /última verificação/);
     assert.match(labels.helpShared, /Shared.*PipeWire.*PulseAudio/);
     assert.match(labels.helpBusy, language === "en" ? /not necessarily/ : /não significa necessariamente/);

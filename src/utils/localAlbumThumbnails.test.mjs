@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import React from "react";
 import ts from "typescript";
 import { LocalAlbumThumbnails, thumbnailFromLoadedImage, LOCAL_ALBUM_THUMBNAILS_KEY,
-  MAX_THUMBNAILS, MAX_THUMBNAIL_BYTES, MAX_THUMBNAILS_BYTES, THUMBNAIL_EDGE } from "./localAlbumThumbnails.ts";
+  MAX_THUMBNAILS, MAX_THUMBNAIL_BYTES, MAX_THUMBNAILS_BYTES, THUMBNAIL_EDGE,
+  sqliteAlbumThumbnailContext } from "./localAlbumThumbnails.ts";
 import { localAlbumPresentationContext } from "./localAlbumPresentationCache.ts";
 import { sortLocalAlbums } from "./localAlbumNavigation.ts";
 import { artworkReadBlocked } from "./localArtwork.ts";
@@ -57,6 +58,18 @@ test("paint restored thumbnails without new reduction, lookups, writes or timers
   assert.equal(f.writes, 1); assert.equal(f.tasks.length, 1);
   reopened.capture(album("a"), image, () => false);
   assert.equal(f.writes, 1);
+});
+
+test("SQLite cover cache scopes are stable across restart and change with source generation", () => {
+  const sources = [{ id: 2, generation: 7 }, { id: 1, generation: 3 }];
+  assert.deepEqual(sqliteAlbumThumbnailContext(sources), [
+    "/sonante-sqlite-library/source/1/generation/3",
+    "/sonante-sqlite-library/source/2/generation/7",
+  ]);
+  assert.deepEqual(sqliteAlbumThumbnailContext([...sources].reverse()), sqliteAlbumThumbnailContext(sources));
+  assert.notDeepEqual(sqliteAlbumThumbnailContext([{ id: 1, generation: 4 }, { id: 2, generation: 7 }]),
+    sqliteAlbumThumbnailContext(sources));
+  assert.deepEqual(sqliteAlbumThumbnailContext([{ id: -1, generation: 1 }, { id: 1, generation: 0 }]), []);
 });
 
 test("configuration and exact album binding prevent reuse by another source/album", () => {
@@ -132,11 +145,13 @@ test("loss of current confirmation during reduction cannot publish the thumbnail
   assert.equal(changed.cache.get(album("a")), null);
 });
 
-test("quota/access failures do not affect normal display; only the thumbnail key is discarded", () => {
-  const f = fixture(); f.cache.setContext(["/music"]); f.cache.capture(album("a"), image, () => true);
+test("quota/access failures do not affect normal display or erase the last stored thumbnails", () => {
+  const f = fixture(); f.cache.setContext(["/music"]); f.cache.capture(album("saved"), image, () => true); f.cache.flush();
+  const previous = f.value;
+  f.cache.capture(album("new"), image, () => true);
   f.storage.setItem = () => { throw Error("quota"); };
-  assert.doesNotThrow(() => f.cache.flush()); assert.equal(f.removes, 1);
-  assert.equal(f.cache.get(album("a")), jpeg());
+  assert.doesNotThrow(() => f.cache.flush()); assert.equal(f.removes, 0); assert.equal(f.value, previous);
+  assert.equal(f.cache.get(album("saved")), jpeg());
   const unavailable = new LocalAlbumThumbnails(() => { throw Error("security"); }, () => jpeg(), f.schedule);
   unavailable.setContext(["/music"]); unavailable.capture(album("a"), image, () => true);
   assert.doesNotThrow(() => unavailable.flush());
@@ -145,21 +160,21 @@ test("quota/access failures do not affect normal display; only the thumbnail key
 const cardSource = readFileSync(new URL("../components/LocalBrowserView.tsx", import.meta.url), "utf8");
 const cardBody = ts.transpileModule(cardSource.slice(cardSource.indexOf("const LocalAlbumCard:"), cardSource.indexOf("export type LocalSubview")),
   { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2020 } }).outputText;
-function renderCard({ confirmed, resolved, thumbnail, layout = "grid" }) {
-  const a = album("a"), effects = []; let reductions = 0, lookups = 0, reads = 0, captures = 0, forgotten = 0; const triggers = [];
+function renderCard({ confirmed, resolved, thumbnail, layout = "grid", sqliteBacked = false, localCoverResult = null }) {
+  const a = album("a"), effects = [], stateUpdates = []; let currentResolved = resolved, reductions = 0, lookups = 0, reads = 0, captures = 0, forgotten = 0; const triggers = [];
   const state = { albums: confirmed ? [a] : [], loaded: confirmed, loading: false, error: null, mpdBusy: false, saveBlocked: false };
   let stateIndex = 0;
   const component = new Function("useMemo", "useQueueInsertion", "loadLocalAlbumQueue", "React", "useTranslation", "useState", "useRef", "useEffect", "localArtworkResolver", "localAlbumThumbnails", "localAlbumCatalog", "artworkReadBlocked", "getLocalAlbumCover", "logError", "AlbumArtworkPlaceholder", "Heart", "Play", "AlbumCatalogRow", cardBody + "return LocalAlbumCard;")(
-    fn => fn(), () => ({ open() {}, trigger: () => null, menu: null, notice: null }), async () => { throw new Error("unexpected album load"); }, React, () => ({ t: key => key }), initial => { const index = stateIndex++; return [index === 2 ? true : typeof initial === "function" ? initial() : initial, () => {}]; }, () => ({ current: null }), task => effects.push(task),
-    { get: () => { lookups++; return resolved; }, subscribe: () => () => {} },
+    fn => fn(), () => ({ open() {}, trigger: () => null, menu: null, notice: null }), async () => { throw new Error("unexpected album load"); }, React, () => ({ t: key => key }), initial => { const index = stateIndex++; return [index === 2 ? true : typeof initial === "function" ? initial() : initial, next => stateUpdates.push({ index, next })]; }, () => ({ current: null }), task => effects.push(task),
+    { get: () => { lookups++; return currentResolved; }, seedPersistedLocal: (_id, cover) => { currentResolved = cover; }, subscribe: () => () => {} },
     { get: () => thumbnail, capture: (_album, _image, current, trigger) => { captures++; triggers.push(trigger); if (current()) reductions++; }, observeInitialCard() {}, forget: (_album, current) => { if (current()) forgotten++; } },
-    { getSnapshot: () => state }, artworkReadBlocked, () => { reads++; return Promise.resolve(null); }, () => {}, () => null, () => null, () => null, function AlbumCatalogRow(){});
+    { getSnapshot: () => state }, artworkReadBlocked, () => { reads++; return Promise.resolve(localCoverResult); }, () => {}, () => null, () => null, () => null, function AlbumCatalogRow(){});
   const tree = component({ layout, album: a, isFavorite: false, readEnabled: confirmed, isPlaybackAvailable: confirmed,
-    isLibraryUpdating: false, onlineArtworkEnabled: false, onClick() {}, onPlayQuick() {}, onToggleFavorite() {} });
+    isLibraryUpdating: false, onlineArtworkEnabled: false, sqliteBacked, onClick() {}, onPlayQuick() {}, onToggleFavorite() {} });
   const elements = [];
   function visit(node) { if (!React.isValidElement(node)) return; elements.push(node); React.Children.forEach(node.props.children, visit); }
   visit(tree);
-  return { tree, elements, effects, state, triggers, get counts() { return { reductions, lookups, reads, captures, forgotten }; } };
+  return { tree, elements, effects, state, triggers, stateUpdates, get counts() { return { reductions, lookups, reads, captures, forgotten }; } };
 }
 
 test("the actual saved card paints a thumbnail with all actions and artwork requests inert", () => {
@@ -197,6 +212,19 @@ test("the thumbnail cannot short-circuit the actual card's normal lookup after c
   assert.equal(card.elements.find(node => node.type === "img").props.src, jpeg());
   card.effects[2](); await new Promise(resolve => setImmediate(resolve));
   assert.equal(card.counts.reads, 1); assert.equal(card.counts.forgotten, 1);
+});
+
+test("SQLite saved thumbnail resolves artwork without rereading the source after restart", async () => {
+  const fullArtwork = "data:image/png;base64,FULL_RESOLUTION_ARTWORK";
+  const card = renderCard({ confirmed: true, resolved: null, thumbnail: jpeg(), sqliteBacked: true, localCoverResult: fullArtwork });
+  const img = card.elements.find(node => node.type === "img");
+  assert.equal(img.props.src, jpeg(), "paint the persisted preview immediately");
+  card.effects[0]();
+  card.effects[2]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(card.counts.reads, 0, "a generation-scoped persisted thumbnail suppresses another source read");
+  assert.ok(card.stateUpdates.some(update => update.index === 0 && update.next === jpeg()));
+  assert.ok(!card.stateUpdates.some(update => update.next === fullArtwork));
 });
 
 

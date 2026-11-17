@@ -100,37 +100,57 @@ function sourceFixture(options = {}) {
   const navTracks = compile('utils/navidromeTracks.ts');
   const service = compile('services/listeningSessions.ts', {
     '../utils/listeningSessions': helpers, '../utils/localSourceReadQueue': { localSourceReadQueue: queue }, '../utils/navidromeTracks': navTracks,
+    '../utils/sqliteExperimentalMode': { isSqliteCatalogEnabled: () => options.sqliteMode === true },
+    './sqliteLibrary': { sqliteLibrary: { sources: async () => { calls.push('sqlite-sources'); return options.sqliteSources ?? [{ id: 7 }]; } } },
     './smartPlaylists': { smartPlaylistsService: { sources: async () => { calls.push('source'); return options.sources?.() ?? { local: true, plex_server_id: 'server-a', navidrome_account_id: nav.account_id }; }, catalog: async () => [album('a')] } },
-    './audio': { audioService: { getLocalAlbums: async () => { calls.push('catalog'); return [ { ...album('a'), folder_path: 'Local/A', source_id: 'origin-a', source_label: 'Jazz', added_at: '2026-11-01T00:00:00Z' } ]; }, getLocalAlbumTracks: async () => { calls.push('local'); return [{ disc: { number: 2 }, tracks: [{ item_type: 'file', path: 'Local/2.flac', name: 'Second' }] }, { disc: { number: 1 }, tracks: [{ item_type: 'file', path: 'Local/1.flac', name: 'First' }] }]; } } },
+    './audio': { audioService: { getLocalAlbums: async () => { calls.push('catalog'); return [ { ...album('a'), folder_path: 'Local/A', source_id: 'origin-a', source_label: 'Jazz', added_at: '2026-11-01T00:00:00Z' } ]; }, getLocalAlbumTracks: async () => { calls.push('local'); const first = options.sqliteMode ? 'sqlite-track://7/QQ' : 'Local/1.flac'; const second = options.sqliteMode ? 'sqlite-track://7/Qg' : 'Local/2.flac'; return [{ disc: { number: 2 }, tracks: [{ item_type: 'file', path: second, name: 'Second' }] }, { disc: { number: 1 }, tracks: [{ item_type: 'file', path: first, name: 'First' }] }]; } } },
     './plex': { plexService: { getAlbumTracks: async () => [{ title: 'Plex song', duration_ms: 123456, media_locator: { kind: 'plex', server_id: options.plexServer ?? 'server-a', part_key: '/library/parts/1/file.flac' } }] } },
     './navidrome': { navidromeService: { status: async () => { calls.push('nav-status'); return options.navStatus?.() ?? { connection_id: 'ephemeral', account_id: nav.account_id }; }, album: async () => { calls.push('nav-album'); return { songs: [{ id: 'two', title: 'Two', artist: 'Artist', album: 'A', duration: 80, disc: 2, track: 1 }, { id: 'one', title: 'One', artist: 'Artist', album: 'A', duration: 90, disc: 1, track: 1 }] }; } } },
   }); return { service, queue, calls };
 }
 test('Local catalog keeps folder scope and source reads retain disc order', async () => {
-  const f = sourceFixture(), catalog = await f.service.sessionCatalog(local, () => true);
+  const f = sourceFixture(), catalog = await f.service.sessionCatalog(local, () => true, true);
   assert.equal(catalog[0].scope_id, 'origin-a'); assert.equal(catalog[0].scope_label, 'Jazz');
-  const tracks = await f.service.sessionAlbumTracks(local, album('a'), () => true);
+  const tracks = await f.service.sessionAlbumTracks(local, album('a'), () => true, true);
   assert.deepEqual(tracks.map(t => t.media_locator.uri), ['Local/1.flac', 'Local/2.flac']);
+});
+test('SQLite Local sessions use persisted catalog sources and preserve opaque track locators', async () => {
+  const f = sourceFixture({ sqliteMode: true, sqliteSources: [{ id: 7 }] });
+  const sources = await f.service.sessionSources(true);
+  assert.equal(sources.local, true, 'SQLite roots are not inferred from legacy local_folders');
+  const candidates = await f.service.sessionCatalog(local, () => true, true);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].scope_id, 'origin-a');
+  assert.equal(f.calls.filter(value => value === 'sqlite-sources').length, 3);
+  const tracks = await f.service.sessionAlbumTracks(local, candidates[0], () => true, true);
+  assert.deepEqual(tracks.map(value => value.media_locator.uri), ['sqlite-track://7/QQ', 'sqlite-track://7/Qg']);
+  const noSource = sourceFixture({ sqliteMode: true, sqliteSources: [] });
+  await assert.rejects(noSource.service.sessionCatalog(local, () => true, true), value => value === 'SESSION_SOURCE');
+  assert.ok(!noSource.calls.includes('catalog'));
+  const disabled = sourceFixture({ sqliteMode: true, sources: () => ({ local: false }), sqliteSources: [{ id: 7 }] });
+  assert.equal((await disabled.service.sessionSources(false)).local, false);
+  await assert.rejects(disabled.service.sessionCatalog(local, () => true, false), value => value === 'SESSION_SOURCE');
+  assert.deepEqual(disabled.calls, ['source']);
 });
 test('disabled sources never read the catalog or album, and stale queued reads never start', async () => {
   const disabled = sourceFixture({ sources: () => ({ local: false }) });
-  await assert.rejects(disabled.service.sessionCatalog(local, () => true), e => e === 'SESSION_SOURCE'); assert.deepEqual(disabled.calls, ['source']);
+  await assert.rejects(disabled.service.sessionCatalog(local, () => true, false), e => e === 'SESSION_SOURCE'); assert.deepEqual(disabled.calls, ['source']);
   const f = sourceFixture(); let release, live = true;
   const occupied = f.queue(() => new Promise(resolve => { release = resolve; })); await new Promise(r => setImmediate(r));
-  const read = f.service.sessionAlbumTracks(local, album('a'), () => live); const refused = assert.rejects(read, e => e === 'SESSION_CANCELLED');
+  const read = f.service.sessionAlbumTracks(local, album('a'), () => live, true); const refused = assert.rejects(read, e => e === 'SESSION_CANCELLED');
   await new Promise(r => setImmediate(r)); live = false; release(); await occupied; await refused; assert.ok(!f.calls.includes('local'));
 });
 test('Plex session tracks preserve durations and refuse a different server', async () => {
   const source = { kind: 'plex', server_id: 'server-a', library_id: '7' };
-  assert.equal((await sourceFixture().service.sessionAlbumTracks(source, album('a'), () => true))[0].duration, 123.456);
-  await assert.rejects(sourceFixture({ plexServer: 'wrong-server' }).service.sessionAlbumTracks(source, album('a'), () => true), e => e === 'SESSION_READ');
+  assert.equal((await sourceFixture().service.sessionAlbumTracks(source, album('a'), () => true, true))[0].duration, 123.456);
+  await assert.rejects(sourceFixture({ plexServer: 'wrong-server' }).service.sessionAlbumTracks(source, album('a'), () => true, true), e => e === 'SESSION_READ');
 });
 test('Navidrome session batches are ordered and a connection/account change refuses the entire batch', async () => {
-  const tracks = await sourceFixture().service.sessionAlbumTracks(nav, album('a'), () => true);
+  const tracks = await sourceFixture().service.sessionAlbumTracks(nav, album('a'), () => true, true);
   assert.deepEqual(tracks.map(t => t.media_locator.song_id), ['one', 'two']); assert.ok(tracks.every(t => t.media_locator.account_id === nav.account_id));
   let status = 0;
   const f = sourceFixture({ navStatus: () => ({ connection_id: ++status === 1 ? 'first' : 'second', account_id: nav.account_id }) });
-  await assert.rejects(f.service.sessionAlbumTracks(nav, album('a'), () => true), e => e === 'SESSION_SOURCE');
+  await assert.rejects(f.service.sessionAlbumTracks(nav, album('a'), () => true, true), e => e === 'SESSION_SOURCE');
 });
 
 

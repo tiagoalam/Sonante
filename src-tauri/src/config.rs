@@ -165,7 +165,8 @@ impl AppConfig {
     }
 
     pub(crate) fn direct_context(&self) -> Option<DirectVolumeChoice> {
-        (self.audio_output_type != "pipewire" && self.audio_output_type != "shared" && self.alsa_device != "default")
+        (crate::audio_route::interpret_legacy_route(&self.audio_output_type, &self.alsa_device).route.access
+            == crate::audio_route::AudioAccess::Exclusive)
             .then(||DirectVolumeChoice {version:1,endpoint:self.alsa_device.clone(),dop_enabled:self.dop_enabled})
     }
     pub(crate) fn confirmed_direct_choice(&self) -> Option<DirectVolumeChoice> {
@@ -197,11 +198,35 @@ impl AppConfig {
         Ok(cfg)
     }
 
+    /// Read only roots explicitly stored in the public config file. In
+    /// particular, do not treat `local_mount_path` as a Local library root:
+    /// older profiles also used it as a Plex mount point.
+    pub(crate) fn load_stored_local_folders() -> Result<Vec<String>, String> {
+        Self::load_stored_local_folders_from_path(&Self::config_path())
+    }
+
+    fn load_stored_local_folders_from_path(path: &Path) -> Result<Vec<String>, String> {
+        crate::persistence::prepare_private_file_for_load(path, "config.json")?;
+        let content = match fs::read(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(format!("Falha ao ler config.json: {error}")),
+        };
+        #[derive(Deserialize)]
+        struct StoredLocalFolders {
+            #[serde(default)]
+            local_folders: Vec<String>,
+        }
+        serde_json::from_slice::<StoredLocalFolders>(&content)
+            .map(|stored| stored.local_folders)
+            .map_err(|error| format!("config.json contém dados inválidos e foi preservado: {error}"))
+    }
+
     pub fn save(&self) -> Result<(), ConfigSaveError> {
         self.save_to_path(&Self::config_path())
     }
 
-    fn save_to_path(&self, path: &Path) -> Result<(), ConfigSaveError> {
+    pub(crate) fn save_to_path(&self, path: &Path) -> Result<(), ConfigSaveError> {
         // Nunca substitua um arquivo existente que não pôde ser carregado.
         Self::load_from_path(path)?;
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
@@ -273,10 +298,21 @@ mod tests {
     }
 
     #[test]
+    fn stored_local_roots_exclude_the_legacy_plex_mount_fallback() {
+        let path = test_path();
+        fs::write(path.as_path(), br#"{"local_mount_path":"/fixture/plex"}"#).unwrap();
+        assert!(AppConfig::load_stored_local_folders_from_path(&path).unwrap().is_empty());
+        fs::write(path.as_path(), br#"{"local_mount_path":"/fixture/plex","local_folders":["/fixture/music"]}"#).unwrap();
+        assert_eq!(AppConfig::load_stored_local_folders_from_path(&path).unwrap(), vec!["/fixture/music"]);
+        remove_test_path(&path);
+    }
+
+    #[test]
     fn experimental_features_are_opt_in_and_preserve_legacy_fingerprints() {
         let legacy: AppConfig = serde_json::from_str(LEGACY_CONFIG).unwrap();
         assert!(!legacy.experimental_features);
         assert!(!AppConfig::default().experimental_features);
+        assert!(!AppConfig::default().experimental_features_enabled());
         let original = serde_json::to_vec(&legacy).unwrap();
         assert!(!String::from_utf8_lossy(&original).contains("experimental_features"));
         let mut enabled = legacy.clone(); enabled.experimental_features = true;

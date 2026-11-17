@@ -4,5 +4,5 @@ export function formatEqNumber(value:number,digits:number,locale='en') {
 }
 export function parseEqNumber(text:string) {
  const value=text.trim();
- return /^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][+-]?\d+)?$/.test(value)?Number(value.replace(',','.')):NaN;
+ return /^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?$/.test(value)?Number(value.replace(',','.')):NaN;
 }

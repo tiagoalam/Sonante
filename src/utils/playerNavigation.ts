@@ -6,7 +6,7 @@ import type { MainSection } from "./appBootstrap";
 import { localArtistIdentity } from "./localArtistNavigation.ts";
 
 export type PlayerNavigationTarget =
-  | { kind: "local"; view: "album" | "artist"; albumId: string;
+  | { kind: "local"; view: "album" | "artist"; albumId: string; artistName?: string;
       verified: { groups: LocalAlbumDiscTracks[]; catalog: readonly LocalAlbum[] } }
   | { kind: "plex"; view: "album" | "artist"; album: PlexAlbum; artist: SelectedArtist; returnToArtist?: boolean }
   | { kind: "navidrome"; view: "album" | "artist"; accountId: string; albumId: string; artistId: string | null };
@@ -83,22 +83,35 @@ export class PlayerNavigationRequests {
     displayedArtist?: string,
     lookupLocal?: (albumId: string) => Promise<LocalAlbumDiscTracks[]>,
     lookupNavidrome?: (media: Extract<CurrentMedia, { kind: "navidrome" }>) => Promise<NavidromePlayerNavigation>,
+    lookupSqliteAlbum?: (locator: string) => Promise<string | null>,
   ): Promise<void> {
     const generation = ++this.generation;
     try {
       let target: PlayerNavigationTarget;
       if (media?.kind === "local") {
-        const album = localAlbumForMedia(media, albums);
+        // SQLite queue items deliberately expose an opaque, source-bound
+        // locator instead of an MPD path. Resolve that exact identity through
+        // the catalog; never parse it as a path or fall back to title matching.
+        const sqliteLocator = media.uri.startsWith("sqlite-track://") || media.uri.startsWith("sqlite-cue://") ? media.uri : null;
+        const sqliteAlbumId = sqliteLocator && lookupSqliteAlbum
+          ? await lookupSqliteAlbum(sqliteLocator) : null;
+        const album = sqliteLocator
+          ? albums.find(candidate => candidate.id === sqliteAlbumId) ?? null
+          : localAlbumForMedia(media, albums);
         if (!album || (view === "artist" && (!album.artist.trim() || !album.source_id
-          || (displayedArtist !== undefined && localArtistIdentity(displayedArtist) !== localArtistIdentity(album.artist))))) {
+          || (displayedArtist !== undefined && localArtistIdentity(displayedArtist) !== localArtistIdentity(album.artist)
+            && !album.artist_names?.some(name => localArtistIdentity(name) === localArtistIdentity(displayedArtist)))))) {
           throw new Error("unresolved");
         }
         if (!lookupLocal) throw new Error("unverified URI");
         const groups = await lookupLocal(album.id);
-        if (!groups.some(group => group.tracks.some(track => track.item_type === "file" && track.path === media.uri))) {
+        if (!groups.length || (!sqliteLocator && !groups.some(group => group.tracks.some(track => track.item_type === "file" && track.path === media.uri)))) {
           throw new Error("URI absent from album");
         }
-        target = { kind: "local", view, albumId: album.id, verified: { groups, catalog: albums } };
+        const artistName = view === "artist" && displayedArtist
+          ? album.artist_names?.find(name => localArtistIdentity(name) === localArtistIdentity(displayedArtist)) ?? album.artist
+          : undefined;
+        target = { kind: "local", view, albumId: album.id, ...(artistName ? { artistName } : {}), verified: { groups, catalog: albums } };
       } else if (media?.kind === "plex") {
         const result = await lookup(media);
         if (currentMediaKey(result.media) !== currentMediaKey(media)

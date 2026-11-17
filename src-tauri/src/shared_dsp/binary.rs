@@ -1,1 +1,1 @@
-pub const CAMILLA_SHA256: &str = "505ee664b58b3376bdfaa5b5c16fae3cb4efc62cfb861b852a3dabe49dcefa2d";
+pub const CAMILLA_SHA256: &str = "802366b3eb8080506cba630e5cb70ed1a377d5100896dea8f7e2a4e9ff7c47ef";

@@ -1,0 +1,23 @@
+{
+  "x86_64-pc-windows-msvc": {
+    "same_packages": 172,
+    "ALL_resolved_features_identical": true,
+    "ALL_dependency_edges_identical_except_Windows_existing_crate_direct_edge": true,
+    "new_edge": [
+      [
+        [
+          "rustfft",
+          "6.4.1"
+        ],
+        "rustfft",
+        "[{'kind': None, 'target': 'cfg(target_os = \"windows\")'}]"
+      ]
+    ]
+  },
+  "x86_64-unknown-linux-gnu": {
+    "same_packages": 158,
+    "ALL_resolved_features_identical": true,
+    "ALL_dependency_edges_identical_except_Windows_existing_crate_direct_edge": true,
+    "new_edge": []
+  }
+}

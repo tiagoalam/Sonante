@@ -46,7 +46,7 @@ function service(invoke, queue) {
     '@tauri-apps/api/core': { invoke }, '../utils/localAlbumCatalogSession': { localAlbumCatalog: { getSnapshot: () => { throw 'NO_CATALOG_EXPECTED'; } } },
     '../utils/localSourceReadQueue': { localSourceReadQueue: queue }, '../utils/albumEditionSizes': sizes,
     '../utils/albumEditionAnalysis': compile('utils/albumEditionAnalysis.ts', { './albumEditionSizes': sizes, './albumEditions': compile('utils/albumEditions.ts') }),
-    '../utils/musicSources': { sourceEnabled: (config, kind) => config.sources[kind] }, './audio': {}, './plex': {}, './navidrome': {}, './smartPlaylists': {},
+    '../utils/musicSources': { sourceEnabled: (config, kind) => config.sources[kind] }, '../utils/sqliteExperimentalMode': { isSqliteCatalogEnabled: () => false }, './sqliteLibrary': { sqliteLibrary: { sources: async () => [] } }, './audio': {}, './plex': {}, './navidrome': {}, './smartPlaylists': {},
   });
 }
 test('size queries carry only exact source/album IDs, never music paths or authenticated stream URLs', async () => {

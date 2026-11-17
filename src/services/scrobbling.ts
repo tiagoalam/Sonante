@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 export type ScrobblingProvider = "lastfm" | "listenbrainz";
 export interface ScrobblingServiceStatus { connected: boolean; enabled: boolean; username: string | null; queued: number; last_sent: number | null; error: string | null }
-export interface ScrobblingStatus { revision: number; ready: boolean; storage_error: boolean; lastfm_authorizing: boolean; lastfm: ScrobblingServiceStatus; listenbrainz: ScrobblingServiceStatus }
+export interface ScrobblingStatus { revision: number; ready: boolean; service_available: boolean; storage_error: boolean; lastfm_authorizing: boolean; lastfm: ScrobblingServiceStatus; listenbrainz: ScrobblingServiceStatus }
 export type ScrobblingAction =
   | { kind: "lastfm_begin"; api_key: string; api_secret: string }
   | { kind: "lastfm_finish" } | { kind: "lastfm_cancel" }

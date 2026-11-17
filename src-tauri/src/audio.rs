@@ -215,6 +215,120 @@ pub struct TrackMetadata {
     pub duration: Option<f64>,
 }
 
+fn is_sqlite_mpd_path(path: &str) -> bool {
+    Path::new(path).is_absolute() && !path.contains(['\0', '\r', '\n'])
+}
+
+fn parse_cue_range_uri(uri: &str) -> Option<crate::sqlite_library::SqliteCueRangePlayback> {
+    if !crate::sqlite_library::SqliteLibraryState::is_sqlite_cue_range_uri(uri) { return None; }
+    crate::sqlite_library::SqliteLibraryState::parse_sqlite_cue_range_uri(uri).ok()
+}
+
+fn cue_range_seconds(frame: u64) -> f64 { frame as f64 / 75.0 }
+
+fn cue_range_seconds_text(frame: u64) -> String {
+    format!("{:.12}", cue_range_seconds(frame)).trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+fn cue_range_command(id: u64, cue: &crate::sqlite_library::SqliteCueRangePlayback) -> Option<String> {
+    if cue.start_frame == 0 && cue.end_frame.is_none() { return None; }
+    let start = cue_range_seconds_text(cue.start_frame);
+    let end = cue.end_frame.map(cue_range_seconds_text).unwrap_or_default();
+    Some(format!("rangeid {id} {start}:{end}"))
+}
+
+fn parse_mpd_range(value: Option<&str>) -> Option<(f64, Option<f64>)> {
+    let value = value?;
+    let (start, end) = value.split_once('-')?;
+    let start = start.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.)?;
+    let end = if end.is_empty() { None } else {
+        Some(end.parse::<f64>().ok().filter(|n| n.is_finite() && *n > start)?)
+    };
+    Some((start, end))
+}
+
+fn expected_mpd_range(uri: &str) -> Result<(String, Option<(f64, Option<f64>)>), String> {
+    if let Some(cue) = parse_cue_range_uri(uri) {
+        let range = if cue.start_frame == 0 && cue.end_frame.is_none() { None }
+            else { Some((cue_range_seconds(cue.start_frame), cue.end_frame.map(cue_range_seconds))) };
+        Ok((cue.path, range))
+    } else if uri.starts_with("sonante-cue-range://") {
+        Err("SQLITE_CUE_RANGE_URI_INVALID".into())
+    } else {
+        Ok((uri.to_owned(), None))
+    }
+}
+
+fn queue_range_matches(actual: Option<&str>, expected: Option<(f64, Option<f64>)>) -> bool {
+    const MPD_RANGE_ROUNDING_TOLERANCE_SECONDS: f64 = 0.0011;
+    let parsed = parse_mpd_range(actual);
+    match (expected, parsed) {
+        (None, None) => actual.is_none(),
+        (Some((start, end)), Some((actual_start, actual_end))) => {
+            (start - actual_start).abs() <= MPD_RANGE_ROUNDING_TOLERANCE_SECONDS
+                && match (end, actual_end) {
+                    (None, None) => true,
+                    (Some(expected), Some(actual)) => (expected - actual).abs() <= MPD_RANGE_ROUNDING_TOLERANCE_SECONDS,
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn queue_entry_matches_playback_uri(entry: &MpdQueueEntry, uri: &str) -> bool {
+    expected_mpd_range(uri).is_ok_and(|(path, range)| entry.uri == path && queue_range_matches(entry.range.as_deref(), range))
+}
+
+pub(crate) fn queue_entry_matches_track(entry: &MpdQueueEntry, track: &TrackMetadata) -> bool {
+    match &track.media_locator {
+        Some(MediaLocator::Local { uri }) if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri) =>
+            queue_entry_matches_playback_uri(entry, &track.uri),
+        Some(MediaLocator::Local { uri }) => uri == &entry.uri && entry.range.is_none(),
+        None => track.uri == entry.uri && entry.range.is_none(),
+        _ => true,
+    }
+}
+
+fn expected_queue_entry(uri: &str, id: u64, pos: usize) -> Result<MpdQueueEntry, String> {
+    let (path, range) = expected_mpd_range(uri)?;
+    let range = range.map(|(start, end)| format!("{}-{}", start, end.map(|value| format!("{value:.12}")).unwrap_or_default()));
+    Ok(MpdQueueEntry { uri: path, range, pos, id })
+}
+
+fn queue_entries_match(actual: &[MpdQueueEntry], expected: &[MpdQueueEntry]) -> bool {
+    actual.len() == expected.len() && actual.iter().zip(expected).all(|(actual, expected)| {
+        actual.id == expected.id && actual.pos == expected.pos && actual.uri == expected.uri
+            && queue_range_matches(actual.range.as_deref(), parse_mpd_range(expected.range.as_deref()))
+            && (actual.range.is_none() == expected.range.is_none())
+    })
+}
+
+fn same_queue_cursor(
+    before: &MpdQueueStatus,
+    before_entries: &[MpdQueueEntry],
+    after: &MpdQueueStatus,
+    after_entries: &[MpdQueueEntry],
+) -> bool {
+    match (before.current_index, after.current_index) {
+        (Some(before_index), Some(after_index)) => {
+            before_index == after_index
+                && before_entries.get(before_index).map(|entry| entry.id)
+                    == after_entries.get(after_index).map(|entry| entry.id)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn is_sqlite_mpd_uri_for_locator(locator: &str, uri: &str) -> bool {
+    if crate::sqlite_library::SqliteLibraryState::is_sqlite_cue_locator(locator) {
+        parse_cue_range_uri(uri).is_some()
+    } else {
+        is_sqlite_mpd_path(uri)
+    }
+}
+
 const QUEUE_CACHE_VERSION: u8 = 2;
 
 #[derive(Serialize)]
@@ -569,6 +683,7 @@ struct MpdQueueStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MpdQueueEntry {
     pub(crate) uri: String,
+    pub(crate) range: Option<String>,
     pub(crate) pos: usize,
     pub(crate) id: u64,
 }
@@ -2445,16 +2560,16 @@ impl AudioEngine {
     fn parse_mpd_queue_entries(lines: &[String]) -> Result<Vec<MpdQueueEntry>, MpdQueueStructureError> {
         use MpdQueueStructureError::Invalid;
         let mut entries = Vec::new();
-        let mut current: Option<(String, Option<usize>, Option<u64>)> = None;
+        let mut current: Option<(String, Option<String>, Option<usize>, Option<u64>)> = None;
         let mut ids = HashSet::new();
-        let mut finish = |entry: (String, Option<usize>, Option<u64>)| {
-            let (uri, pos, id) = entry;
+        let mut finish = |entry: (String, Option<String>, Option<usize>, Option<u64>)| {
+            let (uri, range, pos, id) = entry;
             let pos = pos.ok_or(Invalid)?;
             let id = id.ok_or(Invalid)?;
             if pos != entries.len() || !ids.insert(id) {
                 return Err(Invalid);
             }
-            entries.push(MpdQueueEntry { uri, pos, id });
+            entries.push(MpdQueueEntry { uri, range, pos, id });
             Ok(())
         };
         for line in lines {
@@ -2468,15 +2583,19 @@ impl AudioEngine {
                 "file" => {
                     if let Some(entry) = current.take() { finish(entry)?; }
                     if value.is_empty() || Self::quote_mpd_argument(value).is_err() { return Err(Invalid); }
-                    current = Some((value.to_string(), None, None));
+                    current = Some((value.to_string(), None, None, None));
+                }
+                "Range" => {
+                    let entry = current.as_mut().ok_or(Invalid)?;
+                    if parse_mpd_range(Some(value)).is_none() || entry.1.replace(value.to_owned()).is_some() { return Err(Invalid); }
                 }
                 "Pos" => {
                     let entry = current.as_mut().ok_or(Invalid)?;
-                    if entry.1.replace(value.parse().map_err(|_| Invalid)?).is_some() { return Err(Invalid); }
+                    if entry.2.replace(value.parse().map_err(|_| Invalid)?).is_some() { return Err(Invalid); }
                 }
                 "Id" => {
                     let entry = current.as_mut().ok_or(Invalid)?;
-                    if entry.2.replace(value.parse().map_err(|_| Invalid)?).is_some() { return Err(Invalid); }
+                    if entry.3.replace(value.parse().map_err(|_| Invalid)?).is_some() { return Err(Invalid); }
                 }
                 _ => {} // Tags do not define queue identity.
             }
@@ -2733,10 +2852,13 @@ impl AudioEngine {
             other => other.as_ref().map(Cow::Borrowed),
         };
         let remote = matches!(track.media_locator, Some(MediaLocator::Plex { .. } | MediaLocator::Navidrome { .. }));
+        let sqlite_local = matches!(&track.media_locator, Some(MediaLocator::Local { uri }) if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri));
         Some(PersistedTrackRef {
             title: &track.title, artist: &track.artist, album: &track.album,
             plex_image: if matches!(track.media_locator, Some(MediaLocator::Navidrome { .. })) { None } else { track.plex_image.as_ref() },
-            media_locator, uri: if remote { "" } else { &track.uri }, duration: track.duration,
+            // Persist the opaque catalog identity, not its current absolute path.
+            // On restart the URI is resolved again against the indexed generation.
+            media_locator, uri: if remote || sqlite_local { "" } else { &track.uri }, duration: track.duration,
         })
     }
 
@@ -2796,6 +2918,10 @@ impl AudioEngine {
                         if !Self::contains_plex_token(uri)
                             && !Self::contains_plex_token(&track.uri) =>
                     {
+                        if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri) {
+                            changed |= !track.uri.is_empty();
+                            track.uri.clear();
+                        }
                         Some(track)
                     }
                     Some(MediaLocator::Local { .. }) => {
@@ -2873,6 +2999,57 @@ impl AudioEngine {
             }
         }
         "Falha ao enviar a mídia Plex ao MPD.".to_string()
+    }
+
+    /// Produce useful MPD ACK diagnostics without logging the server-provided
+    /// text, which can contain private paths, URLs or media metadata.
+    fn queue_play_failure_reason(error: &str) -> String {
+        if error.starts_with("ACK") {
+            let header = error.strip_prefix("ACK [").and_then(|rest| rest.split_once(']'));
+            let (code, index) = header
+                .and_then(|(header, _)| header.split_once('@'))
+                .filter(|(code, index)| code.parse::<u16>().is_ok() && index.parse::<usize>().is_ok())
+                .map(|(code, index)| (code.to_owned(), index.to_owned()))
+                .unwrap_or_else(|| ("unknown".into(), "unknown".into()));
+            let command_and_message = error
+                .split_once("} ")
+                .map(|(left, message)| (left.rsplit_once('{').map(|(_, command)| command), message));
+            let command = command_and_message
+                .as_ref()
+                .and_then(|(command, _)| *command)
+                .filter(|command| matches!(*command, "clear" | "add" | "addid" | "play" | "playid" | "command_list_begin" | "command_list_end"))
+                .unwrap_or("other");
+            let reason = command_and_message
+                .map(|(_, message)| {
+                    let message = message.to_ascii_lowercase();
+                    if message.starts_with("no such song") || message.starts_with("no such file") {
+                        "not_found"
+                    } else if message.starts_with("permission denied") || message.starts_with("access denied") {
+                        "access_denied"
+                    } else if message.starts_with("unsupported") || message.starts_with("not supported") {
+                        "unsupported"
+                    } else if message.starts_with("invalid") || message.starts_with("malformed") {
+                        "invalid_argument"
+                    } else {
+                        "other"
+                    }
+                })
+                .unwrap_or("malformed");
+            return format!("mpd_ack code={code} index={index} command={command} reason={reason}");
+        }
+        if error.starts_with("Falha ao conectar no socket MPD") {
+            "mpd_socket_connect".into()
+        } else if error.starts_with("Falha ao enviar comando ao MPD") {
+            "mpd_socket_write".into()
+        } else if error.starts_with("Falha ao ler resposta do MPD")
+            || error.starts_with("Conexão MPD encerrada")
+        {
+            "mpd_socket_response".into()
+        } else if error.starts_with("Handshake inválido") {
+            "mpd_handshake".into()
+        } else {
+            "mpd_protocol_or_transport".into()
+        }
     }
 
     #[cfg(test)]
@@ -3022,6 +3199,22 @@ impl AudioEngine {
             return Err("EQ_RESUME_INVALID_POSITION".into());
         }
         self.validate_device_switch_queue(resolved)?;
+        if resolved.playback_uris.iter().any(|uri| parse_cue_range_uri(uri).is_some()) {
+            let index = saved.filter(|snapshot| snapshot.state != PlaybackState::Stopped).map(|snapshot| snapshot.queue_index);
+            let socket = self.socket_path.clone();
+            let gate = self.direct_playback.clone();
+            let mut send = |command: &str| Self::send_with_gate(&socket, gate.as_deref(), command);
+            if let Err(error) = self.restore_queue_with_ranges_io(&resolved.playback_uris, index, index.is_some(), &mut send) {
+                if error == "PLAYBACK_QUEUE_UNCERTAIN" { self.mark_queue_uncertain(); }
+                return Err(error);
+            }
+            if let Some(snapshot) = saved.filter(|snapshot| snapshot.state != PlaybackState::Stopped) {
+                if snapshot.elapsed > 0.0 {
+                    return Self::restore_position(snapshot.elapsed, &mut |command| self.send_command(command), &mut std::thread::sleep);
+                }
+            }
+            return Ok(DeviceSwitchRestoreOutcome::Complete);
+        }
         let mut batch =
             self.device_switch_queue_restore_commands(saved, &resolved.playback_uris)?;
         if saved.is_some_and(|s| s.state != PlaybackState::Stopped) {
@@ -3108,11 +3301,8 @@ impl AudioEngine {
         let structure = Self::capture_mpd_queue_structure(&self.socket_path)
             .map_err(|_| "EQ_RESUME_QUEUE_UNCONFIRMED")?;
         if structure.entries.len() != resolved.playback_uris.len()
-            || !structure
-                .entries
-                .iter()
-                .zip(&resolved.playback_uris)
-                .all(|(a, b)| &a.uri == b)
+            || !structure.entries.iter().zip(&resolved.playback_uris)
+                .all(|(entry, uri)| queue_entry_matches_playback_uri(entry, uri))
         {
             self.mark_queue_uncertain();
             return Err("EQ_RESUME_QUEUE_CHANGED".into());
@@ -3846,6 +4036,8 @@ impl AudioEngine {
             && captured.iter().zip(&rebound).all(|(before, after)| match &before.media_locator {
                 Some(locator @ MediaLocator::Navidrome { .. }) => crate::navidrome::storage_locator(locator)
                     .is_some_and(|saved| after.media_locator.as_ref().and_then(crate::navidrome::storage_locator) == Some(saved)),
+                Some(MediaLocator::Local { uri }) if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri) =>
+                    after.media_locator.as_ref() == before.media_locator.as_ref() && is_sqlite_mpd_uri_for_locator(uri, &after.uri),
                 _ => before.media_locator == after.media_locator && before.uri == after.uri,
             });
         if !matches {
@@ -3863,6 +4055,17 @@ impl AudioEngine {
             return Ok(());
         }
         self.ensure_queue_structure_available()?;
+        if playback_uris.iter().any(|uri| uri.starts_with("sonante-cue-range://")) {
+            let socket = self.socket_path.clone();
+            let gate = self.direct_playback.clone();
+            let mut send = |command: &str| Self::send_with_gate(&socket, gate.as_deref(), command);
+            if let Err(error) = self.restore_queue_with_ranges_io(playback_uris, None, false, &mut send) {
+                self.startup_restore = StartupQueueRestore::Failed;
+                return Err(error);
+            }
+            self.startup_restore = StartupQueueRestore::Ready;
+            return Ok(());
+        }
         let commands = match self.device_switch_queue_restore_commands(None, playback_uris) {
             Ok(commands) => commands,
             Err(error) => {
@@ -3950,7 +4153,9 @@ impl AudioEngine {
             return Ok(DeviceSwitchRestoreOutcome::Complete);
         }
 
-        let mut send_command = |command: &str| self.send_command(command);
+        let socket = self.socket_path.clone();
+        let gate = self.direct_playback.clone();
+        let mut send_command = |command: &str| Self::send_with_gate(&socket, gate.as_deref(), command);
         self.restore_after_device_switch_with(
             saved_state,
             playback_uris,
@@ -3964,6 +4169,16 @@ impl AudioEngine {
     pub(crate) fn restore_for_route_save(&mut self,saved:Option<DeviceSwitchSnapshot>,resolved:&ResolvedDeviceSwitchQueue)->Result<DeviceSwitchRestoreOutcome,String>{
         self.validate_device_switch_queue(resolved)?;
         if saved.is_some_and(|s|!s.elapsed.is_finite()||s.elapsed<0.||s.queue_index>=self.queue.len()){return Err("OUTPUT_SAVE_RESUME_INVALID".into());}
+        if resolved.playback_uris.iter().any(|uri| parse_cue_range_uri(uri).is_some()) {
+            let socket = self.socket_path.clone();
+            let mut send = |command: &str| Self::send_command_to_socket(&socket, command);
+            if let Err(error) = self.restore_queue_with_ranges_io(&resolved.playback_uris, None, false, &mut send) {
+                if error == "PLAYBACK_QUEUE_UNCERTAIN" { self.mark_queue_uncertain(); }
+                return Err(error);
+            }
+            self.restored_resume=saved.filter(|s|s.state!=PlaybackState::Stopped).map(|s|PlaybackResumeSnapshot{queue_index:s.queue_index,elapsed:s.elapsed,state:PlaybackState::Paused});
+            return Ok(DeviceSwitchRestoreOutcome::Complete);
+        }
         let command=self.device_switch_queue_restore_commands(None,&resolved.playback_uris)?;
         if Self::send_command_to_socket(&self.socket_path,&command).is_err(){self.mark_queue_uncertain();return Err("PLAYBACK_QUEUE_UNCERTAIN".into());}
         self.restored_resume=saved.filter(|s|s.state!=PlaybackState::Stopped).map(|s|PlaybackResumeSnapshot{queue_index:s.queue_index,elapsed:s.elapsed,state:PlaybackState::Paused});
@@ -3976,10 +4191,11 @@ impl AudioEngine {
         saved_state: Option<DeviceSwitchSnapshot>,
         resolved: &ResolvedDeviceSwitchQueue,
     ) -> Result<DeviceSwitchRestoreOutcome, String> {
+        let socket = self.socket_path.clone();
         self.restore_after_reserved_device_switch_with(
             saved_state,
             resolved,
-            &mut |command| Self::send_command_to_socket(&self.socket_path,command),
+            &mut |command| Self::send_command_to_socket(&socket,command),
             &mut std::thread::sleep,
         )
     }
@@ -4036,6 +4252,18 @@ impl AudioEngine {
         F: FnMut(&str) -> Result<Vec<String>, String>,
         S: FnMut(Duration),
     {
+        if playback_uris.iter().any(|uri| parse_cue_range_uri(uri).is_some()) {
+            let index = saved_state.filter(|snapshot| snapshot.state != PlaybackState::Stopped).map(|snapshot| snapshot.queue_index);
+            let mut sender = |command: &str| send_command(command);
+            if let Err(error) = self.restore_queue_with_ranges_io(playback_uris, index, index.is_some(), &mut sender) {
+                return Err(error);
+            }
+            let Some(snapshot) = saved_state.filter(|snapshot| snapshot.state != PlaybackState::Stopped) else {
+                return Ok(DeviceSwitchRestoreOutcome::Complete);
+            };
+            let outcome = if snapshot.elapsed > 0.5 { Self::restore_position(snapshot.elapsed, send_command, sleep)? } else { DeviceSwitchRestoreOutcome::Complete };
+            return Ok(outcome);
+        }
         let restore_queue =
             self.device_switch_queue_restore_commands(saved_state, playback_uris)?;
         send_command(&restore_queue)
@@ -4226,6 +4454,8 @@ impl AudioEngine {
         for track in tracks {
             match &track.media_locator {
                 Some(locator @ MediaLocator::Navidrome { .. }) if crate::navidrome::storage_locator(locator).is_some() => {}
+                Some(MediaLocator::Local { uri }) if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri)
+                    && (track.uri.is_empty() || is_sqlite_mpd_uri_for_locator(uri, &track.uri)) => {}
                 Some(MediaLocator::Local { uri }) if local_media::is_safe_relative_mpd_uri(uri) && local_media::is_catalog_track_uri(uri) => {}
                 Some(MediaLocator::Plex { server_id, part_key, .. }) if !server_id.trim().is_empty()
                     && part_key.starts_with('/') && !part_key.contains(['?', '#', '\0', '\r', '\n'])
@@ -4269,6 +4499,9 @@ impl AudioEngine {
         let quoted = uris.iter().map(|uri| Self::quote_mpd_argument(uri).map_err(|_| "QUEUE_INSERT_INVALID".to_string())).collect::<Result<Vec<_>, _>>()?;
         for (track, uri) in tracks.iter_mut().zip(&uris) {
             match &track.media_locator {
+                Some(MediaLocator::Local { uri: expected }) if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(expected) => {
+                    if track.uri != *uri || !is_sqlite_mpd_uri_for_locator(expected, uri) { return Err("QUEUE_INSERT_INVALID".into()); }
+                }
                 Some(MediaLocator::Local { uri: expected }) if expected != uri => return Err("QUEUE_INSERT_INVALID".into()),
                 Some(MediaLocator::Plex { .. }) => track.uri.clear(),
                 _ => {}
@@ -4278,48 +4511,121 @@ impl AudioEngine {
         // Read-only preflight. No artwork/filesystem scan and no transport command.
         let (before, entries) = Self::queue_insert_snapshot(&mut send).map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
         if entries.len() != self.queue.len() || self.queue.iter().zip(&entries).any(|(track, entry)| match &track.media_locator {
-            Some(MediaLocator::Local { uri }) => uri != &entry.uri,
-            None => track.uri != entry.uri,
+            Some(MediaLocator::Local { uri }) if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri) => !queue_entry_matches_playback_uri(entry, &track.uri),
+            Some(MediaLocator::Local { uri }) => uri != &entry.uri || entry.range.is_some(),
+            None => track.uri != entry.uri || entry.range.is_some(),
             _ => false,
         }) { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
         let cursor = before.current_index.or_else(|| self.restored_resume.as_ref().map(|saved| saved.queue_index));
         let position = match placement { QueueInsertPlacement::End => entries.len(), QueueInsertPlacement::Next => cursor.map_or(0, |index| index + 1) };
         if position > entries.len() { return Err("QUEUE_INSERT_CHANGED".into()); }
         let count = tracks.len();
+        let pause_for_range = uris.iter().any(|uri| parse_cue_range_uri(uri).is_some())
+            && before.state == PlaybackState::Playing
+            && before.current_index.is_some_and(|index| index + 1 == position);
+        if pause_for_range {
+            if send("pause 1").is_err() {
+                let restored = Self::restore_insert_state_with_io(&mut send, &before, &entries, false);
+                if !restored { self.mark_queue_uncertain(); }
+                return Err(if restored { "CUE_PAUSE_FOR_RANGE_FAILED" } else { "PLAYBACK_QUEUE_UNCERTAIN" }.into());
+            }
+        }
         let mut command = String::from("command_list_begin\n");
         for (offset, uri) in quoted.iter().enumerate() { command.push_str(&format!("addid {uri} {}\n", position + offset)); }
         command.push_str("command_list_end");
         let response = match send(&command) {
             Ok(response) => response,
-            Err(error) if crate::direct_playback::is_admission_refusal(&error) => return Err(error),
-            Err(_) => { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+            Err(error) if crate::direct_playback::is_admission_refusal(&error) => {
+                if !Self::restore_insert_state_with_io(&mut send, &before, &entries, pause_for_range) {
+                    self.mark_queue_uncertain();
+                    return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+                }
+                return Err(error);
+            }
+            Err(_) => {
+                // An I/O failure after command-list submission has an unknown
+                // commit point. IDs are not trustworthy, so do not delete by
+                // path or resume a queue that may contain an un-ranged CUE.
+                self.mark_queue_uncertain();
+                return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+            }
         };
-        // A command list is not a transaction. Never clear/replay on partial ACK,
-        // timeout, bad IDs or an unproved postcondition; retain the durable cache.
+        // MPD command lists are not transactions. Require one unique new ID
+        // per requested entry before rangeid or rollback can claim ownership.
+        let ids = response.iter().map(|line| {
+            line.strip_prefix("Id: ").and_then(|value| value.parse::<u64>().ok()).ok_or(())
+        }).collect::<Result<Vec<_>, _>>();
+        let ids = match ids {
+            Ok(ids) if ids.len() == count
+                && ids.iter().collect::<HashSet<_>>().len() == count
+                && ids.iter().all(|id| !entries.iter().any(|entry| entry.id == *id)) => ids,
+            _ => {
+                // A malformed/partial ID response cannot prove ownership.
+                self.mark_queue_uncertain();
+                return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+            }
+        };
+        for (uri, id) in uris.iter().zip(&ids) {
+            if let Some(cue) = parse_cue_range_uri(uri) {
+                if let Some(command) = cue_range_command(*id, &cue) {
+                    if send(&command).is_err() {
+                        let staged = ids.iter().zip(&uris).map(|(id, uri)| (*id, uri.clone())).collect::<Vec<_>>();
+                        let removed = Self::remove_owned_staged_entries(&mut send, &staged, &entries);
+                        let restored = removed && Self::restore_insert_state_with_io(&mut send, &before, &entries, pause_for_range);
+                        if !restored { self.mark_queue_uncertain(); }
+                        return Err(if restored { "CUE_RANGE_APPLY_FAILED" } else { "PLAYBACK_QUEUE_UNCERTAIN" }.into());
+                    }
+                }
+            }
+        }
         let proof = (|| {
-            let ids = response.iter().map(|line| line.strip_prefix("Id: ").and_then(|value| value.parse::<u64>().ok()).ok_or(()))
-                .collect::<Result<Vec<_>, _>>()?;
-            if ids.len() != count || ids.iter().collect::<HashSet<_>>().len() != count
-                || ids.iter().any(|id| entries.iter().any(|entry| entry.id == *id)) { return Err(()); }
             let (after, actual) = Self::queue_insert_snapshot(&mut send).map_err(|_| ())?;
             let mut expected = entries.clone();
-            expected.splice(position..position, uris.iter().zip(&ids).map(|(uri, id)| MpdQueueEntry { uri: uri.clone(), id: *id, pos: 0 }));
+            let new_entries = uris.iter().zip(&ids).map(|(uri, id)| expected_queue_entry(uri, *id, 0).map_err(|_| ())).collect::<Result<Vec<_>, _>>()?;
+            expected.splice(position..position, new_entries);
             for (index, entry) in expected.iter_mut().enumerate() { entry.pos = index; }
-            if actual != expected { return Err(()); }
+            if !queue_entries_match(&actual, &expected) { return Err(()); }
             if before.state != PlaybackState::Playing && after.state != before.state { return Err(()); }
             if before.state != PlaybackState::Playing && before.current_index.is_some() {
                 let old = before.current_index.and_then(|index| entries.get(index)).ok_or(())?;
                 let current = after.current_index.and_then(|index| actual.get(index)).ok_or(())?;
                 if old.id != current.id || (before.elapsed - after.elapsed).abs() > 0.25 { return Err(()); }
             }
-            Ok(())
+            Ok((after, actual, expected))
         })();
-        if proof.is_err() { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        let (after_insert, _actual_insert, expected_insert) = match proof {
+            Ok(proof) => proof,
+            Err(()) => {
+            let staged = ids.iter().zip(&uris).map(|(id, uri)| (*id, uri.clone())).collect::<Vec<_>>();
+            let removed = Self::remove_owned_staged_entries(&mut send, &staged, &entries);
+            let restored = removed && Self::restore_insert_state_with_io(&mut send, &before, &entries, pause_for_range);
+            if !restored { self.mark_queue_uncertain(); }
+            return Err(if restored { "CUE_RANGE_CONFIRMATION_FAILED" } else { "PLAYBACK_QUEUE_UNCERTAIN" }.into());
+            }
+        };
+        // The complete staged structure and ranges are now proven. Update the
+        // logical queue and durable cache before resuming a playback we paused.
         self.queue.splice(position..position, tracks);
         if let Some(saved) = &mut self.restored_resume { if saved.queue_index >= position { saved.queue_index += count; } }
         self.cache_persistence_pending = true;
         persist(self).map_err(|_| "PLAYBACK_PERSISTENCE_FAILED".to_string())?;
         self.cache_persistence_pending = false;
+        if pause_for_range {
+            if send("pause 0").is_err() {
+                self.mark_queue_uncertain();
+                return Err("CUE_QUEUE_CONFIRMED_RESUME_FAILED".into());
+            }
+            let resumed = Self::queue_insert_snapshot(&mut send).is_ok_and(|(status, actual)| {
+                status.state == PlaybackState::Playing
+                    && queue_entries_match(&actual, &expected_insert)
+                    && same_queue_cursor(&before, &entries, &status, &actual)
+                    && status.elapsed + 0.25 >= after_insert.elapsed
+            });
+            if !resumed {
+                self.mark_queue_uncertain();
+                return Err("CUE_QUEUE_CONFIRMED_RESUME_UNCONFIRMED".into());
+            }
+        }
         Ok(count)
     }
 
@@ -4331,12 +4637,13 @@ impl AudioEngine {
     fn queue_revision(status: &MpdQueueStatus, entries: &[MpdQueueEntry]) -> String {
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new(); hash.update(status.playlist_version.to_le_bytes());
-        for entry in entries { hash.update(entry.id.to_le_bytes()); hash.update((entry.uri.len() as u64).to_le_bytes()); hash.update(entry.uri.as_bytes()); }
-        format!("q1:{:x}", hash.finalize())
+        for entry in entries { hash.update(entry.id.to_le_bytes()); hash.update((entry.uri.len() as u64).to_le_bytes()); hash.update(entry.uri.as_bytes()); if let Some(range) = &entry.range { hash.update(range.as_bytes()); } }
+        format!("q2:{:x}", hash.finalize())
     }
     fn queue_edit_alignment(&mut self, entries: &[MpdQueueEntry]) -> Result<(), String> {
         if entries.len() != self.queue.len() || self.queue.iter().zip(entries).any(|(track, entry)| match &track.media_locator {
-            Some(MediaLocator::Local { uri }) => uri != &entry.uri, None => track.uri != entry.uri, _ => false,
+            Some(MediaLocator::Local { uri }) if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri) => !queue_entry_matches_playback_uri(entry, &track.uri),
+            Some(MediaLocator::Local { uri }) => uri != &entry.uri || entry.range.is_some(), None => track.uri != entry.uri || entry.range.is_some(), _ => false,
         }) { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
         Ok(())
     }
@@ -4352,6 +4659,164 @@ impl AudioEngine {
         let socket = self.socket_path.clone(); let gate = self.direct_playback.clone();
         self.edit_queue_with_io(revision, action, |cmd| Self::send_with_gate(&socket, gate.as_deref(), cmd), |audio| audio.save_queue_cache())
     }
+
+    fn sqlite_source_id_from_track(track: &TrackMetadata) -> Result<Option<i64>, String> {
+        let Some(MediaLocator::Local { uri }) = &track.media_locator else { return Ok(None) };
+        crate::sqlite_library::SqliteLibraryState::sqlite_locator_source_id(uri)
+    }
+
+    /// Retire one SQLite source while the caller owns AudioState. The MPD
+    /// queue is paused before the catalog mutation so an automatic Next cannot
+    /// cross the invalidation boundary. Queue IDs, never paths or titles, are
+    /// used to remove exact occurrences; other sources and duplicate entries
+    /// remain untouched.
+    pub(crate) fn remove_sqlite_source_with<T>(
+        &mut self,
+        source_id: i64,
+        remove_catalog: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(T, bool), String> {
+        let socket = self.socket_path.clone();
+        let gate = self.direct_playback.clone();
+        self.remove_sqlite_source_with_io(
+            source_id,
+            remove_catalog,
+            |command| Self::send_with_gate(&socket, gate.as_deref(), command),
+            |audio| audio.save_queue_cache(),
+        )
+    }
+
+    fn remove_sqlite_source_with_io<T>(
+        &mut self,
+        source_id: i64,
+        remove_catalog: impl FnOnce() -> Result<T, String>,
+        mut send: impl FnMut(&str) -> Result<Vec<String>, String>,
+        mut persist: impl FnMut(&Self) -> Result<(), String>,
+    ) -> Result<(T, bool), String> {
+        if source_id <= 0 { return Err("SQLITE_SOURCE_ID_INVALID".into()); }
+        self.ensure_queue_structure_available()?;
+        self.ensure_queue_persisted()?;
+        if self.startup_queue_pending() { return Err("SQLITE_SOURCE_REMOVE_QUEUE_RESTORE_PENDING".into()); }
+
+        let (before, entries) = Self::queue_insert_snapshot(&mut send)?;
+        self.queue_edit_alignment(&entries)?;
+        let mut playback_current_id = before.current_index.and_then(|index| entries.get(index)).map(|entry| entry.id);
+        let mut removed_ids = HashSet::new();
+        for (track, entry) in self.queue.iter().zip(&entries) {
+            if Self::sqlite_source_id_from_track(track)? == Some(source_id) {
+                removed_ids.insert(entry.id);
+            }
+        }
+        if removed_ids.is_empty() {
+            self.invalidate_playback_intents();
+            return remove_catalog().map(|result| (result, false));
+        }
+
+        self.note_eq_intervention();
+        self.invalidate_playback_intents();
+        let was_playing = before.state == PlaybackState::Playing;
+        if was_playing {
+            if send("pause 1").is_err() { return Err("SQLITE_SOURCE_REMOVE_QUEUE_PAUSE_FAILED".into()); }
+            let (paused, paused_entries) = Self::queue_insert_snapshot(&mut send)
+                .map_err(|_| "PLAYBACK_QUEUE_UNCERTAIN")?;
+            if paused_entries != entries || paused.state != PlaybackState::Paused {
+                self.mark_queue_uncertain();
+                let _ = send("stop");
+                return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+            }
+            playback_current_id = paused.current_index.and_then(|index| paused_entries.get(index)).map(|entry| entry.id);
+        }
+
+        let result = match remove_catalog() {
+            Ok(result) => result,
+            Err(error) => {
+                if was_playing && send("pause 0").is_err() { self.mark_queue_uncertain(); }
+                return Err(error);
+            }
+        };
+
+        let current_removed = playback_current_id.is_some_and(|id| removed_ids.contains(&id));
+        let mut queue_safe = true;
+        let mut queue_matches_expected = false;
+        if current_removed && before.state != PlaybackState::Stopped && send("stop").is_err() {
+            queue_safe = false;
+        }
+
+        let mut expected = entries.iter().filter(|entry| !removed_ids.contains(&entry.id)).cloned().collect::<Vec<_>>();
+        for (position, entry) in expected.iter_mut().enumerate() { entry.pos = position; }
+        let mut stopped_confirmed = false;
+        if queue_safe {
+            let mut command = String::from("command_list_begin\n");
+            for id in &removed_ids { command.push_str(&format!("deleteid {id}\n")); }
+            command.push_str("command_list_end");
+            // MPD command lists may partially apply before an ACK. The exact
+            // playlist identity check below decides whether the result is safe.
+            let _ = send(&command);
+            match Self::queue_insert_snapshot(&mut send) {
+                Ok((final_status, actual)) => {
+                    stopped_confirmed = final_status.state == PlaybackState::Stopped;
+                    queue_matches_expected = actual == expected;
+                    queue_safe = queue_matches_expected && (!current_removed || stopped_confirmed);
+                }
+                Err(_) => queue_safe = false,
+            }
+        }
+
+        let prior_resume_id = self.restored_resume.and_then(|resume| entries.get(resume.queue_index).map(|entry| entry.id));
+        let retained_tracks = self.queue.iter().zip(&entries)
+            .filter(|(_, entry)| !removed_ids.contains(&entry.id))
+            .map(|(track, _)| track.clone()).collect::<Vec<_>>();
+        self.queue = retained_tracks;
+        if current_removed { self.restored_resume = None; }
+        else if let Some(resume) = &mut self.restored_resume {
+            if let Some(index) = prior_resume_id.and_then(|id| expected.iter().position(|entry| entry.id == id)) {
+                resume.queue_index = index;
+            } else { self.restored_resume = None; }
+        }
+
+        self.cache_persistence_pending = true;
+        let persistence_confirmed = persist(self).is_ok();
+        if !persistence_confirmed { queue_safe = false; }
+        self.cache_persistence_pending = false;
+
+        if !queue_safe {
+            // Never allow a stale MPD entry to reach automatic playback. Keep
+            // the filtered logical cache; if that write failed, startup's
+            // SQLite locator resolver still fails closed for the removed ID.
+            let _ = send("stop");
+            stopped_confirmed = Self::mpd_reports_stopped(&mut send);
+            // A transient stop/readback race can be recovered without
+            // retaining a permanent uncertainty warning, but only after both
+            // the exact filtered queue and the stopped transport are observed
+            // again, and the filtered logical cache was durably written.
+            if !queue_matches_expected {
+                queue_matches_expected = Self::queue_insert_snapshot(&mut send)
+                    .is_ok_and(|(_, actual)| actual == expected);
+            }
+            if persistence_confirmed && stopped_confirmed && queue_matches_expected {
+                self.queue_coherent = true;
+                self.startup_restore = StartupQueueRestore::Ready;
+            } else {
+                self.mark_queue_uncertain();
+            }
+            return Ok((result, stopped_confirmed));
+        }
+
+        if was_playing && !current_removed && send("pause 0").is_err() {
+            // The queue is exact and persisted. If resuming fails, stop the
+            // transport so the reported recovery state is deterministic.
+            let _ = send("stop");
+            return Ok((result, Self::mpd_reports_stopped(&mut send)));
+        }
+        Ok((result, current_removed && stopped_confirmed))
+    }
+
+    fn mpd_reports_stopped(send: &mut impl FnMut(&str) -> Result<Vec<String>, String>) -> bool {
+        send("status").ok().and_then(|lines| {
+            lines.iter().find_map(|line| line.strip_prefix("state: "))
+                .and_then(|state| Self::parse_playback_state(state).ok())
+        }) == Some(PlaybackState::Stopped)
+    }
+
     fn edit_queue_with_io(&mut self, revision: &str, action: QueueEditAction,
         mut send: impl FnMut(&str) -> Result<Vec<String>, String>, mut persist: impl FnMut(&Self) -> Result<(), String>) -> Result<(), String> {
         self.queue_edit_guard()?;
@@ -4383,7 +4848,7 @@ impl AudioEngine {
         }
         let proof = (|| {
             let (after, actual) = Self::queue_insert_snapshot(&mut send).map_err(|_| ())?;
-            if actual != expected || (before.state != PlaybackState::Playing && before.state != after.state) { return Err(()); }
+            if !queue_entries_match(&actual, &expected) || (before.state != PlaybackState::Playing && before.state != after.state) { return Err(()); }
             if before.state != PlaybackState::Playing {
                 if let Some(old) = before.current_index.and_then(|i| entries.get(i)).filter(|old| expected.iter().any(|e| e.id == old.id)) {
                     let current = after.current_index.and_then(|i| actual.get(i)).ok_or(())?;
@@ -4441,10 +4906,21 @@ impl AudioEngine {
         }
 
         for (track, playback_uri) in tracks.iter_mut().zip(&playback_uris) {
+            let sqlite_locator = match &track.media_locator {
+                Some(MediaLocator::Local { uri }) if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri) => Some(uri.as_str()),
+                _ => None,
+            };
+            if sqlite_locator.is_some_and(|uri| track.uri != *playback_uri || !is_sqlite_mpd_uri_for_locator(uri, playback_uri)) {
+                return Err("SQLITE_TRACK_RESOLUTION_UNCONFIRMED".into());
+            }
             Self::sanitize_track_artwork(track);
             if track.thumb.is_none() && !matches!(track.media_locator, Some(MediaLocator::Radio { .. } | MediaLocator::Navidrome { .. })) {
                 track.thumb = self.resolve_cover(playback_uri);
             }
+        }
+
+        if playback_uris.iter().any(|uri| uri.starts_with("sonante-cue-range://")) {
+            return self.play_tracks_with_ranges_io(tracks, &playback_uris, start_index, &mut send, &mut persist);
         }
 
         let mut batch = String::from("command_list_begin\nclear\n");
@@ -4457,6 +4933,18 @@ impl AudioEngine {
             if crate::direct_playback::is_admission_refusal(&error){return Err(error);}
             // A command list is sequential, never transactional. ACK/lost reply
             // cannot establish which effects ran; retain the last durable cache.
+            if crate::null_output_test_mode()
+                || tracks.iter().any(|track| matches!(
+                    &track.media_locator,
+                    Some(MediaLocator::Local { uri })
+                        if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri)
+                ))
+            {
+                eprintln!(
+                    "[Playback] sqlite_queue_apply_failed stage=replace_and_play cause={}",
+                    Self::queue_play_failure_reason(&error)
+                );
+            }
             self.mark_queue_uncertain();
             return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
         }
@@ -4467,6 +4955,219 @@ impl AudioEngine {
         self.cache_persistence_pending = true;
         persist(self).map_err(|_| "PLAYBACK_PERSISTENCE_FAILED".to_string())?;
         self.cache_persistence_pending = false;
+        Ok(())
+    }
+
+    fn parse_added_id(lines: &[String]) -> Result<u64, String> {
+        let ids = lines.iter().filter_map(|line| line.strip_prefix("Id: ").and_then(|value| value.parse::<u64>().ok())).collect::<Vec<_>>();
+        if ids.len() == 1 { Ok(ids[0]) } else { Err("CUE_MPD_ADDID_RESPONSE_INVALID".into()) }
+    }
+
+    fn remove_owned_staged_entries(
+        send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
+        staged: &[(u64, String)],
+        preserved: &[MpdQueueEntry],
+    ) -> bool {
+        for (id, playback_uri) in staged.iter().rev() {
+            let Ok((_, entries)) = Self::queue_insert_snapshot(send) else { return false };
+            let Some(entry) = entries.iter().find(|entry| entry.id == *id) else { continue };
+            let Ok((expected_path, _)) = expected_mpd_range(playback_uri) else { return false };
+            if entry.uri != expected_path { return false; }
+            if send(&format!("deleteid {id}")).is_err() { return false; }
+            let Ok((_, after)) = Self::queue_insert_snapshot(send) else { return false };
+            if after.iter().any(|entry| entry.id == *id) { return false; }
+        }
+        // Removing our own IDs is not enough: another queue entry could have
+        // changed while the operation was in flight. Only call this a clean
+        // rollback when the pre-existing queue is proven byte-for-byte in
+        // identity, order, range, and position again.
+        Self::queue_insert_snapshot(send)
+            .is_ok_and(|(_, after)| queue_entries_match(&after, preserved))
+    }
+
+    fn restore_insert_state_with_io(
+        send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
+        before: &MpdQueueStatus,
+        preserved: &[MpdQueueEntry],
+        paused_by_operation: bool,
+    ) -> bool {
+        let Ok((mut status, mut actual)) = Self::queue_insert_snapshot(send) else { return false };
+        if !queue_entries_match(&actual, preserved) || !same_queue_cursor(before, preserved, &status, &actual) {
+            return false;
+        }
+        if before.state == PlaybackState::Playing {
+            if status.state == PlaybackState::Playing { return true; }
+            if !paused_by_operation || status.state != PlaybackState::Paused || send("pause 0").is_err() {
+                return false;
+            }
+            let Ok((resumed, resumed_entries)) = Self::queue_insert_snapshot(send) else { return false };
+            status = resumed;
+            actual = resumed_entries;
+            status.state == PlaybackState::Playing
+                && queue_entries_match(&actual, preserved)
+                && same_queue_cursor(before, preserved, &status, &actual)
+        } else {
+            status.state == before.state
+                && (before.elapsed - status.elapsed).abs() <= 0.25
+        }
+    }
+
+    /// CUE queue replacement is staged by ID because MPD's rangeid needs the
+    /// ID returned from addid. Existing entries remain untouched until every
+    /// new segment has its requested range and the complete staged queue is
+    /// observed back from MPD.
+    fn play_tracks_with_ranges_io(
+        &mut self,
+        tracks: Vec<TrackMetadata>,
+        playback_uris: &[String],
+        start_index: usize,
+        send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
+        persist: &mut impl FnMut(&Self) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (before, original) = Self::queue_insert_snapshot(send).map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
+        // Stop before staging so an old queue reaching its end cannot start a
+        // newly-added CUE image before rangeid has been applied and verified.
+        if before.state != PlaybackState::Stopped && send("stop").is_err() {
+            return Err("PLAYBACK_STOP_FAILED".into());
+        }
+        let mut staged = Vec::<(u64, String)>::new();
+        for (offset, uri) in playback_uris.iter().enumerate() {
+            let (path, _) = expected_mpd_range(uri)?;
+            let command = format!("addid {} {}", Self::quote_mpd_argument(&path)?, original.len() + offset);
+            let id = match send(&command).and_then(|lines| Self::parse_added_id(&lines)) {
+                Ok(id) if !original.iter().any(|entry| entry.id == id) && !staged.iter().any(|(prior, _)| *prior == id) => id,
+                _ => {
+                    let _ = Self::remove_owned_staged_entries(send, &staged, &original);
+                    self.mark_queue_uncertain();
+                    return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+                }
+            };
+            staged.push((id, uri.clone()));
+            if let Some(cue) = parse_cue_range_uri(uri) {
+                if let Some(command) = cue_range_command(id, &cue) {
+                    if send(&command).is_err() {
+                        let removed = Self::remove_owned_staged_entries(send, &staged, &original);
+                        if !removed { self.mark_queue_uncertain(); }
+                        return Err(if removed { "CUE_RANGE_APPLY_FAILED" } else { "PLAYBACK_QUEUE_UNCERTAIN" }.into());
+                    }
+                }
+            }
+        }
+        let (_, staged_entries) = match Self::queue_insert_snapshot(send) {
+            Ok(value) => value,
+            Err(_) => { let _ = Self::remove_owned_staged_entries(send, &staged, &original); self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        };
+        let mut expected_staged = original.clone();
+        for (offset, (id, uri)) in staged.iter().enumerate() {
+            match expected_queue_entry(uri, *id, original.len() + offset) {
+                Ok(entry) => expected_staged.push(entry),
+                Err(_) => {
+                    let removed = Self::remove_owned_staged_entries(send, &staged, &original);
+                    if !removed { self.mark_queue_uncertain(); }
+                    return Err(if removed { "SQLITE_CUE_RANGE_URI_INVALID" } else { "PLAYBACK_QUEUE_UNCERTAIN" }.into());
+                }
+            }
+        }
+        if !queue_entries_match(&staged_entries, &expected_staged) {
+            let removed = Self::remove_owned_staged_entries(send, &staged, &original);
+            if !removed { self.mark_queue_uncertain(); }
+            return Err(if removed { "CUE_RANGE_CONFIRMATION_FAILED" } else { "PLAYBACK_QUEUE_UNCERTAIN" }.into());
+        }
+        if !original.is_empty() {
+            let mut delete = String::from("command_list_begin\n");
+            for entry in &original { delete.push_str(&format!("deleteid {}\n", entry.id)); }
+            delete.push_str("command_list_end");
+            if send(&delete).is_err() { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        }
+        let (_, final_entries) = match Self::queue_insert_snapshot(send) {
+            Ok(value) => value,
+            Err(_) => { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        };
+        let expected = staged.iter().enumerate().map(|(pos, (id, uri))| expected_queue_entry(uri, *id, pos)).collect::<Result<Vec<_>, _>>()?;
+        if !queue_entries_match(&final_entries, &expected) { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        if send(&format!("play {start_index}")).is_err() { self.mark_queue_uncertain(); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        self.queue = tracks;
+        self.restored_resume = None;
+        self.startup_restore = StartupQueueRestore::Ready;
+        self.queue_coherent = true;
+        self.cache_persistence_pending = true;
+        persist(self).map_err(|_| "PLAYBACK_PERSISTENCE_FAILED".to_string())?;
+        self.cache_persistence_pending = false;
+        Ok(())
+    }
+
+    fn restore_queue_with_ranges_io(
+        &self,
+        playback_uris: &[String],
+        play_index: Option<usize>,
+        pause_after_play: bool,
+        send: &mut impl FnMut(&str) -> Result<Vec<String>, String>,
+    ) -> Result<(), String> {
+        if playback_uris.len() != self.queue.len() || playback_uris.is_empty() {
+            return Err("CUE_QUEUE_RESTORE_INVALID".into());
+        }
+        let (_, original) = Self::queue_insert_snapshot(send).map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
+        if send("stop").is_err() { return Err("PLAYBACK_STOP_FAILED".into()); }
+        let mut staged = Vec::<(u64, String)>::new();
+        for (offset, uri) in playback_uris.iter().enumerate() {
+            let (path, _) = expected_mpd_range(uri)?;
+            let id = match send(&format!("addid {} {}", Self::quote_mpd_argument(&path)?, original.len() + offset))
+                .and_then(|lines| Self::parse_added_id(&lines)) {
+                    Ok(id) if !original.iter().any(|entry| entry.id == id) && !staged.iter().any(|(prior, _)| *prior == id) => id,
+                    _ => { let _ = Self::remove_owned_staged_entries(send, &staged, &original); return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+                };
+            staged.push((id, uri.clone()));
+            if let Some(cue) = parse_cue_range_uri(uri) {
+                if let Some(command) = cue_range_command(id, &cue) {
+                    if send(&command).is_err() {
+                        let removed = Self::remove_owned_staged_entries(send, &staged, &original);
+                        return Err(if removed { "CUE_RANGE_APPLY_FAILED" } else { "PLAYBACK_QUEUE_UNCERTAIN" }.into());
+                    }
+                }
+            }
+        }
+        let (_, staged_entries) = match Self::queue_insert_snapshot(send) {
+            Ok(value) => value,
+            Err(_) => {
+                let removed = Self::remove_owned_staged_entries(send, &staged, &original);
+                return Err(if removed { "CUE_RANGE_CONFIRMATION_FAILED" } else { "PLAYBACK_QUEUE_UNCERTAIN" }.into());
+            }
+        };
+        let mut expected = original.clone();
+        for (offset, (id, uri)) in staged.iter().enumerate() {
+            match expected_queue_entry(uri, *id, original.len() + offset) {
+                Ok(entry) => expected.push(entry),
+                Err(_) => {
+                    let removed = Self::remove_owned_staged_entries(send, &staged, &original);
+                    return Err(if removed { "CUE_QUEUE_RESTORE_INVALID" } else { "PLAYBACK_QUEUE_UNCERTAIN" }.into());
+                }
+            }
+        }
+        if !queue_entries_match(&staged_entries, &expected) {
+            let removed = Self::remove_owned_staged_entries(send, &staged, &original);
+            return Err(if removed { "CUE_RANGE_CONFIRMATION_FAILED" } else { "PLAYBACK_QUEUE_UNCERTAIN" }.into());
+        }
+        if !original.is_empty() {
+            let mut delete = String::from("command_list_begin\n");
+            for entry in &original { delete.push_str(&format!("deleteid {}\n", entry.id)); }
+            delete.push_str("command_list_end");
+            if send(&delete).is_err() { return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+        }
+        let (_, final_entries) = Self::queue_insert_snapshot(send).map_err(|_| "PLAYBACK_QUEUE_UNCERTAIN")?;
+        let final_expected = staged.iter().enumerate().map(|(pos, (id, uri))| expected_queue_entry(uri, *id, pos)).collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "PLAYBACK_QUEUE_UNCERTAIN")?;
+        if !queue_entries_match(&final_entries, &final_expected) {
+            return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+        }
+        if let Some(index) = play_index {
+            if index >= playback_uris.len() || send(&format!("play {index}")).is_err() {
+                return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+            }
+            if pause_after_play && send("pause 1").is_err() {
+                let _ = send("stop");
+                return Err("PLAYBACK_QUEUE_UNCERTAIN".into());
+            }
+        }
         Ok(())
     }
 
@@ -4499,7 +5200,7 @@ impl AudioEngine {
         self.play_tracks(tracks, playback_uris, start_index)
     }
 
-    fn ensure_startup_queue_ready(&self) -> Result<(), String> {
+    pub(crate) fn ensure_startup_queue_ready(&self) -> Result<(), String> {
         self.ensure_queue_coherent()?;
         self.ensure_logical_resume_available()?;
         match self.startup_restore {
@@ -5028,6 +5729,29 @@ impl AudioEngine {
         self.send_command(&format!("play {}", index))?;
         self.restored_resume = None;
         self.verify_shared_play_resume_progress(is_shared)
+    }
+
+    pub(crate) fn play_sqlite_index(
+        &mut self,
+        index: usize,
+        expected_locator: &str,
+        expected_uri: &str,
+        is_shared: bool,
+    ) -> Result<(), String> {
+        self.ensure_queue_structure_available()?;
+        let track = self
+            .queue
+            .get(index)
+            .ok_or_else(|| "Índice fora da fila.".to_owned())?;
+        let matches_expected = matches!(
+            &track.media_locator,
+            Some(MediaLocator::Local { uri }) if uri == expected_locator
+        ) && track.uri == expected_uri
+            && is_sqlite_mpd_uri_for_locator(expected_locator, expected_uri);
+        if !matches_expected {
+            return Err("SQLITE_QUEUE_ITEM_CHANGED".into());
+        }
+        self.play_index(index, is_shared)
     }
 
     pub fn clear_queue(&mut self) -> Result<(), String> {
@@ -9651,6 +10375,362 @@ mod tests {
     fn qi_script(before: Vec<String>, old: Vec<String>, response: Result<Vec<String>, String>, after: Vec<String>, new: Vec<String>) -> std::collections::VecDeque<Result<Vec<String>, String>> {
         vec![Ok(before.clone()), Ok(old), Ok(before), response, Ok(after.clone()), Ok(new), Ok(after)].into()
     }
+
+    #[test]
+    fn cue_range_protocol_preserves_frames_open_ends_and_full_file_semantics() {
+        let path = "/synthetic/image.wav";
+        let encode = |start: u64, end: Option<u64>| format!(
+            "sonante-cue-range://{}/{}/{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(path),
+            start,
+            end.map(|value| value.to_string()).unwrap_or_else(|| "open".into()),
+        );
+        let partial = parse_cue_range_uri(&encode(501, Some(1002))).unwrap();
+        assert_eq!(cue_range_command(7, &partial).as_deref(), Some("rangeid 7 6.68:13.36"));
+        let open = parse_cue_range_uri(&encode(375, None)).unwrap();
+        assert_eq!(cue_range_command(8, &open).as_deref(), Some("rangeid 8 5:"));
+        let full = parse_cue_range_uri(&encode(0, None)).unwrap();
+        assert_eq!(cue_range_command(9, &full), None, "a full-file CUE track needs no synthetic Range");
+
+        let expected = expected_queue_entry(&encode(501, Some(1002)), 11, 0).unwrap();
+        let lines = vec!["file: /synthetic/image.wav".into(), "Range: 6.680-13.360".into(), "Pos: 0".into(), "Id: 11".into()];
+        let actual = AudioEngine::parse_mpd_queue_entries(&lines).unwrap();
+        assert!(queue_entries_match(&actual, &[expected]));
+        let full_expected = expected_queue_entry(&encode(0, None), 12, 0).unwrap();
+        let full_lines = vec!["file: /synthetic/image.wav".into(), "Pos: 0".into(), "Id: 12".into()];
+        assert!(queue_entries_match(&AudioEngine::parse_mpd_queue_entries(&full_lines).unwrap(), &[full_expected]));
+        assert!(AudioEngine::parse_mpd_queue_entries(&["file: x".into(), "Range: -3.0".into(), "Pos: 0".into(), "Id: 1".into()]).is_err());
+    }
+
+    struct SourceRemovalMpd {
+        entries: Vec<(String, u64)>,
+        version: u64,
+        state: &'static str,
+        current_id: Option<u64>,
+        commands: Vec<String>,
+        fail_delete: bool,
+        stop_calls: usize,
+        stop_stops_after: usize,
+    }
+    impl SourceRemovalMpd {
+        fn send(&mut self, command: &str) -> Result<Vec<String>, String> {
+            self.commands.push(command.to_owned());
+            match command {
+                "status" => {
+                    let song = self.current_id.and_then(|id| self.entries.iter().position(|entry| entry.1 == id));
+                    Ok(qi_status(self.version, self.entries.len(), self.state, song, 9.0))
+                }
+                "currentsong" => Ok(Vec::new()),
+                "playlistinfo" => Ok(self.entries.iter().enumerate().flat_map(|(position, (uri, id))|
+                    [format!("file: {uri}"), format!("Pos: {position}"), format!("Id: {id}")]).collect()),
+                "pause 1" => { self.state = "pause"; Ok(vec![]) }
+                "pause 0" => { self.state = "play"; Ok(vec![]) }
+                "stop" => {
+                    self.stop_calls += 1;
+                    if self.stop_calls >= self.stop_stops_after { self.state = "stop"; }
+                    Ok(vec![])
+                }
+                command if command.starts_with("command_list_begin\n") => {
+                    if self.fail_delete { return Err("fixture ACK".into()); }
+                    let ids = command.lines().filter_map(|line| line.strip_prefix("deleteid ")).map(str::parse::<u64>)
+                        .collect::<Result<HashSet<_>, _>>().map_err(|_| "fixture malformed deleteid".to_owned())?;
+                    if self.current_id.is_some_and(|id| ids.contains(&id)) { self.current_id = None; }
+                    self.entries.retain(|(_, id)| !ids.contains(id));
+                    self.version += ids.len() as u64;
+                    Ok(vec!["list_OK".into(); ids.len()])
+                }
+                other => Err(format!("unexpected fixture command: {other}")),
+            }
+        }
+    }
+    fn sqlite_queue_track(source_id: i64, path: &[u8], mpd_path: &str) -> TrackMetadata {
+        let mut track = qi_track(mpd_path);
+        track.media_locator = Some(MediaLocator::Local { uri: format!("sqlite-track://{source_id}/{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(path)) });
+        track.uri = mpd_path.into();
+        track
+    }
+
+    #[test]
+    fn removing_active_sqlite_source_stops_current_and_preserves_mixed_source_occurrences() {
+        let shared_path = "/nas/Album/01.wav";
+        let mut audio = engine_with_track("");
+        audio.queue = vec![
+            sqlite_queue_track(2, b"Album/01.wav", shared_path),
+            sqlite_queue_track(1, b"Album/01.wav", shared_path),
+            sqlite_queue_track(1, b"Album/02.wav", "/nas/Album/02.wav"),
+            sqlite_queue_track(2, b"Album/02.wav", "/nas/Album/02.wav"),
+        ];
+        let mut plex = qi_track("");
+        plex.media_locator = Some(MediaLocator::Plex { server_id: "plex-fixture".into(),
+            part_key: "/library/parts/1/file.flac".into(), rating_key: None, file_path: None });
+        audio.queue.push(plex);
+        let mut world = SourceRemovalMpd { entries: vec![(shared_path.into(), 10), (shared_path.into(), 11),
+            ("/nas/Album/02.wav".into(), 12), ("/nas/Album/02.wav".into(), 13),
+            ("https://plex.invalid/file.flac".into(), 14)], version: 4,
+            state: "play", current_id: Some(11), commands: vec![], fail_delete: false, stop_calls: 0, stop_stops_after: 1 };
+        let stale_playback_intent = audio.admit_playback_intent().unwrap();
+        let mut persisted = Vec::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let catalog_events = events.clone();
+        let persist_events = events.clone();
+        let ((), queue_stopped) = audio.remove_sqlite_source_with_io(1, move || { catalog_events.lock().unwrap().push("catalog"); Ok(()) },
+            |command| world.send(command), |audio| { persist_events.lock().unwrap().push("persist"); persisted = AudioEngine::encode_queue_cache(&audio.queue)?; Ok(()) }).unwrap();
+        assert!(queue_stopped, "removing the current item must leave playback stopped");
+        assert_eq!(audio.queue.len(), 3);
+        assert_eq!(audio.queue[0].media_locator.as_ref().unwrap(), &MediaLocator::Local { uri: format!("sqlite-track://2/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"Album/01.wav")) });
+        assert_eq!(audio.queue[1].media_locator.as_ref().unwrap(), &MediaLocator::Local { uri: format!("sqlite-track://2/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"Album/02.wav")) });
+        assert!(matches!(audio.queue[2].media_locator, Some(MediaLocator::Plex { .. })));
+        assert_eq!(world.entries, vec![(shared_path.into(), 10), ("/nas/Album/02.wav".into(), 13),
+            ("https://plex.invalid/file.flac".into(), 14)]);
+        assert_eq!(world.state, "stop");
+        assert_eq!(*events.lock().unwrap(), ["catalog", "persist"]);
+        assert!(world.commands.contains(&"stop".into()));
+        let playback = audio.get_status_with_io(false, false, |_| None, |command| {
+            if command == "status" {
+                let song = world.current_id.and_then(|id| world.entries.iter().position(|entry| entry.1 == id));
+                Ok(qi_status(world.version, world.entries.len(), world.state, song, 9.0))
+            } else { Err(format!("unexpected fixture command: {command}")) }
+        }).unwrap();
+        assert_eq!(playback.state, "stop", "the status projection follows the confirmed MPD transport");
+        assert!(playback.current_media.is_none());
+        assert!(playback.playback_error.is_none());
+        assert_eq!(audio.validate_playback_intent(&stale_playback_intent), Err("PLAYBACK_SUPERSEDED".into()));
+        assert!(world.commands.iter().any(|command| command.contains("deleteid 11") && command.contains("deleteid 12")));
+        assert!(audio.queue.iter().any(|track| matches!(track.media_locator, Some(MediaLocator::Plex { .. }))));
+        assert!(!world.commands.iter().any(|command| command.contains("repeat") || command.contains("random")));
+        assert!(!world.commands.contains(&"pause 0".into()));
+        let saved = String::from_utf8(persisted.clone()).unwrap();
+        assert!(saved.contains("sqlite-track://2/"));
+        assert!(!saved.contains("sqlite-track://1/"));
+        let (restored, changed) = AudioEngine::decode_queue_cache(persisted.as_slice()).unwrap();
+        assert!(!changed);
+        let restored_locators = restored.iter().map(|track| track.media_locator.clone()).collect::<Vec<_>>();
+        let retained_locators = audio.queue.iter().map(|track| track.media_locator.clone()).collect::<Vec<_>>();
+        assert_eq!(restored_locators, retained_locators, "restart restores only retained source identities");
+    }
+
+    #[test]
+    fn source_removal_does_not_claim_stopped_until_mpd_status_confirms_it() {
+        let path = "/synthetic/removed/01.wav";
+        let mut audio = engine_with_track("");
+        audio.queue = vec![sqlite_queue_track(1, b"01.wav", path), sqlite_queue_track(2, b"02.wav", "/synthetic/kept/02.wav")];
+        let mut world = SourceRemovalMpd {
+            entries: vec![(path.into(), 51), ("/synthetic/kept/02.wav".into(), 52)],
+            version: 3,
+            state: "play",
+            current_id: Some(51),
+            commands: vec![],
+            fail_delete: false,
+            stop_calls: 0,
+            stop_stops_after: usize::MAX,
+        };
+        let (removed, queue_stopped) = audio.remove_sqlite_source_with_io(
+            1,
+            || Ok::<_, String>("removed"),
+            |command| world.send(command),
+            |_| Ok(()),
+        ).unwrap();
+
+        assert_eq!(removed, "removed", "catalog removal remains committed");
+        assert!(!queue_stopped, "an ACK alone is not proof that transport stopped");
+        assert_eq!(world.state, "pause", "the fixture leaves the transport non-stopped after the ACK");
+        assert!(!audio.queue_coherent, "the unresolved MPD state remains explicitly uncertain");
+        assert_eq!(audio.queue.len(), 1, "the unrelated SQLite source remains in the logical queue");
+        let playback = audio.get_status_with_io(false, false, |_| None, |command| match command {
+            "status" => {
+                let song = world.current_id.and_then(|id| world.entries.iter().position(|entry| entry.1 == id));
+                Ok(qi_status(world.version, world.entries.len(), world.state, song, 9.0))
+            }
+            "currentsong" => Ok(Vec::new()),
+            other => Err(format!("unexpected fixture command: {other}")),
+        }).unwrap();
+        assert_eq!(playback.state, "pause");
+        assert_eq!(playback.playback_error, Some(PlaybackDiagnostic::QueueUncertain));
+        assert!(!world.entries.iter().any(|(uri, _)| uri == path));
+        assert!(world.entries.iter().any(|(uri, _)| uri == "/synthetic/kept/02.wav"));
+        assert_eq!(world.commands.last().map(String::as_str), Some("status"), "fallback stop is read back");
+    }
+
+    #[test]
+    fn source_removal_recovers_transient_stop_state_after_exact_queue_readback() {
+        let path = "/synthetic/removed/01.wav";
+        let mut audio = engine_with_track("");
+        audio.queue = vec![sqlite_queue_track(1, b"01.wav", path), sqlite_queue_track(2, b"02.wav", "/synthetic/kept/02.wav")];
+        let mut world = SourceRemovalMpd {
+            entries: vec![(path.into(), 61), ("/synthetic/kept/02.wav".into(), 62)],
+            version: 8, state: "play", current_id: Some(61), commands: vec![], fail_delete: false,
+            stop_calls: 0, stop_stops_after: 2,
+        };
+        let ((), queue_stopped) = audio.remove_sqlite_source_with_io(1, || Ok(()),
+            |command| world.send(command), |_| Ok(())).unwrap();
+
+        assert!(queue_stopped, "the recovery path must read back stop before reporting it");
+        assert_eq!(world.state, "stop");
+        assert!(audio.queue_coherent, "confirmed stop plus exact queue and durable cache resolves the transient uncertainty");
+        assert_eq!(audio.queue.len(), 1);
+        assert!(world.entries.iter().all(|(uri, _)| uri != path));
+        assert!(world.entries.iter().any(|(uri, _)| uri == "/synthetic/kept/02.wav"));
+        assert!(world.commands.iter().filter(|command| command.as_str() == "stop").count() >= 2);
+    }
+
+    #[test]
+    fn selecting_another_source_rebuilds_uncertain_queue_without_removed_references() {
+        let mut audio = engine_with_track("");
+        audio.queue = vec![
+            sqlite_queue_track(1, b"Remove/01.wav", "/synthetic/remove/01.wav"),
+            sqlite_queue_track(2, b"Keep/01.wav", "/synthetic/keep/01.wav"),
+        ];
+        let mut world = SourceRemovalMpd {
+            entries: vec![("/synthetic/remove/01.wav".into(), 81), ("/synthetic/keep/01.wav".into(), 82)],
+            version: 11, state: "play", current_id: Some(81), commands: vec![], fail_delete: true,
+            stop_calls: 0, stop_stops_after: 1,
+        };
+        let ((), _) = audio.remove_sqlite_source_with_io(1, || Ok(()),
+            |command| world.send(command), |_| Ok(())).unwrap();
+        assert!(!audio.queue_coherent, "a delete ACK failure remains visible until a new queue is confirmed");
+
+        let selected = sqlite_queue_track(2, b"Keep/02.wav", "/resolved/keep/02.wav");
+        let mut playback_commands = Vec::new();
+        let mut persisted = Vec::new();
+        audio.play_tracks_with_io(vec![selected.clone()], vec![selected.uri.clone()], 0,
+            |command| { playback_commands.push(command.to_owned()); Ok(Vec::new()) },
+            |engine| { persisted = AudioEngine::encode_queue_cache(&engine.queue)?; Ok(()) }).unwrap();
+
+        assert!(audio.queue_coherent, "confirmed new-source playback clears the recovered queue warning");
+        assert_eq!(audio.queue, vec![selected]);
+        assert!(playback_commands[0].starts_with("command_list_begin\nclear\nadd "));
+        assert!(playback_commands[0].contains("play 0"));
+        let cache = String::from_utf8(persisted).unwrap();
+        assert!(!cache.contains("sqlite-track://1/"));
+        assert!(cache.contains("sqlite-track://2/"));
+    }
+
+    #[test]
+    fn removing_future_source_pauses_then_resumes_exact_current_and_preserves_duplicate_paths() {
+        let path = "/same/01.wav";
+        let mut audio = engine_with_track("");
+        audio.queue = vec![sqlite_queue_track(2, b"Album/01.wav", path), sqlite_queue_track(1, b"Album/01.wav", path),
+            sqlite_queue_track(2, b"Album/01.wav", path)];
+        let mut world = SourceRemovalMpd { entries: vec![(path.into(), 20), (path.into(), 21), (path.into(), 22)],
+            version: 1, state: "play", current_id: Some(20), commands: vec![], fail_delete: false, stop_calls: 0, stop_stops_after: 1 };
+        let mut saved = Vec::new();
+        let ((), queue_stopped) = audio.remove_sqlite_source_with_io(1, || Ok(()), |command| world.send(command),
+            |audio| { saved = AudioEngine::encode_queue_cache(&audio.queue)?; Ok(()) }).unwrap();
+        assert!(!queue_stopped);
+        assert_eq!(audio.queue.len(), 2);
+        assert_eq!(world.entries, vec![(path.into(), 20), (path.into(), 22)]);
+        assert_eq!(world.current_id, Some(20));
+        assert_eq!(world.state, "play");
+        assert!(world.commands.contains(&"pause 1".into()));
+        assert!(world.commands.contains(&"pause 0".into()));
+        assert!(world.commands.iter().any(|command| command.contains("deleteid 21")));
+        assert!(!world.commands.iter().any(|command| command.contains("deleteid 20") || command.contains("deleteid 22")));
+        assert!(!String::from_utf8(saved).unwrap().contains("sqlite-track://1/"));
+    }
+
+    #[test]
+    fn removing_paused_sqlite_source_stops_without_resuming_or_dropping_other_sources() {
+        let path = "/synthetic/paused/01.wav";
+        let mut audio = engine_with_track("");
+        audio.queue = vec![sqlite_queue_track(1, b"01.wav", path), sqlite_queue_track(2, b"02.wav", "/synthetic/kept/02.wav")];
+        let mut world = SourceRemovalMpd {
+            entries: vec![(path.into(), 71), ("/synthetic/kept/02.wav".into(), 72)],
+            version: 9, state: "pause", current_id: Some(71), commands: vec![], fail_delete: false,
+            stop_calls: 0, stop_stops_after: 1,
+        };
+        let ((), queue_stopped) = audio.remove_sqlite_source_with_io(1, || Ok(()),
+            |command| world.send(command), |_| Ok(())).unwrap();
+
+        assert!(queue_stopped);
+        assert_eq!(world.state, "stop");
+        assert!(!world.commands.contains(&"pause 0".into()), "removal never resumes transport");
+        assert_eq!(audio.queue.len(), 1);
+        assert!(world.entries.iter().any(|(uri, _)| uri == "/synthetic/kept/02.wav"));
+    }
+
+    #[test]
+    fn removing_sqlite_source_matches_and_removes_only_its_cue_range_entry() {
+        let cue_locator = format!("sqlite-cue://1/{}/2", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"Album/image.cue"));
+        let path = "/synthetic/Album/image.wav";
+        let playback_uri = format!("sonante-cue-range://{}/{}/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(path), 501, 1002);
+        let mut cue = qi_track(&cue_locator);
+        cue.media_locator = Some(MediaLocator::Local { uri: cue_locator.clone() });
+        cue.uri = playback_uri;
+        let kept = sqlite_queue_track(2, b"Other/01.flac", "/synthetic/Other/01.flac");
+        let mut audio = engine_with_track("");
+        audio.queue = vec![cue, kept.clone()];
+
+        let mut entries = vec![(path.to_owned(), Some("6.68-13.36".to_owned()), 31_u64),
+            ("/synthetic/Other/01.flac".to_owned(), None, 32_u64)];
+        let mut version = 5_u64;
+        let mut commands = Vec::new();
+        let mut persisted = Vec::new();
+        let ((), stopped) = audio.remove_sqlite_source_with_io(1, || Ok(()), |command| {
+            commands.push(command.to_owned());
+            match command {
+                "status" => Ok(qi_status(version, entries.len(), "stop", None, 0.0)),
+                "playlistinfo" => Ok(entries.iter().enumerate().flat_map(|(pos, (uri, range, id))| {
+                    let mut lines = vec![format!("file: {uri}")];
+                    if let Some(range) = range { lines.push(format!("Range: {range}")); }
+                    lines.extend([format!("Pos: {pos}"), format!("Id: {id}")]); lines
+                }).collect()),
+                command if command.starts_with("command_list_begin\n") => {
+                    let ids = command.lines().filter_map(|line| line.strip_prefix("deleteid "))
+                        .map(str::parse::<u64>).collect::<Result<HashSet<_>, _>>().unwrap();
+                    entries.retain(|entry| !ids.contains(&entry.2)); version += ids.len() as u64;
+                    Ok(vec!["list_OK".into(); ids.len()])
+                }
+                other => Err(format!("unexpected command: {other}")),
+            }
+        }, |engine| { persisted = AudioEngine::encode_queue_cache(&engine.queue)?; Ok(()) }).unwrap();
+
+        assert!(!stopped);
+        assert_eq!(entries, vec![("/synthetic/Other/01.flac".into(), None, 32)]);
+        assert_eq!(audio.queue, vec![kept.clone()]);
+        assert!(commands.iter().any(|command| command == "command_list_begin\ndeleteid 31\ncommand_list_end"));
+        assert!(!commands.iter().any(|command| command.contains("add ") || command.contains("play ")));
+        let cache = String::from_utf8(persisted).unwrap();
+        assert!(!cache.contains("sqlite-cue://1/"));
+        assert!(cache.contains("sqlite-track://2/"));
+        assert_eq!(audio.queue, vec![kept]);
+    }
+
+    #[test]
+    fn source_removal_delete_ack_failure_stops_and_persists_filtered_logical_queue() {
+        let mut audio = engine_with_track("");
+        audio.queue = vec![sqlite_queue_track(1, b"Remove/a.wav", "/remove/a.wav"),
+            sqlite_queue_track(2, b"Keep/a.wav", "/keep/a.wav")];
+        let mut world = SourceRemovalMpd { entries: vec![("/remove/a.wav".into(), 30), ("/keep/a.wav".into(), 31)],
+            version: 6, state: "play", current_id: Some(31), commands: vec![], fail_delete: true, stop_calls: 0, stop_stops_after: 1 };
+        let mut saved = Vec::new();
+        let ((), queue_stopped) = audio.remove_sqlite_source_with_io(1, || Ok(()), |command| world.send(command),
+            |audio| { saved = AudioEngine::encode_queue_cache(&audio.queue)?; Ok(()) }).unwrap();
+        assert!(queue_stopped);
+        assert!(!audio.queue_coherent);
+        assert_eq!(world.state, "stop", "an unverified stale MPD entry must never auto-advance");
+        assert_eq!(audio.queue.len(), 1);
+        let cache = String::from_utf8(saved).unwrap();
+        assert!(!cache.contains("sqlite-track://1/"));
+        assert!(cache.contains("sqlite-track://2/"));
+    }
+
+    #[test]
+    fn failed_catalog_removal_restores_playing_queue_without_deleting_mpd_entries() {
+        let mut audio = engine_with_track("");
+        audio.queue = vec![sqlite_queue_track(1, b"Remove/a.wav", "/remove/a.wav")];
+        let mut world = SourceRemovalMpd { entries: vec![("/remove/a.wav".into(), 40)], version: 2,
+            state: "play", current_id: Some(40), commands: vec![], fail_delete: false, stop_calls: 0, stop_stops_after: 1 };
+        let result = audio.remove_sqlite_source_with_io(1, || Err::<(), _>("catalog failure".into()),
+            |command| world.send(command), |_| panic!("failed catalog mutation must not persist queue"));
+        assert_eq!(result.unwrap_err(), "catalog failure");
+        assert_eq!(world.entries, vec![("/remove/a.wav".into(), 40)]);
+        assert_eq!(world.state, "play");
+        assert!(world.commands.contains(&"pause 1".into()));
+        assert!(world.commands.contains(&"pause 0".into()));
+        assert!(audio.queue_coherent);
+    }
+
     #[test]
     fn queue_insert_preserves_play_pause_stop_and_original_duplicate_occurrences_without_transport() {
         for state in ["play", "pause", "stop"] { for placement in [QueueInsertPlacement::Next, QueueInsertPlacement::End] {
@@ -9684,6 +10764,244 @@ mod tests {
         audio.enqueue_tracks_with_io(vec![qi_track("new/a.flac")],vec!["new/a.flac".into()],QueueInsertPlacement::Next,|_|script.pop_front().unwrap(),|_|Ok(())).unwrap();
         assert_eq!(audio.restored_resume.unwrap().elapsed,41.);
     }
+
+    #[test]
+    fn sqlite_queue_insertion_sends_absolute_path_but_persists_only_the_opaque_identity() {
+        let locator = "sqlite-track://3/QWxidW0vMDEud2F2";
+        let mpd_path = "/tmp/sonante-synthetic/01.wav";
+        let mut audio = engine_with_track("old/one.flac");
+        audio.queue = vec![qi_track("old/one.flac")];
+        let before = qi_status(1, 1, "stop", None, 0.0);
+        let after = qi_status(2, 2, "stop", None, 0.0);
+        let mut script = qi_script(
+            before,
+            qi_entries(&[("old/one.flac", 10)]),
+            Ok(vec!["Id: 20".into()]),
+            after,
+            qi_entries(&[("old/one.flac", 10), (mpd_path, 20)]),
+        );
+        let mut track = qi_track(locator);
+        track.media_locator = Some(MediaLocator::Local { uri: locator.into() });
+        track.uri = mpd_path.into();
+        let mut saved = Vec::new();
+        let mut commands = Vec::new();
+        audio.enqueue_tracks_with_io(
+            vec![track],
+            vec![mpd_path.into()],
+            QueueInsertPlacement::End,
+            |command| { commands.push(command.to_owned()); script.pop_front().unwrap() },
+            |engine| { saved = AudioEngine::encode_queue_cache(&engine.queue)?; Ok(()) },
+        ).unwrap();
+        assert_eq!(audio.queue[1].uri, mpd_path);
+        assert_eq!(audio.queue[1].media_locator, Some(MediaLocator::Local { uri: locator.into() }));
+        let json = String::from_utf8(saved.clone()).unwrap();
+        assert!(json.contains(locator));
+        assert!(!json.contains(mpd_path));
+        assert_eq!(AudioEngine::decode_queue_cache(saved.as_slice()).unwrap().0[1].uri, "");
+        assert!(commands.iter().any(|command| command.contains(&format!("addid \"{mpd_path}\" 1"))));
+    }
+
+    #[test]
+    fn sqlite_cue_replacement_adds_absolute_file_then_sets_and_confirms_rangeid() {
+        let locator = format!("sqlite-cue://7/{}/2", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"Album/image.cue"));
+        let mpd_path = "/synthetic/Album/image.wav";
+        let playback_uri = format!("sonante-cue-range://{}/{}/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mpd_path), 501, 1002);
+        assert!(crate::sqlite_library::SqliteLibraryState::is_sqlite_cue_locator(&locator));
+        assert!(is_sqlite_mpd_uri_for_locator(&locator, &playback_uri));
+        assert!(!is_sqlite_mpd_uri_for_locator(&locator, mpd_path), "an un-ranged physical image is not a CUE track");
+        let cue = parse_cue_range_uri(&playback_uri).unwrap();
+        assert_eq!(cue_range_command(42, &cue).as_deref(), Some("rangeid 42 6.68:13.36"));
+
+        let mut track = qi_track(&locator);
+        track.media_locator = Some(MediaLocator::Local { uri: locator.clone() });
+        track.uri = playback_uri.clone();
+        let mut audio = engine_with_track("old/track.flac");
+        let mut commands = Vec::new();
+        let mut persisted = Vec::new();
+        let mut entries = vec![("old/track.flac".to_owned(), None, 10u64)];
+        let mut version = 1u64;
+        let mut next_id = 11u64;
+        let mut state = "stop";
+        audio.play_tracks_with_io(
+            vec![track], vec![playback_uri.clone()], 0,
+            |command| {
+                commands.push(command.to_owned());
+                if command == "status" {
+                    return Ok(qi_status(version, entries.len(), state, None, 0.));
+                }
+                if command == "playlistinfo" {
+                    return Ok(entries.iter().enumerate().flat_map(|(pos, (uri, range, id))| {
+                        let mut lines = vec![format!("file: {uri}")];
+                        if let Some(range) = range { lines.push(format!("Range: {range}")); }
+                        lines.extend([format!("Pos: {pos}"), format!("Id: {id}")]);
+                        lines
+                    }).collect());
+                }
+                if let Some(args) = command.strip_prefix("addid \"") {
+                    let (path, position) = args.split_once("\" ").ok_or("bad addid")?;
+                    let position = position.parse::<usize>().map_err(|_| "bad add position")?;
+                    let id = next_id; next_id += 1;
+                    entries.insert(position, (path.to_owned(), None, id)); version += 1;
+                    return Ok(vec![format!("Id: {id}")]);
+                }
+                if let Some(args) = command.strip_prefix("rangeid ") {
+                    let (id, range) = args.split_once(' ').ok_or("bad rangeid")?;
+                    let id = id.parse::<u64>().map_err(|_| "bad range id")?;
+                    let entry = entries.iter_mut().find(|entry| entry.2 == id).ok_or("unknown id")?;
+                    let (start, end) = range.split_once(':').ok_or("bad range")?;
+                    entry.1 = Some(if end.is_empty() { format!("{start}-") } else { format!("{start}-{end}") });
+                    version += 1;
+                    return Ok(vec![]);
+                }
+                if command == "stop" { state = "stop"; return Ok(vec![]); }
+                if let Some(args) = command.strip_prefix("command_list_begin\n") {
+                    let ids = args.lines().filter_map(|line| line.strip_prefix("deleteid ")).map(str::parse::<u64>).collect::<Result<HashSet<_>, _>>().map_err(|_| "bad deleteid")?;
+                    entries.retain(|entry| !ids.contains(&entry.2)); version += ids.len() as u64;
+                    return Ok(vec!["list_OK".into(); ids.len()]);
+                }
+                if let Some(index) = command.strip_prefix("play ") {
+                    assert_eq!(index, "0"); state = "play"; return Ok(vec![]);
+                }
+                Err(format!("unexpected command: {command}"))
+            },
+            |engine| { persisted = AudioEngine::encode_queue_cache(&engine.queue)?; Ok(()) },
+        ).unwrap();
+        assert!(commands.iter().any(|command| command == &format!("addid \"{mpd_path}\" 1")));
+        assert!(commands.iter().any(|command| command == "rangeid 11 6.68:13.36"));
+        assert!(!commands.iter().any(|command| command.contains("source-7/") || command.contains("sqlite-cue://")));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, mpd_path);
+        assert_eq!(entries[0].1.as_deref(), Some("6.68-13.36"));
+        assert_eq!(state, "play");
+        assert_eq!(audio.queue[0].media_locator, Some(MediaLocator::Local { uri: locator.clone() }));
+        let cache = String::from_utf8(persisted).unwrap();
+        assert!(cache.contains(&locator));
+        assert!(!cache.contains(mpd_path));
+        assert!(!cache.contains("sonante-cue-range://"));
+    }
+
+    #[test]
+    fn sqlite_cue_rangeid_failure_removes_only_staged_id_and_preserves_original_queue() {
+        let path = "/synthetic/Album/image.wav";
+        let playback_uri = format!(
+            "sonante-cue-range://{}/{}/{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(path),
+            501,
+            1002
+        );
+        let original_track = qi_track("old/keep.flac");
+        let mut cue_track = qi_track("sqlite-cue://7/opaque/2");
+        cue_track.uri = playback_uri.clone();
+        let mut audio = engine_with_track("old/keep.flac");
+        audio.queue = vec![original_track.clone()];
+        let mut entries: Vec<(String, Option<String>, u64)> = vec![("old/keep.flac".to_owned(), None, 10_u64)];
+        let mut version = 1_u64;
+        let mut commands = Vec::new();
+
+        let result = audio.play_tracks_with_ranges_io(
+            vec![cue_track],
+            &[playback_uri],
+            0,
+            &mut |command| {
+                commands.push(command.to_owned());
+                match command {
+                    "status" => Ok(qi_status(version, entries.len(), "stop", None, 0.0)),
+                    "playlistinfo" => Ok(entries.iter().enumerate().flat_map(|(pos, (uri, range, id))| {
+                        let mut lines = vec![format!("file: {uri}")];
+                        if let Some(range) = range { lines.push(format!("Range: {range}")); }
+                        lines.extend([format!("Pos: {pos}"), format!("Id: {id}")]);
+                        lines
+                    }).collect()),
+                    command if command.starts_with("addid \"") => {
+                        let (file, pos) = command.strip_prefix("addid \"").unwrap().split_once("\" ").unwrap();
+                        let pos = pos.parse::<usize>().unwrap();
+                        entries.insert(pos, (file.to_owned(), None, 11)); version += 1;
+                        Ok(vec!["Id: 11".into()])
+                    }
+                    command if command.starts_with("rangeid ") => Err("ACK rangeid fixture rejection".into()),
+                    command if command.starts_with("deleteid ") => {
+                        let id = command.strip_prefix("deleteid ").unwrap().parse::<u64>().unwrap();
+                        entries.retain(|entry| entry.2 != id); version += 1; Ok(vec![])
+                    }
+                    other => Err(format!("unexpected command: {other}")),
+                }
+            },
+            &mut |_| panic!("failed CUE insertion must not persist a replacement queue"),
+        );
+
+        assert_eq!(result.unwrap_err(), "CUE_RANGE_APPLY_FAILED");
+        assert_eq!(entries, vec![("old/keep.flac".into(), None, 10)]);
+        assert_eq!(audio.queue, vec![original_track]);
+        assert!(audio.queue_coherent, "original entries were confirmed after cleanup");
+        assert!(!commands.iter().any(|command| command.starts_with("play ")));
+        assert!(commands.iter().any(|command| command == "deleteid 11"));
+    }
+
+    #[test]
+    fn sqlite_cue_startup_restore_reapplies_range_before_removing_unranged_mpd_entry() {
+        let locator = format!("sqlite-cue://7/{}/2", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"Album/image.cue"));
+        let path = "/synthetic/Album/image.wav";
+        let playback_uri = format!("sonante-cue-range://{}/{}/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(path), 501, 1002);
+        let mut track = qi_track(&locator);
+        track.media_locator = Some(MediaLocator::Local { uri: locator });
+        track.uri = playback_uri.clone();
+        let mut audio = engine_with_track("");
+        audio.queue = vec![track];
+
+        struct RestoreWorld {
+            entries: Vec<(String, Option<String>, u64)>,
+            version: u64,
+            next_id: u64,
+            state: &'static str,
+            commands: Vec<String>,
+        }
+        let mut world = RestoreWorld {
+            // This models MPD save/load: the physical file remains, but Range was lost.
+            entries: vec![(path.into(), None, 10)], version: 1, next_id: 11,
+            state: "stop", commands: Vec::new(),
+        };
+        audio.restore_queue_with_ranges_io(&[playback_uri], None, false, &mut |command| {
+            world.commands.push(command.to_owned());
+            match command {
+                "status" => Ok(qi_status(world.version, world.entries.len(), world.state, None, 0.0)),
+                "playlistinfo" => Ok(world.entries.iter().enumerate().flat_map(|(pos, (uri, range, id))| {
+                    let mut lines = vec![format!("file: {uri}")];
+                    if let Some(range) = range { lines.push(format!("Range: {range}")); }
+                    lines.extend([format!("Pos: {pos}"), format!("Id: {id}")]); lines
+                }).collect()),
+                "stop" => { world.state = "stop"; Ok(vec![]) },
+                command if command.starts_with("addid \"") => {
+                    let args = command.strip_prefix("addid \"").unwrap();
+                    let (file, pos) = args.split_once("\" ").unwrap();
+                    let pos = pos.parse::<usize>().unwrap();
+                    let id = world.next_id; world.next_id += 1;
+                    world.entries.insert(pos, (file.into(), None, id)); world.version += 1;
+                    Ok(vec![format!("Id: {id}")])
+                }
+                command if command.starts_with("rangeid ") => {
+                    let mut parts = command.split_whitespace(); parts.next();
+                    let id = parts.next().unwrap().parse::<u64>().unwrap();
+                    let (start, end) = parts.next().unwrap().split_once(':').unwrap();
+                    let entry = world.entries.iter_mut().find(|entry| entry.2 == id).unwrap();
+                    entry.1 = Some(format!("{start}-{end}")); world.version += 1; Ok(vec![])
+                }
+                command if command.starts_with("command_list_begin\n") => {
+                    let ids = command.lines().filter_map(|line| line.strip_prefix("deleteid "))
+                        .map(str::parse::<u64>).collect::<Result<HashSet<_>, _>>().unwrap();
+                    world.entries.retain(|entry| !ids.contains(&entry.2)); world.version += ids.len() as u64;
+                    Ok(vec!["list_OK".into(); ids.len()])
+                }
+                other => Err(format!("unexpected command: {other}")),
+            }
+        }).unwrap();
+
+        let delete_pos = world.commands.iter().position(|command| command.starts_with("command_list_begin\ndeleteid 10")).unwrap();
+        let range_pos = world.commands.iter().position(|command| command == "rangeid 11 6.68:13.36").unwrap();
+        assert!(range_pos < delete_pos, "the restored segment must be applied and checked before stale MPD entries are removed");
+        assert!(!world.commands.iter().any(|command| command.starts_with("play ")), "startup restoration must not autoplay");
+        assert_eq!(world.entries, vec![(path.into(), Some("6.68-13.36".into()), 11)]);
+    }
+
     #[test]
     fn queue_insert_failed_ack_timeout_or_malformed_id_never_publishes_or_replays() {
         for response in [Err("ACK [50@1] private URI".into()),Err("timeout private URI".into()),Ok(vec!["Id: invalid".into()]),Ok(vec!["Id: 10".into()])] {
@@ -9702,8 +11020,28 @@ mod tests {
             let after=qi_status(2,2,if mode==1{"play"}else if mode==4{"stop"}else{"pause"},Some(if mode==2||mode==4{1}else{0}),if mode==3{14.}else{13.});
             let new=qi_entries(&[(if mode==0{"changed.flac"}else{"old/one.flac"},10),("new/a.flac",20)]);
             let mut script=qi_script(before,qi_entries(&[("old/one.flac",10)]),Ok(vec!["Id: 20".into()]),after,new);
+            // A failed postcondition now performs a bounded, ID-owned
+            // cleanup. Model that proof instead of exhausting the old
+            // seven-response fixture before cleanup can complete.
+            script.extend([
+                Ok(qi_status(2,2,if mode==1{"play"}else if mode==4{"stop"}else{"pause"},Some(if mode==2||mode==4{1}else{0}),if mode==3{14.}else{13.})),
+                Ok(qi_entries(&[(if mode==0{"changed.flac"}else{"old/one.flac"},10),("new/a.flac",20)])),
+                Ok(qi_status(2,2,if mode==1{"play"}else if mode==4{"stop"}else{"pause"},Some(if mode==2||mode==4{1}else{0}),if mode==3{14.}else{13.})),
+                Ok(vec![]),
+                Ok(qi_status(3,1,if mode==4{"stop"}else{"pause"},Some(0),13.)),
+                Ok(qi_entries(&[(if mode==0{"changed.flac"}else{"old/one.flac"},10)])),
+                Ok(qi_status(3,1,if mode==4{"stop"}else{"pause"},Some(0),13.)),
+                Ok(qi_status(3,1,if mode==4{"stop"}else{"pause"},Some(0),13.)),
+                Ok(qi_entries(&[(if mode==0{"changed.flac"}else{"old/one.flac"},10)])),
+                Ok(qi_status(3,1,if mode==4{"stop"}else{"pause"},Some(0),13.)),
+                Ok(qi_status(3,1,if mode==4{"stop"}else{"pause"},Some(0),13.)),
+                Ok(qi_entries(&[(if mode==0{"changed.flac"}else{"old/one.flac"},10)])),
+                Ok(qi_status(3,1,if mode==4{"stop"}else{"pause"},Some(0),13.)),
+            ]);
             assert!(audio.enqueue_tracks_with_io(vec![qi_track("new/a.flac")],vec!["new/a.flac".into()],QueueInsertPlacement::End,|_|script.pop_front().unwrap(),|_|panic!("unproved cache")).is_err());
-            assert!(!audio.queue_coherent);assert_eq!(audio.queue.len(),1);
+            assert_eq!(audio.queue_coherent, mode != 0,
+                "cleanup may retain a coherent queue only when every original entry was proved unchanged");
+            assert_eq!(audio.queue.len(),1);
         }
     }
     #[test]
@@ -10425,6 +11763,26 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_queue_failure_diagnostic_identifies_mpd_stage_without_paths() {
+        assert_eq!(
+            AudioEngine::queue_play_failure_reason(
+                "ACK [50@1] {add} No such file: /home/private/collection/track.wav"
+            ),
+            "mpd_ack code=50 index=1 command=add reason=not_found"
+        );
+        assert_eq!(
+            AudioEngine::queue_play_failure_reason(
+                "Falha ao conectar no socket MPD: /home/private/profile/mpd.sock"
+            ),
+            "mpd_socket_connect"
+        );
+        assert_eq!(
+            AudioEngine::queue_play_failure_reason("ACK malformed private details"),
+            "mpd_ack code=unknown index=unknown command=other reason=malformed"
+        );
+    }
+
+    #[test]
     fn playback_error_classification_requires_known_output_context() {
         for (message, expected) in [
             (
@@ -10703,6 +12061,100 @@ mod tests {
                 .unwrap()
                 .1
         );
+    }
+
+    #[test]
+    fn sqlite_playback_uses_resolved_absolute_path_but_persists_only_opaque_locator() {
+        let locator = format!("sqlite-track://7/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"Album/track.wav"));
+        let mpd_path = "/tmp/sonante-synthetic-track.wav";
+        let mut track = engine_with_track("").queue.remove(0);
+        track.media_locator = Some(MediaLocator::Local { uri: locator.clone() });
+        track.uri = mpd_path.into();
+        AudioEngine::validate_queue_insert_tracks(std::slice::from_ref(&track)).unwrap();
+
+        let mut audio = engine_with_track("old/track.wav");
+        let mut commands = Vec::new();
+        let mut cache = Vec::new();
+        audio.play_tracks_with_io(
+            vec![track],
+            vec![mpd_path.into()],
+            0,
+            |command| { commands.push(command.to_owned()); Ok(Vec::new()) },
+            |audio| { cache = AudioEngine::encode_queue_cache(&audio.queue)?; Ok(()) },
+        ).unwrap();
+
+        assert!(commands[0].contains("add \"/tmp/sonante-synthetic-track.wav\""));
+        assert!(commands[0].contains("play 0"));
+        assert_eq!(audio.queue[0].uri, mpd_path);
+        let serialized = String::from_utf8(cache).unwrap();
+        assert!(serialized.contains(&locator));
+        assert!(!serialized.contains(mpd_path));
+        let restored = AudioEngine::decode_queue_cache(serialized.as_bytes()).unwrap().0;
+        assert_eq!(restored[0].media_locator, Some(MediaLocator::Local { uri: locator }));
+        assert!(restored[0].uri.is_empty());
+    }
+
+    #[test]
+    fn sqlite_playback_uses_the_mpd_socket_protocol_and_keeps_logical_identity() {
+        let locator = format!("sqlite-track://7/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"Album/track.wav"));
+        let mpd_path = "/tmp/sonante-synthetic-track.wav";
+        let expected = format!("command_list_begin\nclear\nadd \"{mpd_path}\"\nplay 0\ncommand_list_end");
+        let (socket, server) = fake_mpd_script(vec![(expected, Some("list_OK\nlist_OK\nlist_OK\nOK\n".into()))]);
+        let mut audio = engine_with_track("");
+        audio.socket_path = socket.clone();
+        let mut track = audio.queue.remove(0);
+        track.media_locator = Some(MediaLocator::Local { uri: locator.clone() });
+        track.uri = mpd_path.into();
+        let mut persisted = Vec::new();
+        audio.play_tracks_with_io(
+            vec![track],
+            vec![mpd_path.into()],
+            0,
+            |command| AudioEngine::send_command_to_socket(&socket, command),
+            |engine| { persisted = AudioEngine::encode_queue_cache(&engine.queue)?; Ok(()) },
+        ).unwrap();
+        server.join().unwrap();
+        assert!(audio.queue_coherent);
+        assert_eq!(audio.queue[0].media_locator, Some(MediaLocator::Local { uri: locator.clone() }));
+        assert_eq!(audio.queue[0].uri, mpd_path);
+        let cache = String::from_utf8(persisted).unwrap();
+        assert!(cache.contains(&locator));
+        assert!(!cache.contains(mpd_path));
+    }
+
+    #[test]
+    fn sqlite_album_playback_preserves_track_order_and_opaque_queue_identity() {
+        let first = format!("sqlite-track://9/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"Album/01.wav"));
+        let second = format!("sqlite-track://9/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"Album/02.wav"));
+        let first_path = "/tmp/sonante-synthetic/Album/01.wav";
+        let second_path = "/tmp/sonante-synthetic/Album/02.wav";
+        let mut tracks = vec![engine_with_track("").queue.remove(0); 2];
+        tracks[0].media_locator = Some(MediaLocator::Local { uri: first.clone() });
+        tracks[0].uri = first_path.into();
+        tracks[0].title = "Track 1".into();
+        tracks[1].media_locator = Some(MediaLocator::Local { uri: second.clone() });
+        tracks[1].uri = second_path.into();
+        tracks[1].title = "Track 2".into();
+
+        let mut audio = engine_with_track("old/track.wav");
+        let mut commands = Vec::new();
+        let mut saved = Vec::new();
+        audio.play_tracks_with_io(
+            tracks,
+            vec![first_path.into(), second_path.into()],
+            0,
+            |command| { commands.push(command.to_owned()); Ok(Vec::new()) },
+            |audio| { saved = AudioEngine::encode_queue_cache(&audio.queue)?; Ok(()) },
+        ).unwrap();
+
+        assert_eq!(
+            commands,
+            [format!("command_list_begin\nclear\nadd \"{first_path}\"\nadd \"{second_path}\"\nplay 0\ncommand_list_end")]
+        );
+        assert_eq!(audio.queue.iter().map(|track| track.title.as_str()).collect::<Vec<_>>(), ["Track 1", "Track 2"]);
+        let saved = String::from_utf8(saved).unwrap();
+        assert!(saved.contains(&first) && saved.contains(&second));
+        assert!(!saved.contains(first_path) && !saved.contains(second_path));
     }
 
     #[test]
@@ -11395,6 +12847,35 @@ mod tests {
             .play_index(0, true)
             .unwrap_err()
             .contains("Índice fora da fila"));
+    }
+
+    #[test]
+    fn sqlite_queue_index_requires_the_same_locator_and_resolved_absolute_path() {
+        let locator = "sqlite-track://3/QWxidW0vMDEud2F2";
+        let mpd_path = "/tmp/sonante-synthetic/01.wav";
+        let mut stale = engine_with_track(mpd_path);
+        stale.queue[0].media_locator = Some(MediaLocator::Local { uri: locator.into() });
+        stale.socket_path = "/socket/must-not-be-used".into();
+        assert_eq!(
+            stale.play_sqlite_index(0, locator, "/tmp/other.wav", false).unwrap_err(),
+            "SQLITE_QUEUE_ITEM_CHANGED"
+        );
+
+        let (socket, server) = fake_mpd_script(vec![("play 0".into(), Some("OK\n".into()))]);
+        let mut current = engine_with_track(mpd_path);
+        current.queue[0].media_locator = Some(MediaLocator::Local { uri: locator.into() });
+        current.socket_path = socket;
+        current.play_sqlite_index(0, locator, mpd_path, false).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn sqlite_mpd_path_requires_an_absolute_control_free_local_path() {
+        assert!(is_sqlite_mpd_path("/tmp/synthetic audio/01.wav"));
+        assert!(!is_sqlite_mpd_path("file:///tmp/synthetic.wav"));
+        assert!(!is_sqlite_mpd_path("relative/track.wav"));
+        assert!(!is_sqlite_mpd_path("/tmp/track.wav\nplay"));
+        assert!(!is_sqlite_mpd_path("/tmp/track.wav\0hidden"));
     }
 
     fn shared_queue_index_script(
@@ -12281,6 +13762,70 @@ mod tests {
     }
 
     #[test]
+    fn eq_failed_transition_restoration_preserves_queue_without_resuming_playing_origin() {
+        for origin in [PlaybackState::Playing, PlaybackState::Stopped] {
+            let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "sonante-eq-restore-{}-{id}.sock",
+                std::process::id()
+            ));
+            let listener = UnixListener::bind(&path).unwrap();
+            let socket_path = path.to_string_lossy().into_owned();
+            let server_path = path.clone();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.write_all(b"OK MPD 0.23.5\n").unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut batch = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    assert!(!line.is_empty(), "MPD closed before command list completed");
+                    batch.push_str(&line);
+                    if line.trim() == "command_list_end" {
+                        break;
+                    }
+                }
+                assert!(batch.contains("clear\n") && batch.contains("add \"fixture.wav\"\n"));
+                assert!(!batch.contains("play "));
+                assert!(!batch.contains("pause "));
+                stream.write_all(b"OK\n").unwrap();
+                std::fs::remove_file(server_path).unwrap();
+            });
+
+            let mut engine = engine_with_track("fixture.wav");
+            engine.socket_path = socket_path;
+            let resolved = engine
+                .capture_device_switch_queue()
+                .unwrap()
+                .bind_resolved_uris(vec!["fixture.wav".into()])
+                .unwrap();
+            let saved = Some(DeviceSwitchSnapshot {
+                queue_index: 0,
+                elapsed: if origin == PlaybackState::Playing {
+                    31.25
+                } else {
+                    0.
+                },
+                state: origin,
+            });
+            assert_eq!(
+                engine.restore_for_route_save(saved, &resolved).unwrap(),
+                DeviceSwitchRestoreOutcome::Complete
+            );
+            assert_eq!(
+                engine.restored_resume,
+                (origin == PlaybackState::Playing).then_some(PlaybackResumeSnapshot {
+                    queue_index: 0,
+                    elapsed: 31.25,
+                    state: PlaybackState::Paused,
+                })
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
     fn eq_resume_actual_caller_requires_confirmed_cursor_queue_and_playing_origin(){
         let pause="playlist: 9\nplaylistlength: 1\nsong: 0\nelapsed: 17.000\nstate: pause\nOK\n";
         let play="playlist: 9\nplaylistlength: 1\nsong: 0\nelapsed: 17.001\nstate: play\nOK\n";
@@ -12667,7 +14212,7 @@ mod tests {
         let audio = Mutex::new(engine);
         let client = crate::plex::PlexClient::from_config(&crate::config::AppConfig::default());
         assert!(
-            tauri::async_runtime::block_on(crate::resolve_device_switch_queue(&audio, &client))
+            tauri::async_runtime::block_on(crate::resolve_device_switch_queue(&audio, &client, None, &[]))
                 .is_err()
         );
         let mut engine = audio.lock().unwrap();
@@ -12733,6 +14278,8 @@ mod tests {
             let resolved = tauri::async_runtime::block_on(crate::resolve_device_switch_queue(
                 &worker_audio,
                 &client,
+                None,
+                &[],
             ))
             .unwrap();
             resolved_tx.send(()).unwrap();

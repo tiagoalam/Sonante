@@ -125,6 +125,7 @@ test('enqueue service passes the explicit token once, bypasses gain/playback pre
     './config':{ensureDirectOutputChoice:async()=>assert.fail('queue editing cannot authorize gain')},
     '../utils/localCoverBatch':{createLocalCoverBatch:()=>()=>assert.fail('no artwork read')},
     '../utils/localSourceReadQueue':{localSourceReadQueue:queue},'../utils/playbackIntent':{...intents,configurePlaybackIntents(){}},
+    '../utils/sqliteExperimentalMode':{isSqliteCatalogEnabled:()=>true},
     '@tauri-apps/api/core':{invoke:async(cmd,args)=>{calls.push([cmd,args]);return 1;}},'../utils/frontendDiagnostics':{diagnosticInvoke:(invoke,...args)=>invoke(...args)},
   });
   const intent=intents.beginPlaybackIntent();assert.equal(await audioService.enqueueTracks([local()],'next',intent),1);assert.deepEqual(calls,[['enqueue_tracks',{tracks:[local()],placement:'next',intent:'1'}]]);
@@ -207,6 +208,14 @@ test('real multi-selection preserves displayed order and duplicate occurrences, 
  available=false;host.paint();host.close();
 });
 
+test('contexts without album-detail selection can hide and disable the shared selection command', async () => {
+ const f=await fixture();f.host.close();const model=await import('../src/utils/trackSelection.ts');
+ const {useTrackSelection}=compile('components/TrackSelection.tsx',{react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t})},'../utils/trackSelection':model,'./QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null},'lucide-react':icons});
+ const host=new f.Harness(()=>useTrackSelection({},[local()],true,false));const view=host.paint();
+ assert.equal(view.toolbar,null);assert.equal(view.checkbox(0),null);assert.equal(view.checked(0),false);
+ assert.equal(view.click({ctrlKey:true,preventDefault(){},stopPropagation(){}},0),false);assert.deepEqual(f.calls,[]);host.close();
+});
+
 test('multi-selection queued payload is discarded after its view becomes unavailable or changes source', async () => {
  for(const mode of ['unavailable','source','unmount']) {
   const f=await fixture();f.host.close();const model=await import('../src/utils/trackSelection.ts');let context={},available=true;
@@ -245,6 +254,19 @@ test('Recent history is source-filtered, plays only on explicit request and open
  nodes(tree,n=>n.type==='button')[0].props.onClick();tree=h.paint();rows=nodes(tree,n=>n.type==='li');nodes(rows[1],n=>n.type==='button'&&n.props['aria-label']===f.t('history.openAlbum'))[0].props.onClick();await flush();tree=h.paint();assert.ok(nodes(tree,n=>n.props?.album?.rating_key==='album-1').length);assert.equal(h.calls.at(-1)[0],'navigate');
  nodes(tree,n=>n.props?.album?.rating_key==='album-1')[0].props.onBack();tree=h.paint();nodes(tree,n=>n.type==='button'&&n.props.children===f.t('history.plex'))[0].props.onClick();tree=h.paint();rows=nodes(tree,n=>n.type==='li');assert.equal(rows.length,1);
  nodes(rows[0],n=>n.type==='button'&&n.props['aria-label']===f.t('history.play',{title:'Plex track'}))[0].props.onClick();await flush();const play=h.calls.find(call=>call[0]==='play');assert.deepEqual(play[1],[entries[1].track]);assert.equal(play[2],0);h.host.close();
+});
+
+test('Recent Local history can replay an opaque SQLite track locator explicitly', async()=>{
+ const f=await fixture();f.host.close();
+ const track={...local('SQLite track'),media_locator:{kind:'local',uri:'sqlite-track://7/QWxidW0vMDEud2F2'}};
+ const h=await historyFixture(f,{version:1,enabled:true,entries:[{id:'sqlite-id',played_at:1720000000000,track}]});
+ const tree=h.paint();
+ nodes(tree,n=>n.type==='button'&&n.props['aria-label']===f.t('history.play',{title:'SQLite track'}))[0].props.onClick();
+ await flush();
+ const play=h.calls.find(call=>call[0]==='play');
+ assert.deepEqual(play[1],[track]);
+ assert.equal(play[2],0);
+ h.host.close();
 });
 
 test('Recent clear requires confirmation, disabling persists independently of playback and status events read only on change',async()=>{

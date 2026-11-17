@@ -1,10 +1,10 @@
 import { createLocalCoverBatch } from "./localCoverBatch.ts";
 import { createLocalSourceReadQueue } from "./localSourceReadQueue.ts";
-import test,{afterEach}from'node:test';import assert from'node:assert/strict';import{readFileSync}from'node:fs';import ts from'typescript';import i18n from'i18next';
-import{directVolumeContext,hasDirectVolumeChoice,confirmDirectVolumeConfig}from'./directVolumeChoice.ts';import{ensureDirectOutputChoice}from'../services/config.ts';import * as intents from'./playbackIntent.ts';
+import test,{afterEach}from'node:test';import assert from'node:assert/strict';import{readFileSync}from'node:fs';import ts from'typescript';
+import{directVolumeContext,hasDirectVolumeChoice,confirmDirectVolumeConfig}from'./directVolumeChoice.ts';import{configService,ensureDirectOutputChoice}from'../services/config.ts';import * as intents from'./playbackIntent.ts';
+import{getDirectVolumeChoicePromptSnapshot,respondToDirectVolumeChoice,subscribeDirectVolumeChoicePrompt}from'./directVolumeChoicePrompt.ts';
 const base=()=>({first_run:false,audio_output_type:'alsa',alsa_device:'hw:CARD=Fixture,DEV=0',dop_enabled:false,local_folders:[],direct_volume_choice:null,direct_muted:false});
-const prior=globalThis.window;afterEach(()=>{globalThis.window=prior;});
-await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(l=>[l,{translation:JSON.parse(readFileSync(new URL(`../locales/${l}.json`,import.meta.url)))}]))});
+const prior=globalThis.window,promptCleanups=[];afterEach(()=>{promptCleanups.splice(0).forEach(cleanup=>cleanup());globalThis.window=prior;});
 let fixtureSerial=0;
 function fixture({accept=true,playing=false}={}){
  let cfg=base(),generation=++fixtureSerial*1000,prompts=0;const calls=[];const native=async(command,args)=>{
@@ -13,11 +13,12 @@ function fixture({accept=true,playing=false}={}){
   if(command==='confirm_direct_volume_choice'){assert.deepEqual(args.expectedConfig,cfg);assert.equal(args.intent,String(generation));cfg={...cfg,direct_volume_choice:directVolumeContext(cfg)};return;}
   if(command==='save_config'){cfg=args.newConfig;return{status:'completed'}}
  };
- globalThis.window={confirm:message=>{prompts++;assert.equal(message,i18n.t('player.directVolumeChoiceConfirm'));return accept;},__TAURI_INTERNALS__:{invoke:native}};
+ const removePromptListener=subscribeDirectVolumeChoicePrompt(()=>{if(getDirectVolumeChoicePromptSnapshot().open){prompts++;queueMicrotask(()=>respondToDirectVolumeChoice(accept));}});promptCleanups.push(removePromptListener);
+ globalThis.window={__TAURI_INTERNALS__:{invoke:native}};
  const js=ts.transpileModule(readFileSync(new URL('../services/audio.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};
- const deps={'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice},'../utils/playbackIntent':intents,'@tauri-apps/api/core':{invoke:native},'../utils/frontendDiagnostics':{diagnosticInvoke:(fn,c,a)=>fn(c,a)}};
+ const deps={'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'../utils/sqliteExperimentalMode':{isSqliteCatalogEnabled:()=>true},'./config':{ensureDirectOutputChoice},'../utils/playbackIntent':intents,'@tauri-apps/api/core':{invoke:native},'../utils/frontendDiagnostics':{diagnosticInvoke:(fn,c,a)=>fn(c,a)}};
  new Function('require','exports',js)(id=>{assert.ok(id in deps,id);return deps[id]},exports);
- return{service:exports.audioService,calls,get cfg(){return cfg},set cfg(v){cfg=v},get prompts(){return prompts},native};
+ return{service:exports.audioService,calls,get cfg(){return cfg},set cfg(v){cfg=v},get prompts(){return prompts},native,dispose:removePromptListener};
 }
 test('choice is versioned, bound to endpoint/DoP, and cancelling preserves draft byte-for-byte',async()=>{
  const c=base(),before=JSON.stringify(c);await assert.rejects(confirmDirectVolumeConfig(c,()=>false),e=>e==='DIRECT_CHOICE_CANCELLED');assert.equal(JSON.stringify(c),before);
@@ -25,11 +26,14 @@ test('choice is versioned, bound to endpoint/DoP, and cancelling preserves draft
  const shared={...granted,audio_output_type:'pipewire'};assert.equal((await confirmDirectVolumeConfig(shared,()=>assert.fail())).direct_volume_choice,null);
 });
 test('first ordinary Play migrates once; later Play, album/track/queue and next/previous use the current intent without new confirmation',async()=>{
- for(const language of['en','pt-BR']){await i18n.changeLanguage(language);const f=fixture();
-  await f.service.togglePlay();assert.equal(f.prompts,1);assert.ok(hasDirectVolumeChoice(f.cfg));
-  await f.service.togglePlay();await f.service.playUris(['fixture.wav'],0);await f.service.playTracks([{uri:'fixture.wav'}],0);await f.service.playQueueIndex(0);await f.service.next();await f.service.previous();
-  assert.equal(f.prompts,1);const actual=f.calls.filter(([c])=>['toggle_playback','play_uris','play_tracks','play_queue_index','next_track','previous_track'].includes(c));assert.equal(actual.length,7);for(const[,a]of actual)assert.ok(a.intent);assert.equal(actual[0][1].wantPlay,true);assert.ok(!JSON.stringify(f.calls).includes('prepare'));
- }
+ const f=fixture();
+ await f.service.togglePlay();assert.equal(f.prompts,1);assert.ok(hasDirectVolumeChoice(f.cfg));
+ await f.service.togglePlay();await f.service.playUris(['fixture.wav'],0);await f.service.playTracks([{uri:'fixture.wav'}],0);await f.service.playQueueIndex(0);await f.service.next();await f.service.previous();
+ assert.equal(f.prompts,1);const actual=f.calls.filter(([c])=>['toggle_playback','play_uris','play_tracks','play_queue_index','next_track','previous_track'].includes(c));assert.equal(actual.length,7);for(const[,a]of actual)assert.ok(a.intent);assert.equal(actual[0][1].wantPlay,true);assert.ok(!JSON.stringify(f.calls).includes('prepare'));
+});
+test('saving Exclusive asks through the modal and cancellation leaves the stored configuration untouched',async()=>{
+ let f=fixture();await configService.saveConfig(f.cfg);assert.equal(f.prompts,1);assert.ok(hasDirectVolumeChoice(f.cfg));assert.equal(f.calls.filter(([command])=>command==='save_config').length,1);f.dispose();
+ f=fixture({accept:false});await assert.rejects(configService.saveConfig(f.cfg),error=>error==='DIRECT_CHOICE_CANCELLED');assert.equal(f.prompts,1);assert.equal(f.cfg.direct_volume_choice,null);assert.equal(f.calls.filter(([command])=>command==='save_config').length,0);
 });
 test('cancelled migration does not persist or send playback; Pause never requires a volume-choice dialog',async()=>{
  let f=fixture({accept:false});await assert.rejects(f.service.togglePlay(),e=>e==='PLAYBACK_SUPERSEDED');assert.equal(f.prompts,1);assert.ok(!f.calls.some(([c])=>['toggle_playback','save_config','confirm_direct_volume_choice'].includes(c)));

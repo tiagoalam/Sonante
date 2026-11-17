@@ -1,13 +1,13 @@
 import { localSourceReadQueue } from "../utils/localSourceReadQueue.ts";
-import i18n from "i18next";
 import { hasDirectVolumeChoice, confirmDirectVolumeConfig } from "../utils/directVolumeChoice.ts";
+import { requestDirectVolumeChoice } from "../utils/directVolumeChoicePrompt.ts";
 import { playbackIntentToken, type PlaybackIntent } from "../utils/playbackIntent.ts";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppConfig, ConfigSaveOperation, ConfigSaveResponse, QueueClearAuthorization } from "../types/config";
 import type { LocalImportPreview } from "../types/localImportPreview";
 import type { AudioDevice, DeviceAvailability } from "../types/audio";
 
-function askDirectVolumeChoice():boolean{return window.confirm(i18n.t('player.directVolumeChoiceConfirm'));}
+function askDirectVolumeChoice():Promise<boolean>{return requestDirectVolumeChoice();}
 export async function ensureDirectOutputChoice(intent:PlaybackIntent):Promise<void>{
  const token=await playbackIntentToken(intent),config=await invoke<AppConfig>('get_config');
  if(!intent.current())throw 'PLAYBACK_SUPERSEDED';if(hasDirectVolumeChoice(config))return;
@@ -19,6 +19,7 @@ export async function ensureDirectOutputChoice(intent:PlaybackIntent):Promise<vo
 export const configService = {
   getConfig: (): Promise<AppConfig> => invoke<AppConfig>("get_config"),
   getAudioDevices: (): Promise<AudioDevice[]> => invoke<AudioDevice[]>("get_audio_devices"),
+  getNullOutputTestMode: (): Promise<boolean> => invoke<boolean>("is_null_output_test_mode"),
   checkDirectDeviceAvailability: (deviceId: string): Promise<DeviceAvailability[]> =>
     invoke<DeviceAvailability[]>("check_direct_device_availability", { deviceId }),
   saveConfig: async (newConfig: AppConfig, queueClearAuthorization?: QueueClearAuthorization): Promise<ConfigSaveResponse> => {

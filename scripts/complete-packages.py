@@ -237,12 +237,40 @@ def deb_control(base, version, revision, stage):
     text = run('dpkg-deb', '-f', base)
     require(re.search(r'^Package: sonante$', text, re.M) and re.search(r'^Architecture: amd64$', text, re.M), 'DEB identity')
     require('libc6 (>= 2.35)' in text and 'libwebkit2gtk-4.1-0 (>= 2.40)' in text, 'DEB ABI requirements')
+    text = remove_control_dependency(text, 'Depends', 'mpd')
     require(not re.search(r'(?m)^(?:Depends|Recommends):.*\bwireplumber\b', text), 'Required WirePlumber is not supported')
+    require(not re.search(r'(?m)^Depends:.*(?:^|[,| ])mpd(?::[a-z0-9-]+)?(?:\s|,|$)', text),
+            'System MPD must not be required; Sonante owns a pinned private runtime')
     text, count = re.subn(r'^Version: .+$', 'Version: ' + version + '-' + revision, text, flags=re.M)
     require(count == 1, 'DEB version field')
     text = re.sub(r'^Installed-Size: .*\n?', '', text, flags=re.M)
     size = sum(p.stat().st_size for p in stage.rglob('*') if p.is_file())
     return text.rstrip() + '\nInstalled-Size: ' + str((size + 1023) // 1024) + '\n'
+
+
+def remove_control_dependency(control, field, package):
+    """Remove a named package from a Debian comma/alternative dependency field."""
+    lines = control.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.startswith(field + ':')]
+    require(len(starts) == 1, 'Expected one ' + field + ' control field')
+    start = starts[0]
+    end = start + 1
+    while end < len(lines) and lines[end][:1].isspace():
+        end += 1
+    value = lines[start].split(':', 1)[1]
+    value += ' ' + ' '.join(line.strip() for line in lines[start + 1:end])
+    groups = []
+    for group in value.split(','):
+        alternatives = []
+        for alternative in group.split('|'):
+            match = re.match(r'\s*([a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?)', alternative, re.I)
+            base_name = match.group(1).split(':', 1)[0].lower() if match else ''
+            if base_name != package.lower():
+                alternatives.append(alternative.strip())
+        if alternatives:
+            groups.append(' | '.join(alternatives))
+    lines[start:end] = [field + ': ' + ', '.join(groups)]
+    return '\n'.join(lines) + ('\n' if control.endswith('\n') else '')
 
 
 def verify_deb_controls(package, expected=None):
@@ -302,6 +330,7 @@ def write_tar(path, stage, names, epoch, include_dirs=False):
 def build_rpm(base, stage, output, work, version, revision, epoch):
     require(not run('rpm', '-qp', '--scripts', base).strip(), 'Base RPM scriptlets forbidden')
     requires = {line for line in run('rpm', '-qp', '--requires', base).splitlines() if not line.startswith('rpmlib(')}
+    requires.discard('mpd')  # The application owns a hash-pinned MPD runtime; never install a global daemon.
     require({'nettle >= 3.10', '(webkit2gtk4.1 >= 2.40)', 'pipewire-utils'} <= requires, 'Fedora requirements missing')
     spec = importlib.util.spec_from_file_location('rpm_elf_deps', ROOT / 'scripts/rpm-elf-deps.py')
     module = importlib.util.module_from_spec(spec)
@@ -360,11 +389,14 @@ def arch_info(previous, version, revision, glibc, size, epoch):
     for line in previous.splitlines():
         key, sep, value = line.partition(' = ')
         if sep and key in allowed:
+            if key == 'depend' and value.split(':', 1)[0] == 'mpd':
+                continue
             if key == 'depend' and value.startswith('glibc>='):
                 value = 'glibc>=' + glibc
             lines.append(key + ' = ' + value)
     require({'pkgname = sonante', 'arch = x86_64', 'depend = glibc>=' + glibc,
              'depend = webkit2gtk-4.1>=2.40', 'depend = pipewire'} <= set(lines), 'Arch required metadata')
+    require('depend = mpd' not in lines, 'System MPD must not be required; Sonante owns a pinned private runtime')
     require('depend = wireplumber' not in lines, 'Required WirePlumber is not supported')
     lines += ['pkgver = ' + version + '-' + revision, 'pkgdesc = Local and Plex music player with pinned audio runtimes',
               'builddate = ' + str(epoch), 'packager = Tiago Alam', 'size = ' + str(size)]

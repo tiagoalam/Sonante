@@ -6,6 +6,29 @@ export function libraryDoctorAvailable(catalog: LocalAlbumCatalogState, updating
     && !catalog.saveBlocked && !updating && catalog.albums.some(album => album.id === albumId);
 }
 
+export function sqliteLibraryDoctorAvailable(
+  albumId: string,
+  sources: readonly { id: number; generation: number }[],
+  indexing: boolean,
+  visibleAlbumIds: readonly string[],
+): boolean {
+  const match = /^(?:sqlite|sqlite-cue-album):(\d+):[A-Za-z0-9_-]+$/.exec(albumId);
+  if (!match || indexing || !visibleAlbumIds.includes(albumId)) return false;
+  const sourceId = Number(match[1]);
+  return Number.isSafeInteger(sourceId) && sources.some(source => source.id === sourceId && source.generation > 0);
+}
+
+export function sqliteLibraryDoctorVersion(
+  albumId: string,
+  sources: readonly { id: number; generation: number }[],
+): string | null {
+  const match = /^(?:sqlite|sqlite-cue-album):(\d+):[A-Za-z0-9_-]+$/.exec(albumId);
+  if (!match) return null;
+  const sourceId = Number(match[1]);
+  const source = sources.find(item => item.id === sourceId);
+  return source ? `sqlite:${source.id}:generation:${source.generation}:album:${albumId}` : null;
+}
+
 export function doctorError(cause: unknown): DoctorUiError {
   return typeof cause === "string" && ["state_unavailable", "catalog_read_failed", "album_not_found", "task_failed", "read_in_progress"].includes(cause)
     ? cause as DoctorUiError : "unknown";

@@ -61,6 +61,7 @@ function serviceFixture(options = {}) {
     '../utils/albumEditionSizes': compile('utils/albumEditionSizes.ts'),
     '../utils/albumEditionAnalysis': compile('utils/albumEditionAnalysis.ts', { './albumEditionSizes': compile('utils/albumEditionSizes.ts'), './albumEditions': helpers }),
     '../utils/musicSources': { sourceEnabled: (cfg, kind) => cfg.sources[kind] },
+    '../utils/sqliteExperimentalMode': { isSqliteCatalogEnabled: () => options.sqliteMode === true },
     './audio': { audioService: options.audio ?? { getLocalAlbums: async () => { calls.push('local'); return [local('one').album]; } } },
     './plex': { plexService: { getLibraries: async () => { calls.push('libraries'); return [{ key: '7', title: 'Jazz' }, { key: '8', title: 'Rock' }]; }, getAlbums: async key => { calls.push('plex:' + key); if (options.failLibrary === key) throw 'OFFLINE'; return [{ ...base, rating_key: key, year: 1959 }]; } } },
     './navidrome': { navidromeService: { status: async () => { calls.push('nav-status'); return options.navStatus?.(++navReads) ?? { connection_id: 'proxy', account_id: 'account' }; } } },
@@ -98,6 +99,14 @@ test('Local editions reuse the confirmed shared catalog without a second native 
   const f = serviceFixture({ catalog: { loaded: true, albums }, audio: { getLocalAlbums: () => assert.fail('duplicate read') } });
   const result = await f.loadEditionSource('local', config, () => true);
   assert.equal(result.entries[0].album, albums[0]); assert.deepEqual(f.calls, []);
+});
+test('SQLite Local editions use the confirmed shared catalog even without legacy folder settings', async () => {
+  const albums = [local('sqlite:7:opaque').album];
+  const f = serviceFixture({ sqliteMode: true, catalog: { loaded: true, albums }, audio: { getLocalAlbums: () => assert.fail('must reuse the admitted catalog') } });
+  const result = await f.loadEditionSource('local', { ...config, local_folders: [] }, () => true);
+  assert.equal(result.phase, 'ready');
+  assert.equal(result.entries[0].album.id, 'sqlite:7:opaque');
+  assert.deepEqual(f.calls, []);
 });
 test('saved, loading, failed or updating Local catalogs never admit an edition check', async () => {
   for (const patch of [{loaded:false}, {loading:true}, {error:'offline'}, {saveBlocked:true}, {mpdBusy:true}, {manualCheckPlayback:true}]) {

@@ -18,9 +18,12 @@ for package in "${packages[@]}"; do
       dpkg-deb --fsys-tarfile "$package" | tar -xOf - usr/share/doc/sonante/copyright | cmp - packaging/debian-copyright
       contents="$(dpkg-deb --fsys-tarfile "$package" | tar -tf -)"
       depends="$(dpkg-deb -f "$package" Depends)"
-      for dep in mpd alsa-utils xdg-utils xdg-desktop-portal libasound2 libwebkit2gtk-4.1-0 libssl3; do
+      for dep in alsa-utils xdg-utils xdg-desktop-portal libasound2 libwebkit2gtk-4.1-0 libssl3; do
         [[ "$depends" == *"$dep"* ]]
       done
+      if printf '%s\n' "$depends" | tr ',' '\n' | sed 's/^[[:space:]]*//' | grep -Eq '^mpd(:[^[:space:]]+)?([[:space:]]|$)'; then
+        echo 'Package must use its private MPD runtime, not depend on the system daemon' >&2; exit 1
+      fi
       if ! printf '%s\n' "$depends" | tr ',' '\n' | grep -Eq '^[[:space:]]*libwebkit2gtk-4\.1-0 \(>= 2\.40\)[[:space:]]*$'; then
         echo 'DEB must require libwebkit2gtk-4.1-0 (>= 2.40)' >&2; exit 1
       fi
@@ -34,9 +37,10 @@ for package in "${packages[@]}"; do
       test "$(rpm -qp --queryformat '%{ARCH}' "$package")" = x86_64
       contents="$(rpm -qlp "$package")"
       depends="$(rpm -qp --requires "$package")"
-      for dep in mpd alsa-utils xdg-utils xdg-desktop-portal alsa-lib webkit2gtk4.1 openssl-libs 'libssl.so.3()(64bit)'; do
+      for dep in alsa-utils xdg-utils xdg-desktop-portal alsa-lib webkit2gtk4.1 openssl-libs 'libssl.so.3()(64bit)'; do
         [[ "$depends" == *"$dep"* ]]
       done
+      ! printf '%s\n' "$depends" | grep -Eq '^mpd$'
       # --requires renders a literal name and a real comparison identically.
       rpm -qp --queryformat '[%{REQUIRENAME}\t%{REQUIREFLAGS}\t%{REQUIREVERSION}\n]' "$package" |
         python3 "$script_dir/inspect-rpm-requires.py"

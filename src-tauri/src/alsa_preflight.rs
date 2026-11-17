@@ -29,7 +29,7 @@ pub(crate) struct DeviceAvailability {
 
 // Recognize hardware addresses only. Numeric and symbolic card names may alias;
 // without resolving that identity, conservatively avoid probing a possible owner.
-fn physical_address(device: &str) -> Option<(&str, u32)> {
+pub(crate) fn physical_address(device: &str) -> Option<(&str, u32)> {
     let mut parts = device.strip_prefix("hw:")?.split(',');
     let card = parts.next()?;
     let card = card.strip_prefix("CARD=").unwrap_or(card);
@@ -53,6 +53,10 @@ fn physical_address(device: &str) -> Option<(&str, u32)> {
         return None;
     }
     Some((card, device))
+}
+
+pub(crate) fn is_physical_address(device: &str) -> bool {
+    physical_address(device).is_some()
 }
 
 #[derive(PartialEq, Eq)]

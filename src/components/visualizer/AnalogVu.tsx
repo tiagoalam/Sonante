@@ -4,8 +4,8 @@ import { InstrumentCanvas } from "./InstrumentCanvas";
 export type AnalogVuVariant = "amber" | "blue" | "radial";
 interface AnalogVuProps {
   levels: AudioLevelFrame; active: boolean; variant: AnalogVuVariant;
-  leftLabel: string; rightLabel: string; relativeLabel: string; fullscreen?: boolean;
+  leftLabel: string; rightLabel: string; relativeLabel: string; fullscreen?: boolean; compact?: boolean;
 }
-export const AnalogVu: React.FC<AnalogVuProps> = ({ levels, active, variant, leftLabel, rightLabel, relativeLabel, fullscreen }) =>
+export const AnalogVu: React.FC<AnalogVuProps> = ({ levels, active, variant, leftLabel, rightLabel, relativeLabel, fullscreen, compact }) =>
   <InstrumentCanvas levels={levels} active={active} mode={variant === "radial" ? "vu-radial" : variant === "blue" ? "vu-blue" : "vu-amber"}
-    labels={{ left: leftLabel, right: rightLabel, relative: relativeLabel }} label={`${leftLabel} / ${rightLabel} — ${relativeLabel} · RMS dBFS`} fullscreen={fullscreen} />;
+    labels={{ left: leftLabel, right: rightLabel, relative: relativeLabel }} label={`${leftLabel} / ${rightLabel} — ${relativeLabel} · RMS dBFS`} fullscreen={fullscreen} compact={compact} />;

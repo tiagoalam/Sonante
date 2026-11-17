@@ -13,8 +13,8 @@ export function ExperimentalNotice() {
 }
 export function ExperimentalFeaturesSetting({ enabled, onChange, disabled = false }: { enabled: boolean; onChange: (value: boolean) => void; disabled?: boolean }) {
   const { t } = useTranslation(); const id = useId();
-  return <fieldset className="space-y-3 border-t border-[color:var(--theme-border-soft,#333333)] pt-4" aria-describedby={`${id}-description ${id}-features`}>
-    <legend className="flex flex-wrap items-center gap-2 text-sm font-semibold"><FlaskConical size={16} aria-hidden="true" />{t('experimental.title')}<BetaBadge /></legend>
+  return <fieldset data-settings-section="experimental" className="settings-section" aria-describedby={`${id}-description ${id}-features`}>
+    <legend className="settings-section-title"><FlaskConical size={14} aria-hidden="true" />{t('experimental.title')}<BetaBadge /></legend>
     <p id={`${id}-description`} className="text-xs leading-relaxed text-[color:var(--theme-fg-muted,#888888)]">{t('experimental.description')}</p>
     <label className="flex items-center gap-2 text-sm">
       <input type="checkbox" checked={enabled} disabled={disabled} onChange={event => onChange(event.target.checked)} aria-describedby={`${id}-description ${id}-features`} className="accent-[var(--theme-control-accent,#E5A00D)]" />

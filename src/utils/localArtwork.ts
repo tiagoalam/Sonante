@@ -24,12 +24,17 @@ export class LocalArtworkResolver {
   private readonly maxCached: number;
   private readonly covers = new Map<string, string>();
   private readonly coverSources = new Map<string, "local" | "online">();
+  // Persisted SQLite art is intentionally a small, presentation-only image.
+  // Keep that distinction so playback can upgrade it to the validated source
+  // artwork without changing the fast thumbnail path used by album cards.
+  private readonly presentationOnly = new Set<string>();
   private readonly inFlight = new Map<string, { generation: number; promise: Promise<string | null>; getPhase: () => ArtworkPhase | undefined; consumers: Set<() => boolean> }>();
   private generation = 0;
   private blocked = false;
   private catalog: readonly LocalAlbum[] | null = null;
   private active = 0;
-  private readonly queued: Array<() => void> = [];
+  private readonly queued: Array<{ background: boolean; order: number; start: () => void }> = [];
+  private queueOrder = 0;
   private readonly listeners = new Map<string, Set<(cover: string) => void>>();
 
   constructor(
@@ -56,6 +61,42 @@ export class LocalArtworkResolver {
     return this.coverSources.get(albumId) ?? null;
   }
 
+  /**
+   * Seed a previously persisted, scope-validated local thumbnail. Used only by
+   * the SQLite browser, whose thumbnail cache is keyed to the catalog source
+   * generation; it avoids rereading a network root after an application restart.
+   */
+  seedPersistedLocal(albumId: string, cover: string): void {
+    if (!albumId || !cover) return;
+    // A browser remount may reseed the small persisted preview after the
+    // player already upgraded this entry. Never downgrade session source art.
+    if (this.coverSources.get(albumId) === "local" && this.covers.has(albumId) && !this.presentationOnly.has(albumId)) return;
+    if (!this.covers.has(albumId) && this.covers.size >= this.maxCached) {
+      const oldest = this.covers.keys().next().value;
+      if (oldest) {
+        this.covers.delete(oldest);
+        this.coverSources.delete(oldest);
+        this.presentationOnly.delete(oldest);
+      }
+    }
+    this.covers.delete(albumId);
+    this.coverSources.delete(albumId);
+    this.covers.set(albumId, cover);
+    this.coverSources.set(albumId, "local");
+    this.presentationOnly.add(albumId);
+    this.listeners.get(albumId)?.forEach(listener => listener(cover));
+  }
+
+  clearLocalCovers(): void {
+    for (const [albumId, source] of this.coverSources) {
+      if (source === "local") {
+        this.coverSources.delete(albumId);
+        this.covers.delete(albumId);
+        this.presentationOnly.delete(albumId);
+      }
+    }
+  }
+
   getDiagnostics(): { active: number; queued: number; inFlight: number; blocked: boolean } {
     return { active: this.active, queued: this.queued.length, inFlight: this.inFlight.size, blocked: this.blocked };
   }
@@ -67,17 +108,21 @@ export class LocalArtworkResolver {
     this.generation += 1;
   }
 
-  private schedule(task: () => Promise<string | null>): Promise<string | null> {
+  private schedule(task: () => Promise<string | null>, background = false): Promise<string | null> {
     return new Promise((resolve, reject) => {
       const start = () => {
         this.active += 1;
         void task().then(resolve, reject).finally(() => {
           this.active -= 1;
-          this.queued.shift()?.();
+          this.queued.sort((a, b) => Number(a.background) - Number(b.background) || a.order - b.order);
+          this.queued.shift()?.start();
         });
       };
       if (this.active < 2) start();
-      else this.queued.push(start);
+      else {
+        this.queued.push({ background, order: this.queueOrder++, start });
+        this.queued.sort((a, b) => Number(a.background) - Number(b.background) || a.order - b.order);
+      }
     });
   }
 
@@ -91,23 +136,25 @@ export class LocalArtworkResolver {
     };
   }
 
-  private publish(albumId: string, cover: string, source: "local" | "online"): void {
-    if (this.covers.has(albumId)) return;
+  private publish(albumId: string, cover: string, source: "local" | "online", upgradePreview = false): void {
+    if (this.covers.has(albumId) && !(upgradePreview && this.presentationOnly.has(albumId))) return;
     if (this.covers.size >= this.maxCached) {
       const oldest = this.covers.keys().next().value;
       if (oldest) {
         this.covers.delete(oldest);
         this.coverSources.delete(oldest);
+        this.presentationOnly.delete(oldest);
       }
     }
     this.covers.set(albumId, cover);
     this.coverSources.set(albumId, source);
+    this.presentationOnly.delete(albumId);
     this.listeners.get(albumId)?.forEach((listener) => listener(cover));
   }
 
-  resolve(album: LocalAlbum, onlineEnabled: CurrentFlag, libraryUpdating: CurrentFlag, onPhase?: (phase: ArtworkPhase) => void, consumerActive: CurrentFlag = true): Promise<string | null> {
+  resolve(album: LocalAlbum, onlineEnabled: CurrentFlag, libraryUpdating: CurrentFlag, onPhase?: (phase: ArtworkPhase) => void, consumerActive: CurrentFlag = true, background = false, preferOriginal = false): Promise<string | null> {
     const cached = this.get(album.id);
-    if (cached) return Promise.resolve(cached);
+    if (cached && !(preferOriginal && this.presentationOnly.has(album.id))) return Promise.resolve(cached);
     const generation = this.generation;
     const contextBlocked = () => this.blocked || generation !== this.generation || current(libraryUpdating)
       || (this.catalog !== null && !this.catalog.includes(album));
@@ -133,16 +180,16 @@ export class LocalArtworkResolver {
       // A queued card may have disappeared, or its cover may have arrived through another path.
       if (!blocked()) {
         const cached = this.get(album.id);
-        if (cached) return Promise.resolve(cached);
+        if (cached && !(preferOriginal && this.presentationOnly.has(album.id))) return Promise.resolve(cached);
       }
       return lookupAlbumArtwork(album, this.getLocalCover, this.getOnlineCover, onlineEnabled, blocked, this.getOnlineCacheStatus, (nextPhase) => {
         phase = nextPhase;
         onPhase?.(nextPhase);
       });
-    })
+    }, background)
       .then((cover) => {
         if (blocked()) { phase = "deferred"; onPhase?.(phase); return this.get(album.id); }
-        if (cover) this.publish(album.id, cover, phase === "online_request" || phase === "online_cache_positive" ? "online" : "local");
+        if (cover) this.publish(album.id, cover, phase === "online_request" || phase === "online_cache_positive" ? "online" : "local", preferOriginal);
         return this.get(album.id) ?? cover;
       })
       .catch(error => {

@@ -12,12 +12,12 @@ const read = <T>(entry: EditionEntry, current: () => boolean, work: () => Promis
 export const albumABService = {
   tracks: (entry: EditionEntry, current: () => boolean) => read(entry, current, async () => { const raw = await invoke<unknown>('ab_tracks', { source: request(entry) }); if (!current()) throw 'AB_CHANGED'; return decodeABTracks(raw); }),
   begin: () => invoke<string>('ab_begin'),
-  async sample(token: string, side: ABSide, entry: EditionEntry, trackKey: string, start: number, seconds: ABSeconds, current: () => boolean) {
+  async sample(token: string, side: ABSide, entry: EditionEntry, trackKey: string, start: number, seconds: ABSeconds, current: () => boolean, syncContext = false) {
     // Queue only the short Local admission/open, never the decoder. Transport
     // controls can run while the separate bounded decoder worker prepares PCM.
     await read(entry, current, () => invoke<void>('ab_load', { token, side, source: request(entry), trackKey }));
     if (!current()) throw 'AB_CHANGED';
-    const raw = await invoke<ArrayBuffer>('ab_decode', { token, side, start, seconds });
+    const raw = await invoke<ArrayBuffer>('ab_decode', { token, side, start, seconds, syncContext });
     if (!current()) throw 'AB_CHANGED'; return decodeABSample(raw);
   },
   start: (token: string, intent: string) => invoke<void>('ab_start', { token, intent }),

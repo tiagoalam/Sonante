@@ -94,6 +94,7 @@ export class LocalAlbumCatalog {
   private contextReady: boolean;
   private presentationContext: string | null = null;
   private configuredFolders: readonly string[] | null = null;
+  private sqliteBacked = false;
 
   constructor(load: () => Promise<LocalAlbum[]>, presentationCache?: LocalAlbumPresentationCache) {
     this.load = load;
@@ -101,9 +102,39 @@ export class LocalAlbumCatalog {
     this.contextReady = !presentationCache;
   }
 
+  /**
+   * SQLite sources are persisted by the catalog itself, not by local_folders.
+   * Keep using this shared view store while bypassing the legacy MPD/folder
+   * gates and presentation cache for that data source.
+   */
+  setSqliteBacked(): void {
+    if (this.sqliteBacked) return;
+    this.sqliteBacked = true;
+    this.configuredFolders = null;
+    this.contextReady = true;
+    this.presentationContext = null;
+    this.updating = false;
+    this.waitingForMpd = false;
+    this.pending = false;
+    this.generation += 1;
+    this.publish({
+      albums: [],
+      presentationAlbums: undefined,
+      loading: false,
+      loaded: false,
+      error: null,
+      mpdBusy: false,
+      saveBlocked: false,
+      confirmedPlayback: false,
+      manualCheckPlayback: false,
+      manualCheckArtwork: false,
+    });
+  }
+
   // Called synchronously with every accepted configuration, before React exposes
   // it. Restoring rows never increments the confirmed revision or grants reads.
   setPresentationContext(folders: readonly string[]): void {
+    if (this.sqliteBacked) return;
     const context = localAlbumPresentationContext(folders);
     if (this.configuredFolders !== null && folders.length === this.configuredFolders.length
       && folders.every((folder, index) => folder === this.configuredFolders![index])) return;
@@ -136,6 +167,11 @@ export class LocalAlbumCatalog {
   }
 
   setUpdating(updating: boolean, mounted = false): void {
+    if (this.sqliteBacked) {
+      this.updating = false;
+      if (mounted && !this.state.loaded && !this.state.loading && !this.inFlight) this.requestRefresh();
+      return;
+    }
     const previous = this.updating;
     this.updating = updating;
     if (updating) {
@@ -152,6 +188,7 @@ export class LocalAlbumCatalog {
   }
 
   onMpdStatus(updating: boolean, manualCheckPlayback = false, manualCheckArtwork = false): void {
+    if (this.sqliteBacked) return;
     const previous = this.state.manualCheckPlayback === true;
     if (previous !== manualCheckPlayback) {
       this.generation += 1;
@@ -184,6 +221,10 @@ export class LocalAlbumCatalog {
   }
 
   ensureLoaded(updating: boolean, available: boolean): void {
+    if (this.sqliteBacked) {
+      if (!this.state.loaded && !this.state.loading && !this.inFlight) this.requestRefresh();
+      return;
+    }
     if (updating) { this.setUpdating(true); return; }
     if (!available) return;
     this.setUpdating(false);
@@ -199,7 +240,8 @@ export class LocalAlbumCatalog {
   }
 
   private refresh(): void {
-    if (this.configuredFolders?.length === 0 || !this.contextReady || !this.pending || this.updating || this.state.saveBlocked || this.state.manualCheckPlayback || this.inFlight) return;
+    if ((!this.sqliteBacked && this.configuredFolders?.length === 0) || !this.contextReady
+      || !this.pending || this.updating || this.state.saveBlocked || this.state.manualCheckPlayback || this.inFlight) return;
     this.pending = false;
     this.inFlight = true;
     this.waitingForMpd = false;

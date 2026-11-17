@@ -13,7 +13,8 @@ fn main() {
     let eq=mpd_engine::MpdEngine::resolve_eq().expect("installed EQ selection");
     let camilla=installed_runtimes::release(installed_runtimes::Kind::Camilla,"SONANTE_EQ_CAMILLA_PATH").expect("installed Camilla selection");
     let mut command=std::process::Command::new(&camilla);
-    installed_runtimes::configure_camilla(&mut command);
+    let runtime_root=camilla.parent().expect("resolved Camilla runtime root");
+    installed_runtimes::configure_camilla(&mut command,runtime_root);
     let env:std::collections::HashMap<_,_>=command.get_envs().collect();
     assert_eq!(env[std::ffi::OsStr::new("PIPEWIRE_MODULE_DIR")],Some(std::ffi::OsStr::new("/usr/lib/sonante/runtimes/v1/lib/pipewire-0.3")));
     assert_eq!(env[std::ffi::OsStr::new("PIPEWIRE_CONFIG_NAME")],None);

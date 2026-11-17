@@ -20,13 +20,13 @@ export function sameSettings(a: EqPreset | null | undefined,b: EqPreset): boolea
 }
 export function validDraft(p: EqPreset): boolean {
   if(!p||typeof p.id!=="string"||!Array.isArray(p.bands)||p.bands.some(b=>!b||typeof b.id!=="string"))return false;
-  return /^[A-Za-z0-9_-]{1,96}$/.test(p.id)&&typeof p.name==="string"&&p.name.trim().length>0&&Array.from(p.name.trim()).length<=80&&!/[\x00-\x1f\x7f-\x9f]/.test(p.name)&&new Set(p.bands.map(b=>b.id)).size===10&&p.bands.every(b=>/^[A-Za-z0-9_-]{1,96}$/.test(b.id)&&typeof b.enabled==="boolean"&&["peak","low_shelf","high_shelf"].includes(b.filter_type))&&p.bands.length===10&&Number.isFinite(p.preamp_db)&&p.preamp_db>=-24&&p.preamp_db<=12&&p.bands.every(b=>Number.isFinite(b.frequency_hz)&&b.frequency_hz>=20&&b.frequency_hz<=20000&&Number.isFinite(b.gain_db)&&b.gain_db>=-12&&b.gain_db<=12&&Number.isFinite(b.q)&&b.q>=.1&&b.q<=30);
+  return /^[A-Za-z0-9_-]{1,96}$/.test(p.id)&&typeof p.name==="string"&&p.name.trim().length>0&&Array.from(p.name.trim()).length<=80&&!/[\x00-\x1f\x7f-\x9f]/.test(p.name)&&new Set(p.bands.map(b=>b.id)).size===10&&p.bands.every(b=>/^[A-Za-z0-9_-]{1,96}$/.test(b.id)&&typeof b.enabled==="boolean"&&["peak","low_shelf","high_shelf"].includes(b.filter_type))&&p.bands.length===10&&Number.isFinite(p.preamp_db)&&p.preamp_db>=-24&&p.preamp_db<=12&&p.bands.every(b=>Number.isFinite(b.frequency_hz)&&b.frequency_hz>=20&&b.frequency_hz<=20000&&Number.isFinite(b.gain_db)&&b.gain_db>=-15&&b.gain_db<=15&&Number.isFinite(b.q)&&b.q>=.1&&b.q<=30);
 }
 
 export const BAND_COLORS=["#91a7ff","#66d9c5","#e8bb72","#f28ca9","#aedb77","#a6c8ef","#c7a5ed","#78c4c9","#dfb5a0","#e3dc80"];
 export const frequencyX=(hz:number)=>Math.log(Math.max(20,Math.min(20000,hz))/20)/Math.log(1000);
 export const xFrequency=(x:number)=>20*1000**Math.max(0,Math.min(1,x));
-export const clampGain=(gain:number)=>Math.max(-12,Math.min(12,gain));
+export const clampGain=(gain:number)=>Math.max(-15,Math.min(15,gain));
 export function movePoint(b:EqBand,key:string,shift=false):Partial<EqBand>|null {
  const scale=shift?1.002:1.025,step=shift?.1:.5;
  if(key==='ArrowLeft'||key==='ArrowRight')return{frequency_hz:Math.max(20,Math.min(20000,b.frequency_hz*(key==='ArrowLeft'?1/scale:scale)))};

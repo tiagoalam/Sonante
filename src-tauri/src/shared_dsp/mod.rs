@@ -2,6 +2,7 @@
 pub(crate) mod availability;
 mod binary;
 mod continuity;
+pub(crate) mod diagnostics;
 pub(crate) mod comparison;
 mod io;
 mod peq;
@@ -155,6 +156,35 @@ impl State {
         s.transition = Some(value.into());
         set(&self.snapshot, s);
     }
+    /// Publish a non-active startup restore state before preflight begins.
+    /// A persisted preference never sets `verified` or claims an in-path DSP.
+    pub fn begin_restore(&self) -> bool {
+        if self.shutdown.load(Ordering::Acquire) { return false; }
+        let mut current = self.snapshot();
+        if current.phase != Phase::Off || current.applied.is_some() || current.comparison.is_some() {
+            return false;
+        }
+        current.phase = Phase::Preparing;
+        current.error = None;
+        current.verified = false;
+        set(&self.snapshot, current);
+        true
+    }
+    /// Return to the idle snapshot when startup restoration loses its
+    /// preference revision before touching the route or creating a DSP.
+    pub fn cancel_restore(&self) {
+        let mut current = self.snapshot();
+        if current.phase == Phase::Preparing
+            && !current.verified
+            && current.applied.is_none()
+            && current.comparison.is_none()
+        {
+            current.phase = Phase::Off;
+            current.error = None;
+            current.in_path = None;
+            set(&self.snapshot, current);
+        }
+    }
     pub fn record_failure(&self, error: Error) {
         let mut current = self.snapshot();
         current.error = Some(error);
@@ -205,6 +235,8 @@ impl State {
                                     ..Snapshot::default()
                                 },
                             );
+                            let preparation_started = Instant::now();
+                            diagnostics::event("dsp.prepare", "started", Some(0), json!({}));
                             match Session::start(
                                 preset.clone(),
                                 generation.clone(),
@@ -228,9 +260,11 @@ impl State {
                                     );
                                     session = Some(s);
                                     committed = false;
+                                    diagnostics::event("dsp.prepare", "ok", Some(preparation_started.elapsed().as_millis()), json!({"generation": prepared.generation}));
                                     let _ = reply.send(Ok(prepared));
                                 }
                                 Err(error) => {
+                                    diagnostics::event("dsp.prepare", "error", Some(preparation_started.elapsed().as_millis()), json!({"error": error}));
                                     set(
                                         &status,
                                         Snapshot {
@@ -244,6 +278,7 @@ impl State {
                             }
                         }
                         Ok(Command::Commit(reply)) => {
+                            let commit_started = Instant::now();
                             let result = session
                                 .as_mut()
                                 .ok_or(Error::ControlFailed)
@@ -263,6 +298,7 @@ impl State {
                                     },
                                 );
                             }
+                            diagnostics::event("dsp.commit", if result.is_ok() { "ok" } else { "error" }, Some(commit_started.elapsed().as_millis()), json!({"error": result.as_ref().err()}));
                             let _ = reply.send(result);
                         }
                         Ok(Command::Apply(preset, reply)) => {
@@ -352,6 +388,7 @@ impl State {
                             }
                         }
                         Ok(Command::Stop(reply)) => {
+                            let stop_started = Instant::now();
                             committed = false;
                             set(
                                 &status,
@@ -377,6 +414,7 @@ impl State {
                                     ..Snapshot::default()
                                 },
                             );
+                            diagnostics::event("dsp.stop", if process_gone && result.is_ok() { "ok" } else { "error" }, Some(stop_started.elapsed().as_millis()), json!({"child_confirmed_stopped": process_gone, "cleanup_error": result.as_ref().err()}));
                             // Artifact cleanup uncertainty is visible, but does not
                             // pretend the confirmed-dead processor is still on.
                             let _ = reply.send(if process_gone { Ok(()) } else { result });
@@ -409,17 +447,13 @@ impl State {
                                     }
                                 }
                                 Err(error) => {
-                                    stop_owned(&mut session);
-                                    committed = false;
-                                    set(
+                                    fail_health_check(
+                                        &mut session,
+                                        &mut committed,
                                         &status,
-                                        Snapshot {
-                                            phase: Phase::Error,
-                                            error: Some(error),
-                                            ..Snapshot::default()
-                                        },
+                                        error,
+                                        &failure,
                                     );
-                                    failure();
                                 }
                             }
                         }
@@ -519,6 +553,28 @@ fn stop_owned(session: &mut Option<Session>) {
         session.take();
     }
 }
+
+fn fail_health_check(
+    session: &mut Option<Session>,
+    committed: &mut bool,
+    status: &Mutex<Snapshot>,
+    error: Error,
+    failure: &Arc<dyn Fn() + Send + Sync>,
+) {
+    diagnostics::event("dsp.health", "error", Some(0), json!({"error": error}));
+    stop_owned(session);
+    *committed = false;
+    set(
+        status,
+        Snapshot {
+            phase: Phase::Error,
+            error: Some(error),
+            ..Snapshot::default()
+        },
+    );
+    failure();
+}
+
 fn set(status: &Mutex<Snapshot>, mut value: Snapshot) {
     if let Ok(mut s) = status.lock() {
         value.revision = s.revision.saturating_add(1);
@@ -574,6 +630,8 @@ struct Session {
     id: u64,
     current: Arc<AtomicU64>,
     child: Option<Child>,
+    stderr_summary: Arc<Mutex<CamillaStderrSummary>>,
+    stderr_reader: Option<JoinHandle<()>>,
     controller: CamillaRuntimeController,
     root: PathBuf,
     marker: continuity::Marker,
@@ -585,6 +643,36 @@ struct Session {
     sink: Node,
     env: Environment,
     preset: EqPreset,
+}
+#[derive(Clone, Default)]
+struct CamillaStderrSummary {
+    bytes: u64,
+    error_marker: bool,
+    pipewire_marker: bool,
+    fifo_marker: bool,
+    config_marker: bool,
+    permission_marker: bool,
+}
+impl CamillaStderrSummary {
+    fn observe(&mut self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+        self.bytes = self.bytes.saturating_add(bytes.len() as u64);
+        self.error_marker |= text.contains("error") || text.contains("failed");
+        self.pipewire_marker |= text.contains("pipewire");
+        self.fifo_marker |= text.contains("fifo") || text.contains("rawfile");
+        self.config_marker |= text.contains("config") || text.contains("unknown option");
+        self.permission_marker |= text.contains("permission denied") || text.contains("operation not permitted");
+    }
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "bytes": self.bytes,
+            "error_marker": self.error_marker,
+            "pipewire_marker": self.pipewire_marker,
+            "fifo_marker": self.fifo_marker,
+            "config_marker": self.config_marker,
+            "permission_marker": self.permission_marker,
+        })
+    }
 }
 struct SetupFiles {
     root: PathBuf,
@@ -625,8 +713,32 @@ impl Session {
         if shutdown.load(Ordering::Acquire) {
             return Err(Error::Cancelled);
         }
-        let binary = binary_path()?;
-        let sink = env.graph()?.default_sink()?;
+        let start_started = Instant::now();
+        diagnostics::event("dsp.session_start", "started", Some(0), json!({}));
+        diagnostics::event(
+            "pipewire.environment",
+            "info",
+            Some(start_started.elapsed().as_millis()),
+            json!({
+                "xdg_runtime_dir_present": std::env::var_os("XDG_RUNTIME_DIR").is_some(),
+                "pipewire_remote_present": std::env::var_os("PIPEWIRE_REMOTE").is_some(),
+                "pipewire_remote_override_count": env.vars.iter().filter(|(key, _)| key == "PIPEWIRE_REMOTE" || key == "PIPEWIRE_REMOTE_NAME").count(),
+                "camilla_autoconnect_forced_off": true,
+            }),
+        );
+        let runtime_started = Instant::now();
+        let binary = match binary_path() {
+            Ok(binary) => binary,
+            Err(error) => {
+                diagnostics::event("camilla.runtime_validation", "error", Some(runtime_started.elapsed().as_millis()), json!({"code": error}));
+                return Err(error);
+            }
+        };
+        diagnostics::event("camilla.runtime_validation", "ok", Some(runtime_started.elapsed().as_millis()), json!({"sha256_pinned": true, "private_runtime": true}));
+        let graph_started = Instant::now();
+        let initial_graph = env.graph()?;
+        let sink = initial_graph.default_sink()?;
+        diagnostics::event("pipewire.default_sink_selected", "ok", Some(graph_started.elapsed().as_millis()), json!({"node_id": sink.id, "serial": sink.serial, "class": sink.class}));
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         generation.store(id, Ordering::Release);
         let mut random = [0u8; 16];
@@ -654,25 +766,42 @@ impl Session {
         };
         let marker = continuity::Marker::create(&root)?;
         let pipe = root.join("pcm.s32le");
+        let fifo_started = Instant::now();
+        diagnostics::event("fifo.camilla_prepare", "started", Some(0), json!({}));
         let c = std::ffi::CString::new(pipe.as_os_str().as_bytes())
-            .map_err(|_| Error::RuntimeStartFailed)?;
+            .map_err(|_| {
+                diagnostics::event("fifo.camilla_prepare", "error", Some(fifo_started.elapsed().as_millis()), json!({"code": "fifo_path_invalid"}));
+                Error::RuntimeStartFailed
+            })?;
         if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
+            diagnostics::event("fifo.camilla_prepare", "error", Some(fifo_started.elapsed().as_millis()), json!({"code": "fifo_create_failed"}));
             return Err(Error::RuntimeStartFailed);
         }
-        let created_pipe = fs::symlink_metadata(&pipe).map_err(|_| Error::RuntimeStartFailed)?;
+        let created_pipe = fs::symlink_metadata(&pipe).map_err(|_| {
+            diagnostics::event("fifo.camilla_prepare", "error", Some(fifo_started.elapsed().as_millis()), json!({"code": "fifo_metadata_unavailable"}));
+            Error::RuntimeStartFailed
+        })?;
         setup.pipe = Some((created_pipe.dev(), created_pipe.ino()));
         let anchor = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
             .open(&pipe)
-            .map_err(|_| Error::RuntimeStartFailed)?;
+            .map_err(|_| {
+                diagnostics::event("fifo.camilla_prepare", "error", Some(fifo_started.elapsed().as_millis()), json!({"code": "fifo_anchor_open_failed"}));
+                Error::RuntimeStartFailed
+            })?;
         unsafe { libc::fcntl(anchor.as_raw_fd(), libc::F_SETPIPE_SZ, 65536) }; // best effort, this private pipe only
-        let m = anchor.metadata().map_err(|_| Error::RuntimeStartFailed)?;
+        let m = anchor.metadata().map_err(|_| {
+            diagnostics::event("fifo.camilla_prepare", "error", Some(fifo_started.elapsed().as_millis()), json!({"code": "fifo_anchor_metadata_unavailable"}));
+            Error::RuntimeStartFailed
+        })?;
         if !m.file_type().is_fifo() {
+            diagnostics::event("fifo.camilla_prepare", "error", Some(fifo_started.elapsed().as_millis()), json!({"code": "fifo_type_mismatch"}));
             return Err(Error::RuntimeStartFailed);
         }
         let pipe_identity = (m.dev(), m.ino());
+        diagnostics::event("fifo.camilla_prepare", "ok", Some(fifo_started.elapsed().as_millis()), json!({"fifo_type_verified": true, "mode_verified": m.mode() & 0o777 == 0o600, "owner_verified": m.uid() == unsafe { libc::getuid() }}));
         let stream_name = format!("sonante_eq_{token}");
         let endpoint =
             RuntimeEndpoint::reserve(id, pipe.to_string_lossy().into_owned(), stream_name.clone())
@@ -691,12 +820,16 @@ impl Session {
         file.write_all(config.to_string().as_bytes())
             .and_then(|_| file.sync_all())
             .map_err(|_| Error::RuntimeStartFailed)?;
+        diagnostics::event("camilla.private_config_ready", "ok", Some(start_started.elapsed().as_millis()), json!({"sample_rate": 48000, "channels": 2, "capture": "private_fifo", "playback": "pipewire", "autoconnect": false}));
         let spawn_fence = gate.read().map_err(|_| Error::Cancelled)?;
         if shutdown.load(Ordering::Acquire) || generation.load(Ordering::Acquire) != id {
             return Err(Error::Cancelled);
         }
         let mut command = env.command(binary.to_str().ok_or(Error::RuntimeUntrusted)?);
-        crate::installed_runtimes::configure_camilla(&mut command);
+        crate::installed_runtimes::configure_camilla(
+            &mut command,
+            binary.parent().ok_or(Error::RuntimeUntrusted)?,
+        );
         command
             .args(["--address", "127.0.0.1", "--port"])
             .arg(endpoint.port.to_string())
@@ -704,7 +837,7 @@ impl Session {
             .env("PIPEWIRE_AUTOCONNECT", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(if diagnostics::is_enabled() { Stdio::piped() } else { Stdio::null() });
         #[cfg(test)]
         if let Some(test_root) = std::env::var_os("SONANTE_EQ_TEST_ROOT").map(PathBuf::from) {
             if test_root.parent() == Some(std::path::Path::new("/tmp"))
@@ -734,7 +867,25 @@ impl Session {
                 });
             }
         }
-        let child = command.spawn().map_err(|_| Error::RuntimeStartFailed)?;
+        let mut child = command.spawn().map_err(|_| {
+            diagnostics::event("camilla.spawn", "error", Some(start_started.elapsed().as_millis()), json!({"code": "spawn_failed"}));
+            Error::RuntimeStartFailed
+        })?;
+        let stderr_summary = Arc::new(Mutex::new(CamillaStderrSummary::default()));
+        let stderr_reader = child.stderr.take().map(|mut stderr| {
+            let summary = stderr_summary.clone();
+            thread::Builder::new().name("sonante-eq-stderr".into()).spawn(move || {
+                let mut buffer = [0u8; 2048];
+                loop {
+                    let Ok(read) = stderr.read(&mut buffer) else { break };
+                    if read == 0 { break; }
+                    if let Ok(mut state) = summary.lock() {
+                        state.observe(&buffer[..read]);
+                    }
+                }
+            }).ok()
+        }).flatten();
+        diagnostics::event("camilla.spawn", "ok", Some(start_started.elapsed().as_millis()), json!({"pid": child.id(), "control_bind": "loopback_reserved_port", "pipewire_autoconnect": false, "runtime_integrity_verified": true}));
         drop(spawn_fence);
         let controller = CamillaRuntimeController::new(
             endpoint,
@@ -749,12 +900,20 @@ impl Session {
             name: stream_name.clone(),
             class: "Stream/Output/Audio".into(),
             pid: Some(child.id()),
+            audio_channels: Some(2),
+            audio_positions: vec!["FL".into(), "FR".into()],
+            usb_playback: None,
+            usb_stereo_verified: false,
+            usb_stereo_failure: None,
+            usb_proof_observation: None,
         };
         let mut s = Self {
             reference:false,comparison:None,
             id,
             current: generation,
             child: Some(child),
+            stderr_summary,
+            stderr_reader,
             controller,
             root,
             marker,
@@ -769,32 +928,62 @@ impl Session {
         };
         setup.armed = false;
         let deadline = Instant::now() + Duration::from_secs(4);
+        let mut last_readiness: &'static str;
         loop {
             s.live()?;
-            if s.controller.probe_owned().is_ok()
-                && s.controller.confirm_initial(&s.preset, pcm()).is_ok()
-            {
-                if let Ok(g) = s.env.graph() {
-                    if let Ok(node) = g.node(&stream_name, "Stream/Output/Audio") {
-                        if node.pid != s.child.as_ref().map(Child::id) {
-                            return Err(Error::GraphInvalid);
+            let control_reachable = s.controller.probe_owned().is_ok();
+            let initial_config_verified = control_reachable && s.controller.confirm_initial(&s.preset, pcm()).is_ok();
+            if !control_reachable {
+                last_readiness = "control_probe_not_ready";
+            } else if !initial_config_verified {
+                last_readiness = "initial_config_not_confirmed";
+            } else {
+                diagnostics::event("camilla.control_confirmation", "ok", Some(start_started.elapsed().as_millis()), json!({"control_reachable": true, "initial_config_verified": true}));
+                match s.env.graph_for_session_sink(&s.sink) {
+                    Ok(g) => match g.node(&stream_name, "Stream/Output/Audio") {
+                        Ok(node) => {
+                            if node.pid != s.child.as_ref().map(Child::id) {
+                                diagnostics::graph_event("owned_stream_pid_mismatch", json!({"expected_pid_matches": false, "graph": g.sanitized_summary(Some(node), Some(&s.sink))}));
+                                return Err(Error::GraphInvalid);
+                            }
+                            match g.stereo(node, true) {
+                                Ok(_) => {
+                                    s.stream = node.clone();
+                                    diagnostics::event("pipewire.owned_stream_found", "ok", Some(start_started.elapsed().as_millis()), json!({"node_id": node.id, "serial": node.serial, "pid_matches_child": true, "stereo_output_ports": true}));
+                                    g.connect(&s.env, &s.stream, &s.sink)?;
+                                    diagnostics::event("pipewire.connection_apply", "ok", Some(start_started.elapsed().as_millis()), g.sanitized_summary(Some(&s.stream), Some(&s.sink)));
+                                    break;
+                                }
+                                Err(_) => last_readiness = "owned_stream_ports_not_ready",
+                            }
+                            #[cfg(test)]
+                            if std::env::var("PIPEWIRE_REMOTE").ok().as_deref()
+                                == Some("sonante-eq-isolated")
+                                && std::env::var_os("SONANTE_EQ_TEST_ROOT").is_some()
+                            {
+                                s.env.run("pw-cli",&["set-param",&node.id.to_string(),"PortConfig","{ direction = Output mode = dsp format = { mediaType = audio mediaSubtype = raw format = F32P rate = 48000 channels = 2 position = [ FL FR ] } }"])?;
+                            }
                         }
-                        if g.stereo(node, true).is_ok() {
-                            s.stream = node.clone();
-                            g.connect(&s.env, &s.stream, &s.sink)?;
-                            break;
-                        }
-                        #[cfg(test)]
-                        if std::env::var("PIPEWIRE_REMOTE").ok().as_deref()
-                            == Some("sonante-eq-isolated")
-                            && std::env::var_os("SONANTE_EQ_TEST_ROOT").is_some()
-                        {
-                            s.env.run("pw-cli",&["set-param",&node.id.to_string(),"PortConfig","{ direction = Output mode = dsp format = { mediaType = audio mediaSubtype = raw format = F32P rate = 48000 channels = 2 position = [ FL FR ] } }"])?;
-                        }
-                    }
+                        Err(Error::NodeMissing) => last_readiness = "owned_stream_node_missing",
+                        Err(Error::GraphInvalid) => last_readiness = "owned_stream_node_ambiguous",
+                        Err(_) => last_readiness = "owned_stream_node_unavailable",
+                    },
+                    Err(_) => last_readiness = "pipewire_graph_unavailable",
                 }
             }
             if Instant::now() >= deadline {
+                let child_running = s.child.as_mut().is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()));
+                let graph = s.env.graph_for_session_sink(&s.sink).map(|graph| graph.sanitized_summary(Some(&s.stream), Some(&s.sink))).unwrap_or_else(|_| json!({"available": false}));
+                diagnostics::event("camilla.control_confirmation", "error", Some(start_started.elapsed().as_millis()), json!({"last_stage": last_readiness, "control_reachable": control_reachable, "initial_config_verified": initial_config_verified}));
+                diagnostics::event("camilla.pipewire_readiness", "timeout", Some(start_started.elapsed().as_millis()), json!({
+                    "last_stage": last_readiness,
+                    "child_running": child_running,
+                    "child_pid": s.child.as_ref().map(Child::id),
+                    "control_probe_ok": control_reachable,
+                    "initial_config_confirmed": initial_config_verified,
+                    "stderr": s.stderr_summary.lock().map(|state| state.clone().json()).unwrap_or_else(|_| json!({"available": false})),
+                    "graph": graph,
+                }));
                 #[cfg(test)]
                 {
                     eprintln!(
@@ -802,7 +991,7 @@ impl Session {
                         s.controller.probe_owned(),
                         s.controller.confirm_initial(&s.preset, pcm())
                     );
-                    if let Ok(g) = s.env.graph() {
+                    if let Ok(g) = s.env.graph_for_session_sink(&s.sink) {
                         eprintln!("private_probe_nodes={:?} ports={}", g.nodes, g.ports.len());
                     }
                 }
@@ -810,17 +999,31 @@ impl Session {
             }
             thread::sleep(Duration::from_millis(40));
         }
+        diagnostics::event("camilla.pipewire_readiness", "ok", Some(start_started.elapsed().as_millis()), json!({"stream_node_id": s.stream.id, "sink_node_id": s.sink.id, "child_pid_matches_stream": true}));
         let linked_deadline = Instant::now() + Duration::from_secs(2);
+        let mut last_graph_error = None;
+        let mut last_graph_state: &'static str;
         loop {
             s.live()?;
-            if s.health().is_ok() {
-                break;
+            match s.health() {
+                Ok(true) => break,
+                Ok(false) => last_graph_state = "links_not_active",
+                // PipeWire may publish a just-created link on the next graph
+                // cycle. Retry only this graph-transition condition; preserve
+                // all other failures instead of rewriting them as graph_invalid.
+                Err(Error::GraphInvalid) => {
+                    last_graph_state = "graph_invalid";
+                    last_graph_error = Some(Error::GraphInvalid)
+                },
+                Err(error) => return Err(error),
             }
             if Instant::now() >= linked_deadline {
-                return Err(Error::GraphInvalid);
+                diagnostics::event("pipewire.graph_confirmation", "timeout", Some(start_started.elapsed().as_millis()), json!({"last_state": last_graph_state, "graph": s.env.graph_for_session_sink(&s.sink).map(|graph| graph.sanitized_summary(Some(&s.stream), Some(&s.sink))).unwrap_or_else(|_| json!({"available": false}))}));
+                return Err(last_graph_error.unwrap_or(Error::GraphInvalid));
             }
             thread::sleep(Duration::from_millis(20));
         }
+        diagnostics::event("dsp.session_start", "ok", Some(start_started.elapsed().as_millis()), json!({"graph_verified": true, "stream_node_id": s.stream.id, "sink_node_id": s.sink.id}));
         Ok(s)
     }
     fn live(&mut self) -> Result<(), Error> {
@@ -830,17 +1033,33 @@ impl Session {
         }
         match self.child.as_mut().ok_or(Error::RuntimeExited)?.try_wait() {
             Ok(None) => Ok(()),
-            _ => Err(Error::RuntimeExited),
+            Ok(Some(status)) => {
+                diagnostics::event("camilla.process_exit", "error", None, json!({
+                    "exit_code": status.code(),
+                    "stderr": self.stderr_summary.lock().map(|state| state.clone().json()).unwrap_or_else(|_| json!({"available": false})),
+                }));
+                Err(Error::RuntimeExited)
+            }
+            Err(_) => {
+                diagnostics::event("camilla.process_status", "error", None, json!({"code": "wait_failed"}));
+                Err(Error::RuntimeExited)
+            }
         }
     }
     fn health(&mut self) -> Result<bool, Error> {
         self.live()?;
-        self.controller
-            .confirm_rendered(&self.preset, pcm(),self.reference)
-            .map_err(|_| Error::ControlFailed)?;
-        self.env.graph()?.validate(&self.stream, &self.sink)
+        let control_started = Instant::now();
+        if self.controller.confirm_rendered(&self.preset, pcm(), self.reference).is_err() {
+            diagnostics::event("camilla.rendered_config_confirmation", "error", Some(control_started.elapsed().as_millis()), json!({"controller_health": format!("{:?}", self.controller.health())}));
+            return Err(Error::ControlFailed);
+        }
+        diagnostics::event("camilla.rendered_config_confirmation", "ok", Some(control_started.elapsed().as_millis()), json!({"preset_identity_confirmed": true}));
+        self.env
+            .graph_for_session_sink(&self.sink)?
+            .validate(&self.stream, &self.sink)
     }
     fn stop(&mut self) -> Result<(), Error> {
+        let stop_started = Instant::now();
         let mut failed = false;
         if let Some(child) = self.child.as_mut() {
             if child
@@ -860,6 +1079,11 @@ impl Session {
             child.wait().map_err(|_| Error::CleanupFailed)?;
         }
         self.child.take();
+        if let Some(reader) = self.stderr_reader.take() {
+            if reader.join().is_err() {
+                failed = true;
+            }
+        }
         self.anchor.take();
         let valid = fs::symlink_metadata(&self.root).is_ok_and(|m| {
             m.is_dir() && !m.file_type().is_symlink() && (m.dev(), m.ino()) == self.root_identity
@@ -882,8 +1106,10 @@ impl Session {
             failed = true
         }
         if failed {
+            diagnostics::event("camilla.cleanup", "error", Some(stop_started.elapsed().as_millis()), json!({"child_reaped": self.child.is_none(), "private_artifact_cleanup_failed": true}));
             Err(Error::CleanupFailed)
         } else {
+            diagnostics::event("camilla.cleanup", "ok", Some(stop_started.elapsed().as_millis()), json!({"child_reaped": self.child.is_none(), "private_artifacts_removed": true}));
             Ok(())
         }
     }
@@ -897,10 +1123,135 @@ impl Drop for Session {
 }
 
 #[cfg(test)]
+#[test]
+fn camilla_stderr_diagnostic_keeps_only_allowlisted_markers() {
+    let mut summary = CamillaStderrSummary::default();
+    summary.observe(b"Failed to open PipeWire config at /home/private/profile/audio.conf: permission denied");
+    let output = summary.json().to_string();
+    assert!(output.contains("\"pipewire_marker\":true"));
+    assert!(output.contains("\"config_marker\":true"));
+    assert!(output.contains("\"permission_marker\":true"));
+    assert!(!output.contains("/home/private"));
+    assert!(!output.contains("audio.conf"));
+}
+
+#[cfg(test)]
 mod probe_tests;
 
 #[cfg(test)]
 #[test]
 fn comparison_cleanup_cannot_initialize_an_actor_or_lose_future_failure_callback() {
  let state=State::new();assert_eq!(state.compare(comparison::Action::Finish,Some("stale".into()),None,None).unwrap_err(),Error::ComparisonUnavailable);assert!(state.actor.lock().unwrap().is_none());state.begin_shutdown();assert_eq!(state.compare(comparison::Action::Finish,Some("stale".into()),None,None).unwrap_err(),Error::Cancelled);assert!(state.actor.lock().unwrap().is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn graph_health_failure_uncommits_eq_and_reaps_only_the_owned_camilla_child() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("owned-eq-test");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let root_metadata = fs::symlink_metadata(&root).unwrap();
+    let root_identity = (root_metadata.dev(), root_metadata.ino());
+
+    let marker = continuity::Marker::create(&root).unwrap();
+    let pipe = root.join("pcm.s32le");
+    let pipe_c = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(pipe_c.as_ptr(), 0o600) }, 0);
+    let pipe_metadata = fs::symlink_metadata(&pipe).unwrap();
+    assert!(pipe_metadata.file_type().is_fifo());
+    let pipe_identity = (pipe_metadata.dev(), pipe_metadata.ino());
+
+    let child = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let child_pid = child.id();
+    let generation = Arc::new(AtomicU64::new(1));
+    let controller = CamillaRuntimeController::new(
+        RuntimeEndpoint {
+            port: 9,
+            title: "sonante-health-test".into(),
+            generation: 1,
+            capture_name: "private-capture".into(),
+            playback_name: "private-playback".into(),
+        },
+        generation.clone(),
+        Arc::new(RuntimeShared::default()),
+        LocalWebSocketTransport,
+    );
+    let node = Node {
+        id: 1,
+        serial: 1,
+        name: "test-node".into(),
+        class: "Stream/Output/Audio".into(),
+        pid: Some(child_pid),
+        audio_channels: Some(2),
+        audio_positions: vec!["FL".into(), "FR".into()],
+        usb_playback: None,
+        usb_stereo_verified: false,
+        usb_stereo_failure: None,
+        usb_proof_observation: None,
+    };
+    let mut session = Some(Session {
+        reference: false,
+        comparison: None,
+        id: 1,
+        current: generation,
+        child: Some(child),
+        stderr_summary: Arc::new(Mutex::new(CamillaStderrSummary::default())),
+        stderr_reader: None,
+        controller,
+        root: root.clone(),
+        marker,
+        pipe,
+        anchor: None,
+        root_identity,
+        pipe_identity,
+        stream: node.clone(),
+        sink: Node {
+            id: 2,
+            serial: 2,
+            name: "test-sink".into(),
+            class: "Audio/Sink".into(),
+            pid: None,
+            audio_channels: Some(2),
+            audio_positions: vec!["FL".into(), "FR".into()],
+            usb_playback: None,
+            usb_stereo_verified: false,
+            usb_stereo_failure: None,
+            usb_proof_observation: None,
+        },
+        env: Environment::default(),
+        preset: crate::equalizer::flat_preset(),
+    });
+    let status = Mutex::new(Snapshot {
+        phase: Phase::Active,
+        verified: true,
+        ..Snapshot::default()
+    });
+    let mut committed = true;
+    let callbacks = Arc::new(AtomicU64::new(0));
+    let callback_count = callbacks.clone();
+    let failure: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        callback_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    fail_health_check(
+        &mut session,
+        &mut committed,
+        &status,
+        Error::GraphInvalid,
+        &failure,
+    );
+
+    let snapshot = status.lock().unwrap().clone();
+    assert!(!committed);
+    assert_eq!(snapshot.phase, Phase::Error);
+    assert_eq!(snapshot.error, Some(Error::GraphInvalid));
+    assert!(!snapshot.verified);
+    assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+    assert!(session.is_none());
+    assert!(!root.exists());
+    assert!(!std::path::Path::new(&format!("/proc/{child_pid}")).exists());
 }

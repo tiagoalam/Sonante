@@ -53,21 +53,37 @@ export const LibraryDoctorReportContent: React.FC<{
   const coverage = report.coverage;
   const coverageState = doctorCoverageState(report);
   return <>
+    {report.inspection_source === "sqlite_snapshot" && <aside role="note" className="rounded-xl border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-raised,#222222)] p-3 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)]">
+      {t("libraryDoctor.sqliteSnapshotNotice")}
+    </aside>}
     <section aria-label={t("libraryDoctor.coverage")} className="rounded-xl border border-[color:var(--theme-border-soft,#333333)] p-4">
       <h3 className="font-bold">{t("libraryDoctor.coverage")}</h3>
       <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-3">
-        <div><dt className="text-[color:var(--theme-fg-secondary,#999999)]">{t("libraryDoctor.physicalReads")}</dt><dd>{t("libraryDoctor.readCount", { read: coverage.physical_tracks_read, total: coverage.physical_track_count })}</dd></div>
+        <div><dt className="text-[color:var(--theme-fg-secondary,#999999)]">{t(report.inspection_source === "sqlite_snapshot" ? "libraryDoctor.currentCatalogMetadata" : "libraryDoctor.physicalReads")}</dt><dd>{t("libraryDoctor.readCount", { read: coverage.physical_tracks_read, total: coverage.physical_track_count })}</dd></div>
         <div><dt className="text-[color:var(--theme-fg-secondary,#999999)]">{t("libraryDoctor.failures")}</dt><dd>{coverage.failed_physical_track_count}</dd></div>
         <div><dt className="text-[color:var(--theme-fg-secondary,#999999)]">{t("libraryDoctor.cueTracks")}</dt><dd>{coverage.cue_virtual_count}</dd></div>
       </dl>
       <p className={`mt-3 text-xs ${coverageState === "performed" ? "text-[color:var(--theme-fg-secondary,#AAAAAA)]" : "text-[color:var(--theme-fg-accent,var(--color-amber-200))]"}`}>
-        {t(`libraryDoctor.coverageStates.${coverageState}`)}
+        {t(report.inspection_source === "sqlite_snapshot"
+          ? `libraryDoctor.sqliteCoverageStates.${coverageState}`
+          : `libraryDoctor.coverageStates.${coverageState}`)}
       </p>
     </section>
+    {report.inspection_source === "sqlite_snapshot" && <section aria-label={t("libraryDoctor.sqliteContext")} className="rounded-xl border border-[color:var(--theme-border-soft,#333333)] p-4 text-sm">
+      <h3 className="font-bold">{t("libraryDoctor.sqliteContext")}</h3>
+      <p className="mt-2 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)]">{t(report.grouping_ambiguous ? "libraryDoctor.groupingAmbiguous" : "libraryDoctor.groupingConsistent")}</p>
+      {report.grouping_notes.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)]">
+        {report.grouping_notes.map(note => <li key={note}>{t(`sqliteLibrary.groupingNotes.${note}`, { defaultValue: note })}</li>)}
+      </ul>}
+      {report.artwork && <p className="mt-3 border-t border-[color:var(--theme-border-soft,#303030)] pt-3 text-xs">
+        {t("libraryDoctor.artwork")}: {t(`libraryDoctor.artworkStates.${report.artwork}`)}
+      </p>}
+    </section>}
     <section aria-label={t("libraryDoctor.findings")}>
       <h3 className="mb-3 font-bold">{t("libraryDoctor.findings")}</h3>
       {report.findings.length === 0 && <p className="text-sm text-[color:var(--theme-fg-secondary,#CCCCCC)]">{t(coverageState === "no_reads"
-        ? "libraryDoctor.noReadableConclusion" : "libraryDoctor.noFindings")}</p>}
+        ? report.inspection_source === "sqlite_snapshot" ? "libraryDoctor.noCurrentMetadata" : "libraryDoctor.noReadableConclusion"
+        : "libraryDoctor.noFindings")}</p>}
       <div className="space-y-3">{doctorFindingGroups(report).map(group => <section key={group.code} className="rounded-xl border border-[color:var(--theme-border-soft,#333333)] p-3">
         <h4 className="mb-2 text-sm font-bold">{t(`libraryDoctor.codes.${group.code}`)}</h4>
         <p className="mb-2 break-all font-mono text-[10px] text-[color:var(--theme-fg-muted,#888888)]">{group.code}</p>
@@ -142,7 +158,7 @@ export const LibraryDoctorModal: React.FC<Props> = ({ albumId, displayName, avai
         <button type="button" onClick={close} aria-label={t("libraryDoctor.close")} className="rounded-lg p-2 hover:bg-[var(--theme-surface-hover,#303030)]"><X size={18} /></button>
       </header>
       <div className="min-h-0 space-y-5 overflow-y-auto p-5">
-        {state.phase === "loading" && <p role="status" className="flex items-center gap-2 text-sm"><LoaderCircle size={16} className="animate-spin" />{t("libraryDoctor.loading")}</p>}
+        {state.phase === "loading" && <p role="status" className="flex items-center gap-2 text-sm"><LoaderCircle size={16} className="animate-spin" />{t(albumId.startsWith("sqlite:") ? "libraryDoctor.loadingSnapshot" : "libraryDoctor.loading")}</p>}
         {(state.phase === "stale" || state.phase === "unavailable") && <p role="status" className="text-sm text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t(state.phase === "stale" ? "libraryDoctor.stale" : "libraryDoctor.unavailable")}</p>}
         {state.inFlight && state.phase !== "loading" && <p role="status" className="text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)]">{t("libraryDoctor.pendingDiscard")}</p>}
         {state.error && <p role="alert" className="text-sm text-[color:var(--theme-fg-error,var(--color-red-200))]">{t(`libraryDoctor.errors.${state.error}`)}</p>}
@@ -156,8 +172,8 @@ export const LibraryDoctorModal: React.FC<Props> = ({ albumId, displayName, avai
             <li>{t("libraryDoctor.limits.numbers")}</li>
             <li>{t("libraryDoctor.limits.conflicts")}</li>
             <li>{t("libraryDoctor.limits.cue")}</li>
-            <li>{t("libraryDoctor.limits.snapshot")}</li>
-            <li>{t("libraryDoctor.limits.invalidation")}</li>
+            <li>{t(albumId.startsWith("sqlite:") ? "libraryDoctor.limits.sqliteSnapshot" : "libraryDoctor.limits.snapshot")}</li>
+            <li>{t(albumId.startsWith("sqlite:") ? "libraryDoctor.limits.sqliteInvalidation" : "libraryDoctor.limits.invalidation")}</li>
           </ul>
         </section>
       </div>

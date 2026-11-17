@@ -60,6 +60,14 @@ test("artist discography uses the same normalized identity", () => {
   assert.deepEqual(albumsForLocalArtist(albums, "joao gilberto").map((item) => item.id), ["1", "2"]);
 });
 
+test("SQLite albums retain each represented track artist without double-counting an album", () => {
+  const compilation = { ...album("sqlite:1:one", "Album Artist"), artist_names: ["Track Artist A", "Track Artist B", "Album Artist"] };
+  const artists = deriveLocalArtists([compilation]);
+  assert.deepEqual(artists.map(item => item.name).sort(), ["Album Artist", "Track Artist A", "Track Artist B"]);
+  assert.ok(artists.every(item => item.albumCount === 1));
+  assert.deepEqual(albumsForLocalArtist([compilation], "Track Artist B").map(item => item.id), [compilation.id]);
+});
+
 test("five thousand artists remain a data-only collection", () => {
   const albums = Array.from({ length: 10_000 }, (_, index) => album(String(index), `Artist ${index % 5_000}`));
   const artists = deriveLocalArtists(albums);

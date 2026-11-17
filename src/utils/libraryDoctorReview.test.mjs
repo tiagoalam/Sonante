@@ -277,8 +277,8 @@ test("view handoff revalidates identity/catalog/availability, preserves active d
   const callback = jsxAttribute("onReview", "LibraryDoctorModal");
   for (const fail of [null, "draft", "identity", "catalog", "availability", "album"]) {
     const changes = [], open = { current: fail === "draft" }, album = { id: "A", title: "Album" };
-    const handler = new Function("tagEditorOpen", "doctorAlbum", "doctorSelectedAlbum", "localAlbumCatalog", "catalog", "albumTagEditingAvailable", "setDoctorAlbum", "setDoctorReviewContext", "setTagEditorAlbum", `return (${callback});`)(
-      open, album, { current: fail === "identity" ? "B" : "A" }, { getSnapshot: () => fail === "catalog" ? {} : version }, version,
+    const handler = new Function("sqliteBacked", "tagEditorOpen", "doctorAlbum", "doctorSelectedAlbum", "localAlbumCatalog", "catalog", "albumTagEditingAvailable", "setDoctorAlbum", "setDoctorReviewContext", "setTagEditorAlbum", `return (${callback});`)(
+      false, open, album, { current: fail === "identity" ? "B" : "A" }, { getSnapshot: () => fail === "catalog" ? {} : version }, version,
       () => fail !== "availability", value => changes.push(["doctor", value]), value => changes.push(["context", value]), value => changes.push(["editor", value]));
     const context = { albumId: fail === "album" ? "B" : "A", code: "year_divergence", field: "date" };
     assert.equal(handler(context), !fail);

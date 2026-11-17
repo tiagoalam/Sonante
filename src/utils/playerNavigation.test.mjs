@@ -78,6 +78,50 @@ test("Local album and artist visits use the same proven catalogue identity, with
   assert.equal(f.failures.length, 1);
 });
 
+test("SQLite player navigation resolves the opaque locator through the catalog identity", async () => {
+  const uri = "sqlite-track://17/QWxidW0vMDMud2F2";
+  const albums = [
+    { ...album("sqlite:18:YWxidW0=", "Other source/Compilation", "sqlite-18"), artist: "Other Artist" },
+    { ...album("sqlite:17:YWxidW0=", "Source/Compilation", "sqlite-17"),
+      artist: "Various Artists", artist_names: ["Guest Artist", "Album Artist"] },
+  ];
+  const expectedAlbum = albums[1];
+  for (const [view, displayedArtist, expectedArtist] of [
+    ["album", "Guest Artist", undefined], ["artist", "Guest Artist", "Guest Artist"],
+  ]) {
+    const f = fixture();
+    const published = f.open(local(uri), view, albums,
+      async () => groupsFor("Source/Compilation/03.wav"));
+    // fixture's default invocation has no SQLite resolver; exercise the full
+    // request contract directly to ensure an opaque locator cannot path-match.
+    await published;
+    assert.equal(f.publications.length, 0);
+    const req = new PlayerNavigationRequests(), targets = [], failures = [];
+    await req.open(local(uri), view, albums, async () => { throw Error("Plex must not be queried"); },
+      target => targets.push(target), () => failures.push(true), displayedArtist,
+      async () => groupsFor("Source/Compilation/03.wav"), undefined,
+      async locator => locator === uri ? expectedAlbum.id : null);
+    assert.equal(failures.length, 0);
+    assert.equal(targets.length, 1);
+    assert.equal(targets[0].albumId, expectedAlbum.id);
+    assert.equal(targets[0].artistName, expectedArtist);
+    assert.equal(targets[0].verified.catalog, albums);
+  }
+});
+
+test("SQLite navigation fails closed for missing, stale, or foreign album identities", async () => {
+  const uri = "sqlite-track://17/QWxidW0vMDMud2F2";
+  const albums = [album("sqlite:18:YWxidW0=", "Source/Album", "sqlite-18")];
+  for (const resolver of [async () => null, async () => "sqlite:17:YWxidW0="]) {
+    const req = new PlayerNavigationRequests(), targets = [], failures = [];
+    await req.open(local(uri), "album", albums, async () => { throw Error("unexpected Plex"); },
+      target => targets.push(target), () => failures.push(true), undefined,
+      async () => groupsFor("Source/Album/one.wav"), undefined, resolver);
+    assert.equal(targets.length, 0);
+    assert.equal(failures.length, 1);
+  }
+});
+
 test("a track artist differing from the anchored Local album artist cannot open another discography", async () => {
   const requests = new PlayerNavigationRequests(), targets = [], failures = [];
   await requests.open(local("Source/Compilation/one.flac"), "artist", [album("one", "Source/Compilation")],
@@ -207,7 +251,7 @@ test("IPC is read-only and player links use guarded identity resolution with a m
   assert.ok(app.includes('onNavigateToAlbum={playerSourceKind === "upnp" ? undefined : () => navigateFromPlayer("album")}'));
   assert.ok(app.includes('onNavigateToArtist={playerSourceKind === "upnp" ? undefined : () => navigateFromPlayer("artist")}'));
   assert.ok(app.includes('className={playerTarget ? "hidden" : "contents"}'));
-  assert.ok(app.includes("const centralSection = playerReturnSection ?? (mediaSource === \"equalizer\" ? eqReturnSectionRef.current : mediaSource)"));
+  assert.ok(app.includes('const centralSection = playerReturnSection ?? (mediaSource === "equalizer" ? eqReturnSectionRef.current : mediaSource)'));
   assert.match(app, /else if \(playerTarget\) \{\s*closePlayerNavigation\(\)/);
   assert.match(app, /playerNavigationRequests\.invalidate\(\);\s*audioService\.next\(\)/);
   assert.match(app, /playerNavigationRequests\.invalidate\(\);\s*audioService\.previous\(\)/);

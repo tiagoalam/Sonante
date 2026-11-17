@@ -1,0 +1,108 @@
+{
+  "cases": [
+    {
+      "name": "pipewire-default-is-shared",
+      "outputType": "pipewire",
+      "device": "default",
+      "expected": {
+        "route": {
+          "destination": { "kind": "system_default" },
+          "access": "shared",
+          "processing": "off"
+        },
+        "issues": []
+      }
+    },
+    {
+      "name": "shared-alias-is-shared",
+      "outputType": "shared",
+      "device": "default",
+      "expected": {
+        "route": {
+          "destination": { "kind": "system_default" },
+          "access": "shared",
+          "processing": "off"
+        },
+        "issues": []
+      }
+    },
+    {
+      "name": "alsa-explicit-device-is-direct",
+      "outputType": "alsa",
+      "device": "hw:CARD=Fixture,DEV=0",
+      "expected": {
+        "route": {
+          "destination": { "kind": "device", "deviceId": "hw:CARD=Fixture,DEV=0" },
+          "access": "exclusive",
+          "processing": "off"
+        },
+        "issues": []
+      }
+    },
+    {
+      "name": "legacy-alsa-default-remains-shared-and-is-marked",
+      "outputType": "alsa",
+      "device": "default",
+      "expected": {
+        "route": {
+          "destination": { "kind": "system_default" },
+          "access": "shared",
+          "processing": "off"
+        },
+        "issues": ["legacy_alsa_default_maps_to_shared"]
+      }
+    },
+    {
+      "name": "pipewire-ignores-explicit-alsa-device-as-before",
+      "outputType": "pipewire",
+      "device": "hw:CARD=Fixture,DEV=0",
+      "expected": {
+        "route": {
+          "destination": { "kind": "system_default" },
+          "access": "shared",
+          "processing": "off"
+        },
+        "issues": ["explicit_device_ignored_in_shared_mode"]
+      }
+    },
+    {
+      "name": "unknown-explicit-mode-preserves-legacy-exclusive-mapping",
+      "outputType": "legacy-custom",
+      "device": "hw:CARD=Fixture,DEV=0",
+      "expected": {
+        "route": {
+          "destination": { "kind": "device", "deviceId": "hw:CARD=Fixture,DEV=0" },
+          "access": "exclusive",
+          "processing": "off"
+        },
+        "issues": ["unknown_output_type_uses_legacy_mapping"]
+      }
+    },
+    {
+      "name": "unknown-default-remains-shared-but-is-marked",
+      "outputType": "legacy-custom",
+      "device": "default",
+      "expected": {
+        "route": {
+          "destination": { "kind": "system_default" },
+          "access": "shared",
+          "processing": "off"
+        },
+        "issues": ["unknown_output_type_uses_legacy_mapping"]
+      }
+    },
+    {
+      "name": "empty-explicit-device-is-preserved-but-marked-invalid",
+      "outputType": "alsa",
+      "device": "",
+      "expected": {
+        "route": {
+          "destination": { "kind": "device", "deviceId": "" },
+          "access": "exclusive",
+          "processing": "off"
+        },
+        "issues": ["invalid_device_identifier"]
+      }
+    }
+  ]
+}

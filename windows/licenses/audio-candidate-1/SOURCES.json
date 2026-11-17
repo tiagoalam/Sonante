@@ -1,0 +1,295 @@
+{
+  "version": 1,
+  "native_executed": false,
+  "archives": [
+    {
+      "path": "archives/mpd.source",
+      "sha256": "afe8fddbdbefc7b3e7ee721fd0dd4e2276f29e40fe7e3c573daf5123b444578f",
+      "bytes": 1051344
+    },
+    {
+      "path": "archives/curl.source",
+      "sha256": "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5",
+      "bytes": 2990916
+    },
+    {
+      "path": "archives/libsamplerate.source",
+      "sha256": "35ceb3e63eb8884ec802b5be685a9aacf2458c4eb3c0ea38dc18ef1b00648c44",
+      "bytes": 3954909
+    },
+    {
+      "path": "archives/ffmpeg.source",
+      "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+      "bytes": 12040788
+    },
+    {
+      "path": "archives/mpg123.source",
+      "sha256": "31d0e35a4ca567ec9b5ebda6c3062bb4435d6d3eacd6ef0d95cadd7854dc03ee",
+      "bytes": 1126376
+    },
+    {
+      "path": "archives/zlib.source",
+      "sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
+      "bytes": 1320064
+    },
+    {
+      "path": "archives/fmt-12.0.0.tar.gz",
+      "sha256": "aa3e8fbb6a0066c03454434add1f1fc23299e85758ceec0d7d2d974431481e40",
+      "bytes": 709036
+    },
+    {
+      "path": "archives/fmt_12.0.0-1_patch.zip",
+      "sha256": "307f288ebf3850abf2f0c50ac1fb07de97df9538d39146d802f3c0d6cada8998",
+      "bytes": 1744
+    },
+    {
+      "path": "archives/flac-1.5.0.tar.xz",
+      "sha256": "f2c1c76592a82ffff8413ba3c4a1299b6c7ab06c734dee03fd88630485c2b920",
+      "bytes": 1078872
+    },
+    {
+      "path": "archives/flac_1.5.0-3_patch.zip",
+      "sha256": "56adbbda2fbfcfba5aaf4a9eb326c37d95889215352d0336a14611608257dcfe",
+      "bytes": 7279
+    },
+    {
+      "path": "archives/libogg-1.3.6.tar.xz",
+      "sha256": "5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce84808677fa1061",
+      "bytes": 439952
+    },
+    {
+      "path": "archives/ogg_1.3.6-1_patch.zip",
+      "sha256": "d20db3b8c8dfaa62af28b43d7e54bbe982a59714913d42bcf370fdc5780d42ca",
+      "bytes": 2563
+    },
+    {
+      "path": "archives/libsndfile-1.2.2.tar.xz",
+      "sha256": "3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e",
+      "bytes": 730760
+    },
+    {
+      "path": "archives/libsndfile_1.2.2-2_patch.zip",
+      "sha256": "47c69c9bdd3d3b2a3ca3834f7288f2527cbc399c15a13705a182b221942aa3a5",
+      "bytes": 5390
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "curl",
+      "version": "8.23.0",
+      "url": "https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz",
+      "sha256": "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5",
+      "authority": "GitHub official curl release asset digest + curl.se/download.html 2026-11-04",
+      "download_sha256": "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5",
+      "bytes": 2990916,
+      "archive": "archives/curl.source"
+    },
+    {
+      "name": "libsamplerate",
+      "version": "0.2.2",
+      "url": "https://codeload.github.com/libsndfile/libsamplerate/tar.gz/c96f5e3de9c4488f4e6c97f59f5245f22fda22f7",
+      "commit": "c96f5e3de9c4488f4e6c97f59f5245f22fda22f7",
+      "authority": "Official signed tag b9c20b93660c3683fda12e3c2a01f0021bf96c56, GitHub verification.valid; full tracked blob comparison before extraction",
+      "git_blobs_verified": 96,
+      "git_archive_export_ignored": [
+        ".gitattributes",
+        ".github/workflows/build.yml",
+        ".gitignore"
+      ],
+      "git_archive_crlf_normalized": [
+        "Win32/libsamplerate-0.def"
+      ],
+      "download_sha256": "35ceb3e63eb8884ec802b5be685a9aacf2458c4eb3c0ea38dc18ef1b00648c44",
+      "bytes": 3954909,
+      "archive": "archives/libsamplerate.source"
+    },
+    {
+      "name": "ffmpeg",
+      "version": "9.0.2",
+      "url": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+      "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+      "authority": "Unmodified MPD0.24.18 python/build/libs.py",
+      "download_sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+      "bytes": 12040788,
+      "archive": "archives/ffmpeg.source"
+    },
+    {
+      "name": "mpg123",
+      "version": "1.33.7",
+      "url": "https://mpg123.de/download/mpg123-1.33.7.tar.bz2",
+      "sha256": "31d0e35a4ca567ec9b5ebda6c3062bb4435d6d3eacd6ef0d95cadd7854dc03ee",
+      "authority": "Unmodified MPD0.24.18 python/build/libs.py",
+      "download_sha256": "31d0e35a4ca567ec9b5ebda6c3062bb4435d6d3eacd6ef0d95cadd7854dc03ee",
+      "bytes": 1126376,
+      "archive": "archives/mpg123.source"
+    },
+    {
+      "name": "zlib",
+      "version": "1.3.2",
+      "url": "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.xz",
+      "sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
+      "authority": "Unmodified MPD0.24.18 python/build/libs.py",
+      "download_sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
+      "bytes": 1320064,
+      "archive": "archives/zlib.source"
+    }
+  ],
+  "wraps": [
+    {
+      "name": "fmt",
+      "kind": "source",
+      "filename": "fmt-12.0.0.tar.gz",
+      "path": "archives/fmt-12.0.0.tar.gz",
+      "sha256": "aa3e8fbb6a0066c03454434add1f1fc23299e85758ceec0d7d2d974431481e40",
+      "url": "https://github.com/fmtlib/fmt/archive/12.0.0.tar.gz"
+    },
+    {
+      "name": "fmt",
+      "kind": "patch",
+      "filename": "fmt_12.0.0-1_patch.zip",
+      "path": "archives/fmt_12.0.0-1_patch.zip",
+      "sha256": "307f288ebf3850abf2f0c50ac1fb07de97df9538d39146d802f3c0d6cada8998",
+      "url": "https://wrapdb.mesonbuild.com/v2/fmt_12.0.0-1/get_patch"
+    },
+    {
+      "name": "flac",
+      "kind": "source",
+      "filename": "flac-1.5.0.tar.xz",
+      "path": "archives/flac-1.5.0.tar.xz",
+      "sha256": "f2c1c76592a82ffff8413ba3c4a1299b6c7ab06c734dee03fd88630485c2b920",
+      "url": "https://github.com/xiph/flac/releases/download/1.5.0/flac-1.5.0.tar.xz"
+    },
+    {
+      "name": "flac",
+      "kind": "patch",
+      "filename": "flac_1.5.0-3_patch.zip",
+      "path": "archives/flac_1.5.0-3_patch.zip",
+      "sha256": "56adbbda2fbfcfba5aaf4a9eb326c37d95889215352d0336a14611608257dcfe",
+      "url": "https://wrapdb.mesonbuild.com/v2/flac_1.5.0-3/get_patch"
+    },
+    {
+      "name": "ogg",
+      "kind": "source",
+      "filename": "libogg-1.3.6.tar.xz",
+      "path": "archives/libogg-1.3.6.tar.xz",
+      "sha256": "5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce84808677fa1061",
+      "url": "https://downloads.xiph.org/releases/ogg/libogg-1.3.6.tar.xz"
+    },
+    {
+      "name": "ogg",
+      "kind": "patch",
+      "filename": "ogg_1.3.6-1_patch.zip",
+      "path": "archives/ogg_1.3.6-1_patch.zip",
+      "sha256": "d20db3b8c8dfaa62af28b43d7e54bbe982a59714913d42bcf370fdc5780d42ca",
+      "url": "https://wrapdb.mesonbuild.com/v2/ogg_1.3.6-1/get_patch"
+    },
+    {
+      "name": "libsndfile",
+      "kind": "source",
+      "filename": "libsndfile-1.2.2.tar.xz",
+      "path": "archives/libsndfile-1.2.2.tar.xz",
+      "sha256": "3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e",
+      "url": "https://github.com/libsndfile/libsndfile/releases/download/1.2.2/libsndfile-1.2.2.tar.xz"
+    },
+    {
+      "name": "libsndfile",
+      "kind": "patch",
+      "filename": "libsndfile_1.2.2-2_patch.zip",
+      "path": "archives/libsndfile_1.2.2-2_patch.zip",
+      "sha256": "47c69c9bdd3d3b2a3ca3834f7288f2527cbc399c15a13705a182b221942aa3a5",
+      "url": "https://wrapdb.mesonbuild.com/v2/libsndfile_1.2.2-2/get_patch"
+    }
+  ],
+  "toolchain": {
+    "tag": "20260616",
+    "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-ucrt-ubuntu-22.04-x86_64.tar.xz",
+    "size": 82188288,
+    "sha256": "534b92e067b22a6b4441f48ae9240a3341b17825d04d577eab0cf85c44b4deda",
+    "provenance": "Official GitHub release digest; build tool only, not shipped runtime",
+    "global_install": false
+  },
+  "python_tools": [
+    {
+      "name": "meson",
+      "version": "1.7.2",
+      "url": "https://files.pythonhosted.org/packages/e5/2b/46bda4ef5a7ae4135dbfe27fc0368c44e5a349a897a54fdf2cedb8dcb66e/meson-1.7.2-py3-none-any.whl",
+      "sha256": "82c6818dc81743c96de3a458f06175776ebfde4081195ea31ea6971838f25e38",
+      "filename": "meson-1.7.2-py3-none-any.whl",
+      "size": 991596
+    },
+    {
+      "name": "ninja",
+      "version": "1.11.1.4",
+      "url": "https://files.pythonhosted.org/packages/eb/7a/455d2877fe6cf99886849c7f9755d897df32eaf3a0fba47b56e615f880f7/ninja-1.11.1.4-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.whl",
+      "sha256": "096487995473320de7f65d622c3f1d16c3ad174797602218ca8c967f51ec38a0",
+      "filename": "ninja-1.11.1.4-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.whl",
+      "size": 422814
+    }
+  ],
+  "meson_options": [
+    "-Dprefer_static=true",
+    "-Dauto_features=disabled",
+    "-Dcurl=enabled",
+    "-Dffmpeg=enabled",
+    "-Dmpg123=enabled",
+    "-Dlibsamplerate=enabled",
+    "-Dflac=enabled",
+    "-Dsndfile=enabled",
+    "-Ddatabase=true",
+    "-Dzeroconf=disabled",
+    "-Dupnp=disabled",
+    "-Dhttpd=false",
+    "-Dsnapcast=false",
+    "-Drecorder=false",
+    "-Dtest=false",
+    "-Ddocumentation=disabled"
+  ],
+  "patch_sha256": "e87a09a5d38265ff2ec720bda3b6ff670a505aa87abc9e367eeeb77c8b169a91",
+  "source_patch_entries": [
+    {
+      "path": "src/output/plugins/wasapi/WasapiOutputPlugin.cxx",
+      "before": "a759b6d6d79e82b2a3d3e68caa9ba8f125ef04b1ce28acdc218975d864aea82a",
+      "after": "2615aa39bec26ecd961d511f57664215360ad715cc2cf90e8e5d7a28c49304ac"
+    },
+    {
+      "path": "src/output/Filtered.hxx",
+      "before": "5c05ba499e4bdeae8eba76a985a789ee3ebd34abb361b9852432d7acc3003208",
+      "after": "65bd7b241e9b4fe60bd86ad632403a8473c0e058a68b30dfe76d9736651097a3"
+    },
+    {
+      "path": "src/output/Filtered.cxx",
+      "before": "cb197083566680907a9e84d717c311fa47d8c55e1483dd815a1ddadcfdd18300",
+      "after": "b7b0a82b340f228aa0aaa31c620008c820c6b8f71560e104049200824ca6e7f6"
+    },
+    {
+      "path": "src/output/Init.cxx",
+      "before": "af671a784c32f3bd7de1e47915254fa4219e448c6cc688aab32beb31ff10c6ea",
+      "after": "25cd4f6503c6834c06db5bd112eca1930873532a0a4fdf4ae2b27b5a78127a85"
+    },
+    {
+      "path": "src/output/Registry.cxx",
+      "before": "bf37a235da7ac6569b93cf41369d212cb05a0c9367f18f4d63dea17450819428",
+      "after": "cca2dfd32c465702f65932d2ece6f16b9b3899f9a1d84d17fd60dfd15dd89d04"
+    },
+    {
+      "path": "src/output/plugins/meson.build",
+      "before": "620cbe6c74dee517d0d2d48f68798177eee654c676287abc0f655b1c1daf2d8e",
+      "after": "95136f724bbf69684833c40cf81dd64320e706d0431f1dbbbbcdb0c60d724b58"
+    },
+    {
+      "path": "src/output/plugins/SonantePcmRing.hxx",
+      "before": null,
+      "after": "87727e7fa0c1df24736859f7e695709693746bf16b13d4ab93c30d8a762202ae"
+    },
+    {
+      "path": "src/output/plugins/SonantePcmOutputPlugin.hxx",
+      "before": null,
+      "after": "b0fad8a5ad0c282147e1b23ba95900df7188a5b8fc2432402950dd9e4610aff4"
+    },
+    {
+      "path": "src/output/plugins/SonantePcmOutputPlugin.cxx",
+      "before": null,
+      "after": "7060c8e7b583a52b3fb9e2943995bc4b7930817d58a291b04aea6bd6ff1ed536"
+    }
+  ]
+}

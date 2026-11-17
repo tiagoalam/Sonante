@@ -4,6 +4,7 @@ import { NavidromeConnectionSetting } from "./NavidromeConnectionSetting";
 import { sourceEnabled } from "../utils/musicSources";
 import { logError } from "../utils/frontendDiagnostics";
 import React, { useState, useEffect, useRef, useId } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   Sparkles,
   Sliders,
@@ -13,12 +14,10 @@ import {
   Check,
   ArrowRight,
   ArrowLeft,
-  ShieldCheck,
   Disc3,
   ExternalLink,
   RefreshCw,
   Languages,
-  Radio,
   CircleHelp,
   CircleAlert,
   CheckCircle2,
@@ -31,13 +30,16 @@ import { PlexServerResource } from "../types/plex";
 import { audioService } from "../services/audio";
 import { configService } from "../services/config";
 import { plexService } from "../services/plex";
-import { AudioSignalDiagram } from "./AudioSignalDiagram";
+import { AudioModeSelector } from "./AudioModeSelector";
 import { UsageModeSetting } from "./UsageModeSetting";
 import { fullModeEnabled } from "../utils/usageMode";
 import { ExperimentalFeaturesSetting } from "./ExperimentalFeatures";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { createDeviceAvailabilityQuery, shouldCheckContextualDevice, type AvailabilityQueryState } from "../utils/deviceAvailability";
+import { interpretLegacyAudioRoute } from "../utils/audioRoute.ts";
 import { wizardPlexConnectionReady, wizardSaveErrorKey, type WizardSaveErrorKey } from "../utils/welcomeWizard";
+import { isSqliteCatalogEnabled } from "../utils/sqliteExperimentalMode";
+import { sqliteLibrary, type SqliteIndexProgress } from "../services/sqliteLibrary";
 
 const OPENING_PAGES = ["appearance", "audio", "sources"];
 
@@ -55,6 +57,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [step, setStep] = useState<number>(() => OPENING_PAGES.indexOf(onCancel ? "sources" : "appearance") + 1);
   const [config, setConfig] = useState<AppConfig>({ ...initialConfig, local_folders: [...initialConfig.local_folders] });
+  const [pendingDirect, setPendingDirect] = useState(false);
 
   const [useLocal, setUseLocal] = useState<boolean>(onCancel ? sourceEnabled(initialConfig, "local") : true);
   const [usePlex, setUsePlex] = useState<boolean>(onCancel ? sourceEnabled(initialConfig, "plex") : false);
@@ -63,6 +66,12 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [isFinishing, setIsFinishing] = useState<boolean>(false);
   const [isPickingFolder, setIsPickingFolder] = useState(false);
+  const [sqliteIndexProgress, setSqliteIndexProgress] = useState<SqliteIndexProgress | null>(null);
+  const sqliteFolderTokensRef = useRef(new Map<string, string>());
+  // An indexed source survives a failed preferences save. The backend checks
+  // its committed identity and generation again before accepting completion.
+  const indexedSqliteFoldersRef = useRef(new Set<string>());
+  const sqliteOperationSequenceRef = useRef(0);
   const pickingFolderRef = useRef(false);
   const finishingRef = useRef(false);
   const [completionError, setCompletionError] = useState<WizardSaveErrorKey | "wizard.plexNotReady" | "wizard.navidromeNotReady" | "wizard.folderError" | null>(null);
@@ -93,6 +102,10 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
       authGenerationRef.current++;
       query.dispose();
       availabilityQueryRef.current = null;
+      for (const token of sqliteFolderTokensRef.current.values()) {
+        void sqliteLibrary.cancelFolderSelection(token).catch(() => {});
+      }
+      sqliteFolderTokensRef.current.clear();
     };
   }, []);
 
@@ -109,9 +122,21 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
     pickingFolderRef.current = true;
     setIsPickingFolder(true);
     try {
-      const selected = await audioService.pickDirectory();
-      if (selected) {
-        setConfig((prev) => prev.local_folders.includes(selected) ? prev : {
+      if (isSqliteCatalogEnabled()) {
+        const selection = await sqliteLibrary.chooseFolder();
+        if (selection) {
+          const existingToken = sqliteFolderTokensRef.current.get(selection.displayPath);
+          if (existingToken) void sqliteLibrary.cancelFolderSelection(existingToken).catch(() => {});
+          indexedSqliteFoldersRef.current.delete(selection.displayPath);
+          sqliteFolderTokensRef.current.set(selection.displayPath, selection.token);
+          setConfig((prev) => prev.local_folders.includes(selection.displayPath) ? prev : {
+            ...prev,
+            local_folders: [...prev.local_folders, selection.displayPath],
+          });
+        }
+      } else {
+        const selected = await audioService.pickDirectory();
+        if (selected) setConfig((prev) => prev.local_folders.includes(selected) ? prev : {
           ...prev,
           local_folders: [...prev.local_folders, selected],
         });
@@ -126,6 +151,12 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   };
 
   const handleRemoveFolder = (folderToRemove: string) => {
+    indexedSqliteFoldersRef.current.delete(folderToRemove);
+    const token = sqliteFolderTokensRef.current.get(folderToRemove);
+    if (token) {
+      sqliteFolderTokensRef.current.delete(folderToRemove);
+      void sqliteLibrary.cancelFolderSelection(token).catch(() => {});
+    }
     setConfig((prev) => ({
       ...prev,
       local_folders: prev.local_folders.filter((f) => f !== folderToRemove),
@@ -231,6 +262,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
       case "settings.localFolderOverlap": return t("settings.localFolderOverlap");
       case "wizard.configPersistenceUncertain": return t("wizard.configPersistenceUncertain");
       case "wizard.libraryPreparationError": return t("wizard.libraryPreparationError");
+      case "wizard.sqliteFolderSelectionRequired": return t("wizard.sqliteFolderSelectionRequired");
       case "wizard.preparationIncomplete": return t("wizard.preparationIncomplete");
       case "wizard.deviceBusy": return t("wizard.deviceBusy");
       case "wizard.deviceUnavailable": return t("wizard.deviceUnavailable");
@@ -246,7 +278,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   };
 
   const handleComplete = async () => {
-    if (finishingRef.current || connectionBusy || preparationBlockedRef.current || availability.checking) return;
+    if (finishingRef.current || connectionBusy || preparationBlockedRef.current || availability.checking || pendingDirect) return;
     if (plexRequired && !plexReady) {
       setCompletionError("wizard.plexNotReady");
       return;
@@ -263,6 +295,37 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
         sources: !initialConfig.first_run && useLocal === sourceEnabled(initialConfig, 'local') && usePlex === sourceEnabled(initialConfig, 'plex') && useNavidrome === sourceEnabled(initialConfig, 'navidrome')
           ? initialConfig.sources : { local: useLocal, plex: usePlex, navidrome: useNavidrome },
       };
+      if (isSqliteCatalogEnabled() && initialConfig.first_run && useLocal) {
+        for (const folder of finalConfig.local_folders) {
+          if (indexedSqliteFoldersRef.current.has(folder)) continue;
+          const token = sqliteFolderTokensRef.current.get(folder);
+          if (!token) throw new Error("SQLITE_WIZARD_FOLDER_SELECTION_REQUIRED");
+          const operationId = `wizard-${Date.now().toString(36)}-${(++sqliteOperationSequenceRef.current).toString(36)}`;
+          let unlisten: (() => void) | undefined;
+          setSqliteIndexProgress({ operationId, operation: "add", sourceName: folder.split(/[\\/]/).filter(Boolean).slice(-1)[0] || "Local music",
+            phase: "scanning", entriesVisited: 0, filesExamined: 0, audioFilesFound: 0,
+            metadataProcessed: 0, metadataTotal: 0, identifiedAlbums: 0, identifiedArtists: 0, countsProvisional: true });
+          try {
+            try {
+              unlisten = await listen<SqliteIndexProgress>("sqlite-library-index-progress", event => {
+                if (event.payload.operationId === operationId && mountedRef.current) setSqliteIndexProgress(event.payload);
+              });
+            } catch { /* Progress display is optional; the catalog operation remains authoritative. */ }
+            const result = await sqliteLibrary.addAndIndex(token, operationId);
+            sqliteFolderTokensRef.current.delete(folder);
+            indexedSqliteFoldersRef.current.add(folder);
+            if (mountedRef.current) setSqliteIndexProgress(current => current?.operationId === operationId ? {
+              ...current, phase: "completed", identifiedAlbums: result.view.albums.length,
+              identifiedArtists: result.view.artists.length, countsProvisional: false,
+            } : current);
+          } catch {
+            sqliteFolderTokensRef.current.delete(folder);
+            if (mountedRef.current) setSqliteIndexProgress(current => current?.operationId === operationId
+              ? { ...current, phase: "failed", countsProvisional: false } : current);
+            throw new Error("SQLITE_WIZARD_INDEX_FAILED");
+          } finally { unlisten?.(); }
+        }
+      }
       const response = await configService.saveConfig(finalConfig);
       if (response.status === "accepted" && onSaveAccepted) { onSaveAccepted(response.operation); return; }
       if (response.status !== "completed") throw new Error(t("settings.librarySaveUncertain"));
@@ -285,7 +348,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
   const plexRequired = usePlex;
 
   const nextStep = () => {
-    if (connectionBusy || isFinishing) return;
+    if (connectionBusy || isFinishing || currentPage === "audio" && pendingDirect) return;
     if (currentPage === "navidrome" && !navidromeReady) { setCompletionError("wizard.navidromeNotReady"); return; }
     if (currentPage === "sources" && !useLocal && !usePlex && !useNavidrome) {
       alert(t("wizard.sourceRequired"));
@@ -302,7 +365,27 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
     setStep((s) => Math.max(1, s - 1));
   };
 
-  const isDirect = (config.audio_output_type || "alsa") === "alsa";
+  const configuredRoute = interpretLegacyAudioRoute(config.audio_output_type, config.alsa_device).route;
+  const isDirect = pendingDirect || configuredRoute.access === "exclusive";
+  const selectAudioMode = (mode: "shared" | "direct") => {
+    if (finishingRef.current || isFinishing) return;
+    availabilityQueryRef.current?.invalidate();
+    if (mode === "shared") {
+      setPendingDirect(false);
+      setConfig({ ...config, audio_output_type: "pipewire" as const });
+      return;
+    }
+    if (!config.alsa_device || config.alsa_device === "default") {
+      setPendingDirect(true);
+      return;
+    }
+    setPendingDirect(false);
+      const proposed: AppConfig = { ...config, audio_output_type: "alsa" };
+    setConfig(proposed);
+    if (shouldCheckContextualDevice(initialConfig, proposed, devices.map(device => device.id))) {
+      void availabilityQueryRef.current?.check(proposed.alsa_device);
+    }
+  };
   const selectedAvailability = availability.results.find(row => row.id === config.alsa_device)?.state ?? "indeterminate";
   const displayedAvailability = selectedAvailability === "current_sonante" ? "indeterminate" : selectedAvailability;
   const AvailabilityIcon = availability.checking ? LoaderCircle
@@ -386,60 +469,8 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                 </p>
               </div>
 
-              {/* Botões dos 2 Modos */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                <button
-                  type="button"
-                  aria-pressed={isDirect}
-                  disabled={isFinishing}
-                  onClick={() => {
-                    if (isDirect || finishingRef.current) return;
-                    const proposed: AppConfig = { ...config, audio_output_type: "alsa" };
-                    availabilityQueryRef.current?.invalidate();
-                    setConfig(proposed);
-                    if (shouldCheckContextualDevice(initialConfig, proposed, devices.map(device => device.id))) {
-                      void availabilityQueryRef.current?.check(proposed.alsa_device);
-                    }
-                  }}
-                  className={`p-3.5 rounded-xl border-2 text-left transition-all cursor-pointer flex flex-col justify-between ${
-                    isDirect
-                      ? "border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-accent,#221B0E)]"
-                      : "border-[color:var(--theme-border-soft,#262626)] bg-[var(--theme-surface-base,#141414)] hover:bg-[var(--theme-surface-panel,#181818)]"
-                  }`}
-                >
-                  <div className="flex items-center space-x-2">
-                    <ShieldCheck size={18} className={isDirect ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#777777)]"} />
-                    <span className="font-bold text-xs text-[color:var(--theme-fg-primary,#ffffff)]">{t("settings.alsaMode")}</span>
-                  </div>
-                  <span className="text-[10px] text-[color:var(--theme-fg-muted,#777777)] mt-1">
-                    {t("settings.directModeCaption")}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  aria-pressed={!isDirect}
-                  disabled={isFinishing}
-                  onClick={() => {
-                    if (finishingRef.current) return;
-                    availabilityQueryRef.current?.invalidate();
-                    setConfig({ ...config, audio_output_type: "pipewire" });
-                  }}
-                  className={`p-3.5 rounded-xl border-2 text-left transition-all cursor-pointer flex flex-col justify-between ${
-                    !isDirect
-                      ? "border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-accent,#221B0E)]"
-                      : "border-[color:var(--theme-border-soft,#262626)] bg-[var(--theme-surface-base,#141414)] hover:bg-[var(--theme-surface-panel,#181818)]"
-                  }`}
-                >
-                  <div className="flex items-center space-x-2">
-                    <Radio size={18} className={!isDirect ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#777777)]"} />
-                    <span className="font-bold text-xs text-[color:var(--theme-fg-primary,#ffffff)]">{t("settings.pipewireMode")}</span>
-                  </div>
-                  <span className="text-[10px] text-[color:var(--theme-fg-muted,#777777)] mt-1">
-                    {t("settings.sharedModeCaption")}
-                  </span>
-                </button>
-              </div>
+              <AudioModeSelector selected={isDirect ? "direct" : "shared"}
+                disabled={isFinishing} onSelect={selectAudioMode} />
 
               {/* Configuração Contextual */}
               {isDirect ? (
@@ -459,9 +490,10 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                       }}
                       onChange={(e) => {
                         const id = e.target.value;
-                        if (finishingRef.current || id === config.alsa_device) return;
-                        const proposed = { ...config, alsa_device: id };
+                        if (finishingRef.current || id === config.alsa_device || id === "default") return;
+                        const proposed: AppConfig = { ...config, audio_output_type: "alsa", alsa_device: id };
                         availabilityQueryRef.current?.invalidate();
+                        setPendingDirect(false);
                         setConfig(proposed);
                         if (shouldCheckContextualDevice(initialConfig, proposed, devices.map(device => device.id))) {
                           void availabilityQueryRef.current?.check(id);
@@ -470,7 +502,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                       className="w-full bg-[var(--theme-surface-base,#111111)] border border-[color:var(--theme-border-soft,#333333)] rounded-xl px-4 py-3 text-xs text-[color:var(--theme-fg-primary,#ffffff)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)] cursor-pointer"
                     >
                       {!isSelectedInList && (
-                        <option value={config.alsa_device}>{t("settings.currentDevice", { id: config.alsa_device || t("settings.deviceAvailability.indeterminate") })}</option>
+                        <option value={config.alsa_device} disabled={config.alsa_device === "default"}>{t("settings.currentDevice", { id: config.alsa_device || t("settings.deviceAvailability.indeterminate") })}</option>
                       )}
                       {devices.map((dev) => (
                         <option key={dev.id} value={dev.id} className="bg-[var(--theme-surface-panel,#1A1A1A)] py-1">
@@ -509,9 +541,10 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
                   {config.alsa_device === "default" && <p className="text-xs text-[color:var(--theme-fg-accent,#C9A45D)]">{t("settings.defaultEndpointNotice")}</p>}
                 </div>
               ) : (
-                <p className="text-xs text-[color:var(--theme-fg-secondary,#AAAAAA)]">{t("settings.sharedActiveNotice")}</p>
+                <p className="text-xs text-[color:var(--theme-fg-secondary,#AAAAAA)]">{t("audioExperience.systemDefault")}</p>
               )}
-              <AudioSignalDiagram mode={!isDirect || config.alsa_device === "default" ? "shared" : "direct"} device={config.alsa_device} />
+              {pendingDirect && <p role="note" className="rounded-lg border border-[color:var(--theme-border-accent,#6E5422)] bg-[var(--theme-surface-base,#121212)] p-3 text-xs leading-relaxed text-[color:var(--theme-fg-accent,#C9A45D)]">{t("audioExperience.directNeedsDevice")}</p>}
+              <p role="note" className="text-xs text-[color:var(--theme-fg-muted,#888888)]">{t("wizard.equalizerNotice")}</p>
             </div>
           )}
 
@@ -683,6 +716,9 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
             </div>
           )}
 
+          {sqliteIndexProgress && currentPage === "review" && <p role="status" aria-live="polite" className="mt-3 text-xs text-[color:var(--theme-fg-secondary,#AAAAAA)]">
+            {t(`sqliteLibrary.activity.phase.${sqliteIndexProgress.phase}`)} · {sqliteIndexProgress.identifiedAlbums} {t("sqliteLibrary.activity.albumsShort")}
+          </p>}
           {completionError && <div className="mt-4 space-y-3">
             <p role="alert" className="text-xs text-[color:var(--theme-fg-error,#FF8686)]">{completionErrorMessage(completionError)}</p>
             <LocalDiagnostics />
@@ -708,7 +744,7 @@ export const WelcomeWizard: React.FC<Props> = ({ initialConfig, devices, onFinis
             <button
               type="button"
               onClick={nextStep}
-              disabled={isFinishing || connectionBusy || (currentPage === "plex" && !plexReady) || (currentPage === "navidrome" && !navidromeReady)}
+              disabled={isFinishing || connectionBusy || (currentPage === "audio" && pendingDirect) || (currentPage === "plex" && !plexReady) || (currentPage === "navidrome" && !navidromeReady)}
               className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-md transition-transform active:scale-95 cursor-pointer"
             >
               <span>{t("wizard.next")}</span>

@@ -91,6 +91,9 @@ fn local_tracks(app: &AppHandle, album: &str) -> Result<Vec<audio::LocalItem>, S
     })?;
     Ok(tracks)
 }
+fn sqlite_album(album: &str) -> bool {
+    album.starts_with("sqlite:") || album.starts_with("sqlite-cue-album:")
+}
 fn local_descriptor(item: &audio::LocalItem, i: usize) -> Result<Track, String> {
     ab::track(
         &item.path,
@@ -120,7 +123,12 @@ pub(crate) async fn ab_tracks(
     }
     match source {
         Source::Local { album_id } => tauri::async_runtime::spawn_blocking(move || {
-            local_tracks(&app, &album_id)?
+            let items = if sqlite_album(&album_id) {
+                app.state::<SqliteLibraryState>().album_ab_tracks(&album_id)?
+            } else {
+                local_tracks(&app, &album_id)?
+            };
+            items
                 .iter()
                 .enumerate()
                 .map(|(i, t)| local_descriptor(t, i))
@@ -268,11 +276,40 @@ pub(crate) async fn ab_load(
     let valid_job = job.clone();
     let current: Check = Arc::new(move || valid_job.current());
     let work = async {
-        Ok::<Input, String>(match source {
+        Ok::<(Input, Option<ab::Segment>), String>(match source {
             Source::Local { album_id } => {
                 let app = app.clone();
                 tauri::async_runtime::spawn_blocking(move || {
+                    if sqlite_album(&album_id) {
+                        let state = app.state::<SqliteLibraryState>().inner().clone();
+                        let tracks = app.state::<SqliteLibraryState>().album_ab_tracks(&album_id)?;
+                        let (item, key) = tracks.into_iter().enumerate().find_map(|(index, item)| {
+                            let key = local_descriptor(&item, index).ok()?.key;
+                            (key == track_key).then_some((item, key))
+                        }).ok_or("AB_CHANGED")?;
+                        let resolved = Arc::new(state.open_album_ab_track(&album_id, &item.path)?);
+                        let reader = resolved.file.try_clone_file().map_err(|_| "AB_SOURCE")?;
+                        let file_for_check = resolved.clone();
+                        let state_for_check = state.clone();
+                        let validate_app = app.clone();
+                        let validate: Check = Arc::new(move || state_for_check.album_ab_track_is_current(&file_for_check)
+                            && validate_app.state::<profile_lease::State>().lease().is_ok_and(|lease| lease.validate().is_ok()));
+                        let alive_app = app.clone();
+                        let alive: Check = Arc::new(move || music_sources::local()
+                            && alive_app.state::<ConfigState>().0.lock().is_ok_and(|config| !config.first_run
+                                && matches!(config.audio_output_type.as_str(), "shared" | "pipewire")));
+                        let segment = resolved.cue.as_ref().map(|cue| ab::Segment {
+                            start_seconds: cue.start_frame as f64 / 75.0,
+                            end_seconds: cue.end_frame.map(|frame| frame as f64 / 75.0),
+                        });
+                        let input = Input {
+                            media: Box::new(reader), alive, validate,
+                            identity: format!("sqlite:{}:{}", resolved.view.source_id(), key),
+                        };
+                        return Ok((input, segment));
+                    }
                     local_input(&app, &album_id, &track_key)
+                        .map(|input| (input, None))
                 })
                 .await
                 .map_err(|_| "AB_UNAVAILABLE".to_string())??
@@ -281,16 +318,14 @@ pub(crate) async fn ab_load(
                 server_id,
                 library_id,
                 album_id,
-            } => {
-                client(&app)?
-                    .ab_input(&server_id, &library_id, &album_id, &track_key, current)
-                    .await?
-            }
+            } => (client(&app)?
+                .ab_input(&server_id, &library_id, &album_id, &track_key, current)
+                .await?, None),
             _ => return Err("AB_SOURCE".into()),
         })
     };
     tokio::pin!(work);
-    let mut input = loop {
+    let (mut input, segment) = loop {
         tokio::select! {result=&mut work=>break result?,_=tokio::time::sleep(std::time::Duration::from_millis(100))=>{if !job.current(){return Err("AB_CHANGED".into());}}}
     };
     shared(&app)?;
@@ -307,7 +342,7 @@ pub(crate) async fn ab_load(
                         .is_ok_and(|actual| actual == expected_binding)
                 })
     });
-    job.install(side, input)
+    job.install_segment(side, input, segment)
 }
 #[tauri::command]
 pub(crate) async fn ab_decode(
@@ -317,6 +352,7 @@ pub(crate) async fn ab_decode(
     side: Side,
     start: f64,
     seconds: u32,
+    sync_context: Option<bool>,
 ) -> Result<tauri::ipc::Response, ab::DecodeFailure> {
     main(&window)?;
     shared(&app)?;
@@ -327,7 +363,7 @@ pub(crate) async fn ab_decode(
     let bytes = tauri::async_runtime::spawn_blocking(
         move || -> Result<Result<Vec<u8>, ab::DecodeFailure>, String> {
             if !local {
-                return Ok(ab::decode(job, side, start, seconds));
+                return Ok(ab::decode_with_context(job, side, start, seconds, sync_context.unwrap_or(false)));
             }
             // Keep the existing profile/transaction/source fence through EVERY
             // payload read. No Audio mutex or frontend read-queue slot is held by
@@ -336,7 +372,7 @@ pub(crate) async fn ab_decode(
                 if before.observed_conflict {
                     return Err("AB_CHANGED".into());
                 }
-                let bytes = ab::decode(job, side, start, seconds);
+                let bytes = ab::decode_with_context(job, side, start, seconds, sync_context.unwrap_or(false));
                 let after = recheck()?;
                 if after.observed_conflict || before.sources != after.sources {
                     return Err("AB_CHANGED".into());

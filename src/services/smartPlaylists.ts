@@ -54,7 +54,7 @@ export const smartPlaylistsService = {
             if (selected.plex_server_id !== rules.source.server_id)
                 throw 'SMART_PLAYLIST_SOURCE';
         }
-        return result;
+        return { ...result, unknown_added_date_albums: selection.unknown_added_date_albums ?? 0 };
     },
 };
 export function smartError(error: unknown): string {

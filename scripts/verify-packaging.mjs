@@ -12,12 +12,17 @@ const revision = /^pkgrel=([1-9][0-9]*)$/m.exec(read("sonante-arch/PKGBUILD"))?.
 assert.ok(revision, "Arch package revision must be a positive integer");
 const sourceTag = `v${pkg.version}${revision === "1" ? "" : `-r${revision}`}`;
 if (process.env.RELEASE_TAG) assert.equal(process.env.RELEASE_TAG, sourceTag);
-assert.match(read("src/components/AboutModal.tsx"), new RegExp(`v${pkg.version.replaceAll(".", "\\.")}`));
+assert.match(
+  read("src/components/AboutModal.tsx"),
+  new RegExp(`t\\("about\\.version", \\{ version: "${pkg.version.replaceAll(".", "\\.")}" \\}\\)`),
+);
 // API/SONAME 4.1 alone does not guarantee the WebKit 2.40 APIs used by Tauri/Wry.
-for (const dep of ["mpd", "alsa-utils", "xdg-utils", "xdg-desktop-portal", "libasound2", "libssl3"]) assert.ok(tauri.bundle.linux.deb.depends.includes(dep), dep);
+for (const dep of ["alsa-utils", "xdg-utils", "xdg-desktop-portal", "libasound2", "libssl3"]) assert.ok(tauri.bundle.linux.deb.depends.includes(dep), dep);
+assert.ok(!tauri.bundle.linux.deb.depends.includes("mpd"), "The private MPD runtime must not pull in the system daemon");
 // Tauri CLI 2.12.0 emits Dependency::any: only RPM's parenthesized rich
 // dependency grammar interprets the comparison in the name field.
-for (const dep of ["mpd", "alsa-utils", "xdg-utils", "xdg-desktop-portal", "alsa-lib", "(webkit2gtk4.1 >= 2.40)", "openssl-libs"]) assert.ok(tauri.bundle.linux.rpm.depends.includes(dep), dep);
+for (const dep of ["alsa-utils", "xdg-utils", "xdg-desktop-portal", "alsa-lib", "(webkit2gtk4.1 >= 2.40)", "openssl-libs"]) assert.ok(tauri.bundle.linux.rpm.depends.includes(dep), dep);
+assert.ok(!tauri.bundle.linux.rpm.depends.includes("mpd"), "The private MPD runtime must not pull in the system daemon");
 assert.ok(!tauri.bundle.linux.rpm.depends.includes("webkit2gtk4.1 >= 2.40"));
 assert.ok(tauri.bundle.linux.deb.depends.includes("libwebkit2gtk-4.1-0 (>= 2.40)"));
 assert.ok(!tauri.bundle.linux.deb.depends.includes("wireplumber"));

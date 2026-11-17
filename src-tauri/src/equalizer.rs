@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{atomic::{AtomicU64, Ordering}, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const FILE_NAME: &str = "equalizer-shared-v1.json";
@@ -17,8 +17,8 @@ const MAX_ID_CHARS: usize = 96;
 const MAX_FILE_BYTES: u64 = 1_048_576;
 pub(crate) const MIN_FREQUENCY_HZ: f64 = 20.0;
 pub(crate) const MAX_FREQUENCY_HZ: f64 = 20_000.0;
-pub(crate) const MIN_GAIN_DB: f64 = -12.0;
-pub(crate) const MAX_GAIN_DB: f64 = 12.0;
+pub(crate) const MIN_GAIN_DB: f64 = -15.0;
+pub(crate) const MAX_GAIN_DB: f64 = 15.0;
 pub(crate) const MIN_PREAMP_DB: f64 = -24.0;
 pub(crate) const MAX_PREAMP_DB: f64 = 12.0;
 // CamillaDSP 4.1.3 requires Q > 0 and declares no maximum. This is a product bound.
@@ -160,138 +160,179 @@ pub(crate) fn built_in_presets() -> Vec<EqPreset> {
     for (id, name, preamp, bands) in [
         // Broad listening preferences; band count follows tonal purpose, not a quota.
         (
-            "gentle_bass",
+            "gentle_bass_v2",
             "Gentle bass",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 80.0, 3.0, 0.707),
+                (EqFilterType::LowShelf, 72.0, 2.5, 0.707),
+                (EqFilterType::Peak, 155.0, 1.1, 0.85),
+                (EqFilterType::Peak, 320.0, -0.8, 0.85),
+                (EqFilterType::Peak, 1000.0, -0.3, 0.8),
             ],
         ),
         (
-            "voices",
+            "voices_v2",
             "Voices",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 100.0, -1.5, 0.707),
-                (EqFilterType::Peak, 350.0, -1.0, 0.65),
-                (EqFilterType::Peak, 2000.0, 2.0, 0.65),
+                (EqFilterType::LowShelf, 120.0, -1.2, 0.707),
+                (EqFilterType::Peak, 320.0, -0.8, 0.8),
+                (EqFilterType::Peak, 1200.0, 0.8, 0.8),
+                (EqFilterType::Peak, 2300.0, 1.8, 0.9),
+                (EqFilterType::Peak, 4200.0, -0.5, 0.9),
+                (EqFilterType::HighShelf, 10000.0, 0.3, 0.707),
             ],
         ),
         (
-            "smooth",
+            "smooth_v2",
             "Smooth",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 120.0, 0.8, 0.707),
-                (EqFilterType::HighShelf, 4000.0, -2.0, 0.707),
+                (EqFilterType::LowShelf, 110.0, 0.4, 0.707),
+                (EqFilterType::Peak, 250.0, -0.4, 0.85),
+                (EqFilterType::Peak, 2800.0, -0.8, 0.85),
+                (EqFilterType::Peak, 4800.0, -0.6, 0.9),
+                (EqFilterType::HighShelf, 9000.0, -0.4, 0.707),
             ],
         ),
         (
-            "light_loudness",
+            "light_loudness_v2",
             "Light loudness",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 80.0, 2.5, 0.707),
-                (EqFilterType::Peak, 650.0, -0.7, 0.6),
-                (EqFilterType::HighShelf, 6500.0, 1.5, 0.707),
+                (EqFilterType::LowShelf, 80.0, 2.0, 0.707),
+                (EqFilterType::Peak, 160.0, 0.8, 0.85),
+                (EqFilterType::Peak, 400.0, -0.7, 0.8),
+                (EqFilterType::Peak, 2000.0, 0.4, 0.8),
+                (EqFilterType::HighShelf, 8500.0, 1.2, 0.707),
             ],
         ),
         (
-            "style_rock",
+            "style_rock_v2",
             "Rock",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 90.0, 2.0, 0.707),
-                (EqFilterType::Peak, 350.0, -1.2, 0.65),
-                (EqFilterType::Peak, 2200.0, 1.2, 0.65),
-                (EqFilterType::HighShelf, 8500.0, 0.7, 0.707),
+                (EqFilterType::LowShelf, 55.0, 2.5, 0.707),
+                (EqFilterType::Peak, 110.0, 1.5, 0.9),
+                (EqFilterType::Peak, 280.0, -1.5, 0.8),
+                (EqFilterType::Peak, 1800.0, 0.8, 0.85),
+                (EqFilterType::Peak, 3800.0, 0.8, 0.9),
+                (EqFilterType::HighShelf, 9000.0, 0.7, 0.707),
             ],
         ),
         (
-            "style_reggae",
+            "style_reggae_v2",
             "Reggae",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 70.0, 3.0, 0.707),
-                (EqFilterType::Peak, 350.0, -0.8, 0.65),
-                (EqFilterType::HighShelf, 5500.0, -0.8, 0.707),
+                (EqFilterType::LowShelf, 60.0, 2.4, 0.707),
+                (EqFilterType::Peak, 160.0, 0.8, 0.85),
+                (EqFilterType::Peak, 350.0, -1.1, 0.8),
+                (EqFilterType::Peak, 1800.0, 0.4, 0.85),
+                (EqFilterType::Peak, 3800.0, 0.8, 0.9),
+                (EqFilterType::HighShelf, 8000.0, 0.6, 0.707),
             ],
         ),
         (
-            "style_jazz",
+            "style_jazz_v2",
             "Jazz",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 100.0, 0.7, 0.707),
-                (EqFilterType::Peak, 2200.0, 0.9, 0.6),
-                (EqFilterType::HighShelf, 9000.0, 0.5, 0.707),
+                (EqFilterType::LowShelf, 65.0, 0.8, 0.707),
+                (EqFilterType::Peak, 220.0, -0.4, 0.85),
+                (EqFilterType::Peak, 700.0, 0.3, 0.85),
+                (EqFilterType::Peak, 1800.0, 0.7, 0.85),
+                (EqFilterType::Peak, 4500.0, -0.4, 0.9),
+                (EqFilterType::HighShelf, 10000.0, 0.5, 0.707),
             ],
         ),
         (
-            "style_electronic",
+            "style_electronic_v2",
             "Electronic",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 60.0, 3.5, 0.707),
-                (EqFilterType::Peak, 400.0, -1.0, 0.65),
-                (EqFilterType::HighShelf, 7000.0, 1.5, 0.707),
+                (EqFilterType::LowShelf, 40.0, 3.0, 0.707),
+                (EqFilterType::Peak, 110.0, 1.2, 0.9),
+                (EqFilterType::Peak, 280.0, -1.0, 0.8),
+                (EqFilterType::Peak, 1100.0, -0.4, 0.85),
+                (EqFilterType::Peak, 3500.0, 0.8, 0.9),
+                (EqFilterType::HighShelf, 10000.0, 1.2, 0.707),
             ],
         ),
         (
-            "style_pop",
+            "style_pop_v2",
             "Pop",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 90.0, 1.8, 0.707),
-                (EqFilterType::Peak, 2300.0, 1.2, 0.65),
-                (EqFilterType::HighShelf, 9500.0, 0.8, 0.707),
+                (EqFilterType::LowShelf, 70.0, 1.5, 0.707),
+                (EqFilterType::Peak, 180.0, -0.7, 0.85),
+                (EqFilterType::Peak, 700.0, -0.5, 0.85),
+                (EqFilterType::Peak, 2500.0, 1.4, 0.9),
+                (EqFilterType::Peak, 4500.0, 0.3, 0.9),
+                (EqFilterType::HighShelf, 9500.0, 0.9, 0.707),
             ],
         ),
         (
-            "style_acoustic",
+            "style_acoustic_v2",
             "Acoustic",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 150.0, -1.0, 0.707),
-                (EqFilterType::Peak, 1700.0, 1.3, 0.65),
-                (EqFilterType::HighShelf, 9500.0, 0.7, 0.707),
+                (EqFilterType::LowShelf, 100.0, 0.5, 0.707),
+                (EqFilterType::Peak, 300.0, -0.8, 0.85),
+                (EqFilterType::Peak, 900.0, 0.5, 0.85),
+                (EqFilterType::Peak, 2600.0, 1.0, 0.9),
+                (EqFilterType::Peak, 5500.0, -0.4, 0.9),
+                (EqFilterType::HighShelf, 10000.0, 0.6, 0.707),
             ],
         ),
         (
-            "mood_balanced",
+            "mood_balanced_v2",
             "Balanced",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 100.0, 0.7, 0.707),
-                (EqFilterType::HighShelf, 7500.0, 0.5, 0.707),
+                (EqFilterType::LowShelf, 70.0, 0.6, 0.707),
+                (EqFilterType::Peak, 220.0, -0.3, 0.85),
+                (EqFilterType::Peak, 1500.0, 0.5, 0.85),
+                (EqFilterType::Peak, 5000.0, 0.4, 0.9),
+                (EqFilterType::HighShelf, 11000.0, 0.4, 0.707),
             ],
         ),
         (
-            "mood_relaxing",
+            "mood_relaxing_v2",
             "Relaxing",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 150.0, 1.2, 0.707),
-                (EqFilterType::HighShelf, 2500.0, -1.8, 0.707),
+                (EqFilterType::LowShelf, 100.0, 0.5, 0.707),
+                (EqFilterType::Peak, 300.0, 0.3, 0.85),
+                (EqFilterType::Peak, 2700.0, -1.0, 0.85),
+                (EqFilterType::Peak, 5000.0, -0.8, 0.9),
+                (EqFilterType::HighShelf, 10000.0, -0.4, 0.707),
             ],
         ),
         (
-            "mood_energetic",
+            "mood_energetic_v2",
             "Energetic",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 80.0, 2.2, 0.707),
-                (EqFilterType::Peak, 2600.0, 1.4, 0.7),
-                (EqFilterType::HighShelf, 9000.0, 0.8, 0.707),
+                (EqFilterType::LowShelf, 70.0, 2.0, 0.707),
+                (EqFilterType::Peak, 180.0, -0.7, 0.85),
+                (EqFilterType::Peak, 800.0, 0.3, 0.85),
+                (EqFilterType::Peak, 2500.0, 1.3, 0.9),
+                (EqFilterType::Peak, 5200.0, 0.5, 0.9),
+                (EqFilterType::HighShelf, 10000.0, 0.7, 0.707),
             ],
         ),
         (
-            "mood_cozy",
+            "mood_cozy_v2",
             "Cozy",
             0.0,
             vec![
-                (EqFilterType::LowShelf, 180.0, 1.5, 0.707),
-                (EqFilterType::HighShelf, 4500.0, -1.5, 0.707),
+                (EqFilterType::LowShelf, 120.0, 1.5, 0.707),
+                (EqFilterType::Peak, 280.0, 0.5, 0.85),
+                (EqFilterType::Peak, 800.0, -0.5, 0.85),
+                (EqFilterType::Peak, 2800.0, -0.8, 0.9),
+                (EqFilterType::Peak, 5200.0, -0.6, 0.9),
+                (EqFilterType::HighShelf, 8000.0, -0.7, 0.707),
             ],
         ),
     ] {
@@ -311,6 +352,32 @@ pub(crate) fn built_in_presets() -> Vec<EqPreset> {
         }
         presets.push(p);
     }
+    // Explicit ten-band tonal curves. The preamp is lower than the sum of
+    // positive band gains by 1 dB, a conservative bound against stacked boosts.
+    const TONE_FREQUENCIES: [f64; 10] = [31.0, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
+    let tone_curves: [(&str, &str, [f64; 10]); 4] = [
+        ("tone_classic_v3", "Classic", [0.8, 0.6, 0.3, 0.0, -0.1, 0.0, 0.1, 0.3, 0.4, 0.3]),
+        ("tone_dance_v3", "Dance", [1.2, 1.0, 0.5, 0.0, -0.2, -0.1, 0.1, 0.3, 0.5, 0.3]),
+        ("tone_hip_hop_v3", "Hip-Hop", [1.0, 0.7, 0.3, -0.3, -0.4, -0.1, 0.2, 0.5, 0.4, 0.1]),
+        ("tone_rnb_v3", "R&B", [0.7, 0.6, 0.4, 0.0, -0.1, 0.0, 0.2, 0.3, 0.2, 0.0]),
+    ];
+    for (id, name, gains) in tone_curves {
+        let mut preset = flat_preset();
+        preset.id = id.into();
+        preset.name = name.into();
+        let positive_gain_cents = gains.iter().filter(|gain| **gain > 0.0)
+            .map(|gain| (gain * 100.0).round() as i64).sum::<i64>();
+        preset.preamp_db = -((positive_gain_cents + 100) as f64 / 100.0);
+        for (index, (band, (frequency, gain))) in preset.bands.iter_mut().zip(TONE_FREQUENCIES.into_iter().zip(gains)).enumerate() {
+            band.id = format!("{id}_{:02}", index + 1);
+            band.enabled = true;
+            band.filter_type = EqFilterType::Peak;
+            band.frequency_hz = frequency;
+            band.gain_db = gain;
+            band.q = 1.0;
+        }
+        presets.push(preset);
+    }
     presets
 }
 
@@ -318,36 +385,190 @@ pub(crate) fn built_in_presets() -> Vec<EqPreset> {
 #[derive(serde::Serialize)]
 pub(crate) struct BuiltinGroup {
     id: &'static str,
-    preset_ids: Vec<&'static str>,
+    preset_ids: Vec<String>,
 }
-pub(crate) fn builtin_groups() -> Vec<BuiltinGroup> {
+fn legacy_builtin_presets() -> &'static [EqPreset] {
+    static PRESETS: OnceLock<Vec<EqPreset>> = OnceLock::new();
+    PRESETS.get_or_init(|| {
+        serde_json::from_str(include_str!("equalizer_builtin_legacy_v1.json"))
+            .expect("embedded legacy equalizer catalog is valid")
+    })
+}
+// Keep old saved selections resolvable with their original coefficients.
+// They are only surfaced in the existing legacy group when already selected.
+fn legacy_tone_preset(id: &str) -> Option<EqPreset> {
+    let (name, bands): (&str, &[(EqFilterType, f64, f64, f64)]) = match id {
+        "k17_classic_ref_v1" => ("Classic", &[
+            (EqFilterType::LowShelf, 88.0, 2.0, 0.707), (EqFilterType::Peak, 170.0, 0.7, 0.9),
+            (EqFilterType::Peak, 380.0, -0.6, 0.85), (EqFilterType::Peak, 1500.0, 0.4, 0.9),
+            (EqFilterType::Peak, 3600.0, 0.8, 0.95), (EqFilterType::HighShelf, 9200.0, 0.9, 0.707),
+        ]),
+        "k17_dance_ref_v1" => ("Dance", &[
+            (EqFilterType::LowShelf, 54.0, 2.8, 0.707), (EqFilterType::Peak, 105.0, 1.8, 0.9),
+            (EqFilterType::Peak, 235.0, 0.8, 0.9), (EqFilterType::Peak, 520.0, -0.5, 0.8),
+            (EqFilterType::Peak, 1450.0, 0.3, 0.85), (EqFilterType::Peak, 4100.0, 0.8, 0.9),
+            (EqFilterType::HighShelf, 10000.0, 1.1, 0.707),
+        ]),
+        "k17_pop_ref_v1" => ("Pop", &[
+            (EqFilterType::LowShelf, 58.0, 1.0, 0.707), (EqFilterType::Peak, 130.0, 0.4, 0.9),
+            (EqFilterType::Peak, 310.0, -0.7, 0.85), (EqFilterType::Peak, 780.0, 0.5, 0.85),
+            (EqFilterType::Peak, 2500.0, 1.3, 0.9), (EqFilterType::Peak, 4500.0, 0.5, 0.9),
+            (EqFilterType::HighShelf, 9800.0, 0.7, 0.707),
+        ]),
+        "k17_hip_hop_ref_v1" => ("Hip-Hop", &[
+            (EqFilterType::LowShelf, 44.0, 2.7, 0.707), (EqFilterType::Peak, 88.0, 1.2, 0.9),
+            (EqFilterType::Peak, 245.0, -0.7, 0.85), (EqFilterType::Peak, 680.0, -0.3, 0.85),
+            (EqFilterType::Peak, 1800.0, 0.2, 0.9), (EqFilterType::Peak, 4200.0, 0.6, 0.9),
+            (EqFilterType::HighShelf, 9200.0, 0.4, 0.707),
+        ]),
+        "k17_rnb_ref_v1" => ("R&B", &[
+            (EqFilterType::LowShelf, 68.0, 2.4, 0.707), (EqFilterType::Peak, 142.0, 1.4, 0.9),
+            (EqFilterType::Peak, 320.0, 0.7, 0.85), (EqFilterType::Peak, 720.0, -0.3, 0.85),
+            (EqFilterType::Peak, 1700.0, 0.4, 0.9), (EqFilterType::Peak, 3900.0, 0.4, 0.9),
+            (EqFilterType::HighShelf, 9000.0, 0.5, 0.707),
+        ]),
+        "k17_rock_ref_v1" => ("Rock", &[
+            (EqFilterType::LowShelf, 72.0, 1.7, 0.707), (EqFilterType::Peak, 155.0, 0.8, 0.9),
+            (EqFilterType::Peak, 430.0, -1.0, 0.85), (EqFilterType::Peak, 1300.0, -0.5, 0.9),
+            (EqFilterType::Peak, 2800.0, 1.0, 0.9), (EqFilterType::Peak, 4700.0, 0.8, 0.95),
+            (EqFilterType::HighShelf, 8500.0, 0.5, 0.707),
+        ]),
+        "k17_jazz_ref_v1" => ("Jazz", &[
+            (EqFilterType::LowShelf, 68.0, 0.6, 0.707), (EqFilterType::Peak, 220.0, 0.3, 0.85),
+            (EqFilterType::Peak, 520.0, -0.3, 0.85), (EqFilterType::Peak, 1450.0, 0.4, 0.85),
+            (EqFilterType::Peak, 3200.0, 0.5, 0.9), (EqFilterType::Peak, 6200.0, -0.3, 0.9),
+            (EqFilterType::HighShelf, 10000.0, -0.2, 0.707),
+        ]),
+        _ => return None,
+    };
+    let mut preset = flat_preset();
+    preset.id = id.into(); preset.name = name.into(); preset.preamp_db = 0.0;
+    for band in &mut preset.bands { band.enabled = false; }
+    for (band, (kind, frequency, gain, q)) in preset.bands.iter_mut().zip(bands.iter().copied()) {
+        band.enabled = true; band.filter_type = kind; band.frequency_hz = frequency; band.gain_db = gain; band.q = q;
+    }
+    Some(preset)
+}
+fn retired_generic_tone_preset(id: &str) -> Option<EqPreset> {
+    const FREQUENCIES: [f64; 10] = [31.0, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
+    let gains: [f64; 10] = match id {
+        "tone_pop_v3" => [0.5, 0.4, 0.1, -0.1, -0.1, 0.0, 0.4, 0.7, 0.4, 0.2],
+        "tone_rock_v3" => [0.8, 0.5, 0.1, -0.3, -0.4, 0.1, 0.6, 0.8, 0.5, 0.2],
+        "tone_jazz_v3" => [0.3, 0.2, 0.0, -0.1, 0.0, 0.1, 0.3, 0.3, 0.1, -0.1],
+        _ => return None,
+    };
+    let mut preset = flat_preset();
+    preset.id = id.to_owned();
+    preset.name = "Previously saved tone".into();
+    let positive_gain_cents = gains
+        .iter()
+        .filter(|gain| **gain > 0.0)
+        .map(|gain| (gain * 100.0).round() as i64)
+        .sum::<i64>();
+    preset.preamp_db = -((positive_gain_cents + 100) as f64 / 100.0);
+    for (index, (band, (frequency, gain))) in preset
+        .bands
+        .iter_mut()
+        .zip(FREQUENCIES.into_iter().zip(gains))
+        .enumerate()
+    {
+        band.id = format!("{id}_{:02}", index + 1);
+        band.enabled = true;
+        band.filter_type = EqFilterType::Peak;
+        band.frequency_hz = frequency;
+        band.gain_db = gain;
+        band.q = 1.0;
+    }
+    Some(preset)
+}
+fn builtin_preset(id: &str) -> Option<EqPreset> {
+    let presets = built_in_presets();
+    if let Some(preset) = presets.iter().find(|preset| preset.id == id) {
+        return Some(preset.clone());
+    }
+    if let Some(preset) = retired_generic_tone_preset(id) {
+        return Some(preset);
+    }
+    if let Some(preset) = legacy_tone_preset(id) {
+        return Some(preset);
+    }
+    legacy_builtin_presets().iter().find(|preset| preset.id == id).cloned()
+}
+pub(crate) fn catalog_built_ins(config: &EqualizerConfig) -> Vec<EqPreset> {
+    let mut presets = built_in_presets();
+    let mut referenced = Vec::new();
+    if let PresetRef::BuiltIn { id } = &config.active_preset {
+        referenced.push(id.as_str());
+    }
+    referenced.extend(config.equipment_profiles.iter().filter_map(|profile| match &profile.preset {
+        PresetRef::BuiltIn { id } => Some(id.as_str()),
+        PresetRef::User { .. } => None,
+    }));
+    for id in referenced {
+        if presets.iter().any(|preset| preset.id == id) {
+            continue;
+        }
+        if let Some(preset) = builtin_preset(id) {
+            presets.push(preset);
+        }
+    }
+    presets
+}
+pub(crate) fn builtin_groups(config: &EqualizerConfig) -> Vec<BuiltinGroup> {
     [
         ("reference", vec!["flat"]),
         (
             "styles",
             vec![
-                "style_rock",
-                "style_reggae",
-                "style_jazz",
-                "style_electronic",
-                "style_pop",
-                "style_acoustic",
+                "style_rock_v2",
+                "style_reggae_v2",
+                "style_jazz_v2",
+                "style_electronic_v2",
+                "style_pop_v2",
+                "style_acoustic_v2",
+                "tone_classic_v3",
+                "tone_dance_v3",
+                "tone_hip_hop_v3",
+                "tone_rnb_v3",
             ],
         ),
         (
             "moods",
             vec![
-                "mood_balanced",
-                "mood_relaxing",
-                "mood_energetic",
-                "mood_cozy",
-                "voices",
+                "mood_balanced_v2",
+                "mood_relaxing_v2",
+                "mood_energetic_v2",
+                "mood_cozy_v2",
+                "voices_v2",
             ],
         ),
-        ("tonal", vec!["gentle_bass", "smooth", "light_loudness"]),
+        ("tonal", vec!["gentle_bass_v2", "smooth_v2", "light_loudness_v2"]),
     ]
     .into_iter()
-    .map(|(id, preset_ids)| BuiltinGroup { id, preset_ids })
+    .map(|(id, preset_ids)| BuiltinGroup {
+        id,
+        preset_ids: preset_ids.into_iter().map(str::to_owned).collect(),
+    })
+    .chain(std::iter::once_with(|| {
+        let mut preset_ids = Vec::new();
+        if let PresetRef::BuiltIn { id } = &config.active_preset {
+            if id != FLAT_ID && (legacy_builtin_presets().iter().any(|preset| preset.id == *id) || legacy_tone_preset(id).is_some() || retired_generic_tone_preset(id).is_some()) {
+                preset_ids.push(id.clone());
+            }
+        }
+        for profile in &config.equipment_profiles {
+            if let PresetRef::BuiltIn { id } = &profile.preset {
+                if id != FLAT_ID
+                    && (legacy_builtin_presets().iter().any(|preset| preset.id == *id) || legacy_tone_preset(id).is_some() || retired_generic_tone_preset(id).is_some())
+                    && !preset_ids.contains(id)
+                {
+                    preset_ids.push(id.clone());
+                }
+            }
+        }
+        BuiltinGroup { id: "legacy", preset_ids }
+    }))
+    .filter(|group| group.id != "legacy" || !group.preset_ids.is_empty())
     .collect()
 }
 
@@ -355,30 +576,62 @@ pub(crate) fn builtin_groups() -> Vec<BuiltinGroup> {
 mod collection_tests {
     use super::*;
 
+    fn response_db(preset: &EqPreset, rate: u32, frequency: f64) -> f64 {
+        let omega = 2. * std::f64::consts::PI * frequency / rate as f64;
+        let (sin1, cos1) = omega.sin_cos();
+        let (sin2, cos2) = (2. * omega).sin_cos();
+        let mut magnitude = 1.;
+        for band in preset.bands.iter().filter(|band| band.enabled) {
+            let [b0, b1, b2, a1, a2] = crate::shared_dsp::safety::coefficients(band, rate);
+            let numerator_re = b0 + b1 * cos1 + b2 * cos2;
+            let numerator_im = -b1 * sin1 - b2 * sin2;
+            let denominator_re = 1. + a1 * cos1 + a2 * cos2;
+            let denominator_im = -a1 * sin1 - a2 * sin2;
+            magnitude *= numerator_re.hypot(numerator_im) / denominator_re.hypot(denominator_im);
+        }
+        20. * magnitude.log10()
+    }
+
     #[test]
-    fn factory_updates_keep_legacy_refs_and_personal_copies_without_migration() {
-        let old: Vec<EqPreset> = serde_json::from_str(include_str!("../../tests/fixtures/equalizer-legacy-builtins.json")).unwrap();
-        let builtins=built_in_presets();
-        for p in old {
-            let current=builtins.iter().find(|v|v.id==p.id).unwrap().clone();
-            assert_eq!(current.name,p.name);if p.id=="flat"{assert_eq!(current,p);}else{assert_ne!(current.bands,p.bands);assert_eq!(current.preamp_db,0.);}
-            let raw=serde_json::json!({"schema_version":1,"enabled":false,"active_preset":{"kind":"built_in","id":p.id},"user_presets":[]});
-            let mut config:EqualizerConfig=serde_json::from_value(raw).unwrap();config.validate().unwrap();let reference=config.active_preset.clone();config.link_equipment(None,"Existing headphones",reference.clone()).unwrap();assert_eq!(config.preset(&reference).unwrap(),current);
-            let copy=config.create_user_preset("Rock",Some(&reference)).unwrap();assert_eq!(config.preset(&PresetRef::User{id:copy.id}).unwrap().bands,current.bands);
-            let mut personal=p.clone();personal.id=format!("legacy_saved_{}",p.id);personal.name="Existing personal copy".into();let user=PresetRef::User{id:personal.id.clone()};config.user_presets.push(personal.clone());config.set_active_preset(user.clone()).unwrap();config.link_equipment(None,"Saved personal association",user.clone()).unwrap();
-            let reopened:EqualizerConfig=serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();reopened.validate().unwrap();assert_eq!(reopened.preset(&user).unwrap(),personal);assert_eq!(reopened.preset(&user).unwrap().bands,p.bands);assert_eq!(reopened.preset(&user).unwrap().preamp_db,p.preamp_db);assert!(!reopened.enabled);
+    fn versioned_catalog_keeps_existing_builtin_references_and_personal_copies_unchanged() {
+        let current = built_in_presets();
+        let legacy = legacy_builtin_presets();
+        assert_eq!(current.len(), 19);
+        assert_eq!(legacy.len(), 15);
+        assert_eq!(current[0], legacy[0]);
+        assert!(current.iter().skip(1).all(|p| p.id.ends_with("_v2") || p.id.ends_with("_v3")));
+
+        for old in legacy.iter().filter(|p| p.id != FLAT_ID) {
+            let raw = serde_json::json!({
+                "schema_version":1,"enabled":false,
+                "active_preset":{"kind":"built_in","id":old.id},
+                "user_presets":[]
+            });
+            let mut config: EqualizerConfig = serde_json::from_value(raw).unwrap();
+            config.validate().unwrap();
+            let reference = config.active_preset.clone();
+            assert_eq!(config.preset(&reference).unwrap(), *old);
+            let catalog = catalog_built_ins(&config);
+            assert_eq!(catalog.iter().find(|preset| preset.id == old.id), Some(old));
+            let groups = builtin_groups(&config);
+            assert!(groups.iter().any(|group| group.id == "legacy" && group.preset_ids.contains(&old.id)));
+
+            config.link_equipment(None, "Existing headphones", reference.clone()).unwrap();
+            let copy = config.create_user_preset("Personal copy", Some(&reference)).unwrap();
+            assert_eq!(config.preset(&PresetRef::User { id: copy.id }).unwrap().bands, old.bands);
         }
     }
 
     #[test]
     fn presentation_groups_cover_every_builtin_once_and_imports_remain_portable() {
         let presets = built_in_presets();
-        let grouped: Vec<_> = builtin_groups().into_iter().flat_map(|g| g.preset_ids).collect();
-        let unique: std::collections::HashSet<_> = grouped.iter().copied().collect();
+        let config = EqualizerConfig::default();
+        let grouped: Vec<_> = builtin_groups(&config).into_iter().flat_map(|g| g.preset_ids).collect();
+        let unique: std::collections::HashSet<_> = grouped.iter().cloned().collect();
         assert_eq!(grouped.len(), presets.len());
         assert_eq!(unique.len(), presets.len());
         for p in presets {
-            assert!(unique.contains(p.id.as_str()));
+            assert!(unique.contains(&p.id));
             let text = crate::equalizer_portable::export(&p).unwrap();
             let imported = crate::equalizer_portable::inspect(&text).unwrap();
             assert_eq!(imported.preamp_db, p.preamp_db);
@@ -391,6 +644,153 @@ mod collection_tests {
             config.set_active_preset(PresetRef::User { id:user.id }).unwrap();
             assert!(!config.enabled);
             assert_eq!(built_in_presets().iter().find(|v|v.id==p.id),Some(&p));
+        }
+    }
+
+    #[test]
+    fn new_rhythm_presets_are_unique_styles_and_keep_safe_headroom() {
+        let config = EqualizerConfig::default();
+        assert!(!config.enabled, "catalog changes must not activate EQ");
+        let catalog = catalog_built_ins(&config);
+        let new_styles = ["tone_classic_v3", "tone_dance_v3", "tone_hip_hop_v3", "tone_rnb_v3"];
+        let styles = builtin_groups(&config).into_iter().find(|group| group.id == "styles").unwrap();
+        for id in new_styles {
+            assert!(styles.preset_ids.contains(&id.to_owned()), "{id} is part of the normal styles category");
+            let preset = catalog.iter().find(|preset| preset.id == id).unwrap();
+            assert!(preset.bands.iter().all(|band| band.enabled));
+            assert_eq!(preset.bands.len(), 10);
+            let positive = preset.bands.iter().map(|band| band.gain_db.max(0.0)).sum::<f64>();
+            assert!((preset.preamp_db + positive + 1.0).abs() < 1e-9);
+            for rate in [44_100, 48_000, 96_000, 192_000] {
+                let protection = crate::shared_dsp::safety::assess(preset, rate).unwrap();
+                let peak = (0..=2048).map(|index| {
+                    let frequency = 20.0_f64 * (20_000.0_f64 / 20.0_f64).powf(index as f64 / 2048.0);
+                    response_db(preset, rate, frequency)
+                }).fold(f64::NEG_INFINITY, f64::max);
+                assert!(protection.effective_preamp_db + peak + protection.resampler_bound_db <= protection.ceiling_db + 1e-9);
+            }
+        }
+        assert!(!builtin_groups(&config).iter().any(|group| group.id == "tones"));
+        let names: Vec<_> = catalog.iter().map(|preset| preset.name.to_lowercase()).collect();
+        assert_eq!(names.iter().filter(|name| name.as_str() == "rock").count(), 1);
+        assert_eq!(names.iter().filter(|name| name.as_str() == "pop").count(), 1);
+        assert_eq!(names.iter().filter(|name| name.as_str() == "jazz").count(), 1);
+    }
+
+    #[test]
+    fn retired_duplicate_tones_keep_saved_coefficients_without_becoming_duplicate_choices() {
+        let normal = built_in_presets();
+        for (id, original) in [("tone_pop_v3", "style_pop_v2"), ("tone_rock_v3", "style_rock_v2"), ("tone_jazz_v3", "style_jazz_v2")] {
+            assert!(!normal.iter().any(|preset| preset.id == id));
+            let mut config = EqualizerConfig::default();
+            config.active_preset = PresetRef::BuiltIn { id: id.into() };
+            let catalog = catalog_built_ins(&config);
+            let saved = catalog.iter().find(|preset| preset.id == id).expect("saved selection remains resolvable");
+            assert_eq!(saved.name, "Previously saved tone");
+            let expected_gains: [f64; 10] = match id {
+                "tone_pop_v3" => [0.5, 0.4, 0.1, -0.1, -0.1, 0.0, 0.4, 0.7, 0.4, 0.2],
+                "tone_rock_v3" => [0.8, 0.5, 0.1, -0.3, -0.4, 0.1, 0.6, 0.8, 0.5, 0.2],
+                "tone_jazz_v3" => [0.3, 0.2, 0.0, -0.1, 0.0, 0.1, 0.3, 0.3, 0.1, -0.1],
+                _ => unreachable!(),
+            };
+            assert_eq!(saved.bands.len(), expected_gains.len());
+            assert_eq!(saved.bands.iter().map(|band| band.gain_db).collect::<Vec<_>>(), expected_gains);
+            assert!(saved.bands.iter().all(|band| band.filter_type == EqFilterType::Peak && band.q == 1.0));
+            assert_eq!(saved.bands.iter().map(|band| band.frequency_hz).collect::<Vec<_>>(), [31.0, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0]);
+            assert!(catalog.iter().any(|preset| preset.id == original));
+            assert!(builtin_groups(&config).iter().any(|group| group.id == "legacy" && group.preset_ids.contains(&id.to_owned())));
+        }
+    }
+
+    #[test]
+    fn old_factory_tone_references_resolve_to_generic_curves_without_changing_saved_selections() {
+        let aliases = [
+            ("k17_classic_ref_v1", "tone_classic_v3"), ("k17_dance_ref_v1", "tone_dance_v3"),
+            ("k17_pop_ref_v1", "tone_pop_v3"), ("k17_hip_hop_ref_v1", "tone_hip_hop_v3"),
+            ("k17_rnb_ref_v1", "tone_rnb_v3"), ("k17_rock_ref_v1", "tone_rock_v3"),
+            ("k17_jazz_ref_v1", "tone_jazz_v3"),
+        ];
+        for (old_id, new_id) in aliases {
+            let mut config = EqualizerConfig::default();
+            config.active_preset = PresetRef::BuiltIn { id: old_id.into() };
+            let catalog = catalog_built_ins(&config);
+            let old = catalog.iter().find(|preset| preset.id == old_id).unwrap();
+            assert_eq!(old.name, legacy_tone_preset(old_id).unwrap().name);
+            assert_eq!(old.preamp_db, 0.0);
+            assert!((6..=7).contains(&old.bands.iter().filter(|band| band.enabled).count()));
+            if let Some(current) = built_in_presets().into_iter().find(|preset| preset.id == new_id) {
+                assert_ne!(old.bands, current.bands, "legacy selections keep their original coefficients");
+            }
+            assert!(builtin_groups(&config).iter().any(|group| group.id == "legacy" && group.preset_ids.contains(&old_id.into())));
+        }
+    }
+
+    #[test]
+    fn reformulated_defaults_have_finite_stable_curves_and_headroom_at_supported_analysis_rates() {
+        let presets = built_in_presets();
+        let flat_curve: Vec<_> = (0..=2048)
+            .map(|index| {
+                let frequency = 20.0_f64 * (20_000.0_f64 / 20.0_f64).powf(index as f64 / 2048.0);
+                response_db(&presets[0], 48_000, frequency)
+            })
+            .collect();
+        let mut sampled_curves = Vec::new();
+        for preset in presets.iter().filter(|preset| preset.id != FLAT_ID) {
+            validate_v1(preset).unwrap();
+            let active: Vec<_> = preset.bands.iter().filter(|band| band.enabled).collect();
+            assert!((4..=10).contains(&active.len()), "{} filter count", preset.id);
+            if !preset.id.starts_with("tone_") { assert_eq!(preset.preamp_db, 0.0, "{} default preamp", preset.id); }
+
+            let mut curve_48k = Vec::new();
+            for rate in [44_100, 48_000, 96_000, 192_000] {
+                let protection = crate::shared_dsp::safety::assess(preset, rate)
+                    .unwrap_or_else(|_| panic!("{} rejected at {rate} Hz", preset.id));
+                assert!(protection.filter_bound_db.is_finite());
+                assert!(protection.effective_preamp_db.is_finite());
+                assert!(protection.effective_preamp_db + protection.filter_bound_db
+                    + protection.resampler_bound_db <= protection.ceiling_db + 1e-9);
+
+                for band in &active {
+                    assert!((MIN_FREQUENCY_HZ..=MAX_FREQUENCY_HZ).contains(&band.frequency_hz));
+                    assert!((MIN_GAIN_DB..=MAX_GAIN_DB).contains(&band.gain_db));
+                    assert!((MIN_Q..=MAX_Q).contains(&band.q));
+                    let [b0, b1, b2, a1, a2] = crate::shared_dsp::safety::coefficients(band, rate);
+                    assert!([b0, b1, b2, a1, a2].iter().all(|value| value.is_finite()));
+                    let discriminant = a1 * a1 - 4. * a2;
+                    let radius = if discriminant < 0. {
+                        a2.sqrt()
+                    } else {
+                        let root = discriminant.sqrt();
+                        ((-a1 + root) / 2.).abs().max(((-a1 - root) / 2.).abs())
+                    };
+                    assert!(radius < 1.0, "{} has unstable pole at {rate} Hz", preset.id);
+                }
+
+                for index in 0..=2048 {
+                    let frequency = 20.0_f64 * (20_000.0_f64 / 20.0_f64).powf(index as f64 / 2048.0);
+                    let response = response_db(preset, rate, frequency);
+                    assert!(response.is_finite(), "{} non-finite response at {frequency} Hz / {rate}", preset.id);
+                    if rate == 48_000 { curve_48k.push(response); }
+                }
+            }
+            let peak = curve_48k.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let minimum = curve_48k.iter().copied().fold(f64::INFINITY, f64::min);
+            eprintln!("{}: sampled response {minimum:.2}..{peak:.2} dB; 48 kHz safety bound {:.2} dB; effective preamp {:.2} dB", preset.id,
+                crate::shared_dsp::safety::assess(preset, 48_000).unwrap().filter_bound_db,
+                crate::shared_dsp::safety::assess(preset, 48_000).unwrap().effective_preamp_db);
+            sampled_curves.push(curve_48k);
+        }
+
+        // Each named profile must remain discernible from Flat and from every other profile.
+        for left in 0..sampled_curves.len() {
+            let flat_distance = sampled_curves[left].iter().zip(&flat_curve)
+                .map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+            assert!(flat_distance >= 0.25, "profile {left} is indistinguishable from Flat");
+            for right in 0..left {
+                let distance = sampled_curves[left].iter().zip(&sampled_curves[right])
+                    .map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+                assert!(distance >= 0.25, "profiles {left} and {right} are indistinguishable");
+            }
         }
     }
 }
@@ -499,7 +899,7 @@ impl EqualizerConfig {
             self.preset(&e.preset)?;
         }
         match &self.active_preset {
-            PresetRef::BuiltIn { id } if built_in_presets().iter().any(|p| &p.id == id) => Ok(()),
+            PresetRef::BuiltIn { id } if builtin_preset(id).is_some() => Ok(()),
             PresetRef::BuiltIn { .. } => Err(EqError::UnknownBuiltinPreset),
             PresetRef::User { id } if !valid_id(id) || !ids.contains(id) => {
                 Err(EqError::MissingActivePreset)
@@ -524,10 +924,7 @@ impl EqualizerConfig {
 
     pub fn preset(&self, reference: &PresetRef) -> Result<EqPreset, EqError> {
         match reference {
-            PresetRef::BuiltIn { id } => built_in_presets()
-                .into_iter()
-                .find(|p| &p.id == id)
-                .ok_or(EqError::UnknownBuiltinPreset),
+            PresetRef::BuiltIn { id } => builtin_preset(id).ok_or(EqError::UnknownBuiltinPreset),
             PresetRef::User { id } => self
                 .user_presets
                 .iter()
@@ -849,7 +1246,7 @@ mod tests {
     #[test]
     fn all_builtins_are_readonly_generic_copies_and_never_enable_dsp() {
         let presets = built_in_presets();
-        assert_eq!(presets.len(), 15);
+        assert_eq!(presets.len(), 19);
         let mut config = EqualizerConfig::default();
         for p in presets {
             validate_v1(&p).unwrap();
@@ -897,7 +1294,7 @@ mod tests {
             assert_eq!(config.validate(), Err(EqError::InvalidFrequency));
         }
         config.user_presets[index].bands[0].frequency_hz = 1000.0;
-        for value in [-12.01, 12.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for value in [-16.0, -15.01, 15.01, 16.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             config.user_presets[index].bands[0].gain_db = value;
             assert_eq!(config.validate(), Err(EqError::InvalidGain));
         }

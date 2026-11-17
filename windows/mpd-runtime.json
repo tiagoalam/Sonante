@@ -1,0 +1,13 @@
+{
+  "version": "0.24.18",
+  "url": "https://www.musicpd.org/download/win32/0.24.18/mpd.exe",
+  "sha256": "18121d1593450b18451f7d83565adef4ac73cb70005eba1113617afb607433bd",
+  "sourceUrl": "https://www.musicpd.org/download/mpd/0.24/mpd-0.24.18.tar.xz",
+  "sourceSha256": "afe8fddbdbefc7b3e7ee721fd0dd4e2276f29e40fe7e3c573daf5123b444578f",
+  "signatureKeyFingerprint": "0392335A78083894A4301C43236E8A58C6DB4512",
+  "upstreamBuildRecipes": "https://github.com/MusicPlayerDaemon/MPD/tree/v0.24.18/win32",
+  "binarySignatureUrl": "https://www.musicpd.org/download/win32/0.24.18/mpd.exe.sig",
+  "binarySignatureSha256": "5c7f8889e8e06717be5ffd3e266ca81e1c906e6461f311c7ddece8057fcd3e4b",
+  "sourceSignatureUrl": "https://www.musicpd.org/download/mpd/0.24/mpd-0.24.18.tar.xz.sig",
+  "sourceSignatureSha256": "aab8ebac3a3d76cba6f44826bed74838702fb0e3d8449d6528eb120d224f4417"
+}

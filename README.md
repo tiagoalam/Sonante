@@ -18,6 +18,8 @@ A modern, open-source music player for enjoying your own albums, Plex and Navidr
 
 </div>
 
+**0.7.0 homologation candidate — not published.** No 0.7.0 installation packages or public tag are available. The latest public release remains [v0.6.3](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.3).
+
 ## More music. Less searching.
 
 Your albums deserve more than a folder list. Sonante brings your collection together, whether it's stored on your computer, a network drive, Plex or Navidrome.
@@ -35,12 +37,12 @@ Browse your favorite artists, rediscover forgotten albums and spend more time li
 
 ## What can Sonante do?
 
-- **Bring your libraries together:** local folders, mounted shares, Plex and Navidrome.
+- **Bring your libraries together:** a persistent SQLite catalog for local folders and mounted shares, plus Plex and Navidrome.
 - **Rediscover your collection:** Explore, suggestions, albums, artists, genres and decades.
 - **Create your own listening experience:** queues, favorites, manual playlists and smart playlists.
 - **Customize your player:** Simple and Full modes, six themes, library layouts and immersive Now Playing screens.
 - **Look after your music:** local album diagnostics and reviewed FLAC metadata editing.
-- **Choose how to listen:** Shared and Direct audio-output options, audio-device selection and playback controls.
+- **Choose how to listen:** Shared and Direct audio-output options, EQ, audio-device selection and playback controls.
 - **Go further when you want:** online radio, Last.fm and ListenBrainz, and optional advanced features.
 
 Some features are specific to certain music sources or interface modes. [See all the details](docs/LINUX_GUIDE.md).

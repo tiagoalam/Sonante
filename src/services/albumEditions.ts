@@ -11,6 +11,7 @@ import { localAlbumCatalog } from '../utils/localAlbumCatalogSession';
 import { plexService } from './plex';
 import { navidromeService } from './navidrome';
 import { smartPlaylistsService } from './smartPlaylists';
+import { isSqliteCatalogEnabled } from '../utils/sqliteExperimentalMode';
 const check = (current: () => boolean) => { if (!current()) throw 'EDITIONS_CANCELLED'; };
 
 // Explicit page work only. Native catalog admission remains authoritative.
@@ -19,7 +20,7 @@ export async function loadEditionSource(source: EditionSource, config: AppConfig
   check(current);
   if (!sourceEnabled(config, source)) return { source, phase: 'unconfigured', entries: [] };
   if (source === 'local') {
-    if (!config.local_folders?.length) return { source, phase: 'unconfigured', entries: [] };
+    if (!isSqliteCatalogEnabled() && !config.local_folders?.length) return { source, phase: 'unconfigured', entries: [] };
     // Reuse the admitted session catalog used by the browser and artwork. Never
     // start a competing catalog read, or promote saved presentation rows to ready.
     const catalog = localAlbumCatalog.getSnapshot();

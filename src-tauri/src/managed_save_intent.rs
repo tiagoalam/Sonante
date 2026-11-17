@@ -1320,6 +1320,7 @@ mod tests {
             entries: (0..2)
                 .map(|pos| crate::audio::MpdQueueEntry {
                     uri: uri.into(),
+                    range: None,
                     pos,
                     id: pos as u64 + 10,
                 })

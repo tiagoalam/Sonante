@@ -1,0 +1,715 @@
+--- a/src/audiodevice.rs
++++ b/src/audiodevice.rs
+@@ -398,7 +398,15 @@
+             rate_measure_interval: conf.rate_measure_interval(),
+         }),
+         config::CaptureDevice::Stdin(ref dev) => Box::new(filedevice::FileCaptureDevice {
+-            source: filedevice::CaptureSource::Stdin,
++            source: {
++                #[cfg(target_os = "windows")]
++                { match &dev.sonante_pcm {
++                    Some(p) => filedevice::CaptureSource::SonantePrivatePcm(p.clone()),
++                    None => filedevice::CaptureSource::Stdin,
++                } }
++                #[cfg(not(target_os = "windows"))]
++                { filedevice::CaptureSource::Stdin }
++            },
+             samplerate: conf.samplerate,
+             capture_samplerate,
+             resampler_config: conf.resampler,
+--- a/src/config/mod.rs
++++ b/src/config/mod.rs
+@@ -528,6 +528,9 @@
+ #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+ #[serde(deny_unknown_fields)]
+ pub struct CaptureDeviceStdin {
++    #[cfg(target_os = "windows")]
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub sonante_pcm: Option<crate::file_backend::private_pcm::Parameters>,
+     #[serde(deserialize_with = "validate_nonzero_usize")]
+     pub channels: usize,
+     pub format: BinarySampleFormat,
+--- a/src/file_backend/device.rs
++++ b/src/file_backend/device.rs
+@@ -62,6 +62,8 @@
+ pub enum CaptureSource {
+     Filename(String),
+     Stdin,
++    #[cfg(target_os = "windows")]
++    SonantePrivatePcm(super::private_pcm::Parameters),
+     #[cfg(all(target_os = "linux", feature = "bluez-backend"))]
+     BluezDBus(String, String),
+ }
+@@ -614,6 +616,11 @@
+                     CaptureSource::Filename(filename) => File::open(filename)
+                         .map(|f| Box::new(BlockingReader::new(f)) as Box<dyn Reader>),
+                     CaptureSource::Stdin => Ok(Box::new(BlockingReader::new(stdin()))),
++                    #[cfg(target_os = "windows")]
++                    CaptureSource::SonantePrivatePcm(p) => super::private_pcm::RingStream::new(p, super::private_pcm::CaptureFormat {
++                        rate: samplerate, capture_rate: capture_samplerate, channels, format: sample_format,
++                        transformed: resampler_config.is_some() || skip_bytes != 0 || read_bytes != 0 || extra_bytes != 0,
++                    }).map(|reader| Box::new(BlockingReader::new(reader)) as Box<dyn Reader>),
+                 };
+                 #[cfg(target_os = "linux")]
+                 let file_res: Result<Box<dyn Reader>, Box<dyn Error>> = match source {
+--- a/src/file_backend/mod.rs
++++ b/src/file_backend/mod.rs
+@@ -17,6 +17,8 @@
+ #[cfg(all(target_os = "linux", feature = "bluez-backend"))]
+ pub mod bluez;
+ pub mod device;
++#[cfg(target_os = "windows")]
++pub mod private_pcm;
+ #[cfg(not(target_os = "linux"))]
+ pub mod filereader;
+ #[cfg(target_os = "linux")]
+--- /dev/null
++++ b/src/file_backend/pcm_core.rs
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: GPL-3.0-only OR MPL-2.0
++//! Windows PCM transport ABI/core. No DSP, device, filesystem or engine access.
++use std::{ptr::NonNull, sync::atomic::{AtomicU32, AtomicU64, Ordering}};
++pub const MAGIC:u64=0x31304d43504e4f53;
++pub const CAPACITY:u64=4096;
++pub const FRAME_BYTES:usize=8;
++pub const EOF:u32=1;pub const LOST:u32=2;pub const STOP:u32=4;
++const INDEX_MAX:u64=0x7fffffffffffffff;
++#[repr(C,align(64))]
++pub struct Header {
++ pub magic:u64,pub version:u32,pub header_bytes:u32,pub capacity:u32,pub rate:u32,pub channels:u32,pub frame_bytes:u32,pub format:u32,pub owner:u32,
++ pub nonce0:u64,pub nonce1:u64,pub reserved:u64,
++ pub written:u64,pub pad_written:[u8;56],pub read:u64,pub pad_read:[u8;56],
++ pub flags:u32,pub consumer:u32,pub pad_flags:[u8;56],pub data:[u8;32768],
++}
++const _:()=assert!(size_of::<Header>()==33024 && align_of::<Header>()==64);
++const _:()=assert!(std::mem::offset_of!(Header,written)==64 && std::mem::offset_of!(Header,read)==128);
++const _:()=assert!(std::mem::offset_of!(Header,flags)==192 && std::mem::offset_of!(Header,data)==256);
++const _:()=assert!(std::mem::offset_of!(Header,consumer)==196);
++#[derive(Clone,Copy)]
++pub struct Binding {pub owner:u32,pub nonce0:u64,pub nonce1:u64}
++#[derive(Debug,PartialEq)]
++pub enum Fault {Binding,State,Alignment}
++pub struct Reader {p:NonNull<Header>,binding:Binding}
++// Mapping lifetime is owned by the native wrapper; one consumer only. This is
++// Send so Camilla's capture thread can own it, never Sync or clonable.
++unsafe impl Send for Reader {}
++unsafe fn u64_load(p:*mut u64)->u64 {unsafe{AtomicU64::from_ptr(p)}.load(Ordering::Acquire)}
++unsafe fn u32_load(p:*mut u32)->u32 {unsafe{AtomicU32::from_ptr(p)}.load(Ordering::Acquire)}
++impl Reader {
++ /// Native capture adapter claims the sole consumer only after binding/format
++ /// validation. The flag is never cleared; a generation cannot be resurrected.
++ pub fn claim(&self)->Result<(),Fault>{
++  self.validate()?;
++  if self.flags()?!=0{return Err(Fault::State);}
++  unsafe{AtomicU32::from_ptr(std::ptr::addr_of_mut!((*self.p.as_ptr()).consumer))}.compare_exchange(0,1,Ordering::AcqRel,Ordering::Acquire).map(|_|()).map_err(|_|Fault::State)?;
++  if self.flags()?!=0{return Err(Fault::State);}Ok(())
++ }
++ pub fn invalidate(&self){unsafe{AtomicU32::from_ptr(std::ptr::addr_of_mut!((*self.p.as_ptr()).flags))}.fetch_or(LOST|STOP,Ordering::AcqRel);}
++ pub fn flags(&self)->Result<u32,Fault>{self.validate()?;Ok(unsafe{u32_load(std::ptr::addr_of_mut!((*self.p.as_ptr()).flags))})}
++ /// Caller owns a live, exact-size, 64-aligned mapping until this view is dropped.
++ /// Only one reader may exist; immutable ABI metadata is initialized before use.
++ pub unsafe fn new(p:*mut Header,binding:Binding)->Result<Self,Fault>{
++  let p=NonNull::new(p).filter(|p|p.as_ptr() as usize%64==0).ok_or(Fault::Binding)?;
++  let this=Self{p,binding};this.validate()?;Ok(this)
++ }
++ pub fn validate(&self)->Result<(),Fault>{
++  let p=self.p.as_ptr();let b=self.binding;
++  let ok=unsafe{
++   b.owner!=0&&(b.nonce0|b.nonce1)!=0&&
++   u64_load(std::ptr::addr_of_mut!((*p).magic))==MAGIC&&
++   u32_load(std::ptr::addr_of_mut!((*p).version))==1&&u32_load(std::ptr::addr_of_mut!((*p).header_bytes))==256&&
++   u32_load(std::ptr::addr_of_mut!((*p).capacity))==CAPACITY as u32&&u32_load(std::ptr::addr_of_mut!((*p).rate))==48000&&
++   u32_load(std::ptr::addr_of_mut!((*p).channels))==2&&u32_load(std::ptr::addr_of_mut!((*p).frame_bytes))==8&&
++   u32_load(std::ptr::addr_of_mut!((*p).format))==1&&u32_load(std::ptr::addr_of_mut!((*p).owner))==b.owner&&
++   u64_load(std::ptr::addr_of_mut!((*p).nonce0))==b.nonce0&&u64_load(std::ptr::addr_of_mut!((*p).nonce1))==b.nonce1&&
++   u64_load(std::ptr::addr_of_mut!((*p).reserved))==0&&u32_load(std::ptr::addr_of_mut!((*p).consumer))<=1&&u32_load(std::ptr::addr_of_mut!((*p).flags))&!(EOF|LOST|STOP)==0
++  };if ok {Ok(())}else{Err(Fault::Binding)}
++ }
++ /// None is empty/backpressure, Some(0) EOF/explicit stop, never fabricated data.
++ pub fn read(&mut self,out:&mut[u8])->Result<Option<usize>,Fault>{
++  self.validate()?;if out.len()%FRAME_BYTES!=0{return Err(Fault::Alignment);}
++  if out.is_empty(){return Ok(Some(0));}
++  let p=self.p.as_ptr();let(flags,read,written)=unsafe{(u32_load(std::ptr::addr_of_mut!((*p).flags)),u64_load(std::ptr::addr_of_mut!((*p).read)),u64_load(std::ptr::addr_of_mut!((*p).written)))};
++  if flags&LOST!=0{return Err(Fault::State);}if flags&STOP!=0{return Ok(Some(0));}
++  if read>written||written>INDEX_MAX||written-read>CAPACITY{return Err(Fault::State);}
++  let frames=(out.len()/FRAME_BYTES) as u64;let count=frames.min(written-read);
++  if count==0{return Ok(if flags&EOF!=0{Some(0)}else{None});}
++  let bytes=count as usize*FRAME_BYTES;let offset=(read%CAPACITY)as usize*FRAME_BYTES;let first=bytes.min(32768-offset);
++  unsafe{
++   let data=std::ptr::addr_of!((*p).data).cast::<u8>();
++   std::ptr::copy_nonoverlapping(data.add(offset),out.as_mut_ptr(),first);
++   std::ptr::copy_nonoverlapping(data,out.as_mut_ptr().add(first),bytes-first);
++   let flags=u32_load(std::ptr::addr_of_mut!((*p).flags));
++   if flags&(LOST|STOP)!=0{return Err(Fault::State);}
++   AtomicU64::from_ptr(std::ptr::addr_of_mut!((*p).read)).store(read+count,Ordering::Release);
++  }
++  Ok(Some(bytes))
++ }
++}
+--- /dev/null
++++ b/src/file_backend/private_pcm.rs
+@@ -0,0 +1,89 @@
++// SPDX-License-Identifier: GPL-3.0-only OR MPL-2.0
++//! Sonante Windows input adapter only. DSP, conversion and processing unchanged.
++#[path="pcm_core.rs"]mod core;
++use crate::config::BinarySampleFormat;
++use serde::{Deserialize,Serialize};
++use std::{ffi::c_void,io::{self,Read},ptr::null_mut};
++type Handle=*mut c_void;
++#[link(name="kernel32")]
++unsafe extern "system" {
++ fn MapViewOfFile(mapping:Handle,access:u32,high:u32,low:u32,bytes:usize)->*mut c_void;
++ fn UnmapViewOfFile(address:*const c_void)->i32;
++ fn CloseHandle(handle:Handle)->i32;
++ fn GetHandleInformation(handle:Handle,flags:*mut u32)->i32;
++ fn SetHandleInformation(handle:Handle,mask:u32,flags:u32)->i32;
++ fn SetEvent(handle:Handle)->i32;
++ fn WaitForMultipleObjects(count:u32,handles:*const Handle,all:i32,millis:u32)->u32;
++}
++#[derive(Clone,Debug,Serialize,Deserialize,Eq,PartialEq)]
++#[serde(deny_unknown_fields)]
++pub struct Parameters {
++ pub mapping:String,pub readable:String,pub writable:String,pub stop:String,
++ pub owner_pid:u32,pub nonce0:String,pub nonce1:String,
++}
++pub struct CaptureFormat {
++ pub rate:usize,pub capture_rate:usize,pub channels:usize,pub format:BinarySampleFormat,
++ pub transformed:bool,
++}
++fn failure(code:&'static str)->io::Error{io::Error::new(io::ErrorKind::Other,code)}
++fn number(text:&str)->io::Result<u64>{
++ if text.is_empty()||text.len()>20||!text.bytes().all(|b|b.is_ascii_digit()){return Err(failure("SONANTE_PCM_BINDING"));}
++ text.parse().map_err(|_|failure("SONANTE_PCM_BINDING"))
++}
++struct Inputs([Handle;4]);
++impl Drop for Inputs {fn drop(&mut self){for h in self.0 {unsafe{CloseHandle(h)};}}}
++struct View(*mut c_void);
++impl Drop for View {fn drop(&mut self){if !self.0.is_null(){unsafe{UnmapViewOfFile(self.0)};}}}
++pub struct RingStream {reader:core::Reader,_view:View,inputs:Inputs}
++// Handles/views are process resources; ownership moves once into capture thread.
++unsafe impl Send for RingStream {}
++impl RingStream {
++ pub fn new(p:Parameters,f:CaptureFormat)->io::Result<Self>{
++  const _:()=assert!(size_of::<usize>()==8);
++  if f.rate!=48000||f.capture_rate!=48000||f.channels!=2||f.format!=BinarySampleFormat::S32_LE||f.transformed{return Err(failure("SONANTE_PCM_FORMAT"));}
++  let mut raw=[null_mut();4];
++  for (i,s) in [&p.mapping,&p.readable,&p.writable,&p.stop].into_iter().enumerate(){
++   let v=number(s)?;if v==0||v>isize::MAX as u64{return Err(failure("SONANTE_PCM_BINDING"));}
++   raw[i]=v as usize as Handle;if raw[..i].contains(&raw[i]){return Err(failure("SONANTE_PCM_BINDING"));}
++  }
++  let binding=core::Binding{owner:p.owner_pid,nonce0:number(&p.nonce0)?,nonce1:number(&p.nonce1)?};
++  let inputs=Inputs(raw);
++  for h in raw {let mut flags=0;if unsafe{GetHandleInformation(h,&mut flags)}==0||unsafe{SetHandleInformation(h,1,0)}==0{return Err(failure("SONANTE_PCM_BINDING"));}}
++  let view=View(unsafe{MapViewOfFile(raw[0],0x000f001f,0,0,size_of::<core::Header>())});
++  let reader=unsafe{core::Reader::new(view.0.cast(),binding)}.map_err(|_|failure("SONANTE_PCM_BINDING"))?;
++  reader.claim().map_err(|_|failure("SONANTE_PCM_ALREADY_CLAIMED"))?;
++  Ok(Self{reader,_view:view,inputs})
++ }
++}
++impl Read for RingStream {
++ fn read(&mut self,out:&mut[u8])->io::Result<usize>{
++  loop {
++   match self.reader.read(out).map_err(|_|failure("SONANTE_PCM_CONTINUITY"))? {
++    Some(n)=>{if n>0&&unsafe{SetEvent(self.inputs.0[2])}==0{return Err(failure("SONANTE_PCM_SIGNAL"));}return Ok(n)},
++    None=>{},
++   }
++   let handles=[self.inputs.0[3],self.inputs.0[1]];
++   match unsafe{WaitForMultipleObjects(2,handles.as_ptr(),0,u32::MAX)} {
++    0=>{let flags=self.reader.flags().map_err(|_|failure("SONANTE_PCM_BINDING"))?;
++        if flags&core::LOST!=0{return Err(failure("SONANTE_PCM_CONTINUITY"));}
++        if flags&core::STOP!=0{return Ok(0);}
++        return Err(failure("SONANTE_PCM_STOP_UNCONFIRMED"));},
++    1=>{},
++    _=>return Err(failure("SONANTE_PCM_WAIT")),
++   }
++  }
++ }
++}
++impl Drop for RingStream {
++ fn drop(&mut self){
++  // Capture-thread failure/config restart is visible even while MPD is paused
++  // and no GUI status polling occurs. Never leave a consumerless live channel.
++  match self.reader.flags(){
++   Ok(flags) if flags&(core::EOF|core::STOP)!=0=>{},
++   _=>{
++    self.reader.invalidate();
++    for h in &self.inputs.0[1..]{unsafe{SetEvent(*h)};}
++   },
++  }
++ }
++}
+--- a/src/wasapi_backend/device.rs
++++ b/src/wasapi_backend/device.rs
+@@ -456,6 +456,7 @@
+ 
+ enum PlaybackDeviceMessage {
+     Data(usize),
++    Drain(Sender<Result<(), String>>),
+     Stop,
+ }
+ 
+@@ -471,13 +472,7 @@
+     mut ringbuffer: Caching<Arc<HeapRb<u8>>, false, true>,
+     target_level: usize,
+ ) -> Res<()> {
+-    let mut buffer_free_frame_count = audio_client.get_buffer_size()?;
+-    let mut sample_queue: VecDeque<u8> = VecDeque::with_capacity(
+-        4 * blockalign * (chunksize + 2 * buffer_free_frame_count as usize)
+-            + target_level * blockalign,
+-    );
+-
+-    let tx_cb = sync.tx_cb;
++    let PlaybackSync{rx_play,tx_cb,bufferfill}=sync;
+     let mut callbacks = wasapi::EventCallbacks::new();
+     callbacks.set_disconnected_callback(move |reason| {
+         debug!("Disconnected, reason: {reason:?}.");
+@@ -493,7 +488,7 @@
+ 
+     let mut waited_millis = 0;
+     trace!("Waiting for data to start playback, will time out after one second.");
+-    while sync.rx_play.len() < 2 && waited_millis < 1000 {
++    while rx_play.len() < 2 && waited_millis < 1000 {
+         thread::sleep(Duration::from_millis(10));
+         waited_millis += 10;
+     }
+@@ -511,89 +506,51 @@
+         }
+     };
+ 
+-    audio_client.start_stream()?;
+-    let mut running = false;
+-    let mut starting = true;
+-    let (device_period_hns, _) = audio_client.get_device_period()?;
+-    // set poll delay to one device period, may be shorter than needed
+-    let poll_delay = std::time::Duration::from_micros(device_period_hns as u64 / 10);
+-    if handle.is_none() {
+-        debug!(
+-            "Playback uses polling mode, delay is {} us.",
+-            poll_delay.as_micros()
+-        );
+-    }
+-    loop {
+-        buffer_free_frame_count = audio_client.get_available_space_in_frames()?;
+-        trace!("Playback, new buffer frame count {buffer_free_frame_count}.");
+ 
+-        while sample_queue.len() < (blockalign * buffer_free_frame_count as usize) {
+-            trace!("Playback loop needs more samples, reading from channel.");
+-            match sync.rx_play.try_recv() {
+-                Ok(PlaybackDeviceMessage::Data(bytes)) => {
+-                    trace!("Playback received chunk.");
+-                    if !running {
+-                        running = true;
+-                        if starting {
+-                            starting = false;
+-                        } else {
+-                            warn!("Restarting playback after buffer underrun.");
+-                        }
+-                        debug!(
+-                            "Playback, inserting {target_level} silent frames to reach target delay."
+-                        );
+-                        for _ in 0..(blockalign * target_level) {
+-                            sample_queue.push_back(0);
+-                        }
+-                    }
+-                    for element in ringbuffer.pop_iter().take(bytes) {
+-                        sample_queue.push_back(element);
+-                    }
+-                }
+-                Ok(PlaybackDeviceMessage::Stop) => {
+-                    debug!("Stopping inner playback loop.");
+-                    audio_client.stop_stream()?;
+-                    return Ok(());
+-                }
+-                Err(TryRecvError::Empty) => {
+-                    for _ in
+-                        0..((blockalign * buffer_free_frame_count as usize) - sample_queue.len())
+-                    {
+-                        sample_queue.push_back(0);
+-                    }
+-                    if running {
+-                        running = false;
+-                        warn!("Playback interrupted, no data available.");
+-                    }
+-                }
+-                Err(TryRecvError::Disconnected) => {
+-                    error!("Playback, channel is closed.");
+-                    return Err(DeviceError::new("Playback data channel closed.").into());
+-                }
+-            }
+-        }
+-        render_client.write_to_device_from_deque(
+-            buffer_free_frame_count as usize,
+-            &mut sample_queue,
+-            None,
+-        )?;
+-        let curr_buffer_fill = sample_queue.len() / blockalign + sync.rx_play.len() * chunksize;
+-        if let Ok(mut estimator) = sync.bufferfill.try_lock() {
+-            estimator.add(curr_buffer_fill)
+-        }
+-        //println!("{} bef",prev_inst.elapsed().as_micros());
+-        if let Some(ref h) = handle {
+-            if h.wait_for_event(1000).is_err() {
+-                error!("Error on playback, stopping stream");
+-                audio_client.stop_stream()?;
+-                return Err(DeviceError::new("Error on playback").into());
+-            }
+-        } else {
+-            thread::sleep(poll_delay);
+-        }
+-    }
++    let (period,_)=audio_client.get_device_period()?;
++    if period<=0{return Err(DeviceError::new("SONANTE_WASAPI_PERIOD").into());}
++    let mut device=NativeRender{client:&audio_client,render:&render_client,handle:handle.as_ref(),poll:Duration::from_micros(period as u64/10),start:std::time::Instant::now()};
++    let mut feed=NativeFeed{rx:rx_play,ring:&mut ringbuffer,bufferfill,drain:None};
++    super::playback_core::run(&mut device,&mut feed,super::playback_core::Config{blockalign,chunksize,target:target_level})
++        .map(|_|()).map_err(|code|DeviceError::new(code).into())
+ }
+ 
++struct NativeRender<'a>{client:&'a wasapi::AudioClient,render:&'a wasapi::AudioRenderClient,handle:Option<&'a wasapi::Handle>,poll:Duration,start:std::time::Instant}
++impl super::playback_core::Device for NativeRender<'_>{
++ fn capacity(&self)->super::playback_core::Result<usize>{self.client.get_buffer_size().map(|n|n as usize).map_err(|_|"SONANTE_WASAPI_BUFFER")}
++ fn free(&self)->super::playback_core::Result<usize>{self.client.get_available_space_in_frames().map(|n|n as usize).map_err(|_|"SONANTE_WASAPI_BUFFER")}
++ fn padding(&self)->super::playback_core::Result<usize>{self.client.get_current_padding().map(|n|n as usize).map_err(|_|"SONANTE_WASAPI_PADDING")}
++ fn submit(&mut self,frames:usize,queue:&mut VecDeque<u8>)->super::playback_core::Result<()>{self.render.write_to_device_from_deque(frames,queue,None).map_err(|_|"SONANTE_WASAPI_WRITE")}
++ fn start(&mut self)->super::playback_core::Result<()>{self.client.start_stream().map_err(|_|"SONANTE_WASAPI_START")}
++ fn stop(&mut self)->super::playback_core::Result<()>{self.client.stop_stream().map_err(|_|"SONANTE_WASAPI_STOP")}
++ fn wait(&mut self,max_ms:u32)->super::playback_core::Result<()>{
++  if let Some(handle)=self.handle{handle.wait_for_event(max_ms).map_err(|_|"SONANTE_WASAPI_WAIT")}
++  else{thread::sleep(self.poll.min(Duration::from_millis(max_ms as u64)));Ok(())}
++ }
++ fn millis(&self)->u64{u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)}
++}
++struct NativeFeed<'a>{rx:Receiver<PlaybackDeviceMessage>,ring:&'a mut Caching<Arc<HeapRb<u8>>,false,true>,bufferfill:Arc<Mutex<countertimer::DeviceBufferEstimator>>,drain:Option<Sender<Result<(),String>>>}
++impl super::playback_core::Source for NativeFeed<'_>{
++ fn next(&mut self)->super::playback_core::Result<super::playback_core::Notice>{
++  use super::playback_core::Notice;
++  match self.rx.try_recv(){
++   Ok(PlaybackDeviceMessage::Data(bytes))=>Ok(Notice::Data(bytes)),
++   Ok(PlaybackDeviceMessage::Stop)=>Ok(Notice::Stop),
++   Ok(PlaybackDeviceMessage::Drain(reply))=>{if self.drain.is_some(){return Err("SONANTE_WASAPI_DUPLICATE_DRAIN");}self.drain=Some(reply);Ok(Notice::Drain)},
++   Err(TryRecvError::Empty)=>Ok(Notice::Empty),Err(TryRecvError::Disconnected)=>Err("SONANTE_WASAPI_CHANNEL_CLOSED"),
++  }
++ }
++ fn append(&mut self,bytes:usize,queue:&mut VecDeque<u8>)->super::playback_core::Result<()>{
++  let before=queue.len();queue.extend(self.ring.pop_iter().take(bytes));
++  if queue.len()==before+bytes{Ok(())}else{Err("SONANTE_WASAPI_SHORT_DATA")}
++ }
++ fn pending_bytes(&self)->usize{self.ring.occupied_len()}
++ fn pending_notices(&self)->usize{self.rx.len()}
++ fn buffer_level(&self,frames:usize){if let Ok(mut estimator)=self.bufferfill.try_lock(){estimator.add(frames);}}
++ fn drained(&mut self)->super::playback_core::Result<()>{self.drain.take().ok_or("SONANTE_WASAPI_DRAIN_UNCONFIRMED")?.try_send(Ok(())).map_err(|_|"SONANTE_WASAPI_DRAIN_ACK")}
++}
++impl Drop for NativeFeed<'_>{fn drop(&mut self){if let Some(reply)=self.drain.take(){let _=reply.try_send(Err("SONANTE_WASAPI_DRAIN_ABORTED".into()));}}}
++
+ struct CaptureChannels {
+     pub tx_filled: Sender<(u64, usize)>,
+     pub ringbuf: Caching<Arc<HeapRb<u8>>, true, false>,
+@@ -880,7 +837,7 @@
+                                 }
+                                 Err(err) => {
+                                     let msg = format!("Playback error: {err}");
+-                                    tx_state_dev.send(DeviceState::Error(msg)).unwrap_or(());
++                                    tx_state_dev.send_timeout(DeviceState::Error(msg),Duration::from_millis(250)).unwrap_or(());
+                                     return;
+                                 }
+                             };
+@@ -903,7 +860,7 @@
+                         if let Err(err) = result {
+                             let msg = format!("Playback failed with error: {err}");
+                             //error!("{}", msg);
+-                            tx_state_dev.send(DeviceState::Error(msg)).unwrap_or(());
++                            tx_state_dev.send_timeout(DeviceState::Error(msg),Duration::from_millis(250)).unwrap_or(());
+                         }
+                     })
+                     .unwrap();
+@@ -951,6 +908,7 @@
+                     ];
+ 
+                 debug!("Playback device starts now!");
++                let mut drained=false;
+                 loop {
+                     match rx_state_dev.try_recv() {
+                         Ok(DeviceState::Ok(_)) => {}
+@@ -1015,25 +973,19 @@
+                             // and most of it would be dropped.  The sleep duration is
+                             // based on the time it takes to play back one chunksize.
+                             let bytes_to_write = conversion_result.0;
++                            if bytes_to_write==0{continue;}
+                             let sleep_duration = std::time::Duration::from_micros(
+                                 (1_000_000 * chunksize / samplerate / 2) as u64
+                             );
+-                            let max_retries = 8;
+-                            for _ in 0..max_retries {
+-                                if device_producer.vacant_len() >= bytes_to_write {
+-                                    break;
+-                                }
+-                                std::thread::sleep(sleep_duration);
++                            let start=std::time::Instant::now();
++                            if let Err(code)=super::playback_core::wait_for_capacity(bytes_to_write,||device_producer.vacant_len(),||u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),||thread::sleep(sleep_duration.min(Duration::from_millis(5)))) {
++                                status_channel.send(StatusMessage::PlaybackError(code.into())).unwrap_or(());
++                                break;
+                             }
+-                            if device_producer.vacant_len() >= bytes_to_write {
+-                                device_producer.push_slice(&buf[0..bytes_to_write]);
+-                            } else {
+-                                debug!(
+-                                    "Playback ring buffer is full, dropped chunk of {bytes_to_write} bytes",
+-                                );
+-                                continue;
++                            if device_producer.push_slice(&buf[0..bytes_to_write])!=bytes_to_write {
++                                status_channel.send(StatusMessage::PlaybackError("SONANTE_WASAPI_SHORT_PUSH".into())).unwrap_or(());break;
+                             }
+-                            match tx_dev.send(PlaybackDeviceMessage::Data(bytes_to_write)) {
++                            match tx_dev.send_timeout(PlaybackDeviceMessage::Data(bytes_to_write),Duration::from_millis(250)) {
+                                 Ok(_) => {}
+                                 Err(err) => {
+                                     error!("Playback device channel error: {err}.");
+@@ -1050,9 +1002,12 @@
+                             trace!("Playback, pause message received.");
+                         }
+                         Ok(AudioMessage::EndOfStream) => {
+-                            status_channel
+-                                .send(StatusMessage::PlaybackDone)
+-                                .unwrap_or(());
++                            let (ack,done)=bounded(1);
++                            let result=tx_dev.send_timeout(PlaybackDeviceMessage::Drain(ack),Duration::from_millis(250))
++                                .map_err(|_|"SONANTE_WASAPI_DRAIN_SEND".to_owned())
++                                .and_then(|_|done.recv_timeout(Duration::from_secs(4)).map_err(|_|"SONANTE_WASAPI_DRAIN_TIMEOUT".to_owned()))
++                                .and_then(|r|r);
++                            match result {Ok(())=>drained=true,Err(error)=>{status_channel.send(StatusMessage::PlaybackError(error)).unwrap_or(());}}
+                             break;
+                         }
+                         Err(err) => {
+@@ -1076,15 +1031,12 @@
+                         }
+                     };
+                 }
+-                match tx_dev.send(PlaybackDeviceMessage::Stop) {
+-                    Ok(_) => {
+-                        debug!("Wait for inner playback thread to exit.");
+-                        innerhandle.join().unwrap_or(());
+-                    }
+-                    Err(_) => {
+-                        warn!("Inner playback thread already stopped.")
+-                    }
+-                }
++                if !drained {let _=tx_dev.send_timeout(PlaybackDeviceMessage::Stop,Duration::from_millis(250));}
++                drop(tx_dev);
++                let joined=innerhandle.join().is_ok();
++                if drained&&joined {status_channel.send(StatusMessage::PlaybackDone).unwrap_or(());}
++                else if drained {status_channel.send(StatusMessage::PlaybackError("SONANTE_WASAPI_JOIN_FAILED".into())).unwrap_or(());}
++
+             })?;
+         Ok(Box::new(handle))
+     }
+--- a/src/wasapi_backend/mod.rs
++++ b/src/wasapi_backend/mod.rs
+@@ -14,4 +14,5 @@
+ // Mozilla Public License along with this program. If not, see
+ // <https://www.gnu.org/licenses/> and <https://www.mozilla.org/MPL/2.0/>.
+ 
++mod playback_core;
+ pub mod device;
+--- /dev/null
++++ b/src/wasapi_backend/playback_core.rs
+@@ -0,0 +1,200 @@
++// SPDX-License-Identifier: GPL-3.0-only OR MPL-2.0
++//! Windows render I/O only: whole-frame FIFO, bounded drain and explicit
++//! failure. No DSP/filter/sample conversion or device-format negotiation.
++use std::collections::VecDeque;
++
++pub type Result<T> = std::result::Result<T, &'static str>;
++pub enum Notice { Data(usize), Drain, Stop, Empty }
++pub enum Outcome { Stopped, Drained }
++pub trait Source {
++    fn next(&mut self) -> Result<Notice>;
++    fn append(&mut self, bytes:usize, queue:&mut VecDeque<u8>) -> Result<()>;
++    fn pending_bytes(&self) -> usize;
++    fn pending_notices(&self) -> usize;
++    fn buffer_level(&self, frames:usize);
++    fn drained(&mut self) -> Result<()>;
++}
++pub trait Device {
++    fn capacity(&self) -> Result<usize>;
++    fn free(&self) -> Result<usize>;
++    fn padding(&self) -> Result<usize>;
++    fn submit(&mut self,frames:usize,queue:&mut VecDeque<u8>) -> Result<()>;
++    fn start(&mut self) -> Result<()>;
++    fn stop(&mut self) -> Result<()>;
++    fn wait(&mut self,max_ms:u32) -> Result<()>;
++    fn millis(&self) -> u64;
++}
++pub struct Config { pub blockalign:usize,pub chunksize:usize,pub target:usize }
++const DRAIN_MS:u64=2000;
++pub fn wait_for_capacity(required:usize,mut space:impl FnMut()->usize,mut millis:impl FnMut()->u64,mut wait:impl FnMut())->Result<()>{
++    let deadline=millis().checked_add(250).ok_or("SONANTE_WASAPI_BACKPRESSURE")?;
++    loop{
++        if millis()>=deadline{return Err("SONANTE_WASAPI_BACKPRESSURE");}
++        if space()>=required{return Ok(());}
++        wait();
++    }
++}
++
++pub fn run(device:&mut impl Device,source:&mut impl Source,c:Config)->Result<Outcome>{
++    let result=inner(device,source,c);
++    // Failure never publishes Done or retries a partially submitted block.
++    if result.is_err(){let _=device.stop();}
++    result
++}
++fn inner(device:&mut impl Device,source:&mut impl Source,c:Config)->Result<Outcome>{
++    if !(1..=256).contains(&c.blockalign)||c.chunksize==0||c.chunksize>65536||c.target>131072{return Err("SONANTE_WASAPI_FORMAT");}
++    let capacity=device.capacity()?;
++    if capacity==0||capacity>131072{return Err("SONANTE_WASAPI_BUFFER");}
++    let max_frames=c.chunksize.checked_add(capacity.checked_mul(2).ok_or("SONANTE_WASAPI_BUFFER")?).and_then(|v|v.checked_mul(4)).and_then(|v|v.checked_add(c.target)).ok_or("SONANTE_WASAPI_BUFFER")?;
++    let max_bytes=max_frames.checked_mul(c.blockalign).filter(|v|*v<=8*1024*1024).ok_or("SONANTE_WASAPI_BUFFER")?;
++    let chunk_bytes=c.chunksize.checked_mul(c.blockalign).ok_or("SONANTE_WASAPI_FORMAT")?;
++    let mut queue=VecDeque::with_capacity(max_bytes);
++    let mut running=false;
++    let mut drain_end=None;
++    let mut pending_data=None;
++    let mut last_progress=device.millis();
++    device.start()?;
++    loop{
++        let free=device.free()?;
++        if free>capacity{return Err("SONANTE_WASAPI_BUFFER");}
++        if let Some(end)=drain_end {
++            if device.millis()>=end{return Err("SONANTE_WASAPI_DRAIN_TIMEOUT");}
++            match source.next()? {
++                Notice::Stop=>{device.stop()?;return Ok(Outcome::Stopped)},
++                Notice::Empty=>{},
++                _=>return Err("SONANTE_WASAPI_AFTER_EOF"),
++            }
++        }
++        while drain_end.is_none() {
++            let notice=match pending_data.take(){Some(bytes)=>Notice::Data(bytes),None=>source.next()?};
++            match notice {
++                Notice::Data(bytes)=>{
++                    if bytes==0||bytes>chunk_bytes||bytes%c.blockalign!=0{return Err("SONANTE_WASAPI_FRAME_ALIGNMENT");}
++                    // Look ahead for control even when the device is full, but
++                    // leave data in the source ring until there is queue room.
++                    if running&&queue.len()>=free*c.blockalign{pending_data=Some(bytes);break;}
++                    let silence=if running{0}else{c.target*c.blockalign};
++                    if queue.len().checked_add(silence).and_then(|n|n.checked_add(bytes)).is_none_or(|n|n>max_bytes){return Err("SONANTE_WASAPI_BUFFER");}
++                    // Preserve Camilla's target-delay behavior on underrun.
++                    if !running {queue.extend(std::iter::repeat_n(0,silence));running=true;}
++                    let before=queue.len();source.append(bytes,&mut queue)?;
++                    if queue.len()!=before+bytes{return Err("SONANTE_WASAPI_SHORT_DATA");}
++                },
++                Notice::Drain=>{drain_end=Some(device.millis().checked_add(DRAIN_MS).ok_or("SONANTE_WASAPI_DRAIN_TIMEOUT")?);},
++                Notice::Stop=>{device.stop()?;return Ok(Outcome::Stopped)},
++                Notice::Empty=>{
++                    if queue.len()<free*c.blockalign{queue.resize(free*c.blockalign,0);running=false;}
++                    break;
++                },
++            }
++        }
++        let frames=if drain_end.is_some(){free.min(queue.len()/c.blockalign)}else{free};
++        if frames>0 {
++            let before=queue.len();device.submit(frames,&mut queue)?;
++            if queue.len()!=before-frames*c.blockalign{return Err("SONANTE_WASAPI_WRITE_UNCONFIRMED");}
++            last_progress=device.millis();
++        }
++        source.buffer_level(queue.len()/c.blockalign+source.pending_notices()*c.chunksize);
++        if let Some(end)=drain_end {
++            if queue.is_empty() {
++                match source.next()? {
++                    Notice::Stop=>{device.stop()?;return Ok(Outcome::Stopped)},
++                    Notice::Empty=>{},
++                    _=>return Err("SONANTE_WASAPI_AFTER_EOF"),
++                }
++                if source.pending_bytes()!=0||source.pending_notices()!=0{return Err("SONANTE_WASAPI_EOF_TAIL");}
++                if device.padding()?==0 {
++                    device.stop()?;source.drained()?;return Ok(Outcome::Drained);
++                }
++            }
++            let left=end.saturating_sub(device.millis());
++            if left==0{return Err("SONANTE_WASAPI_DRAIN_TIMEOUT");}
++            device.wait(left.min(1000)as u32)?;
++        }else if pending_data.is_some(){
++            let elapsed=device.millis().saturating_sub(last_progress);
++            if elapsed>=250{return Err("SONANTE_WASAPI_BACKPRESSURE");}
++            device.wait((250-elapsed).min(1000)as u32)?;
++        }else{device.wait(1000)?;}
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    struct Feed{data:VecDeque<u8>,notices:VecDeque<Notice>,done:bool,short:bool}
++    impl Source for Feed {
++        fn next(&mut self)->Result<Notice>{Ok(self.notices.pop_front().unwrap_or(Notice::Empty))}
++        fn append(&mut self,bytes:usize,queue:&mut VecDeque<u8>)->Result<()>{queue.extend(self.data.drain(..bytes-usize::from(self.short)));Ok(())}
++        fn pending_bytes(&self)->usize{self.data.len()}
++        fn pending_notices(&self)->usize{self.notices.len()}
++        fn buffer_level(&self,_:usize){}
++        fn drained(&mut self)->Result<()>{self.done=true;Ok(())}
++    }
++    struct Sink{align:usize,capacity:usize,pending:VecDeque<u8>,heard:Vec<u8>,time:u64,stuck:bool,stopped:bool,fail_write:bool}
++    impl Device for Sink {
++        fn capacity(&self)->Result<usize>{Ok(self.capacity)}
++        fn free(&self)->Result<usize>{Ok(self.capacity-self.pending.len()/self.align)}
++        fn padding(&self)->Result<usize>{Ok(self.pending.len()/self.align)}
++        fn submit(&mut self,frames:usize,queue:&mut VecDeque<u8>)->Result<()>{if self.fail_write{return Err("fixture_write_failed");}self.pending.extend(queue.drain(..frames*self.align));Ok(())}
++        fn start(&mut self)->Result<()>{Ok(())}
++        fn stop(&mut self)->Result<()>{self.stopped=true;Ok(())}
++        fn wait(&mut self,_:u32)->Result<()>{self.time+=1;if !self.stuck{self.heard.extend(self.pending.drain(..));}Ok(())}
++        fn millis(&self)->u64{self.time}
++    }
++    fn fixture(frames:usize,chunk:usize,target:usize)->(Feed,Sink,Vec<u8>,Config){
++        let bytes=(0..frames*8).map(|n|(n%251+1)as u8).collect::<Vec<_>>();
++        let mut notices=VecDeque::new();let mut left=frames;
++        while left>0{let n=left.min(chunk);notices.push_back(Notice::Data(n*8));left-=n;}
++        notices.push_back(Notice::Drain);
++        (Feed{data:bytes.clone().into(),notices,done:false,short:false},Sink{align:8,capacity:257,pending:VecDeque::new(),heard:Vec::new(),time:0,stuck:false,stopped:false,fail_write:false},bytes,Config{blockalign:8,chunksize:chunk,target})
++    }
++    #[test]
++    fn all_frames_including_partial_eof_are_delivered_once_before_done_and_stop(){
++        for (frames,chunk,target) in [(1,1024,0),(17,1024,0),(48017,1024,0),(200003,127,17)]{
++            let(mut feed,mut sink,bytes,c)=fixture(frames,chunk,target);
++            assert!(matches!(run(&mut sink,&mut feed,c),Ok(Outcome::Drained)));
++            let mut expected=vec![0;target*8];expected.extend(bytes);
++            assert_eq!(sink.heard,expected);assert!(sink.pending.is_empty());assert!(feed.done&&sink.stopped);
++        }
++    }
++    #[test]
++    fn stuck_client_padding_times_out_without_false_done_or_discarding_a_successful_result(){
++        for frames in [17,257]{
++            let(mut feed,mut sink,_,c)=fixture(frames,1024,0);sink.stuck=true;
++            assert!(matches!(run(&mut sink,&mut feed,c),Err("SONANTE_WASAPI_DRAIN_TIMEOUT")));
++            assert!(!feed.done);assert!(sink.stopped);assert_eq!(sink.pending.len(),frames*8);
++        }
++    }
++    #[test]
++    fn malformed_or_short_frames_write_failures_and_extra_eof_data_are_explicit_failures(){
++        let(mut f,mut s,_,c)=fixture(17,1024,0);f.notices[0]=Notice::Data(7);assert!(run(&mut s,&mut f,c).is_err());assert!(!f.done);
++        let(mut f,mut s,_,c)=fixture(17,1024,0);f.short=true;assert!(matches!(run(&mut s,&mut f,c),Err("SONANTE_WASAPI_SHORT_DATA")));assert!(!f.done);
++        let(mut f,mut s,_,c)=fixture(17,1024,0);s.fail_write=true;assert!(run(&mut s,&mut f,c).is_err());assert!(!f.done);
++        let(mut f,mut s,_,c)=fixture(17,1024,0);f.notices.push_back(Notice::Data(8));assert!(run(&mut s,&mut f,c).is_err());assert!(!f.done);
++    }
++    #[test]
++    fn stop_during_drain_is_cancellation_not_a_done_ack(){
++        let(mut feed,mut sink,_,c)=fixture(17,1024,0);feed.notices.push_back(Notice::Stop);
++        assert!(matches!(run(&mut sink,&mut feed,c),Ok(Outcome::Stopped)));assert!(!feed.done);
++    }
++    #[test]
++    fn full_ring_waits_for_space_and_times_out_without_skipping_a_chunk(){
++        use std::cell::Cell;
++        let time=Cell::new(0u64);let space=Cell::new(0usize);
++        wait_for_capacity(1024,||space.get(),||time.get(),||{time.set(time.get()+10);if time.get()==30{space.set(1024);}}).unwrap();
++        assert_eq!(time.get(),30);
++        time.set(0);space.set(0);
++        assert!(matches!(wait_for_capacity(1024,||space.get(),||time.get(),||time.set(time.get()+10)),Err("SONANTE_WASAPI_BACKPRESSURE")));
++        assert_eq!(time.get(),250);
++    }
++    #[test]
++    fn temporary_underflow_never_truncates_queued_real_frames_or_repeats_them(){
++        let(mut feed,mut sink,bytes,c)=fixture(48017,1024,0);
++        let mut notices=VecDeque::new();
++        for notice in feed.notices.drain(..){let data=matches!(notice,Notice::Data(_));notices.push_back(notice);if data{notices.push_back(Notice::Empty);}}
++        feed.notices=notices;
++        assert!(matches!(run(&mut sink,&mut feed,c),Ok(Outcome::Drained)));
++        let real=sink.heard.chunks_exact(8).filter(|frame|frame.iter().any(|n|*n!=0)).flatten().copied().collect::<Vec<_>>();
++        assert_eq!(real,bytes);assert!(feed.done);assert!(sink.pending.is_empty());
++    }
++}

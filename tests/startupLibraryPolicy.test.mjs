@@ -23,15 +23,15 @@ test('managed startup reuses a watched original mirror proof without dropping ad
  assert.match(initial,/ReadonlyMirrorSnapshot::open_for_startup\(&library_dir\)/);
  assert.match(initial,/admission\.origins=admission\.observe_origins\(\)\?/);
  assert.match(initial,/admission\.validate\(config\)\?/);
- assert.match(initial,/supervisor\.start_initial_existing\(config,&admission\)/);
+ assert.match(initial,/supervisor\.start_initial_existing\(config,\s*&admission\)/);
  const mirror=readFileSync(new URL('../src-tauri/src/local_media.rs',import.meta.url),'utf8');
  const capture=mirror.slice(mirror.indexOf('pub(crate) fn open_for_startup('),mirror.indexOf('pub(crate) fn has_change_watch('));
- assert.match(capture,/let result=Self::capture\(library\)/);
- assert.match(capture,/Self::finish_startup\(result\?,MirrorChanges::open\)/);
+ assert.match(capture,/let\s+result\s*=\s*Self::capture\(library\)/);
+ assert.match(capture,/Self::finish_startup\(result\?,\s*MirrorChanges::open\)/);
  assert.ok(capture.indexOf('result.revalidate_full()?') < capture.indexOf('changes.check()?'));
  assert.match(capture,/if let Ok\(changes\)=changes \{changes.check\(\)\?;result.changes=Some\(changes\);\}/);
  const validation=section("impl InitialManagedGeneration<'_>", 'fn start_initial_mpd(');
- assert.equal((validation.match(/self\.mirror\.revalidate\(\)/g)||[]).length,2);
+ assert.equal((validation.match(/self\s*\.\s*mirror\s*\.\s*revalidate\(\)/g)||[]).length,2);
  for(const guard of ['self.owner.validate()', 'self.profile.validate()', 'self.library.validate()',
   'self.transaction.belongs_to', 'shutdown_requested()', 'check_startup(', 'self.profile.file_identity(',
   'self.profile.read(', 'self.observe_origins()?!=self.origins'])assert.ok(validation.includes(guard),guard);

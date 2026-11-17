@@ -26,16 +26,24 @@ export function localArtistIdentity(name: string): string {
 
 export function deriveLocalArtists(albums: readonly LocalAlbum[]): LocalArtistSummary[] {
   const grouped = new Map<string, LocalArtistSummary>();
+  const albumIdsByArtist = new Map<string, Set<string>>();
   for (const album of albums) {
-    const name = album.artist.trim();
-    const id = localArtistIdentity(name);
-    if (!id) continue;
-    const current = grouped.get(id);
-    if (current) {
-      current.albumCount += 1;
-      current.name = deterministicDisplayName(current.name, name);
-    } else {
-      grouped.set(id, { id, name, albumCount: 1 });
+    const names = [...new Set([...(album.artist_names ?? []), album.artist].map(name => name.trim()).filter(Boolean))];
+    for (const name of names) {
+      const id = localArtistIdentity(name);
+      if (!id) continue;
+      const current = grouped.get(id);
+      if (current) {
+        const albumIds = albumIdsByArtist.get(id)!;
+        if (!albumIds.has(album.id)) {
+          albumIds.add(album.id);
+          current.albumCount += 1;
+        }
+        current.name = deterministicDisplayName(current.name, name);
+      } else {
+        grouped.set(id, { id, name, albumCount: 1 });
+        albumIdsByArtist.set(id, new Set([album.id]));
+      }
     }
   }
   return [...grouped.values()];
@@ -74,5 +82,6 @@ export function albumsForLocalArtist(
   artistName: string,
 ): LocalAlbum[] {
   const identity = localArtistIdentity(artistName);
-  return albums.filter((album) => localArtistIdentity(album.artist) === identity);
+  return albums.filter((album) => [album.artist, ...(album.artist_names ?? [])]
+    .some(name => localArtistIdentity(name) === identity));
 }

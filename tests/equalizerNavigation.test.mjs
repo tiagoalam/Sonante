@@ -2,55 +2,90 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import ts from 'typescript';
-import {createMainSectionPreference} from '../src/utils/appBootstrap.ts';
-import {exploreSourceFor} from '../src/utils/exploreNavigation.ts';
-const root=process.env.SONANTE_NAV_BASE??new URL('../',import.meta.url).pathname;
-const source=readFileSync(root+'/src/App.tsx','utf8');
+import {createMainSectionPreference, initialMediaSource} from '../src/utils/appBootstrap.ts';
+
+const source=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
 const ast=ts.createSourceFile('App.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
-const walk=(fn)=>{const visit=n=>{fn(n);ts.forEachChild(n,visit)};visit(ast)};
-function initializer(name){let value;walk(n=>{if(ts.isVariableDeclaration(n)&&n.name.getText(ast)===name)value=n.initializer.getText(ast)});assert.ok(value,name);return value}
-function evaluate(code,env){const js=ts.transpileModule(`const extracted=(${code});`,{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText;return new Function(...Object.keys(env),js+'return extracted;')(...Object.values(env))}
-function sidebar(action){let code;walk(n=>{if(ts.isJsxSelfClosingElement(n)&&n.tagName.getText(ast)==='SidebarNavItem'&&n.attributes.properties.some(p=>p.name?.getText(ast)==='diagnosticAction'&&p.initializer?.getText(ast)===JSON.stringify(action)))code=n.attributes.properties.find(p=>p.name?.getText(ast)==='onClick')?.initializer?.expression.getText(ast)});assert.ok(code,action);return code}
-function setup(origin,target=null){
- const ctx={section:origin,subview:'artists',target,reset:0,transport:0};const saved=[];
- const pref=createMainSectionPreference(s=>ctx.section=s,()=>({getItem:()=>origin,setItem:(k,v)=>saved.push(v)}));pref.restore({first_run:false,plex_token:'fixture'});
- const returnRef={current:origin};
- const section=()=>evaluate(initializer('centralSection'),{mediaSource:ctx.section,playerReturnSection:ctx.target?origin:null,eqReturnSectionRef:returnRef});
- const env={fullMode:true,mediaSource:'equalizer',playerTarget:target,centralSection:origin,eqReturnSectionRef:returnRef,eqReturnViewRef:{current:true},setLocalSubview:v=>ctx.subview=v,changePlayerLocalSubview:v=>ctx.playerSubview=v,resetAllNavigation:()=>{ctx.reset++;ctx.target=null},mainSectionPreference:pref};
- env.navigateExplore=evaluate(initializer('navigateExplore'),{...env,exploreSource:'local',exploreSources:['local','plex'],exploreSourceFor,setExploreSource:v=>ctx.exploreSource=v,setNavidromeArea:v=>ctx.navArea=v,setPlexArea:v=>ctx.plexArea=v});
- ctx.section='equalizer';return {ctx,env,section,saved};
+const walk=fn=>{const visit=n=>{fn(n);ts.forEachChild(n,visit)};visit(ast)};
+function expression(name){let value;walk(n=>{if(ts.isVariableDeclaration(n)&&n.name.getText(ast)===name)value=n.initializer.getText(ast)});assert.ok(value,name);return value;}
+function navItem(label){let item;walk(n=>{
+ if(ts.isJsxSelfClosingElement(n)&&n.tagName.getText(ast)==='SidebarNavItem'
+  &&n.attributes.properties.some(p=>p.name?.getText(ast)==='label'&&p.initializer?.getText(ast)===`{t("${label}")}`))item=n;
+ });return item;
 }
-test('actual Local handler exits EQ from Local/Explore/Plex/Playlists; Local return retains context',()=>{
- for(const origin of ['local','explore','plex','playlists']){
-  const h=setup(origin);evaluate(initializer('navigateLocalSubview'),h.env)('browser');assert.equal(h.ctx.section,'local',origin);assert.equal(h.ctx.subview,'browser');assert.equal(h.ctx.reset,origin==='local'?0:1);assert.equal(h.ctx.transport,0);
- }
+
+test('sidebar utilities put Equalizer before Preferences without changing route availability',()=>{
+ const start=source.indexOf('<nav aria-label={t("sidebar.utilitiesGroup")}');
+ const end=source.indexOf('</nav>',start);
+ assert.ok(start>=0&&end>start);
+ const utilities=source.slice(start,end);
+ assert.ok(utilities.indexOf('equalizer.title')<utilities.indexOf('<KeyboardShortcutsHelp />'));
+ assert.ok(utilities.indexOf('<KeyboardShortcutsHelp />')<utilities.indexOf('sidebar.preferences'));
+ const item=navItem('equalizer.title');assert.ok(item);
+ assert.match(item.attributes.properties.map(p=>p.getText(ast)).join(' '),/sourceEnabled=\{equalizerActive\}/);
 });
-test('actual Local handler restores the retained Local player target instead of leaving EQ visible',()=>{
- for(const origin of ['local','explore','plex','playlists']){
-  const target={kind:'local',albumId:'fixture'};const h=setup(origin,target);evaluate(initializer('navigateLocalSubview'),h.env)('browser');assert.equal(h.ctx.section,origin);assert.equal(h.ctx.target,target);assert.equal(h.ctx.playerSubview,'browser');assert.equal(h.ctx.reset,0);
- }
+
+test('Equalizer remains an independent sidebar route and legacy stored route restores it',()=>{
+ const item=navItem('equalizer.title');assert.ok(item);
+ assert.equal(navItem('settings.pages.audio'),undefined);
+ const saved=[],published=[];
+ const preference=createMainSectionPreference(section=>published.push(section),()=>({getItem:()=>"equalizer",setItem:(_key,value)=>saved.push(value)}),undefined,initialMediaSource);
+ preference.restore({first_run:false,plex_token:'fixture',usage_mode:'full'});
+ assert.equal(published.at(-1),'equalizer');assert.deepEqual(saved,[]);
+ preference.navigate('equalizer');assert.equal(published.at(-1),'equalizer');assert.deepEqual(saved,['equalizer']);
 });
-test('actual Explore sidebar callback leaves EQ from every origin and clears only navigation state',()=>{
- for(const origin of ['local','explore','plex','playlists'])for(const target of [null,{kind:'local'}]){
-  const h=setup(origin,target);evaluate(sidebar('explore'),h.env)();assert.equal(h.ctx.section,'explore');assert.equal(h.ctx.reset,1);assert.equal(h.ctx.transport,0);assert.equal(h.section(),'explore');
- }
+
+test('Equalizer navigation remembers the source page and stays clickable while EQ is off',()=>{
+ const item=navItem('equalizer.title');assert.ok(item);
+ const attrs=Object.fromEntries(item.attributes.properties.map(p=>[p.name.getText(ast),p.initializer?.getText(ast)]));
+ assert.match(attrs.sourceEnabled,/equalizerActive/);
+ const click=item.attributes.properties.find(p=>p.name?.getText(ast)==='onClick').initializer.expression.getText(ast);
+ const code=ts.transpileModule(`const open=${click}; open();`,{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText;
+ const events=[],ref={current:'local'};
+ new Function('mediaSource','eqReturnSectionRef','resetAllNavigation','mainSectionPreference',code)('favorites',ref,()=>events.push('reset'),{navigate:section=>events.push(section)});
+ assert.equal(ref.current,'favorites');assert.deepEqual(events,['reset','equalizer']);
+ const html=source;
+ assert.match(html,/sourceEnabled=\{equalizerActive\}/);assert.match(html,/data-equalizer-disabled/);
 });
-test('repeated EQ→Local→EQ→Explore clicks keep publishing the intended destination',()=>{
- let enter;walk(n=>{if(ts.isJsxSelfClosingElement(n)&&n.tagName.getText(ast)==='SidebarNavItem'&&n.attributes.properties.some(p=>p.name?.getText(ast)==='label'&&p.initializer?.getText(ast)==='{t("equalizer.title")}'))enter=n.attributes.properties.find(p=>p.name?.getText(ast)==='onClick').initializer.expression.getText(ast)});assert.ok(enter);
- for(const origin of ['local','explore','plex','playlists']){
-  const h=setup(origin);for(let i=0;i<5;i++){
-   h.env.mediaSource=h.ctx.section;h.env.centralSection=h.section();evaluate(initializer('navigateLocalSubview'),h.env)('browser');assert.equal(h.ctx.section,'local');
-   h.env.mediaSource=h.ctx.section;evaluate(enter,h.env)();assert.equal(h.ctx.section,'equalizer');assert.equal(h.env.eqReturnSectionRef.current,'local');
-   h.env.mediaSource=h.ctx.section;evaluate(sidebar('explore'),h.env)();assert.equal(h.ctx.section,'explore');
-   h.env.mediaSource=h.ctx.section;evaluate(enter,h.env)();assert.equal(h.ctx.section,'equalizer');assert.equal(h.env.eqReturnSectionRef.current,'explore');
-  }
- }
+
+test('inactive Equalizer page links directly to Audio settings; editor renders only from runtime state',()=>{
+ assert.match(source,/\{equalizerActive\}[\s\S]*?<EqualizerView/);
+ assert.match(source,/configuredSignalRoute\(config\)\?\.mode === "direct"[\s\S]*?equalizer\.disabledExclusive/);
+ const button=Array.from(source.matchAll(/setSettingsInitialPage\("audio"\); setShowSettings\(true\)/g));
+ assert.ok(button.length>=1);
+ assert.doesNotMatch(source,/label=\{t\("settings\.pages\.audio"\)\}/);
+ assert.match(source,/active=\{mediaSource === "equalizer"\} sourceEnabled=\{equalizerActive\}/);
+ assert.match(source,/className=\{nowPlayingEmbedded \|\| mediaSource === "equalizer" \? "hidden"/);
+ assert.equal(expression('equalizerActive'),'fullMode && equalizerIsActive(playbackStatus.shared_dsp, playbackStatus.audio_route)');
 });
-test('retained Explore is inactive under EQ and initial direct EQ does not mount a previous page',()=>{
- let active,wrapper;walk(n=>{if(ts.isJsxSelfClosingElement(n)&&n.tagName.getText(ast)==='ExploreView')active=n.attributes.properties.find(p=>p.name?.getText(ast)==='active').initializer.expression.getText(ast);if(ts.isJsxElement(n)&&n.openingElement.attributes.properties.some(p=>p.name?.getText(ast)==='data-now-playing-previous-page'))wrapper=n.openingElement});
- assert.ok(active&&wrapper);assert.equal(evaluate(active,{mediaSource:'equalizer',exploreDetail:null,playerTarget:null}),false);assert.equal(evaluate(active,{mediaSource:'explore',exploreDetail:null,playerTarget:null}),true);
- const visible=evaluate(initializer('exploreLive').replace(/^useRef\(/,'').replace(/\)$/,''),{exploreContext:{}});assert.ok(visible);
- const classExpr=wrapper.attributes.properties.find(p=>p.name?.getText(ast)==='className').initializer.expression.getText(ast),inertExpr=wrapper.attributes.properties.find(p=>p.name?.getText(ast)==='inert').initializer.expression.getText(ast);
- for(const mediaSource of ['local','explore','plex','playlists']){assert.equal(evaluate(classExpr,{mediaSource,nowPlayingEmbedded:false}),'contents');assert.equal(evaluate(inertExpr,{mediaSource,nowPlayingEmbedded:false}),undefined)}
- assert.match(source,/\(mediaSource !== "equalizer" \|\| eqReturnViewRef.current\) &&/);
+
+test('Equalizer goes directly to Local even when Local is the hidden return section',()=>{
+ const handler=expression('navigateLocalSubview');
+ const code=ts.transpileModule(`const navigate=${handler}; navigate("browser");`,{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText;
+ for(const equalizerActive of [true,false]){
+  const events=[];
+  new Function('playerTarget','mediaSource','centralSection','setLocalSubview','changePlayerLocalSubview','resetAllNavigation','mainSectionPreference',code)(
+   null,'equalizer','local',view=>events.push(['subview',view]),view=>events.push(['player-subview',view]),()=>events.push(['reset']),{navigate:section=>events.push(['section',section])});
+  assert.deepEqual(events,[['subview','browser'],['reset'],['section','local']],
+   `Local navigation must leave the Equalizer page whether the editor is ${equalizerActive?'active':'inactive'}`);
+ }
+ assert.match(source,/if \(!playerTarget && mediaSource === "local"\)/);
+ assert.doesNotMatch(handler,/audioService|configService|saveConfig/);
+});
+
+test('Local can open Equalizer and its return action restores Local',()=>{
+ const item=navItem('equalizer.title');assert.ok(item);
+ const click=item.attributes.properties.find(p=>p.name?.getText(ast)==='onClick').initializer.expression.getText(ast);
+ const code=ts.transpileModule(`const open=${click}; open();`,{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText;
+ const events=[],ref={current:'radio'};
+ new Function('mediaSource','eqReturnSectionRef','resetAllNavigation','mainSectionPreference',code)('local',ref,()=>events.push('reset'),{navigate:section=>events.push(section)});
+ assert.equal(ref.current,'local');assert.deepEqual(events,['reset','equalizer']);
+ let returnExpression;
+ walk(node=>{if(ts.isJsxSelfClosingElement(node)&&node.tagName.getText(ast)==='EqualizerView'){
+  returnExpression=node.attributes.properties.find(property=>property.name?.getText(ast)==='onReturn')?.initializer?.expression?.getText(ast);
+ }});
+ assert.ok(returnExpression);
+ const returnCode=ts.transpileModule(`const leave=${returnExpression}; leave();`,{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText;
+ new Function('mainSectionPreference','eqReturnSectionRef',returnCode)({navigate:section=>events.push(section)},ref);
+ assert.equal(events.at(-1),'local');
 });

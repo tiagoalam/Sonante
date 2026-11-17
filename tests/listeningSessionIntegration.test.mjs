@@ -22,6 +22,7 @@ function fixture(options = {}) {
     '../utils/localCoverBatch': compile('utils/localCoverBatch.ts'),
     '../utils/playbackIntent': compile('utils/playbackIntent.ts'),
     '../utils/frontendDiagnostics': { diagnosticInvoke: (invoke, command, args) => invoke(command, args) },
+    '../utils/sqliteExperimentalMode': { isSqliteCatalogEnabled: () => options.sqliteMode === true },
     '@tauri-apps/api/core': { invoke: async command => {
       calls.push(command);
       if (command === 'get_local_albums') return options.catalog ? options.catalog() : [album];
@@ -33,6 +34,7 @@ function fixture(options = {}) {
   const service = compile('services/listeningSessions.ts', {
     './audio': { audioService },
     './smartPlaylists': { smartPlaylistsService: { sources: async () => ({ local: true, plex_server_id: null }) } },
+    './sqliteLibrary': { sqliteLibrary: { sources: async () => [] } }, '../utils/sqliteExperimentalMode': { isSqliteCatalogEnabled: () => options.sqliteMode === true },
     './plex': { plexService: {} }, './navidrome': { navidromeService: {} },
     '../utils/localSourceReadQueue': { localSourceReadQueue: queue },
     '../utils/navidromeTracks': compile('utils/navidromeTracks.ts'),

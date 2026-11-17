@@ -41,10 +41,10 @@ function meterFace(ctx: CanvasRenderingContext2D, width: number, height: number,
     const at = point(cx, cy, r + Math.max(10, w * .046), angleFor((db + 48) / 48));
     ctx.fillStyle = db >= -6 ? "#a92d24" : ink; ctx.fillText(String(db), at[0], at[1]);
   }
-  ctx.fillStyle = ink; ctx.font = `700 ${Math.max(11, Math.min(22, w * .075))}px Georgia,serif`;
-  ctx.fillText("VU", cx, height * .53);
-  ctx.font = `${Math.max(7, Math.min(9, w * .035))}px ui-monospace,monospace`;
-  ctx.fillText("RMS · dBFS", cx, height * .63);
+  ctx.fillStyle = ink; ctx.font = `700 ${Math.max(11, Math.min(22, w * .075))}px ui-sans-serif,sans-serif`;
+  ctx.fillText("RMS", cx, height * .52);
+  ctx.font = `700 ${Math.max(7, Math.min(9, w * .035))}px ui-monospace,monospace`;
+  ctx.fillText("dBFS", cx, height * .62);
   ctx.font = `600 ${Math.max(7, Math.min(10, w * .035))}px ui-sans-serif,sans-serif`;
   ctx.textAlign = "left"; ctx.fillText(channel ? labels.right : labels.left, x + 12, Math.max(14, height * .095));
   ctx.textAlign = "center";
@@ -59,8 +59,12 @@ function meterNeedle(ctx: CanvasRenderingContext2D, width: number, height: numbe
   const { x, w, cx, cy, r } = meterGeometry(width, height, channel), angle = angleFor(meterPosition(frame.rms[channel]));
   const tip = point(cx, cy, r - 5, angle), tail = point(cx, cy, -9, angle), side = [-Math.sin(angle) * 1.1, Math.cos(angle) * 1.1];
   ctx.fillStyle = "#00000035"; ctx.beginPath(); ctx.moveTo(tail[0] + 2, tail[1] + 2); ctx.lineTo(tip[0] + 2, tip[1] + 2); ctx.lineTo(cx + side[0] + 2, cy + side[1] + 2); ctx.closePath(); ctx.fill();
+  ctx.save();
+  ctx.shadowColor = blue ? "#42c1de55" : "#ef9f3c55";
+  ctx.shadowBlur = Math.max(2, w * .012);
   ctx.fillStyle = blue ? "#183944" : "#261c15";
   ctx.beginPath(); ctx.moveTo(tail[0] - side[0], tail[1] - side[1]); ctx.lineTo(tip[0], tip[1]); ctx.lineTo(tail[0] + side[0], tail[1] + side[1]); ctx.closePath(); ctx.fill();
+  ctx.restore();
   if (frame.peak[channel] > 0) {
     const peak = angleFor(meterPosition(frame.peak[channel])); ctx.strokeStyle = blue ? "#137d98" : "#ba3e24"; ctx.lineWidth = 2;
     line(ctx, point(cx, cy, r + 2, peak), point(cx, cy, r - 3, peak));
@@ -136,28 +140,43 @@ function spectrumFace(ctx: CanvasRenderingContext2D, width: number, height: numb
   frequencies.forEach(([hz, text], index) => {
     const x = a.x + Math.log(hz / 40) / Math.log(500) * a.w;
     ctx.textAlign = index === 0 ? "left" : index === frequencies.length - 1 ? "right" : "center";
+    ctx.strokeStyle = "#b4dce612"; ctx.lineWidth = 1;
+    line(ctx, [x, a.y], [x, a.y + a.h]);
     ctx.fillText(text, x, height - 2);
   });
+  const edge = ctx.createLinearGradient(0, a.y, 0, a.y + a.h);
+  edge.addColorStop(0, "#d8f4ef0a"); edge.addColorStop(1, "#d8f4ef00");
+  ctx.fillStyle = edge; ctx.fillRect(a.x, a.y, a.w, a.h);
 }
 function spectrumBars(ctx: CanvasRenderingContext2D, width: number, height: number, frame: InstrumentFrame, segmented: boolean, combo: boolean) {
-  const a = spectrumArea(width, height, combo), gap = Math.max(1, Math.min(3, a.w / 250));
+  const a = spectrumArea(width, height, combo), gap = Math.max(1.5, Math.min(4, a.w / 150));
   const bar = Math.max(.5, (a.w - gap * (INSTRUMENT_BANDS - 1)) / INSTRUMENT_BANDS);
   const gradient = ctx.createLinearGradient(0, a.y + a.h, 0, a.y);
   gradient.addColorStop(0, "#165c70"); gradient.addColorStop(.55, segmented ? "#45aeb3" : "#27c6d1"); gradient.addColorStop(.85, "#a0e6cc"); gradient.addColorStop(1, "#efd18a");
-  ctx.fillStyle = gradient;
+  ctx.fillStyle = "#b9e8e50a";
+  for (let i = 0; i < INSTRUMENT_BANDS; i++) ctx.fillRect(a.x + i * (bar + gap), a.y, bar, a.h);
+  ctx.fillStyle = gradient; ctx.shadowColor = "#42d7d555"; ctx.shadowBlur = Math.min(7, bar * .55);
   for (let i = 0; i < INSTRUMENT_BANDS; i++) {
     const h = frame.spectrum[i] * a.h, x = a.x + i * (bar + gap);
-    ctx.fillRect(x, a.y + a.h - h, bar, h);
+    if (h > .5) rounded(ctx, x, a.y + a.h - h, bar, h, Math.min(bar / 2, 2));
+    else ctx.beginPath();
+    if (h > .5) {
+      ctx.fill();
+      ctx.fillStyle = "#e8fff044"; ctx.fillRect(x, a.y + a.h - h, bar, Math.min(1, h));
+      ctx.fillStyle = gradient;
+    }
   }
+  ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
   if (segmented) {
     // Fixed horizontal gaps cut every column at once instead of 48x20 rectangles.
     ctx.strokeStyle = "#071016"; ctx.lineWidth = Math.max(1, Math.min(2, a.h / 35));
     for (let row = 1; row < 20; row++) { const y = a.y + a.h * row / 20; line(ctx, [a.x, y], [a.x + a.w, y]); }
   }
-  ctx.fillStyle = "#d6f4edcc";
+    ctx.fillStyle = "#f2d38b";
   for (let i = 0; i < INSTRUMENT_BANDS; i++) {
     if (frame.spectrumPeaks[i] <= 0) continue;
-    ctx.fillRect(a.x + i * (bar + gap), a.y + a.h * (1 - frame.spectrumPeaks[i]), bar, 1);
+    const x = a.x + i * (bar + gap), y = a.y + a.h * (1 - frame.spectrumPeaks[i]);
+    ctx.fillRect(x, y, Math.max(1, bar), 2);
   }
 }
 function levelBars(ctx: CanvasRenderingContext2D, width: number, height: number, frame: InstrumentFrame, only: boolean) {

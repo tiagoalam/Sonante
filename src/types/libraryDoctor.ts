@@ -33,6 +33,10 @@ export interface DoctorCoverage {
 }
 export interface LibraryDoctorReport {
   album_id: string;
+  inspection_source: "live_files" | "sqlite_snapshot";
+  grouping_ambiguous: boolean;
+  grouping_notes: string[];
+  artwork: "external" | "embedded" | "missing" | "unavailable" | null;
   tracks: LocalAlbumTrackInspection[];
   coverage: DoctorCoverage;
   findings: DoctorFinding[];

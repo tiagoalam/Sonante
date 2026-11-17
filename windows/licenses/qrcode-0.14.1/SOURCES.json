@@ -1,0 +1,17 @@
+{
+  "package": "qrcode",
+  "version": "0.14.1",
+  "source": "registry+https://github.com/rust-lang/crates.io-index",
+  "crateSha256": "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec",
+  "repository": "https://github.com/kennytm/qrcode-rust",
+  "license": "MIT OR Apache-2.0",
+  "features": [
+    "svg"
+  ],
+  "defaultFeatures": false,
+  "licenseFilesSha256": {
+    "LICENSE-MIT.txt": "7f865e72ab3644ea5887aa1f352aa435b36d139c35a964f47091e7dc02722e9a",
+    "LICENSE-APACHE.txt": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "note": "Same exact crate already used by Linux0.6.2; Windows-only dependency edge for the original remote QR function."
+}

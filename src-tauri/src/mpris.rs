@@ -16,7 +16,13 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
-const BUS_NAME_SUFFIX: &str = "sonante";
+const BUS_NAME_SUFFIX: &str = if cfg!(feature = "experimental-package") {
+    "sonante-experimental065"
+} else if cfg!(debug_assertions) {
+    "sonante-dev064"
+} else {
+    "sonante"
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BasicMediaAction {
@@ -1145,6 +1151,9 @@ impl Default for MprisState {
 }
 
 pub fn start(app: AppHandle) {
+    if crate::null_output_test_mode() {
+        return;
+    }
     let Some(state) = app.try_state::<MprisState>() else {
         eprintln!("[MPRIS] Service state unavailable.");
         return;
@@ -1524,6 +1533,22 @@ mod tests {
         assert!(!track_id.as_str().contains("Faixa"));
         assert!(!track_id.as_str().contains("X-Plex-Token"));
         assert!(!track_id.as_str().contains("segredo"));
+    }
+
+    #[test]
+    fn sqlite_track_id_is_opaque_and_experimental_bus_name_is_distinct() {
+        let track_id = track_id_for(&CurrentMedia::Local {
+            uri: "sqlite-track://42/YS9iLmZsYWM".into(),
+            queue_index: 3,
+        })
+        .expect("opaque SQLite locator has a valid MPRIS TrackId");
+        assert!(track_id.as_str().starts_with("/com/sonante/player/track/local_3_"));
+        assert!(!track_id.as_str().contains("sqlite-track"));
+        if cfg!(debug_assertions) || cfg!(feature = "experimental-package") {
+            assert_ne!(BUS_NAME_SUFFIX, "sonante");
+        } else {
+            assert_eq!(BUS_NAME_SUFFIX, "sonante");
+        }
     }
 
     #[test]

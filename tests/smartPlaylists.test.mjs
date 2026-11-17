@@ -42,6 +42,13 @@ test('templates keep a single selected source, apply explicit rules and use dedu
 test('opening Playlists lists definitions only, without reading any catalog or changing playback',async()=>{
  const f=await fixture({panel:true});try{const tree=await f.settle();assert.ok(text(tree).includes('Jazz'));assert.deepEqual(f.calls,[['list']]);assert.equal(f.button(tree,'smart.create').props.disabled,false);}finally{f.dispose()}
 });
+for(const language of ['en','pt-BR'])test(`Local date preview explains excluded historical albums with unknown import dates (${language})`,async()=>{
+ const f=await fixture({language,preview:async rules=>({...preview,unknown_added_date_albums:rules.added_days?2:0})});try{
+  let tree=await f.settle();f.field(tree,'smart.added').props.onChange({target:{value:'30'}});tree=f.render();
+  await f.button(tree,'smart.preview').props.onClick();await flush();tree=f.render();
+  assert.ok(text(tree).includes(f.t('smart.unknownAddedDates',{count:2})));
+ }finally{f.dispose()}
+});
 for(const language of ['en','pt-BR'])test(`creation offers real catalog values and requires a fresh explicit preview before saving (${language})`,async()=>{
  const f=await fixture({language});try{let tree=await f.settle();assert.equal(f.calls.filter(c=>c[0]==='preview').length,0);assert.equal(f.button(tree,'smart.save').props.disabled,true);assert.ok(text(f.field(tree,'smart.genre')).includes('Reggae'));f.field(tree,'smart.name').props.onChange({target:{value:'Saved rules'}});tree=f.render();await f.button(tree,'smart.preview').props.onClick();await flush();tree=f.render();assert.equal(f.button(tree,'smart.save').props.disabled,false);f.field(tree,'smart.yearFrom').props.onChange({target:{value:'1960'}});tree=f.render();assert.equal(f.button(tree,'smart.save').props.disabled,true);assert.equal(f.calls.filter(c=>c[0]==='play'||c[0]==='save').length,0);assert.ok(!text(tree).includes('smart.'));}finally{f.dispose()}
 });

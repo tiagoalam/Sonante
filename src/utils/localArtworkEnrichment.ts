@@ -5,10 +5,12 @@ import type { ArtworkProgressChange, ArtworkProgressEntry, ArtworkProgressResult
 
 export interface ArtworkEnrichmentStatus {
   active: boolean;
+  outcome: "idle" | "running" | "completed" | "partial" | "cancelled";
   total: number;
   processed: number;
   found: number;
   onlineFound: number;
+  failed: number;
   latestFoundTitle?: string;
   onlineActivity?: { kind: "searching" | "found"; title: string };
 }
@@ -42,6 +44,7 @@ export class LocalArtworkEnrichment {
   private processed = new Set<string>();
   private foundIds = new Set<string>();
   private onlineFoundIds = new Set<string>();
+  private failedIds = new Set<string>();
   private latestFoundId: string | null = null;
   private offlineMissing = new Set<string>();
   private index = 0;
@@ -50,9 +53,12 @@ export class LocalArtworkEnrichment {
   private updating = false;
   private awaitingCatalog = false;
   private onlineEnabled = false;
+  private manualRun: { allows: () => boolean; retryIds: Set<string> } | null = null;
   private running = false;
   private listeners = new Set<() => void>();
-  private status: ArtworkEnrichmentStatus = { active: false, total: 0, processed: 0, found: 0, onlineFound: 0 };
+  private status: ArtworkEnrichmentStatus = {
+    active: false, outcome: "idle", total: 0, processed: 0, found: 0, onlineFound: 0, failed: 0,
+  };
 
   constructor(
     resolver: ArtworkResolver,
@@ -79,6 +85,10 @@ export class LocalArtworkEnrichment {
   private publish(patch: Partial<ArtworkEnrichmentStatus>): void {
     this.status = { ...this.status, ...patch };
     this.listeners.forEach((listener) => listener());
+  }
+
+  private isUpdating(): boolean {
+    return this.updating && !(this.manualRun?.allows() ?? false);
   }
 
   private clearActivity(): void {
@@ -120,7 +130,8 @@ export class LocalArtworkEnrichment {
       this.pendingCatalog = null;
       this.generation++;
       this.clearActivity();
-      this.publish({ active: false });
+      this.publish({ active: false, outcome: "idle", total: 0, processed: 0, found: 0, onlineFound: 0,
+        failed: 0, latestFoundTitle: undefined });
       this.flush();
     } else if (this.pendingCatalog) {
       const catalog = this.pendingCatalog;
@@ -133,20 +144,31 @@ export class LocalArtworkEnrichment {
   setOnlineEnabled(enabled: boolean): void {
     if (this.onlineEnabled === enabled) return;
     this.onlineEnabled = enabled;
+    if (!enabled && this.manualRun) {
+      const wasActive = this.status.active;
+      this.manualRun = null;
+      this.generation++;
+      this.clearActivity();
+      this.publish({ active: false, outcome: wasActive ? "cancelled" : "idle" });
+    }
     if (enabled) {
-      for (const id of this.offlineMissing) this.processed.delete(id);
+      for (const id of this.offlineMissing) {
+        this.processed.delete(id);
+        this.failedIds.delete(id);
+      }
       this.offlineMissing.clear();
       this.index = 0;
-      this.publish({ processed: this.processed.size });
+      this.publish({ processed: this.processed.size, failed: this.failedIds.size, outcome: "idle" });
       this.start();
     }
   }
 
   setCatalog(albums: LocalAlbum[]): void {
-    if (this.updating) {
+    if (this.isUpdating()) {
       if (albums !== this.albums) this.pendingCatalog = albums;
       return;
     }
+    this.pendingCatalog = null;
     if (this.awaitingCatalog && albums === this.albums) return;
     if (albums === this.albums && !this.awaitingCatalog) return;
     this.albums = albums;
@@ -154,8 +176,41 @@ export class LocalArtworkEnrichment {
     this.generation++;
     const generation = this.generation;
     this.awaitingCatalog = false;
+    this.clearActivity();
+    this.publish({ active: false, outcome: "idle", total: 0, processed: 0, found: 0, onlineFound: 0,
+      failed: 0, latestFoundTitle: undefined });
     // A browser task yields a paint after the catalog has been published.
     void this.prepareCatalog(generation);
+  }
+
+  /** Run the existing bounded resolver against a SQLite catalog only after an explicit user action. */
+  searchMissing(albums: LocalAlbum[], allowed: () => boolean): boolean {
+    if (!this.onlineEnabled || !allowed() || !albums.length) return false;
+    if (this.manualRun?.allows()) return false;
+    this.manualRun = null;
+    if (this.isUpdating() && !allowed()) return false;
+    const retryIds = new Set<string>();
+    for (const album of albums) {
+      if (this.resolver.get(album.id)) continue;
+      const previous = this.persisted?.get(album.id);
+      if (!previous || previous.result === "none") {
+        retryIds.add(album.id);
+        this.processed.delete(album.id);
+        this.offlineMissing.delete(album.id);
+        this.failedIds.delete(album.id);
+      }
+    }
+    this.manualRun = { allows: allowed, retryIds };
+    this.index = 0;
+    this.publish({ processed: this.processed.size, failed: this.failedIds.size, outcome: "idle" });
+    if (retryIds.size === 0) {
+      this.manualRun = null;
+      this.publish({ active: false, outcome: "completed", total: albums.length, processed: albums.length });
+      return true;
+    }
+    if (albums !== this.albums) this.setCatalog(albums);
+    else this.start();
+    return true;
   }
 
   private async prepareCatalog(generation: number): Promise<void> {
@@ -167,16 +222,18 @@ export class LocalArtworkEnrichment {
       });
       this.persisted = await this.progressLoading;
     }
-    if (generation !== this.generation || this.updating || this.awaitingCatalog || !this.albums) return;
+    if (generation !== this.generation || this.isUpdating() || this.awaitingCatalog || !this.albums) return;
     const persisted = this.persisted;
     if (!persisted) return;
     this.ids = new Set(this.albums.map((album) => album.id));
     this.processed = new Set([...this.processed].filter((id) => this.ids.has(id)));
     this.foundIds = new Set([...this.foundIds].filter((id) => this.ids.has(id)));
     this.onlineFoundIds = new Set([...this.onlineFoundIds].filter((id) => this.ids.has(id)));
+    this.failedIds = new Set([...this.failedIds].filter((id) => this.ids.has(id)));
     if (this.latestFoundId && !this.ids.has(this.latestFoundId)) this.latestFoundId = null;
     this.offlineMissing = new Set([...this.offlineMissing].filter((id) => this.ids.has(id)));
     for (const album of this.albums) {
+      if (this.manualRun?.retryIds.has(album.id)) continue;
       const entry = persisted.get(album.id);
       if (entry && (["local", "embedded", "ineligible"].includes(entry.result)
           || entry.online_complete || (entry.result === "none" && !this.onlineEnabled))) {
@@ -194,6 +251,7 @@ export class LocalArtworkEnrichment {
       processed: this.processed.size,
       found: this.foundIds.size,
       onlineFound: this.onlineFoundIds.size,
+      failed: this.failedIds.size,
       latestFoundTitle: this.albums.find((album) => album.id === this.latestFoundId)?.title,
     });
     this.flush();
@@ -211,25 +269,36 @@ export class LocalArtworkEnrichment {
   }
 
   private start(): void {
-    if (this.running || this.updating || this.awaitingCatalog || this.preparedGeneration !== this.generation || !this.albums?.length) return;
+    if (this.running || this.isUpdating() || this.awaitingCatalog || this.preparedGeneration !== this.generation || !this.albums?.length) return;
     if (this.index >= this.albums.length) return;
+    const runGeneration = this.generation;
     this.running = true;
-    this.publish({ active: true });
+    this.publish({ active: true, outcome: "running" });
     void this.drain().finally(async () => {
       this.flush();
       await this.flushing;
       this.running = false;
-      this.publish({ active: false });
-      if (!this.updating && !this.awaitingCatalog && this.index < (this.albums?.length ?? 0)) this.start();
+      if (runGeneration === this.generation) {
+        const cancelled = !!this.manualRun && !this.manualRun.allows();
+        const finished = this.index >= (this.albums?.length ?? 0);
+        const outcome = cancelled ? "cancelled" : finished
+          ? this.failedIds.size > 0 ? "partial" : "completed"
+          : "idle";
+        this.publish({ active: false, outcome, failed: this.failedIds.size });
+      }
+      if (this.manualRun && !this.manualRun.allows()) this.manualRun = null;
+      if (!this.isUpdating() && !this.awaitingCatalog && this.index < (this.albums?.length ?? 0)) this.start();
+      else if (this.manualRun && this.index >= (this.albums?.length ?? 0)) this.manualRun = null;
     }).catch(this.reportError);
   }
 
   private async drain(): Promise<void> {
-    while (!this.updating && !this.awaitingCatalog) {
+    while (!this.isUpdating() && !this.awaitingCatalog) {
       const album = this.next();
       if (!album) return;
       const generation = this.generation;
       const onlineEnabledAtStart = this.onlineEnabled;
+      const manualRun = this.manualRun;
       const knownCover = this.resolver.get(album.id);
       const knownBefore = !!knownCover;
       let cover: string | null = knownCover;
@@ -237,9 +306,9 @@ export class LocalArtworkEnrichment {
       let failed = false;
       try {
         cover = knownCover ?? await this.resolver.resolve(
-          album, () => this.onlineEnabled, () => this.updating, (nextPhase) => {
+          album, () => this.onlineEnabled, () => this.isUpdating(), (nextPhase) => {
             phase = nextPhase;
-            if (nextPhase === "online_request" && generation === this.generation && !this.updating) {
+            if (nextPhase === "online_request" && generation === this.generation && !this.isUpdating()) {
               this.clearActivity();
               this.publish({ onlineActivity: { kind: "searching", title: album.title } });
             }
@@ -251,7 +320,7 @@ export class LocalArtworkEnrichment {
       }
       if (generation === this.generation && phase === "online_request" && this.status.onlineActivity?.kind === "searching"
           && this.status.onlineActivity.title === album.title) this.clearActivity();
-      if (generation === this.generation && !this.updating && !this.awaitingCatalog && this.ids.has(album.id)) {
+      if (generation === this.generation && !this.isUpdating() && !this.awaitingCatalog && this.ids.has(album.id)) {
         if (phase === "deferred") return;
         if (!cover && !onlineEnabledAtStart && this.onlineEnabled) {
           // The preference changed while this item was resolving; retry its online phase.
@@ -260,6 +329,8 @@ export class LocalArtworkEnrichment {
           continue;
         }
         this.processed.add(album.id);
+        if (failed) this.failedIds.add(album.id);
+        else this.failedIds.delete(album.id);
         if (!cover && !this.onlineEnabled) this.offlineMissing.add(album.id);
         if (!failed) {
           const result: ArtworkProgressResult = cover
@@ -271,6 +342,7 @@ export class LocalArtworkEnrichment {
           this.remember(album.id, result, onlineComplete);
           if (cover && result === "online") this.onlineFoundIds.add(album.id);
         }
+        manualRun?.retryIds.delete(album.id);
         if (cover && !knownBefore) {
           this.foundIds.add(album.id);
           this.latestFoundId = album.id;
@@ -280,6 +352,7 @@ export class LocalArtworkEnrichment {
           processed: this.processed.size,
           found: this.foundIds.size,
           onlineFound: this.onlineFoundIds.size,
+          failed: this.failedIds.size,
           latestFoundTitle: cover && !knownBefore ? album.title : this.status.latestFoundTitle,
         });
       }

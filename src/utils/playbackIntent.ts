@@ -49,9 +49,10 @@ export async function playbackIntentToken(intent: PlaybackIntent): Promise<strin
   if (!intent.current()) throw "PLAYBACK_SUPERSEDED";
   return token;
 }
-export type PlaybackFailure = "uncertain" | "persistence" | "failed" | "initialIndexing";
+export type PlaybackFailure = "uncertain" | "persistence" | "failed" | "initialIndexing" | "legacyFavorite";
 export function playbackFailure(error: unknown): PlaybackFailure {
   return error === "PLAYBACK_QUEUE_UNCERTAIN" ? "uncertain"
     : error === "PLAYBACK_PERSISTENCE_FAILED" ? "persistence"
+    : (error === "SQLITE_LEGACY_FAVORITE_REQUIRES_RESOLUTION" || error === "SQLITE_FAVORITE_REFERENCE_UNAVAILABLE") ? "legacyFavorite"
     : (error === "FIRST_RUN_CATALOG_INDEXING" || error === "LOCAL_ADDITION_INDEXING") ? "initialIndexing" : "failed";
 }

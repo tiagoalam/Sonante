@@ -6,7 +6,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import i18next from "i18next";
 import { createLibraryDoctorSession, doctorCoverageState, doctorError, doctorFindingGroups, doctorValue,
-  installDoctorDialogFocus, libraryDoctorAvailable } from "./libraryDoctor.ts";
+  installDoctorDialogFocus, libraryDoctorAvailable, sqliteLibraryDoctorAvailable, sqliteLibraryDoctorVersion } from "./libraryDoctor.ts";
 
 const dataModule = code => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const invokeMock = dataModule('export const invoke = (command, args) => globalThis.__doctorInvoke(command, args);');
@@ -16,7 +16,8 @@ const serviceJs = ts.transpileModule(serviceSource, { compilerOptions: { module:
 const serviceUrl = dataModule(serviceJs);
 const { libraryDoctorService } = await import(serviceUrl);
 const flush = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };
-const report = (overrides = {}) => ({ album_id: "A", tracks: [{ uri: "Music/a.wav", kind: "physical", issue: null,
+const report = (overrides = {}) => ({ album_id: "A", inspection_source: "live_files", grouping_ambiguous: false,
+  grouping_notes: [], artwork: null, tracks: [{ uri: "Music/a.wav", kind: "physical", issue: null,
   tags: { readable: true, writable: false, editable: false, format: "wav" } }],
   coverage: { canonical_track_count: 1, physical_track_count: 1, physical_tracks_read: 1,
     failed_physical_track_count: 0, cue_virtual_count: 0, physical_inspection_complete: true, partial: false,
@@ -49,6 +50,40 @@ test("successful read uses the actual command and albumId, including readable no
   assert.equal(f.session.getSnapshot().report.tracks[0].tags.writable, false);
   f.session.syncContext("A", f.version, true);
   await flush(); assert.equal(f.requests.length, 1);
+});
+
+test("SQLite album inspection routes to its own command and guards source generation", async () => {
+  const f = fixture();
+  f.session.syncContext("sqlite:7:YWxidW0", f.version, true);
+  const pending = f.session.inspect();
+  assert.equal(f.requests[0].command, "sqlite_library_album_doctor");
+  assert.deepEqual(f.requests[0].args, { albumId: "sqlite:7:YWxidW0" });
+  f.requests[0].resolve(report({ album_id: "sqlite:7:YWxidW0", inspection_source: "sqlite_snapshot" }));
+  await pending;
+  assert.equal(f.session.getSnapshot().report.inspection_source, "sqlite_snapshot");
+
+  const sources = [{ id: 7, generation: 4 }];
+  assert.equal(sqliteLibraryDoctorAvailable("sqlite:7:YWxidW0", sources, false, ["sqlite:7:YWxidW0"]), true);
+  assert.equal(sqliteLibraryDoctorAvailable("sqlite:7:YWxidW0", sources, true, ["sqlite:7:YWxidW0"]), false);
+  assert.equal(sqliteLibraryDoctorAvailable("sqlite:7:YWxidW0", sources, false, []), false);
+  assert.equal(sqliteLibraryDoctorVersion("sqlite:7:YWxidW0", sources), "sqlite:7:generation:4:album:sqlite:7:YWxidW0");
+  assert.equal(sqliteLibraryDoctorVersion("sqlite:7:YWxidW0", [{ id: 7, generation: 5 }]), "sqlite:7:generation:5:album:sqlite:7:YWxidW0");
+});
+
+test("CUE-backed SQLite albums use the read-only SQLite Doctor contract", async () => {
+  const id = "sqlite-cue-album:7:c29uYW50ZS1jdWUtYWxidW0tdjE";
+  const f = fixture();
+  f.session.syncContext(id, f.version, true);
+  const pending = f.session.inspect();
+  assert.equal(f.requests[0].command, "sqlite_library_album_doctor");
+  assert.deepEqual(f.requests[0].args, { albumId: id });
+  f.requests[0].resolve(report({ album_id: id, inspection_source: "sqlite_snapshot" }));
+  await pending;
+  const sources = [{ id: 7, generation: 3 }];
+  assert.equal(sqliteLibraryDoctorAvailable(id, sources, false, [id]), true);
+  assert.equal(sqliteLibraryDoctorVersion(id, sources), `sqlite:7:generation:3:album:${id}`);
+  assert.equal(sqliteLibraryDoctorAvailable(id, sources, true, [id]), false);
+  assert.equal(sqliteLibraryDoctorAvailable(`${id}:tampered`, sources, false, [id]), false);
 });
 
 test("every catalog/update/Save gate prevents sending and requires an explicit inspection after recovery", async () => {
@@ -330,6 +365,20 @@ const hookMock = dataModule(`
 const { LibraryDoctorModal: MountModal } = await import(dataModule(componentJs.replace(
   `from ${JSON.stringify(import.meta.resolve("react"))}`, `from ${JSON.stringify(hookMock)}`,
 )));
+
+test("album detail no longer shows the unsolicited grouping explanation while Doctor and tag tools remain wired", () => {
+  const browser = readFileSync(new URL("../components/LocalBrowserView.tsx", import.meta.url), "utf8");
+  const doctor = readFileSync(new URL("../components/LibraryDoctorModal.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(browser, /sqliteLibrary\.groupingExplanation|selectedAlbum\.grouping_notes/);
+  assert.match(browser, /diagnoseMetadataAlbum\(selectedAlbum\.id\)/);
+  assert.match(browser, /openMetadataEditor\(selectedAlbum\.id\)/);
+  assert.match(doctor, /report\.grouping_notes\.map/);
+  assert.match(doctor, /sqliteLibrary\.groupingNotes\./);
+  const english = JSON.parse(readFileSync(new URL("../locales/en.json", import.meta.url), "utf8"));
+  const portuguese = JSON.parse(readFileSync(new URL("../locales/pt-BR.json", import.meta.url), "utf8"));
+  assert.equal(english.sqliteLibrary.groupingExplanation, undefined);
+  assert.equal(portuguese.sqliteLibrary.groupingExplanation, undefined);
+});
 
 test("opening dispatches once despite StrictMode effect replay, and cleanup invalidates the pending read", async () => {
   const f = fixture(); globalThis.__doctorMountEffects = [];

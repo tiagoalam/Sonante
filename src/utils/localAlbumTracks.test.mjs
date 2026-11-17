@@ -76,7 +76,7 @@ test("UI gates playback, selects only surviving albums and translates waiting/lo
   assert.match(view, /confirmedCatalogPlaybackAllowed\(catalog, isLibraryUpdating\)/);
   assert.match(view, /tracksLoader\.select\(exists \? selectedAlbum\.id : null, catalogConfirmed, albums\)/);
   assert.match(view, /const tracksReady = catalogConfirmed && trackState\.catalogVersion === albums/);
-  assert.match(view, /disabled=\{!isPlaybackAvailable \|\| !tracksReady\}/);
+  assert.match(view, /disabled=\{!isPlaybackAvailable \|\| !catalogConfirmed \|\| !tracksReady\}/);
   assert.match(view, /if \(!isPlaybackAvailable \|\| !catalogConfirmed \|\| \(trackItems && !tracksReady\)\) return/);
   assert.match(view, /currentCatalog\.albums !== albums/);
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");

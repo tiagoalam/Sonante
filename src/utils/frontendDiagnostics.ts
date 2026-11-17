@@ -4,7 +4,7 @@ import type { ThumbnailDiagnostic } from "./localAlbumThumbnails";
 const operations = [
   "player.request", "plex.album-play", "search.local", "search.plex", "search.navidrome",
   "libraryRecovery.cancel", "navidrome.catalog", "navidrome.play", "app.bootstrap", "app.view-load", "app.now-playing-listener", "app.window-title",
-  "artist.load", "artist.play", "artwork.album-load",
+  "artist.load", "artist.play", "artwork.album-load", "artwork.search-album",
   "artwork.folder-load", "artwork.local-enrich", "audio.health",
   "favorites.load", "favorites.load-tracks", "favorites.quick-play",
   "favorites.toggle", "local.album-location", "local.album-play", "local.album-artwork",
@@ -22,9 +22,11 @@ const operations = [
   "plex.favorite-toggle", "plex.libraries-load", "plex.pin-create",
   "plex.pin-status", "plex.quick-play", "plex.search",
   "plex.servers-discover", "queue.clear", "queue.load",
-  "queue.play-index", "settings.load", "settings.local-folders-save",
+  "queue.play-index", "settings.load", "settings.local-folders-save", "sqlite-library.add-index",
+  "sqlite-library.legacy-import", "sqlite-library.legacy-migration-status",
   "settings.pick-folder", "settings.reload", "settings.reload-confirmed",
-  "settings.save", "settings.save-status", "wizard.pick-folder", "wizard.save"
+  "settings.save", "settings.save-status", "sqlite-library.progress-listener", "sqlite-library.verify",
+  "sqlite-library.reindex", "sqlite-library.remove-source", "wizard.pick-folder", "wizard.save"
 ] as const;
 export type DiagnosticOperation = typeof operations[number];
 const safeCodes = new Set([

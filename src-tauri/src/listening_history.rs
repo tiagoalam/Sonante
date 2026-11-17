@@ -15,14 +15,22 @@ pub struct HistoryStore { path: PathBuf, data: Option<HistoryFile>, last: Option
 pub struct HistoryState(pub Mutex<HistoryStore>);
 impl Default for HistoryStore { fn default() -> Self { Self::new(crate::persistence::sonante_config_dir().join("listening-history.json")) } }
 fn clean(text: &str) -> String { text.chars().filter(|c| !c.is_control()).take(256).collect() }
+fn valid_local_locator(uri: &str) -> bool {
+    if uri.starts_with("sqlite-track://") || uri.starts_with("sqlite-cue://") {
+        crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri)
+    } else {
+        crate::local_media::is_safe_relative_mpd_uri(uri)
+            && crate::local_media::is_catalog_track_uri(uri)
+    }
+}
 fn sanitized(track: &TrackMetadata) -> Option<TrackMetadata> {
     let locator = match &track.media_locator {
-        Some(MediaLocator::Local { uri }) if crate::local_media::is_safe_relative_mpd_uri(uri) && crate::local_media::is_catalog_track_uri(uri) => MediaLocator::Local { uri: uri.clone() },
+        Some(MediaLocator::Local { uri }) if valid_local_locator(uri) => MediaLocator::Local { uri: uri.clone() },
         Some(MediaLocator::Plex { server_id, part_key, rating_key, .. }) if !server_id.is_empty() && server_id.len() <= 256 && part_key.len() <= 4096
             && part_key.starts_with("/library/parts/") && !part_key.contains(['?', '#', '\0', '\r', '\n']) && !crate::plex::contains_plex_token(part_key) =>
             MediaLocator::Plex { server_id: server_id.clone(), part_key: part_key.clone(), rating_key: rating_key.as_ref().filter(|key| !key.is_empty() && key.len() <= 32 && key.bytes().all(|c| c.is_ascii_digit())).cloned(), file_path: None },
         Some(locator @ MediaLocator::Navidrome { .. }) => crate::navidrome::storage_locator(locator)?,
-        None if crate::local_media::is_safe_relative_mpd_uri(&track.uri) && crate::local_media::is_catalog_track_uri(&track.uri) => MediaLocator::Local { uri: track.uri.clone() },
+        None if valid_local_locator(&track.uri) => MediaLocator::Local { uri: track.uri.clone() },
         _ => return None,
     };
     Some(TrackMetadata { title: clean(&track.title), artist: clean(&track.artist), album: clean(&track.album), uri: String::new(), media_locator: Some(locator), thumb: None,
@@ -188,6 +196,33 @@ mod tests {
         assert!(!history.observe("play",Some(track.clone()),2));
         let raw=std::fs::read_to_string(&history.path).unwrap();assert!(!raw.contains("SESSION"));assert!(!raw.contains("private artwork"));
         let saved=HistoryStore::new(history.path.clone()).list().unwrap();assert_eq!(saved.entries.len(),1);assert!(matches!(&saved.entries[0].track.media_locator,Some(MediaLocator::Navidrome{connection_id,..}) if connection_id.is_empty()));
+    }
+
+    #[test]
+    fn sqlite_history_persists_only_canonical_opaque_locator_and_deduplicates_ticks() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let mut history = store();
+        let locator = format!("sqlite-track://7/{}", URL_SAFE_NO_PAD.encode(b"Album/01.wav"));
+        let mut track = local(1);
+        track.uri = "/private/music/Album/01.wav".into();
+        track.media_locator = Some(MediaLocator::Local { uri: locator.clone() });
+
+        assert!(history.observe("play", Some(track.clone()), 1));
+        assert!(!history.observe("play", Some(track.clone()), 2));
+        let raw = std::fs::read_to_string(&history.path).unwrap();
+        assert!(raw.contains(&locator));
+        assert!(!raw.contains("/private/music"));
+
+        let reopened = HistoryStore::new(history.path.clone()).list().unwrap();
+        assert_eq!(reopened.entries.len(), 1);
+        assert_eq!(reopened.entries[0].track.uri, "");
+        assert_eq!(reopened.entries[0].track.media_locator, Some(MediaLocator::Local { uri: locator }));
+
+        let unsafe_locator = format!("sqlite-track://7/{}", URL_SAFE_NO_PAD.encode(b"../outside.wav"));
+        assert!(!crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(&unsafe_locator));
+        track.media_locator = Some(MediaLocator::Local { uri: unsafe_locator });
+        assert!(!history.observe("play", Some(track), 3));
+        assert_eq!(history.list().unwrap().entries.len(), 1);
     }
 
 }

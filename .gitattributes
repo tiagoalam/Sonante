@@ -1,0 +1,2 @@
+src-tauri/src/analyzer.rs text eol=lf
+src-tauri/src/windows_analyzer/linux_policy.rs text eol=lf

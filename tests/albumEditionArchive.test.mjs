@@ -28,6 +28,7 @@ function service(disk, options = {}) {
     '../utils/localAlbumCatalogSession': { localAlbumCatalog: { getSnapshot: () => { throw 'NO_CATALOG_EXPECTED'; } } },
     '../utils/localSourceReadQueue': { localSourceReadQueue: compile('utils/localSourceReadQueue.ts').createLocalSourceReadQueue() },
     '../utils/musicSources': { sourceEnabled: (config, source) => config.sources[source] },
+    '../utils/sqliteExperimentalMode': { isSqliteCatalogEnabled: () => false },
     '@tauri-apps/api/core': { invoke: async (command, args) => {
       if (command === 'get_edition_cache_namespace') return options.namespace ?? namespace;
       assert.equal(command, 'get_edition_profile'); calls.push(args.source);

@@ -412,7 +412,11 @@ mod tests {
             ));
         }
         preset.bands[0].frequency_hz = 1000.0;
-        for value in [-12.01, 12.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for value in [-15.0, 0.0, 15.0] {
+            preset.bands[0].gain_db = value;
+            assert!(convert_preset(&preset, pcm(48_000)).is_ok());
+        }
+        for value in [-16.0, -15.01, 15.01, 16.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             preset.bands[0].gain_db = value;
             assert!(matches!(
                 convert_preset(&preset, pcm(48_000)),

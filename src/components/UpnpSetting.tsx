@@ -31,8 +31,8 @@ export function UpnpSetting() {
     }).catch(() => { if (own === generation.current) setError(true); })
       .finally(() => { if (own === generation.current) setBusy(false); });
   };
-  return <fieldset className="space-y-3 border-t border-[color:var(--theme-border-soft,#333333)] pt-4" aria-describedby={`${id}-help`}>
-    <legend className="flex items-center gap-2 text-sm font-semibold"><Radio size={16}/>{t("upnp.title")}</legend>
+  return <fieldset data-settings-section="upnp" className="settings-section" aria-describedby={`${id}-help`}>
+    <legend className="settings-section-title"><Radio size={14}/>{t("upnp.title")}</legend>
     <p id={`${id}-help`} className="text-xs leading-relaxed text-[color:var(--theme-fg-muted,#888888)]">{t("upnp.help")}</p>
     <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={enabled} disabled={busy || !status} onChange={event => setEnabled(event.target.checked)} className="accent-[var(--theme-control-accent,#E5A00D)]"/>{t("upnp.enable")}</label>
     <label htmlFor={`${id}-name`} className="block text-xs">{t("upnp.name")}</label>

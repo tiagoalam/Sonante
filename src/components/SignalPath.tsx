@@ -57,18 +57,16 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
   const format = information.format;
   const formatLabel = format.kind === "pcm"
     ? t("signalPath.pcm", { rate: format.rateKhz, bits: format.bits, channels: format.channels })
+    : format.kind === "pcm_float"
+      ? t("signalPath.pcmFloat", { rate: format.rateKhz, channels: format.channels })
     : format.kind === "dsd"
       ? t("signalPath.dsd", { level: format.level ?? "", rate: format.rateMhz, channels: format.channels })
       : t(format.kind === "unknown" ? "signalPath.unknownFormat" : "signalPath.noSignal");
   const mode = route ? t(`signalPath.${route.mode}`) : t("signalPath.unknownRoute");
+  const compactMode = route?.mode === "shared" ? t("signalPath.sharedCompact") : mode;
   const source = information.source ? t(`player.source.${information.source}`) : t("signalPath.unknownSource");
   const state = t(`signalPath.${information.state}`);
-  const secondary = information.state === "unavailable" ? state
-    : information.state === "paused" || information.state === "stopped"
-      ? [information.source ? source : null, state].filter(Boolean).join(" · ")
-      : format.kind === "pcm" ? t("signalPath.pcmCompact", { rate: format.rateKhz, bits: format.bits })
-        : format.kind === "dsd" ? t("signalPath.dsdCompact", { level: format.level ?? "", rate: format.rateMhz })
-          : information.source ? source : "";
+  const compactState = t(`signalPath.${information.state}Compact`);
   const dsp = route?.mode === "shared" && status.shared_dsp?.in_path === true ? status.shared_dsp : null;
   const stages = [
     { label: "Sonante", icon: Music2 },
@@ -84,8 +82,9 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
     { label: route?.mode === "direct" ? "DAC" : t("signalPath.output"), icon: Speaker },
   ];
   if (compact) return <section aria-label={t("signalPath.title")} data-signal-summary
-    className="flex min-w-0 flex-col items-start gap-0.5 text-[10px] leading-tight">
-    <span className="max-w-full truncate text-[9px] text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.65))]" title={`${mode} · ${formatLabel} · ${state}`}>{mode}{secondary ? ` · ${secondary}` : ""}</span>
+    className="flex min-w-0 flex-wrap items-center gap-1 text-[10px] leading-none">
+    <span data-signal-route className="inline-flex h-6 min-w-0 max-w-full items-center truncate rounded-md border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] bg-[var(--theme-surface-raised,rgb(255_255_255_/_0.05))] px-1.5 font-medium text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.75))]" title={`${mode} · ${formatLabel} · ${state}`}>{compactMode}</span>
+    <span data-signal-state title={state} className="inline-flex h-6 shrink-0 items-center rounded-md border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] px-1.5 font-medium text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.85))]">{compactState}</span>
   </section>;
   return <section aria-label={t("signalPath.title")} data-signal-summary
     className={`relative w-full min-w-0 rounded-xl border border-[color:var(--theme-border-accent,#E5A00D)]/20 bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.25))] p-4 ${horizontal ? "np-signal-path" : ""}`}>
@@ -132,12 +131,19 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
           <p className="text-[11px]">{observedOutput.rate / 1000} kHz · {t("signalPath.observation.channelCount", { count: observedOutput.channels })}</p>
         </div>}
       </div>
-      {route?.mode === "shared" && <section data-shared-dsp className="mt-3 rounded border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.1))] p-3 text-xs text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.65))]">
-        <p className="font-semibold">{t("equalizer.title")} · {t(`equalizer.state.${status.shared_dsp?.phase ?? "off"}`)}</p>
-        {status.shared_dsp?.verified && status.shared_dsp.applied && <p>{status.shared_dsp.applied.name} · {t("equalizer.pcmFormat")} · {t("equalizer.stereo")}</p>}
-        {status.shared_dsp?.verified && status.shared_dsp.protection && <p>{t("equalizer.appliedGain", { effective: status.shared_dsp.protection.effective_preamp_db.toFixed(1), requested: status.shared_dsp.protection.requested_preamp_db.toFixed(1) })}</p>}
-        {status.shared_dsp?.comparison && <p>{t(status.shared_dsp.comparison.interrupted ? "equalizer.compare.interrupted" : status.shared_dsp.comparison.side === "reference" ? "equalizer.compare.referenceInRoute" : "equalizer.compare.equalized")}</p>}
-        <p className="mt-1 text-[11px]">{t("equalizer.sharedProcessingHelp")}</p>
+      {route?.mode === "shared" && <section data-shared-dsp className={horizontal ? "np-signal-dsp text-xs text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.72))]" : "mt-3 rounded border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.1))] p-3 text-xs text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.65))]"}>
+        <div className="np-signal-dsp-summary">
+          <p className="font-semibold text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.88))]">{t("equalizer.title")} · {t(`equalizer.state.${status.shared_dsp?.phase ?? "off"}`)}</p>
+          {status.shared_dsp?.verified && status.shared_dsp.applied && <p>{status.shared_dsp.applied.name} · {t("equalizer.pcmFormat")} · {t("equalizer.stereo")}</p>}
+          {status.shared_dsp?.verified && status.shared_dsp.protection && <p>{t("equalizer.appliedGain", { effective: status.shared_dsp.protection.effective_preamp_db.toFixed(1), requested: status.shared_dsp.protection.requested_preamp_db.toFixed(1) })}</p>}
+          {status.shared_dsp?.comparison && <p>{t(status.shared_dsp.comparison.interrupted ? "equalizer.compare.interrupted" : status.shared_dsp.comparison.side === "reference" ? "equalizer.compare.referenceInRoute" : "equalizer.compare.equalized")}</p>}
+        </div>
+        {horizontal
+          ? <details className="np-signal-dsp-details">
+              <summary>{t("settings.signal.details")}</summary>
+              <p>{t("equalizer.sharedProcessingHelp")}</p>
+            </details>
+          : <p className="mt-1 text-[11px]">{t("equalizer.sharedProcessingHelp")}</p>}
       </section>}
   </section>;
 };

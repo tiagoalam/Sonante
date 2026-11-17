@@ -4,7 +4,17 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Optional full commit SHA; defaults to the dispatched commit
+        required: false
+        type: string
   workflow_call:
+    inputs:
+      candidate_sha:
+        description: Full 40-character commit SHA selected for all package jobs
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -21,6 +31,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Verify immutable candidate source
+        env:
+          SONANTE_CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
+          SONANTE_EVENT_SHA: ${{ github.sha }}
+        run: python3 scripts/verify-candidate-source.py --candidate-sha "$SONANTE_CANDIDATE_SHA" --event-sha "$SONANTE_EVENT_SHA"
 
       - name: Install Linux dependencies
         run: |
@@ -123,8 +142,9 @@ jobs:
       - name: Upload DEB and RPM candidates
         uses: actions/upload-artifact@v4
         with:
-          name: sonante-compilation-ubuntu-inputs
+          name: sonante-compilation-ubuntu-inputs-${{ inputs.candidate_sha || github.sha }}
           path: artifacts/*
+          retention-days: 2
           if-no-files-found: error
 
       - name: Build Fedora runtime profile executable
@@ -147,8 +167,9 @@ jobs:
       - name: Upload Fedora runtime profile executable
         uses: actions/upload-artifact@v4
         with:
-          name: sonante-compilation-fedora-inputs
+          name: sonante-compilation-fedora-inputs-${{ inputs.candidate_sha || github.sha }}
           path: fedora-native/*
+          retention-days: 2
           if-no-files-found: error
 
   arch:
@@ -160,8 +181,16 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed git nodejs npm rust python file binutils \
             gtk3 webkit2gtk-4.1 alsa-lib alsa-utils \
-            openssl mpd xdg-utils xdg-desktop-portal desktop-file-utils
+            openssl xdg-utils xdg-desktop-portal desktop-file-utils
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          fetch-depth: 0
+      - name: Verify immutable candidate source
+        env:
+          SONANTE_CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
+          SONANTE_EVENT_SHA: ${{ github.sha }}
+        run: python3 scripts/verify-candidate-source.py --candidate-sha "$SONANTE_CANDIDATE_SHA" --event-sha "$SONANTE_EVENT_SHA"
       - name: Verify packaging versions
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -183,7 +212,7 @@ jobs:
           VERSION="$(node -p "require('../package.json').version")"
           REVISION="$(sed -n 's/^pkgrel=//p' ../sonante-arch/PKGBUILD)"
           grep -Fx "pkgver = $VERSION-$REVISION" package-info.txt
-          for dep in mpd alsa-utils xdg-utils webkit2gtk-4.1; do grep -Fx "depend = $dep" package-info.txt; done
+          for dep in alsa-utils xdg-utils webkit2gtk-4.1; do grep -Fx "depend = $dep" package-info.txt; done
           bsdtar -tf ./*.pkg.tar.zst | grep -Fx usr/bin/sonante
           desktop-file-validate src/sonante.desktop
           bash ../scripts/inspect-elf.sh src/sonante/src-tauri/target/release/sonante | tee native-abi-arch.txt
@@ -193,13 +222,14 @@ jobs:
       - name: Upload Arch candidate
         uses: actions/upload-artifact@v4
         with:
-          name: sonante-compilation-arch-inputs
+          name: sonante-compilation-arch-inputs-${{ inputs.candidate_sha || github.sha }}
           path: |
             arch-build/*.pkg.tar.zst
             arch-build/SHA256SUMS-arch.txt
             arch-build/package-info.txt
             arch-build/native-abi-arch.txt
             arch-build/source-commit.txt
+          retention-days: 2
           if-no-files-found: error
 
 
@@ -211,21 +241,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          fetch-depth: 0
+      - name: Verify immutable candidate source
+        env:
+          SONANTE_CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
+          SONANTE_EVENT_SHA: ${{ github.sha }}
+        run: python3 scripts/verify-candidate-source.py --candidate-sha "$SONANTE_CANDIDATE_SHA" --event-sha "$SONANTE_EVENT_SHA"
       - name: Install packaging tools only
         run: |
           sudo apt-get update
           sudo apt-get install -y binutils dpkg-dev rpm libarchive-tools zstd python3
       - uses: actions/download-artifact@v4
         with:
-          name: sonante-compilation-ubuntu-inputs
+          name: sonante-compilation-ubuntu-inputs-${{ inputs.candidate_sha || github.sha }}
           path: ${{ runner.temp }}/sonante-candidates/ubuntu
       - uses: actions/download-artifact@v4
         with:
-          name: sonante-compilation-fedora-inputs
+          name: sonante-compilation-fedora-inputs-${{ inputs.candidate_sha || github.sha }}
           path: ${{ runner.temp }}/sonante-candidates/fedora
       - uses: actions/download-artifact@v4
         with:
-          name: sonante-compilation-arch-inputs
+          name: sonante-compilation-arch-inputs-${{ inputs.candidate_sha || github.sha }}
           path: ${{ runner.temp }}/sonante-candidates/arch
       - name: Assemble and verify complete installers and corresponding sources
         run: |
@@ -237,7 +274,8 @@ jobs:
       - name: Upload complete installable packages
         uses: actions/upload-artifact@v4
         with:
-          name: sonante-complete-linux-packages
+          name: sonante-0.7.0-candidate-${{ inputs.candidate_sha || github.sha }}
           path: ${{ runner.temp }}/sonante-complete-output/*
           compression-level: 0
+          retention-days: 14
           if-no-files-found: error

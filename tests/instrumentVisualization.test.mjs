@@ -36,7 +36,7 @@ test('cached instrument faces and all dynamic modes draw finite bounded geometry
  for(const mode of ['vu-amber','vu-blue','vu-radial','combo','spectrum-neon','spectrum-segmented','levels'])for(const [w,h] of [[600,180],[240,100]]){
   calls.length=0;drawing.drawInstrumentBackground(ctx,w,h,mode,{left:'LEFT',right:'RIGHT',relative:'Relative'});drawing.drawInstrumentForeground(ctx,w,h,mode,m.frame);
   assert.ok(calls.length<800);for(const[, ...args]of calls)for(const n of args)if(typeof n==='number')assert.ok(Number.isFinite(n));
-  if(mode==='vu-amber'||mode==='vu-blue')assert.ok(calls.some(([name,text])=>name==='fillText'&&text==='RMS · dBFS'));
+  if(mode==='vu-amber'||mode==='vu-blue')assert.ok(calls.some(([name,text])=>name==='fillText'&&text==='RMS')&&calls.some(([name,text])=>name==='fillText'&&text==='dBFS'));
  }
  assert.deepEqual(drawing.instrumentCanvasSize(7680,4320,3),{width:1422,height:800,ratio:800/4320,logicalWidth:7680,logicalHeight:4320});
 });

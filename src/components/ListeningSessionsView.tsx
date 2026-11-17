@@ -8,8 +8,7 @@ import type { SmartSource, SmartSources } from '../types/smartPlaylist';
 import type { ListeningSession, SessionAlbum, SessionCandidate, SessionMode } from '../types/listeningSession';
 import type { PlexLibrary } from '../types/plex';
 import { sourceEnabled } from '../utils/musicSources';
-import { smartPlaylistsService } from '../services/smartPlaylists';
-import { sessionCatalog, sessionAlbumTracks, checkSessionSource, sessionLocalAlbum } from '../services/listeningSessions';
+import { sessionCatalog, sessionAlbumTracks, checkSessionSource, sessionLocalAlbum, sessionSources } from '../services/listeningSessions';
 import { plexService } from '../services/plex';
 import { historyService } from '../services/history';
 import { audioService } from '../services/audio';
@@ -30,12 +29,12 @@ const button = 'inline-flex items-center justify-center gap-2 rounded-lg border 
 const primary = button + ' bg-[var(--theme-control-accent,#E5A00D)] text-[color:var(--theme-control-on-accent,#000)]';
 const input = 'w-full rounded-lg border border-[color:var(--theme-border-soft,#333)] bg-[var(--theme-surface-base,#121212)] px-3 py-2.5 text-sm';
 const minutes = (seconds: number) => Math.round(seconds / 60);
-function SessionCover({ album, candidate, source }: { album: Pick<SessionAlbum, 'id' | 'title'>; candidate?: SessionCandidate; source: SmartSource }) {
+function SessionCover({ album, candidate, source, localEnabled }: { album: Pick<SessionAlbum, 'id' | 'title'>; candidate?: SessionCandidate; source: SmartSource; localEnabled: boolean }) {
   const [thumb, setThumb] = useState<string | null>(null);
   useEffect(() => {
     let live = true; setThumb(null);
     void (async () => {
-      await checkSessionSource(source, () => live);
+      await checkSessionSource(source, () => live, localEnabled);
       if (source.kind === 'local') {
         const value = sessionLocalAlbum(album.id) ?? localAlbumCatalog.getSnapshot().albums.find(a => a.id === album.id);
         if (value) { const cover = await localArtworkResolver.resolveLocalOnly(value); if (live) setThumb(cover); }
@@ -47,7 +46,7 @@ function SessionCover({ album, candidate, source }: { album: Pick<SessionAlbum, 
       }
     })().catch(() => {});
     return () => { live = false; };
-  }, [album.id, JSON.stringify(source)]);
+  }, [album.id, JSON.stringify(source), localEnabled]);
   return <TrackArtwork track={{ thumb, plex_image: candidate?.image }} alt={album.title} />;
 }
 export function ListeningSessionsView({ config, available, active, status }: { config: AppConfig; available: boolean; active: boolean; status: PlaybackStatus }) {
@@ -74,7 +73,7 @@ export function ListeningSessionsView({ config, available, active, status }: { c
   useEffect(() => { if (!active) { life.current++; intentRef.current?.cancel(); } }, [active]);
   useEffect(() => {
     let current = true;
-    void smartPlaylistsService.sources().then(async value => {
+    void sessionSources(sourceEnabled(config, 'local')).then(async value => {
       if (!current) return; setSources(value);
       if (!source || !sourceEnabled(config, source.kind)) setSource(value.local ? { kind: 'local' } : value.plex_server_id
         ? { kind: 'plex', server_id: value.plex_server_id, library_id: '' } : value.navidrome_account_id ? { kind: 'navidrome', account_id: value.navidrome_account_id } : null);
@@ -90,7 +89,7 @@ export function ListeningSessionsView({ config, available, active, status }: { c
     if (!source || !sourceEnabled(config, source.kind) || source.kind === 'plex' && !source.library_id || !active) return;
     setLoading(true); setError(null);
     const current = () => alive.current && own === life.current && live.current.active;
-    void sessionCatalog(source, current).then(value => { if (current()) setCatalog(value); })
+    void sessionCatalog(source, current, source.kind !== 'local' || sourceEnabled(config, 'local')).then(value => { if (current()) setCatalog(value); })
       .catch(() => { if (current()) setError('read'); }).finally(() => { if (own === life.current && alive.current) setLoading(false); });
     return () => { life.current++; };
   }, [sourceKey, preferenceKey, active, retry]);
@@ -122,7 +121,7 @@ export function ListeningSessionsView({ config, available, active, status }: { c
   const prepare = () => { if (!source) return; void run(async current => {
     let heard = new Set<string>();
     if (mode === 'unplayed') { const history = await historyService.list(); if (!current()) return; if (!history.enabled) throw 'SESSION_HISTORY'; heard = new Set(history.entries.map(entry => sessionTrackKey(entry.track.media_locator)).filter((key): key is string => !!key)); }
-    const result = await prepareSessionAlbums(orderedCandidates(pool, mode), source, target, mode, a => sessionAlbumTracks(source, a, current), current, heard);
+    const result = await prepareSessionAlbums(orderedCandidates(pool, mode), source, target, mode, a => sessionAlbumTracks(source, a, current, source.kind !== 'local' || sourceEnabled(config, 'local')), current, heard);
     if (current()) {
       const name = sessionDisplayName('', t('sessions.suggestedName', { album: result.albums[0].title, artist: result.albums[0].artist }), saved);
       setSession({ id: crypto.randomUUID(), name, created_at: Date.now(), source, target, albums: result.albums, cursor: 0, completed: false }); setName(name);
@@ -154,7 +153,7 @@ export function ListeningSessionsView({ config, available, active, status }: { c
     void run(async current => {
       const valid = () => current() && replacementLive.current === choice.context;
       const albums = await prepareSessionReplacement(selected, choice.albumId, candidate,
-        value => sessionAlbumTracks(selected.source, value, valid), valid);
+        value => sessionAlbumTracks(selected.source, value, valid, selected.source.kind !== 'local' || sourceEnabled(config, 'local')), valid);
       if (valid()) {
         const index = selected.albums.findIndex(album => album.id === choice.albumId);
         changeAlbums(albums); setReplacement(null);
@@ -167,7 +166,7 @@ export function ListeningSessionsView({ config, available, active, status }: { c
     const valid = () => current() && intent.current() && sourceEnabled(live.current.config, selected.source.kind);
     const batches: TrackMetadata[][] = [];
     for (const album of selected.albums) {
-      const tracks = await sessionAlbumTracks(selected.source, catalog.find(a => a.id === album.id) ?? { ...album, genres: [], added_at: null }, valid);
+      const tracks = await sessionAlbumTracks(selected.source, catalog.find(a => a.id === album.id) ?? { ...album, genres: [], added_at: null }, valid, selected.source.kind !== 'local' || sourceEnabled(config, 'local'));
       if (JSON.stringify(sessionAlbum({ ...album, genres: [], added_at: null }, tracks, selected.source, album.reason).keys) !== JSON.stringify(album.keys)) throw 'SESSION_CHANGED';
       batches.push(tracks);
     }
@@ -211,7 +210,7 @@ export function ListeningSessionsView({ config, available, active, status }: { c
         <p className="text-xs text-[color:var(--theme-fg-muted,#888)]">{t(saved.some(item => sameSessionSelection(item, selected)) ? 'sessions.explicitlySaved' : 'sessions.unsavedHint')}</p>
         {status.options && (status.options.random || status.options.repeat || status.options.single !== 'off') && <p role="status" className="text-xs text-[color:var(--theme-fg-accent,#E5A00D)]">{t('sessions.playbackModesHint')}</p>}
         <ol ref={albumRows} className="grid gap-4 lg:grid-cols-2">{selected.albums.map((album, index) => <li key={album.id} data-session-slot={index} className={`flex flex-wrap content-start gap-4 rounded-xl border bg-[var(--theme-surface-panel,#181818)] p-4 ${index === position && selectedIsPlaying && !selected.completed ? 'border-[color:var(--theme-border-accent,#E5A00D)]' : 'border-[color:var(--theme-border-soft,#333)]'}`}>
-          <div className="h-24 w-24 shrink-0 overflow-hidden rounded-lg"><SessionCover album={album} source={selected.source} candidate={catalog.find(a => a.id === album.id)} /></div><div className="min-w-0 flex-1"><span className="text-[10px] font-bold uppercase tracking-widest text-[color:var(--theme-fg-accent,#E5A00D)]">{t('sessions.step', { index: index + 1 })}</span><h3 tabIndex={-1} className="mt-1 truncate font-bold outline-none" title={album.title}>{album.title}</h3><p className="truncate text-sm text-[color:var(--theme-fg-secondary,#aaa)]">{album.artist}</p><p className="mt-1 text-xs text-[color:var(--theme-fg-muted,#888)]">{album.duration === null ? t('sessions.unknownDuration') : t('sessions.minutes', { count: minutes(album.duration) })} · {t('sessions.tracks', { count: album.keys.length })}</p><p className="mt-2 text-xs text-[color:var(--theme-fg-muted,#999)]">{t(`sessions.reasons.${album.reason}`)}</p>
+          <div className="h-24 w-24 shrink-0 overflow-hidden rounded-lg"><SessionCover album={album} source={selected.source} localEnabled={sourceEnabled(config, 'local')} candidate={catalog.find(a => a.id === album.id)} /></div><div className="min-w-0 flex-1"><span className="text-[10px] font-bold uppercase tracking-widest text-[color:var(--theme-fg-accent,#E5A00D)]">{t('sessions.step', { index: index + 1 })}</span><h3 tabIndex={-1} className="mt-1 truncate font-bold outline-none" title={album.title}>{album.title}</h3><p className="truncate text-sm text-[color:var(--theme-fg-secondary,#aaa)]">{album.artist}</p><p className="mt-1 text-xs text-[color:var(--theme-fg-muted,#888)]">{album.duration === null ? t('sessions.unknownDuration') : t('sessions.minutes', { count: minutes(album.duration) })} · {t('sessions.tracks', { count: album.keys.length })}</p><p className="mt-2 text-xs text-[color:var(--theme-fg-muted,#999)]">{t(`sessions.reasons.${album.reason}`)}</p>
             <div className="mt-3 flex flex-wrap gap-2"><button className={button} disabled={busy || index === 0} aria-label={t('sessions.up')} onClick={() => { const list = [...selected.albums]; [list[index - 1], list[index]] = [list[index], list[index - 1]]; changeAlbums(list); }}><ArrowUp size={13} /></button><button className={button} disabled={busy || index === selected.albums.length - 1} aria-label={t('sessions.down')} onClick={() => { const list = [...selected.albums]; [list[index + 1], list[index]] = [list[index], list[index + 1]]; changeAlbums(list); }}><ArrowDown size={13} /></button><button className={button} disabled={busy || loading || !active || sourceKey !== JSON.stringify(selected.source) || !pool.some(a => !selected.albums.some(item => item.id === a.id))} onClick={event => openReplacement(index, event.currentTarget)}><RefreshCw size={13} />{t('sessions.replace')}</button><button className={button} disabled={busy || selected.albums.length === 1} aria-label={t('sessions.removeAlbum')} onClick={() => changeAlbums(selected.albums.filter((_, i) => i !== index))}><Trash2 size={13} /></button></div>
           </div>
           {shownReplacement?.albumId === album.id && <SessionAlbumChoices title={album.title}
@@ -219,7 +218,7 @@ export function ListeningSessionsView({ config, available, active, status }: { c
             busy={busy} more={shownReplacement.candidates.length > 3} error={error ? t(`sessions.errors.${error}`) : null}
             onChoose={chooseReplacement} onClose={closeReplacement}
             onMore={() => setReplacement(value => value && ({ ...value, page: (value.page + 1) % Math.ceil(value.candidates.length / 3) }))}
-            renderArtwork={candidate => <SessionCover album={candidate} candidate={candidate} source={selected.source} />} />}
+            renderArtwork={candidate => <SessionCover album={candidate} candidate={candidate} source={selected.source} localEnabled={sourceEnabled(config, 'local')} />} />}
         </li>)}</ol>
         {saved.some(s => s.id === selected.id) && <button className={button} disabled={busy || selected.completed} onClick={() => persist({ ...selected, completed: true })}><Check size={15} />{t(selected.completed ? 'sessions.completed' : 'sessions.finish')}</button>}
       </section>}

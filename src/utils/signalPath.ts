@@ -1,18 +1,22 @@
 import type { AppConfig } from "../types/config";
 import type { ConfiguredSignalRoute, MpdHealth, PlaybackStatus } from "../types/audio";
+import { interpretLegacyAudioRoute } from "./audioRoute.ts";
 
 // Only a known ALSA hardware identifier may cross the window boundary here.
 // Arbitrary PCM names can contain private paths or plugin configuration.
 export function configuredSignalRoute(config: AppConfig | null): ConfiguredSignalRoute | null {
   if (!config || config.first_run) return null;
-  const shared = config.audio_output_type === "pipewire" || config.alsa_device === "default";
-  const endpoint = /^hw:(?:CARD=)?[A-Za-z0-9_]+,(?:DEV=)?\d+$/.test(config.alsa_device)
-    ? config.alsa_device : null;
+  const route = interpretLegacyAudioRoute(config.audio_output_type, config.alsa_device).route;
+  const shared = route.access === "shared";
+  const configuredDevice = route.destination.kind === "device" ? route.destination.deviceId : "default";
+  const endpoint = /^hw:(?:CARD=)?[A-Za-z0-9_]+,(?:DEV=)?\d+$/.test(configuredDevice)
+    ? configuredDevice : null;
   return { mode: shared ? "shared" : "direct", endpoint: shared ? "default" : endpoint };
 }
 
 export type ReportedMpdFormat =
   | { kind: "pcm"; rateKhz: number; bits: number; channels: number }
+  | { kind: "pcm_float"; rateKhz: number; channels: number }
   | { kind: "dsd"; rateMhz: number; level: number | null; channels: number }
   | { kind: "unknown" }
   | { kind: "absent" };
@@ -34,6 +38,13 @@ export function parseReportedMpdFormat(value: string): ReportedMpdFormat {
     return { kind: "dsd", rateMhz: rate / 1_000_000, level, channels };
   }
   const match = /^(\d+):(8|16|24|32):(\d+)$/.exec(value);
+  const float = /^(\d+):f:(\d+)$/.exec(value);
+  if (float) {
+    const rate = Number(float[1]), channels = Number(float[2]);
+    if (!Number.isSafeInteger(rate) || rate < 1000 || rate > 1536000
+      || !Number.isSafeInteger(channels) || channels < 1 || channels > 64) return { kind: "unknown" };
+    return { kind: "pcm_float", rateKhz: rate / 1000, channels };
+  }
   if (!match) return { kind: "unknown" };
   const rate = Number(match[1]), channels = Number(match[3]);
   if (rate < 1000 || rate > 1536000 || channels < 1 || channels > 64) return { kind: "unknown" };

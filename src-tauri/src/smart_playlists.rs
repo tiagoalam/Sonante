@@ -303,11 +303,21 @@ pub struct Sources {
 }
 #[tauri::command]
 pub async fn smart_playlist_sources(app: AppHandle) -> Result<Sources, String> {
-    let (local, plex_server_id, navidrome) = {
+    let (local_enabled, plex_server_id, navidrome) = {
         let state = app.state::<crate::ConfigState>();
         let config = state.0.lock().map_err(|_| SOURCE)?;
         let sources = config.sources.unwrap_or_default();
-        (sources.local && !config.local_folders.is_empty(), config.plex_server_id.clone().filter(|_| sources.plex), sources.navidrome)
+        (sources.local, config.plex_server_id.clone().filter(|_| sources.plex), sources.navidrome)
+    };
+    // SQLite owns Local in 0.6.4. `local_folders` belongs to the legacy MPD
+    // catalog and is intentionally empty in this profile.
+    let library = app.state::<crate::sqlite_library::SqliteLibraryState>().inner().clone();
+    let local = if local_enabled {
+        tauri::async_runtime::spawn_blocking(move || library.has_indexed_sources())
+            .await
+            .map_err(|_| SOURCE)??
+    } else {
+        false
     };
     let navidrome_account_id = if navidrome { crate::navidrome::navidrome_status(app).await.ok().and_then(|s| s.account_id) } else { None };
     Ok(Sources { local, plex_server_id, navidrome_account_id })
@@ -362,24 +372,13 @@ async fn catalog(app: &AppHandle, source: &Source) -> Result<Vec<Album>, String>
     check_source(app, source)?;
     let albums = match source {
         Source::Navidrome { account_id } => crate::navidrome::smart_catalog(account_id).await.map_err(|_| READ)?,
-        Source::Local {} => crate::get_local_albums(app.clone(), None)
-            .await
-            .map_err(|_| READ)?
-            .into_iter()
-            .map(|a| Album {
-                id: a.id,
-                title: a.title,
-                artist: a.artist,
-                genres: a.genres,
-                year: a
-                    .year
-                    .and_then(|v| v.get(..4).and_then(|v| v.parse().ok()))
-                    .filter(|y| (1000..=9999).contains(y)),
-                added_at: local_added(a.added_at.as_deref()),
-                favorite_key: a.folder_path,
-                image: None,
-            })
-            .collect(),
+        Source::Local {} => {
+            let library = app.state::<crate::sqlite_library::SqliteLibraryState>().inner().clone();
+            tauri::async_runtime::spawn_blocking(move || library.smart_playlist_albums())
+                .await
+                .map_err(|_| READ)?
+                .map_err(|_| READ)?
+        }
         Source::Plex {
             server_id,
             library_id,
@@ -478,10 +477,19 @@ fn select(mut albums: Vec<Album>, r: &Rules, favorites: &HashSet<String>, time: 
     });
     albums
 }
+fn count_unknown_added_dates(albums: &[Album], rules: &Rules, favorites: &HashSet<String>, time: u64) -> usize {
+    if rules.added_days.is_none() { return 0; }
+    let mut other_rules = rules.clone();
+    other_rules.added_days = None;
+    albums.iter().filter(|album| {
+        album.added_at.is_none() && matches(album, &other_rules, favorites, time)
+    }).count()
+}
 #[derive(Serialize)]
 pub struct PreviewSelection {
     albums: Vec<Album>,
     matched_albums: usize,
+    unknown_added_date_albums: usize,
 }
 async fn preview(app: &AppHandle, r: Rules) -> Result<PreviewSelection, String> {
     r.validate()?;
@@ -518,7 +526,9 @@ async fn preview(app: &AppHandle, r: Rules) -> Result<PreviewSelection, String> 
             }
         }
     }
-    let albums = select(albums, &r, &favorites, now());
+    let now = now();
+    let unknown_added_date_albums = count_unknown_added_dates(&albums, &r, &favorites, now);
+    let albums = select(albums, &r, &favorites, now);
     let matched_albums = albums.len();
     check_source(app, &r.source)?;
     // Return the ordered selection for native rules. The renderer applies the
@@ -528,6 +538,7 @@ async fn preview(app: &AppHandle, r: Rules) -> Result<PreviewSelection, String> 
     Ok(PreviewSelection {
         albums,
         matched_albums,
+        unknown_added_date_albums,
     })
 }
 
@@ -558,6 +569,23 @@ mod tests {
             sort: Sort::Album,
             limit: 100,
         }
+    }
+    #[test]
+    fn local_added_date_filter_matches_only_known_dates_and_counts_unknown_records() {
+        let mut local = rules();
+        local.added_days = Some(30);
+        let now = 1_800_000_000;
+        let albums = vec![
+            album("recent", "Recent", Some(2020), Some(now - 86_400)),
+            album("old", "Old", Some(2020), Some(now - 90 * 86_400)),
+            album("unknown", "Unknown", Some(2020), None),
+        ];
+        let favorites = HashSet::new();
+        let result = select(albums.clone(), &local, &favorites, now);
+        assert_eq!(result.iter().map(|album| album.id.as_str()).collect::<Vec<_>>(), ["recent"]);
+        assert_eq!(count_unknown_added_dates(&albums, &local, &favorites, now), 1);
+        local.added_days = None;
+        assert_eq!(count_unknown_added_dates(&albums, &local, &favorites, now), 0);
     }
     fn album(id: &str, title: &str, year: Option<u32>, added_at: Option<u64>) -> Album {
         Album {

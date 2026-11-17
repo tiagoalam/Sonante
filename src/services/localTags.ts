@@ -25,11 +25,14 @@ export const localTagsService = {
     }),
 
   getAlbumInspection: (albumId: string): Promise<LocalAlbumTagInspection> =>
-    invoke<LocalAlbumTagInspection>("get_local_album_tag_inspection", { albumId }),
+    invoke<LocalAlbumTagInspection>(albumId.startsWith("sqlite:")
+      ? "sqlite_library_tag_album_inspection" : "get_local_album_tag_inspection", { albumId }),
 
   preflightAlbumBatch: (request: LocalAlbumTagBatchPreflightRequest): Promise<LocalAlbumTagBatchPlan> =>
-    invoke<LocalAlbumTagBatchPlan>("preflight_local_album_tag_batch", { request }),
+    invoke<LocalAlbumTagBatchPlan>(request.album_id.startsWith("sqlite:")
+      ? "sqlite_library_tag_album_preflight" : "preflight_local_album_tag_batch", { request }),
 
   applyAlbumBatch: (request: LocalAlbumTagBatchPreflightRequest): Promise<LocalAlbumTagBatchResult> =>
-    invoke<LocalAlbumTagBatchResult>("apply_local_album_tag_batch", { request }),
+    invoke<LocalAlbumTagBatchResult>(request.album_id.startsWith("sqlite:")
+      ? "sqlite_library_tag_album_apply" : "apply_local_album_tag_batch", { request }),
 };

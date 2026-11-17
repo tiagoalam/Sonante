@@ -19,11 +19,13 @@ import * as presentation from "./nowPlayingPresentation.ts";
 import { LocalArtworkResolver, artworkReadBlocked } from "./localArtwork.ts";
 import { LocalAlbumCatalog } from "./localAlbumCatalog.ts";
 import { VisibleQueueArtwork } from "./visibleQueueArtwork.ts";
+import { VisibleSqliteQueueAlbums } from "./visibleSqliteQueueAlbums.ts";
 import { localAlbumForMedia } from "./playerNavigation.ts";
+import { currentMediaKey } from "./playerNavigation.ts";
 import { logError } from "./frontendDiagnostics.ts";
 const coverPaths = calls => calls.filter(c=>c[0]==="get_local_covers").flatMap(c=>c[1].paths);
 const read = file => readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
-function compile(file,deps){const js=ts.transpileModule(read(file),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};new Function("require","exports",js)(id=>{if(id === "../utils/nowPlayingFullscreen")return {NowPlayingFullscreen}; if(id === "../utils/playbackIntent") return playbackIntents; if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; if(id==="../utils/signalPath")return signalPathHelpers; if(id==="../utils/localCoverBatch")return {createLocalCoverBatch}; if(id==="../utils/localSourceReadQueue")return {createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()}; assert.ok(id in deps,id);return deps[id];},exports);return exports;}
+function compile(file,deps){const js=ts.transpileModule(read(file),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const exports={};new Function("require","exports",js)(id=>{if(id === "../utils/nowPlayingFullscreen")return {NowPlayingFullscreen}; if(id === "../utils/playbackIntent") return playbackIntents; if(id==="./config")return {ensureDirectOutputChoice:async()=>{}}; if(id==="../utils/signalPath")return signalPathHelpers; if(id==="../utils/localCoverBatch")return {createLocalCoverBatch}; if(id==="../utils/localSourceReadQueue")return {createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()}; if(id==="../utils/playerNavigation")return {currentMediaKey,localAlbumForMedia};if(id==="../utils/sqliteExperimentalMode")return {isSqliteCatalogEnabled:()=>false}; assert.ok(id in deps,id);return deps[id];},exports);return exports;}
 const flush=async()=>{for(let i=0;i<60;i++)await Promise.resolve();};
 const defer=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};};
 const album=(id,folder)=>({id,title:"Same title",artist:"Same artist",folder_path:folder,discs:[],source_id:folder.split("/")[0],track_count:2});
@@ -34,7 +36,7 @@ const {TrackArtwork}=compile("components/TrackArtwork.tsx",{...common,react:{...
 const nodes=(tree,pred)=>Array.isArray(tree)?tree.flatMap(n=>nodes(n,pred)):!tree||typeof tree!=="object"?[]:[...(pred(tree)?[tree]:[]),...nodes(tree.props?.children,pred)];
 const fixtures=new Set();
 test.afterEach(()=>{for(const f of fixtures)f.dispose();fixtures.clear();});
-function mount({items=[track("Source/Album/1.flac"),track("Source/Album/2.flac"),track("Other/Album/3.flac")],inventory=[a,b],cover=async path=>`cover:${path}`,cache=async()=>null,detached=false,navCover=async()=>"data:image/png;base64,bmF2"}={}){
+function mount({items=[track("Source/Album/1.flac"),track("Source/Album/2.flac"),track("Other/Album/3.flac")],inventory=[a,b],cover=async path=>`cover:${path}`,cache=async()=>null,detached=false,navCover=async()=>"data:image/png;base64,bmF2",sqliteAlbumsByLocator={}}={}){
  const calls=[],slots=[],effects=[],layouts=[];let cursor=0,disposed=false,late=0,reader;
  const effect=(list,fn,deps)=>{const i=cursor++,old=slots[i];if(!old||deps.some((v,n)=>!Object.is(v,old.deps[n])))list.push(()=>{old?.cleanup?.();slots[i]={deps,cleanup:fn()};});};
  const react={...React,default:React,useId:()=> "queue-filter-test",
@@ -53,7 +55,7 @@ function mount({items=[track("Source/Album/1.flac"),track("Source/Album/2.flac")
  };
  const {audioService}=compile("services/audio.ts",{"@tauri-apps/api/core":{invoke:async(cmd,args)=>{calls.push([cmd,args]);if(cmd==="get_queue")return f.items.map(t=>({...t}));if(cmd==="get_local_albums")return f.inventory;if(cmd==="get_local_covers")return Promise.all(args.paths.map(async path=>{try{return {Ok:await cover(path)}}catch(error){return {Err:String(error)}}}));if(cmd==="get_online_album_cover"){assert.equal(args.cacheOnly,true);return cache(args.request);}assert.fail(`unexpected transport/HTTP ${cmd}`);}},"../utils/frontendDiagnostics":{diagnosticInvoke:(invoke,cmd,args)=>invoke(cmd,args)}});
  const catalog=new LocalAlbumCatalog(audioService.getLocalAlbums),resolver=new LocalArtworkResolver(audioService.getLocalCover,async()=>assert.fail("no HTTP"));
- const hook=compile("utils/useLocalQueueArtwork.ts",{react,"./localAlbumCatalogSession":{localAlbumCatalog:catalog},"./localArtworkSession":{localArtworkResolver:resolver},"./localArtwork":{artworkReadBlocked},"./playerNavigation":{localAlbumForMedia},"./nowPlayingPresentation":presentation,"./visibleQueueArtwork":{VisibleQueueArtwork},"../services/audio":{audioService},"./frontendDiagnostics":{logError}}).useLocalQueueArtwork;
+ const hook=compile("utils/useLocalQueueArtwork.ts",{react,"./localAlbumCatalogSession":{localAlbumCatalog:catalog},"./localArtworkSession":{localArtworkResolver:resolver},"./localArtwork":{artworkReadBlocked},"./playerNavigation":{localAlbumForMedia},"./nowPlayingPresentation":presentation,"./visibleQueueArtwork":{VisibleQueueArtwork},"./visibleSqliteQueueAlbums":{VisibleSqliteQueueAlbums},"../services/sqliteLibrary":{sqliteLibrary:{albumForTrack:async locator=>{calls.push(["sqlite_album_for_track",locator]);return typeof sqliteAlbumsByLocator==="function"?sqliteAlbumsByLocator(locator):sqliteAlbumsByLocator[locator]??null;}}},"../services/audio":{audioService},"./frontendDiagnostics":{logError}}).useLocalQueueArtwork;
  class Reader extends presentation.QueuePreviewReader{constructor(load,publish){super(load,publish,100000);reader=this;}}
  const navHook=compile("utils/useNavidromeQueueArtwork.ts",{react,"./nowPlayingPresentation":presentation,"./visibleNavidromeQueueArtwork":{VisibleNavidromeQueueArtwork,navidromeQueueArtworkKey},"./navidromeArtwork":{navidromeSongCover:async(...args)=>{calls.push(["nav_cover",...args.slice(0,2)]);return navCover(...args);}},"./frontendDiagnostics":{logError}}).useNavidromeQueueArtwork;
  const Queue=compile("components/NowPlayingQueue.tsx",{...common,react,"../utils/useNavidromeQueueArtwork":{useNavidromeQueueArtwork:navHook},"../utils/useLocalQueueArtwork":{useLocalQueueArtwork:hook},"../services/audio":{audioService},"../utils/nowPlayingPresentation":{...presentation,QueuePreviewReader:Reader},"./TrackArtwork":{TrackArtwork}}).NowPlayingQueue;
@@ -66,6 +68,40 @@ test("actual virtual queue restores noncurrent rows, shares one album read and p
  assert.deepEqual(coverPaths(f.calls),["Source/Album","Other/Album"]);
  const artwork=nodes(f.tree,n=>n.type===TrackArtwork)[1];assert.match(renderToStaticMarkup(React.createElement(TrackArtwork,artwork.props)),/src="cover:Source\/Album"/);
  const count=f.calls.length;for(let i=0;i<20;i++){f.props.status={...f.props.status,elapsed:i};await f.ready();}assert.equal(f.calls.length,count);f.dispose();
+});
+
+test("opaque SQLite queue rows resolve artwork by exact locator with visible-only bounded lookup and stable reorder identity",async()=>{
+ const ids=["sqlite:7:YWxidW0x","sqlite:7:YWxidW0y","sqlite-cue-album:7:YWxidW0z"];
+ const inventory=ids.map((id,i)=>({...album(id,`sqlite-album://${id}`),source_id:"sqlite-7",title:`Album ${i+1}`}));
+ const items=Array.from({length:12},(_,i)=>{const locator=`${i===8?"sqlite-cue":"sqlite-track"}://7/${Buffer.from(`Album${i%3}/track${i}.flac`).toString("base64url")}${i===8?"/1":""}`;
+  return{title:`Track ${i+1}`,artist:"Fixture",album:`Album ${i%3+1}`,uri:locator,media_locator:{kind:"local",uri:locator},duration:60};});
+ const mapping=Object.fromEntries(items.map((item,i)=>[item.media_locator.uri,ids[i%3]]));
+ let running=0,maxRunning=0;
+ const f=mount({items,inventory,sqliteAlbumsByLocator:async locator=>{running++;maxRunning=Math.max(maxRunning,running);await Promise.resolve();running--;return mapping[locator]??null;}});
+ await f.ready();
+ assert.equal(f.thumbs().length,12);
+ assert.equal(f.thumbs()[0],"current-cover");
+ for(let i=1;i<12;i++)assert.equal(f.thumbs()[i],`cover:sqlite-album://${ids[i%3]}`,`queue row ${i}`);
+ assert.ok(maxRunning<=2,"opaque album lookup concurrency stays bounded");
+ assert.equal(f.calls.filter(call=>call[0]==="sqlite_album_for_track").length,11,"only visible rows without artwork are resolved");
+ assert.deepEqual(coverPaths(f.calls).sort(),ids.map(id=>`sqlite-album://${id}`).sort());
+ const reversed=items.slice().reverse();
+ f.props.status={...f.props.status,current_media:{kind:"local",uri:items[0].media_locator.uri,queue_index:11},thumb:"current-cover"};
+ await f.replace(reversed);
+ assert.equal(f.thumbs()[11],"current-cover");
+ for(let i=0;i<11;i++)assert.equal(f.thumbs()[i],`cover:sqlite-album://${ids[(11-i)%3]}`,`reordered queue row ${i}`);
+ f.dispose();
+});
+
+test("late SQLite album lookup from an old queue is discarded after replacement",async()=>{
+ const old=defer(),albumId="sqlite:7:YWxidW0",fixture={...a,id:albumId,folder_path:`sqlite-album://${albumId}`};
+ const locator=`sqlite-track://7/${Buffer.from("Album/old.flac").toString("base64url")}`;
+ const f=mount({items:[track(locator),track("Source/Album/next.flac")],inventory:[fixture],sqliteAlbumsByLocator:value=>value===locator?old.promise:null});
+ await f.ready();
+ await f.replace([track("Source/Album/replacement.flac")]);
+ old.resolve(albumId);await flush();await f.ready();
+ assert.deepEqual(f.thumbs(),[null]);
+ f.dispose();
 });
 
 test("visible plus overscan only, bounded concurrency through local/cache fallback, scrolling and polling reuse",async()=>{

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import ts from "typescript";
 import { LocalAlbumCatalog, confirmedCatalogPlaybackAllowed, emptyLocalAlbumCatalogState, localCatalogPresentationAlbums } from "./localAlbumCatalog.ts";
 import { artworkReadBlocked } from "./localArtwork.ts";
 import { libraryDoctorAvailable } from "./libraryDoctor.ts";
@@ -87,6 +88,16 @@ test("null optional native fields are accepted as presentation metadata", () => 
   cache.write(context, [{ ...album("native"), year: null, genres: null, source_label: null }]);
   const result = cache.read(context);
   assert.equal(result[0].id, "native"); assert.equal(result[0].year, undefined);
+});
+
+test("Windows drive and UNC root spellings are valid exact cache scopes without admitting relative or traversing paths", () => {
+  assert.ok(localAlbumPresentationContext(["C:/Music"]));
+  assert.ok(localAlbumPresentationContext(["//nas/share/Music"]));
+  assert.ok(localAlbumPresentationContext(["//nas/share/"]));
+  assert.equal(localAlbumPresentationContext(["C:/Music/../Other"]), null);
+  assert.equal(localAlbumPresentationContext(["//nas"]), null);
+  assert.equal(localAlbumPresentationContext(["relative/Music"]), null);
+  assert.notEqual(localAlbumPresentationContext(["C:/Music"]), localAlbumPresentationContext(["C:/Other"]));
 });
 
 test("quota and storage access errors are optional and cannot suppress fresh results", async () => {
@@ -275,18 +286,18 @@ test("Local UI keeps saved cards inert, and configuration binding precedes React
   const source = readFileSync(new URL("../components/LocalBrowserView.tsx", import.meta.url), "utf8");
   const favorite = source.slice(source.indexOf("const handleToggleFavoriteLocal ="), source.indexOf("const handleSelectAlbum ="));
   let writes = 0;
-  const toggle = new Function("localAlbumCatalog", "favoritesService", "setFavoriteIds", "logError", favorite.replace(/const handleToggleFavoriteLocal = async \(e: React.MouseEvent, album: LocalAlbum, cov: string \| null\)/,
-    "const handleToggleFavoriteLocal = async (e, album, cov)").replace("const favItem: FavoriteAlbum", "const favItem") + "return handleToggleFavoriteLocal;");
-  const call = toggle({ getSnapshot: () => ({ loaded: false, albums: [album("old")] }) }, { toggleFavorite: () => { writes++; } }, () => {}, () => {});
+  const executable = ts.transpileModule(favorite, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
+  const toggle = new Function("sqliteBacked", "localAlbumCatalog", "favoritesService", "setFavoriteIds", "logError", `${executable}; return handleToggleFavoriteLocal;`);
+  const call = toggle(false, { getSnapshot: () => ({ loaded: false, albums: [album("old")] }) }, { toggleFavorite: () => { writes++; } }, () => {}, () => {});
   void call({ stopPropagation() {} }, album("old"), null);
   assert.equal(writes, 0);
   assert.match(source, /disabled=\{!isPlaybackAvailable \|\| !readEnabled\}/);
   assert.match(source, /const albums = localCatalogPresentationAlbums\(catalog\)/);
   assert.match(source, /onClick=\{readEnabled \? onClick : undefined\}/);
   assert.equal((source.match(/readEnabled=\{!metadataMode && catalog.loaded\}/g) ?? []).length, 4);
-  assert.match(source, /if \(!selectedAlbum \|\| !catalog.loaded \|\| metadataMode/);
+  assert.match(source, /if \(sqliteBacked \|\| !selectedAlbum \|\| !catalog.loaded \|\| metadataMode/);
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
-  assert.match(app, /localAlbumCatalog.setPresentationContext\(next.first_run \|\| !sourceEnabled\(next, "local"\) \? \[\] : next.local_folders\);\s*setConfigState\(next\)/);
+  assert.match(app, /localAlbumCatalog\.setPresentationContext\(next\.first_run \|\| !sourceEnabled\(next, "local"\) \? \[\] : next\.local_folders\);[\s\S]*?setConfigState\(next\)/);
 });
 
 

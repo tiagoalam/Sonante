@@ -82,7 +82,11 @@ test('shortcut help is bilingual, modal, keyboard-owned and returns focus withou
   const t=dictionary(lang);let opened=false;const effect=[],calls=[];const trigger={isConnected:true,focus:()=>calls.push('focus')};const modal={open:false,showModal(){this.open=true;calls.push('open');},close(){this.open=false;calls.push('close');}};let refIndex=0;
   const hooks={...React,useId:()=> 'help-owned',useState:()=>[opened,value=>opened=value],useRef:()=>({current:refIndex++===0?modal:trigger}),useEffect:fn=>effect.push(fn)};
   const View=compile('src/components/KeyboardShortcutsHelp.tsx',{react:hooks,'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t})}}).KeyboardShortcutsHelp;
-  let tree=View();let stopped=0;nodes(tree,n=>n.type==='button')[0].props.onClick({stopPropagation:()=>stopped++});assert.equal(opened,true);effect.length=0;refIndex=0;tree=View();
+  let tree=View();let stopped=0;const shortcutTrigger=nodes(tree,n=>n.type==='button')[0];
+  assert.match(shortcutTrigger.props.className,/text-\[13px\].*text-\[color:var\(--theme-fg-primary/);
+  assert.match(shortcutTrigger.props.className,/gap-2\.5.*px-3 py-2.*focus-visible:ring-1/);
+  assert.doesNotMatch(shortcutTrigger.props.className,/text-\[color:var\(--theme-fg-muted/);
+  shortcutTrigger.props.onClick({stopPropagation:()=>stopped++});assert.equal(opened,true);effect.length=0;refIndex=0;tree=View();
   const cleanup=effect[0]();assert.deepEqual(calls,['open']);const dialog=nodes(tree,n=>n.type==='dialog')[0];assert.equal(dialog.props['aria-modal'],'true');dialog.props.onKeyDown({stopPropagation:()=>stopped++});dialog.props.onCancel({preventDefault(){}});assert.equal(opened,false);cleanup();assert.deepEqual(calls,['open','close','focus']);assert.equal(stopped,2);
   assert.equal(nodes(tree,n=>n.type==='kbd').length,10);assert.ok(nodes(tree,n=>n.type==='h2').some(n=>n.props.children===t('shortcuts.title')));
  }

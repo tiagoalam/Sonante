@@ -11,6 +11,7 @@ import * as jsx from "react/jsx-runtime";
 import * as icons from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createDeviceAvailabilityQuery, shouldCheckContextualDevice } from "./deviceAvailability.ts";
+import { interpretLegacyAudioRoute } from "./audioRoute.ts";
 import { wizardPlexConnectionReady, wizardSaveErrorKey } from "./welcomeWizard.ts";
 import { createAppearance, APPEARANCE_KEY } from "./appearance.ts";
 
@@ -18,6 +19,9 @@ const source = readFileSync(new URL("../components/WelcomeWizard.tsx", import.me
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const t = (key, vars) => key === "wizard.step" ? `${key}:${vars.step}/${vars.total}` : key;
+const modeCode = ts.transpileModule(readFileSync(new URL("../components/AudioModeSelector.tsx", import.meta.url), "utf8"), { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+const modeExports = {};
+new Function("require", "exports", modeCode)(id => id === "react-i18next" ? { useTranslation: () => ({ t }) } : id === "lucide-react" ? icons : id === "react/jsx-runtime" ? jsx : assert.fail(`Unexpected selector import ${id}`), modeExports);
 const base = { first_run: true, audio_output_type: "pipewire", alsa_device: "default", local_folders: [],
   online_artwork_enabled: false, plex_url: "", plex_token: "", plex_server_id: null, plex_server_name: null,
   playback_mode: "http", local_mount_path: "", remote_share_path: "", dop_enabled: false, audio_buffer_size_kb: 8192, replay_gain: "off" };
@@ -27,21 +31,21 @@ const server = (name = "Living room", id = "fixture-server") => ({ name, client_
 const connected = { ...base, sources:{local:true,plex:true,navidrome:false}, plex_token: "fixture-token", plex_server_id: "fixture-server", plex_server_name: "Living room", plex_url: server().chosen_uri };
 function nodes(tree) {
   if (!React.isValidElement(tree)) return Array.isArray(tree) ? tree.flatMap(nodes) : [];
-  return [tree, ...nodes(tree.type?.name === "SourceCards" ? tree.type(tree.props) : tree.props.children)];
+  return [tree, ...nodes(["SourceCards", "AudioModeSelector"].includes(tree.type?.name) ? tree.type(tree.props) : tree.props.children)];
 }
 const text = tree => React.isValidElement(tree) ? text(tree.props.children) : Array.isArray(tree) ? tree.map(text).join("") : typeof tree === "string" || typeof tree === "number" ? String(tree) : "";
 const find = (tree, predicate) => { const value = nodes(tree).find(predicate); assert.ok(value, "Expected UI control exists"); return value; };
 const button = (f, label) => find(f.tree, node => node.type === "button" && text(node) === label);
-const mode = (f, id) => find(f.tree, node => node.type === "button" && text(node).includes(`settings.${id}Mode`));
+const mode = (f, id) => find(f.tree, node => node.type === "button" && node.props["data-audio-mode"] === id);
 const selector = (f, suffix) => find(f.tree, node => node.type === "select" && node.props.id.endsWith(suffix));
 const sourceButton = (f, id) => find(f.tree, node => node.type === "button" && text(node).includes(`sources.names.${id}`));
-const diagram = f => find(f.tree, node => node.type?.name === "AudioSignalDiagram").props;
 const fixtures = [];
 test.afterEach(() => { fixtures.splice(0).reverse().forEach(f => f.dispose()); });
 function wizard(overrides = {}) {
   const slots = [], effects = [], timers = new Map();
   let cursor = 0, sequence = 0, timerSequence = 0;
-  const calls = { reads: [], saves: [], finished: [], pins: 0, pinChecks: 0, servers: 0, browser: [], pickers: 0, focused: [], palettes: [], appearanceWrites: 0 };
+  const calls = { reads: [], saves: [], finished: [], pins: 0, pinChecks: 0, servers: 0, browser: [], pickers: 0, focused: [], palettes: [], appearanceWrites: 0,
+    sqliteChoices: 0, sqliteAdds: [], sqliteCancels: [], sqliteListeners: [] };
   let appearanceRaw = overrides.appearanceRaw ?? null;
   const appearance = createAppearance({origin:"wizard-fixture",storage:()=>({getItem:()=>appearanceRaw,setItem:(key,value)=>{assert.equal(key,APPEARANCE_KEY);appearanceRaw=value;calls.appearanceWrites++;}}),apply:value=>calls.palettes.push(value),onStorage:()=>()=>{}});
   const stopAppearance = appearance.start();
@@ -50,7 +54,7 @@ function wizard(overrides = {}) {
   const appearanceDeps = {react:{...React,useId:()=>"wizard-appearance-fixture",useSyncExternalStore:(_subscribe,get)=>get()},"react/jsx-runtime":jsx,"react-i18next":{useTranslation:()=>({t})},"../services/appearance":{appearance}, "../utils/appearance":appearanceModel};
   new Function("require","exports",appearanceCode)(id=>{assert.ok(id in appearanceDeps,id);return appearanceDeps[id];},appearanceExports);
   const previousWindow = globalThis.window, previousClear = globalThis.clearInterval;
-  globalThis.window = { setInterval(callback, delay) { assert.equal(delay, 1500); timers.set(++timerSequence, callback); return timerSequence; } };
+  globalThis.window = { location: { search: "" }, setInterval(callback, delay) { assert.equal(delay, 1500); timers.set(++timerSequence, callback); return timerSequence; } };
   globalThis.clearInterval = id => timers.delete(id);
   const hooks = { ...React,
     useState(initial) { const key = cursor++; if (!(key in slots)) slots[key] = typeof initial === "function" ? initial() : initial; return [slots[key], value => { slots[key] = typeof value === "function" ? value(slots[key]) : value; }]; },
@@ -61,8 +65,10 @@ function wizard(overrides = {}) {
   const dependencies = {
     react: { ...hooks, default: hooks, __esModule: true }, "react/jsx-runtime": jsx,
     "../utils/frontendDiagnostics": frontendDiagnostics, "lucide-react": icons,
+    "../utils/audioRoute.ts": { interpretLegacyAudioRoute },
+    "../utils/platform": { isWindowsPreview: () => Boolean(overrides.windowsPreview) },
     "react-i18next": { useTranslation: () => ({ t, i18n: { language: "en", changeLanguage() {} } }) },
-    "./AudioSignalDiagram": { AudioSignalDiagram: function AudioSignalDiagram() {} },
+    "./AudioModeSelector": modeExports,
     "./LocalDiagnostics": { LocalDiagnostics: function LocalDiagnostics() {} },
     "./AppearanceSetting": appearanceExports,
     "../utils/usageMode": usageMode,
@@ -70,6 +76,18 @@ function wizard(overrides = {}) {
     "./ExperimentalFeatures": { ExperimentalFeaturesSetting: function ExperimentalFeaturesSetting() {} },
     "../utils/deviceAvailability": { createDeviceAvailabilityQuery, shouldCheckContextualDevice },
     "../utils/welcomeWizard": { wizardPlexConnectionReady, wizardSaveErrorKey },
+    "../utils/sqliteExperimentalMode": { isSqliteCatalogEnabled: () => Boolean(overrides.sqlite) },
+    "../services/sqliteLibrary": { sqliteLibrary: {
+      async chooseFolder() { calls.sqliteChoices++; return { token: `fixture-token-${calls.sqliteChoices}`, displayPath: "/fixture/local" }; },
+      async cancelFolderSelection(token) { calls.sqliteCancels.push(token); },
+      async addAndIndex(token, operationId) {
+        calls.sqliteAdds.push({ token, operationId });
+        if (overrides.sqliteAdd) return overrides.sqliteAdd(token, operationId, calls.sqliteListeners);
+        for (const listener of calls.sqliteListeners) listener({ payload: { operationId, phase: "metadata", identifiedAlbums: 2 } });
+        return { view: { albums: [{}, {}], artists: [{}] } };
+      },
+    } },
+    "@tauri-apps/api/event": { async listen(_name, listener) { calls.sqliteListeners.push(listener); return () => {}; } },
     "../services/audio": { audioService: { async pickDirectory() { calls.pickers++; return "/fixture/local"; } } },
     "../services/config": { configService: {
       async checkDirectDeviceAvailability(id) { const d = deferred(); calls.reads.push({ id, ...d }); return d.promise; },
@@ -117,32 +135,79 @@ const audioWizard = (overrides={}) => {const f=wizard(overrides);if(!overrides.o
 test("opening preserves saved/default/missing DACs without probes, enumeration or silent replacement", () => {
   for (const id of ["default", "", "hw:CARD=Missing,DEV=0", devices[0].id]) {
     const f = audioWizard({ config: { ...base, audio_output_type: "alsa", alsa_device: id } });
-    assert.equal(selector(f, "-device").props.value, id); assert.equal(f.calls.reads.length, 0); assert.equal(f.calls.servers, 0);
-    const values = nodes(selector(f, "-device")).filter(node => node.type === "option").map(node => node.props.value);
-    assert.ok(values.includes(id)); assert.match(statusText(f), /indeterminate/); f.dispose();
+    assert.equal(f.calls.reads.length, 0); assert.equal(f.calls.servers, 0);
+    if (id === "default") {
+      assert.equal(mode(f, "shared").props["aria-pressed"], true);
+      assert.match(text(f.tree), /audioExperience.systemDefault/);
+    } else {
+      assert.equal(selector(f, "-device").props.value, id);
+      const values = nodes(selector(f, "-device")).filter(node => node.type === "option").map(node => node.props.value);
+      assert.ok(values.includes(id)); assert.match(statusText(f), /indeterminate/);
+    }
+    f.dispose();
   }
   assert.doesNotMatch(source, /devices\[0\]|getAudioDevices\(/);
 });
 
-test("explicit Shared/Direct and new physical choices update the diagram and serialize only directed checks", async () => {
+test("Wizard shares Audio terminology, maps legacy alsa/default to Shared and never enables EQ", async () => {
+  const f = audioWizard({ config: { ...base, audio_output_type: "alsa", alsa_device: "default" } });
+  const modes = () => nodes(f.tree).filter(node => node.props["data-audio-mode"]).map(node => node.props["data-audio-mode"]);
+  assert.deepEqual(modes(), ["shared", "direct"]);
+  assert.equal(mode(f, "shared").props["aria-pressed"], true);
+  assert.equal(nodes(f.tree).some(node => node.type?.name === "AudioSignalDiagram"), false);
+  assert.match(text(f.tree), /wizard.equalizerNotice/);
+
+  mode(f, "direct").props.onClick(); f.render();
+  assert.equal(button(f, "wizard.next").props.disabled, true);
+  assert.equal(selector(f, "-device").props.value, "default");
+  assert.equal(nodes(selector(f, "-device")).find(node => node.type === "option" && node.props.value === "default").props.disabled, true);
+  assert.match(text(f.tree), /audioExperience.directNeedsDevice/);
+  choose(f, devices[0].id);
+  assert.equal(mode(f, "direct").props["aria-pressed"], true);
+  assert.deepEqual(modes(), ["shared", "direct"]);
+  f.dispose();
+
+  const shared = audioWizard({ config: { ...base, audio_output_type: "alsa", alsa_device: "default" } });
+  mode(shared, "shared").props.onClick(); shared.render();
+  selectSources(shared, true, false); next(shared);
+  await button(shared, "wizard.start").props.onClick();
+  assert.equal(shared.calls.saves[0].audio_output_type, "pipewire");
+  assert.equal(Object.hasOwn(shared.calls.saves[0], "equalizer_enabled"), false);
+  assert.equal(shared.calls.finished.length, 1);
+  shared.dispose();
+});
+
+test("Windows Wizard keeps Shared/Direct and endpoint selection without Linux route diagrams", () => {
+  const f = audioWizard({ windowsPreview: true });
+  const modes = nodes(f.tree).filter(node => node.props["data-audio-mode"]).map(node => node.props["data-audio-mode"]);
+  assert.deepEqual(modes, ["shared", "direct"]);
+  assert.equal(nodes(f.tree).some(node => node.type?.name === "AudioSignalDiagram"), false);
+  assert.match(text(f.tree), /wizard.equalizerNotice/);
+  mode(f, "direct").props.onClick(); f.render(); choose(f, devices[0].id);
+  assert.equal(selector(f, "-device").props.value, devices[0].id);
+  assert.deepEqual(nodes(f.tree).filter(node => node.props["data-audio-mode"]).map(node => node.props["data-audio-mode"]), ["shared", "direct"]);
+  f.dispose();
+});
+
+test("output cards and endpoint selection retain the first-run draft and serialize only directed checks", async () => {
   const f = audioWizard({ config: { ...base, alsa_device: devices[0].id } });
-  assert.equal(diagram(f).mode, "shared");
-  mode(f, "alsa").props.onClick(); f.render();
-  assert.equal(mode(f, "alsa").props["aria-pressed"], true); assert.equal(diagram(f).mode, "direct");
+  assert.equal(mode(f, "shared").props["aria-pressed"], true);
+  mode(f, "direct").props.onClick(); f.render();
+  assert.equal(mode(f, "direct").props["aria-pressed"], true);
   assert.deepEqual(f.calls.reads.map(row => row.id), [devices[0].id]);
-  mode(f, "alsa").props.onClick(); f.render(); assert.equal(f.calls.reads.length, 1);
+  mode(f, "direct").props.onClick(); f.render(); assert.equal(f.calls.reads.length, 1);
   choose(f, devices[1].id); choose(f, devices[2].id);
-  assert.equal(diagram(f).device, devices[2].id); assert.equal(f.calls.reads.length, 1);
+  assert.equal(selector(f, "-device").props.value, devices[2].id); assert.equal(f.calls.reads.length, 1);
   f.calls.reads[0].resolve([{ id: devices[0].id, state: "busy" }]); await flush(); f.render();
   assert.deepEqual(f.calls.reads.map(row => row.id), [devices[0].id, devices[2].id]); assert.doesNotMatch(statusText(f), /\.busy/);
   f.calls.reads[1].resolve([{ id: devices[2].id, state: "available" }]); await flush(); f.render();
   assert.match(statusText(f), /\.available/);
-  mode(f, "pipewire").props.onClick(); f.render(); assert.equal(diagram(f).mode, "shared");
+  mode(f, "shared").props.onClick(); f.render(); assert.equal(mode(f, "shared").props["aria-pressed"], true);
 });
 
 test("available, busy, inconclusive and ownership-marker results use the same compact presentation as Settings", async () => {
   for (const state of ["available", "busy", "indeterminate", "current_sonante"]) {
-    const f = audioWizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
+    const f = audioWizard(); mode(f, "direct").props.onClick(); f.render(); choose(f, devices[0].id);
     assert.match(statusText(f), /\.checking/);
     f.calls.reads[0].resolve([{ id: devices[0].id, state }]); await flush(); f.render();
     assert.match(statusText(f), new RegExp(`\\.${state === "current_sonante" ? "indeterminate" : state}`));
@@ -151,7 +216,7 @@ test("available, busy, inconclusive and ownership-marker results use the same co
 });
 
 test("help and retry are keyboard-native; a busy observation can become available without a permanent Save lock", async () => {
-  const f = audioWizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
+  const f = audioWizard(); mode(f, "direct").props.onClick(); f.render(); choose(f, devices[0].id);
   f.calls.reads[0].resolve([{ id: devices[0].id, state: "busy" }]); await flush(); f.render();
   const help = () => find(f.tree, node => node.type === "button" && node.props["aria-label"] === "settings.deviceAvailability.helpLabel");
   const panel = () => find(f.tree, node => node.props.id === help().props["aria-controls"]);
@@ -166,10 +231,10 @@ test("help and retry are keyboard-native; a busy observation can become availabl
 
 test("current Direct owner, virtual/unlisted choices and page navigation do not trigger extra probes", () => {
   const f = audioWizard({ config: { ...base, first_run: false, audio_output_type: "alsa", alsa_device: devices[0].id } });
-  mode(f, "pipewire").props.onClick(); f.render(); mode(f, "alsa").props.onClick(); f.render();
+  mode(f, "shared").props.onClick(); f.render(); mode(f, "direct").props.onClick(); f.render();
   assert.equal(f.calls.reads.length, 0); assert.equal(button(f, "settings.deviceAvailability.check").props.disabled, true);
   choose(f, "null"); choose(f, "hw:CARD=Unlisted,DEV=0"); next(f); back(f);
-  assert.equal(f.calls.reads.length, 0); assert.equal(diagram(f).device, "hw:CARD=Unlisted,DEV=0");
+  assert.equal(f.calls.reads.length, 0); assert.equal(selector(f, "-device").props.value, "hw:CARD=Unlisted,DEV=0");
 });
 
 test("source controls are semantic toggle buttons and all optional combinations reach review before Save", async () => {
@@ -194,10 +259,10 @@ test("source controls are semantic toggle buttons and all optional combinations 
 });
 
 test("back/next retains the audio and folder drafts; layout scrolls within the viewport with a fixed footer", async () => {
-  const f = audioWizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
+  const f = audioWizard(); mode(f, "direct").props.onClick(); f.render(); choose(f, devices[0].id);
   f.calls.reads[0].resolve([{ id: devices[0].id, state: "available" }]); await flush(); f.render();
   next(f); next(f); await button(f, "settings.addFolder").props.onClick(); f.render();
-  back(f); back(f); assert.equal(selector(f, "-device").props.value, devices[0].id); assert.equal(diagram(f).mode, "direct");
+  back(f); back(f); assert.equal(selector(f, "-device").props.value, devices[0].id); assert.equal(mode(f, "direct").props["aria-pressed"], true);
   next(f); next(f); assert.ok(text(f.tree).includes("/fixture/local")); next(f);
   assert.ok(text(f.tree).includes("Fixture DAC 1")); assert.match(text(f.tree), /wizard.stepFinalTitle/);
   const dialog = find(f.tree, node => node.props.role === "dialog");
@@ -254,7 +319,7 @@ test("PIN cancel and unmount discard pending authentication/availability results
   await start; await flush(); f.render(); assert.equal(f.calls.browser.length, 0); assert.equal(f.timers.size, 0);
   const f2 = audioWizard({ checkPin: () => pin.promise }); enterPlex(f2);
   await button(f2, "settings.connectPlex").props.onClick(); f2.render(); assert.equal(f2.timers.size, 1); f2.dispose(); assert.equal(f2.timers.size, 0);
-  const f3 = audioWizard(); mode(f3, "alsa").props.onClick(); f3.render(); choose(f3, devices[0].id); choose(f3, devices[1].id);
+  const f3 = audioWizard(); mode(f3, "direct").props.onClick(); f3.render(); choose(f3, devices[0].id); choose(f3, devices[1].id);
   f3.dispose(); f3.calls.reads[0].resolve([{ id: devices[0].id, state: "busy" }]); await flush(); assert.equal(f3.calls.reads.length, 1);
 });
 
@@ -282,6 +347,79 @@ test("failed/busy/uncertain/accepted Save never finishes early or discards the r
   }
   const f = audioWizard({ save: async () => ({ status: "accepted", operation: { id: "op", phase: "preparing" } }) });
   selectSources(f, true, false); next(f); await button(f, "wizard.start").props.onClick(); f.render(); assert.equal(f.calls.finished.length, 0);
+});
+
+test("SQLite wizard registers the authorized folder, reports progress and finishes after catalog commit", async () => {
+  const f = audioWizard({ sqlite: true });
+  selectSources(f, true, false); await button(f, "settings.addFolder").props.onClick(); f.render(); next(f);
+  const completion = button(f, "wizard.start").props.onClick(); f.render();
+  assert.equal(f.calls.saves.length, 0);
+  assert.equal(f.calls.finished.length, 0);
+  await completion; f.render();
+  assert.equal(f.calls.saves.length, 1);
+  assert.deepEqual(f.calls.sqliteAdds.map(({ token }) => token), ["fixture-token-1"]);
+  assert.match(f.calls.sqliteAdds[0].operationId, /^wizard-[a-z0-9]+-1$/);
+  assert.equal(f.calls.finished.length, 1);
+  assert.match(text(f.tree), /sqliteLibrary.activity.phase.completed/);
+  assert.match(text(f.tree), /2 sqliteLibrary.activity.albumsShort/);
+  f.dispose();
+});
+
+test("SQLite wizard does not finish when indexing fails and hides backend details", async () => {
+  const f = audioWizard({ sqlite: true, sqliteAdd: async () => { throw "SQLITE_INTERNAL: /private/SECRET"; } });
+  selectSources(f, true, false); await button(f, "settings.addFolder").props.onClick(); f.render(); next(f);
+  await button(f, "wizard.start").props.onClick(); f.render();
+  assert.equal(f.calls.finished.length, 0);
+  assert.equal(f.calls.saves.length, 0);
+  assert.match(text(f.tree), /wizard.sqliteFolderSelectionRequired/);
+  assert.doesNotMatch(text(f.tree), /SECRET|private|SQLITE_INTERNAL/);
+  f.dispose();
+});
+
+test("SQLite catalog survives a later preference-save failure and retries the same folder by reusing its source", async () => {
+  let saves = 0;
+  const f = audioWizard({ sqlite: true, save: async () => {
+    if (++saves === 1) throw "synthetic preferences write failure";
+    return { status: "completed" };
+  } });
+  selectSources(f, true, false); await button(f, "settings.addFolder").props.onClick(); f.render(); next(f);
+  await button(f, "wizard.start").props.onClick(); f.render();
+  assert.equal(f.calls.sqliteAdds.length, 1);
+  assert.equal(f.calls.finished.length, 0);
+  assert.match(text(f.tree), /wizard.saveError/);
+
+  await button(f, "wizard.start").props.onClick(); f.render();
+  assert.equal(f.calls.sqliteAdds.length, 1);
+  assert.equal(f.calls.saves.length, 2);
+  assert.equal(f.calls.finished.length, 1);
+  f.dispose();
+});
+
+test("SQLite Wizard reselects and reindexes when a previously indexed source disappears", async () => {
+  let saves = 0;
+  const f = audioWizard({ sqlite: true, save: async () => {
+    if (++saves === 1) throw "SQLITE_WIZARD_SOURCE_NOT_INDEXED";
+    return { status: "completed" };
+  } });
+  selectSources(f, true, false); await button(f, "settings.addFolder").props.onClick(); f.render(); next(f);
+  await button(f, "wizard.start").props.onClick(); f.render();
+  assert.equal(f.calls.sqliteAdds.length, 1);
+  assert.equal(f.calls.finished.length, 0);
+  assert.match(text(f.tree), /wizard.sqliteFolderSelectionRequired/);
+  back(f); await button(f, "settings.addFolder").props.onClick(); f.render(); next(f);
+  await button(f, "wizard.start").props.onClick();
+  assert.equal(f.calls.sqliteAdds.length, 2);
+  assert.equal(f.calls.saves.length, 2);
+  assert.equal(f.calls.finished.length, 1);
+  f.dispose();
+});
+
+test("SQLite wizard revokes a selected folder token when canceled", async () => {
+  const f = audioWizard({ sqlite: true });
+  selectSources(f, true, false); await button(f, "settings.addFolder").props.onClick();
+  assert.equal(f.calls.sqliteChoices, 1);
+  f.dispose(); await flush();
+  assert.deepEqual(f.calls.sqliteCancels, ["fixture-token-1"]);
 });
 
 test("postcommit preparation failure preserves the draft and blocks another completion", async () => {
@@ -318,16 +456,19 @@ test("connection readiness and completion diagnostics are conservative, translat
   assert.equal(wizardSaveErrorKey(new Error("ALSA_PREFLIGHT_OUTPUT_BUSY")), "wizard.deviceBusy");
   assert.equal(wizardSaveErrorKey(new Error("CONFIG_PERSISTENCE_UNCERTAIN: SECRET")), "wizard.configPersistenceUncertain");
   assert.equal(wizardSaveErrorKey("FIRST_RUN_DATABASE_UNCONFIRMED. Estado anterior restaurado."), "wizard.libraryPreparationError");
+  assert.equal(wizardSaveErrorKey("SQLITE_WIZARD_FOLDER_SELECTION_REQUIRED"), "wizard.sqliteFolderSelectionRequired");
+  assert.equal(wizardSaveErrorKey("SQLITE_WIZARD_INDEX_FAILED"), "wizard.sqliteFolderSelectionRequired");
+  assert.equal(wizardSaveErrorKey("SQLITE_WIZARD_SOURCE_NOT_INDEXED"), "wizard.sqliteFolderSelectionRequired");
   assert.equal(wizardSaveErrorKey("FIRST_RUN_PREPARATION_INCOMPLETE: SECRET"), "wizard.preparationIncomplete");
   for (const language of ["en", "pt-BR"]) {
     const locale = JSON.parse(readFileSync(new URL(`../locales/${language}.json`, import.meta.url), "utf8"));
-    for (const key of ["libraryPreparationError", "preparationIncomplete", "deviceBusy", "deviceUnavailable", "folderError", "noPlexServers", "plexDiscoveryError", "plexNotReady", "unnamedServer"]) assert.ok(locale.wizard[key]);
+    for (const key of ["libraryPreparationError", "sqliteFolderSelectionRequired", "preparationIncomplete", "deviceBusy", "deviceUnavailable", "folderError", "noPlexServers", "plexDiscoveryError", "plexNotReady", "unnamedServer"]) assert.ok(locale.wizard[key]);
     assert.match(locale.wizard.step, /{{step}}.*{{total}}/);
   }
 });
 
 test("a stale busy observation cannot veto completion; only the Save backend accepts or refuses it", async () => {
-  const f = audioWizard(); mode(f, "alsa").props.onClick(); f.render(); choose(f, devices[0].id);
+  const f = audioWizard(); mode(f, "direct").props.onClick(); f.render(); choose(f, devices[0].id);
   f.calls.reads[0].resolve([{ id: devices[0].id, state: "busy" }]); await flush(); f.render();
   selectSources(f, true, false); next(f);
   assert.equal(button(f, "wizard.start").props.disabled, false);
@@ -422,7 +563,7 @@ test("Sources remains mandatory after the new opening page; Local/Plex combinati
 });
 
 test("returning to appearance preserves audio/folder drafts and active Plex PIN until ordinary cancel",async()=>{
- const f=wizard();next(f);mode(f,"alsa").props.onClick();f.render();choose(f,devices[0].id);f.calls.reads[0].resolve([{id:devices[0].id,state:"available"}]);await flush();f.render();
+ const f=wizard();next(f);mode(f,"direct").props.onClick();f.render();choose(f,devices[0].id);f.calls.reads[0].resolve([{id:devices[0].id,state:"available"}]);await flush();f.render();
  next(f);sourceButton(f,"plex").props.onClick();f.render();next(f);await button(f,"settings.addFolder").props.onClick();f.render();next(f);
  await button(f,"settings.connectPlex").props.onClick();f.render();assert.equal(f.timers.size,1);
  back(f);back(f);back(f);back(f);appearanceSelect(f).props.onChange({target:{value:"light"}});f.render();assert.equal(f.calls.pins,1);assert.equal(f.timers.size,1);

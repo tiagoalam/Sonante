@@ -60,7 +60,7 @@ const formatTime = (seconds: number) => {
 export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = props => {
   const { t } = useTranslation();
   const layout = nowPlayingLayout(props.layout);
-  const advanced = props.snapshot?.usageMode !== "simple";
+  const simpleMode = props.snapshot?.usageMode === "simple";
   const psychoPlacement = props.psychoPlacement === "background" ? "background" : "frame";
   const status = props.snapshot?.playback;
   const health = props.snapshot?.health;
@@ -73,6 +73,10 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
     ? null : playbackDiagnostic;
   const interactive = available && !props.controlsDisabled;
   const isRadio = status?.current_media?.kind === "radio";
+  const progressPosition = props.isSeeking ? props.seekValue : status?.elapsed ?? 0;
+  const progressDuration = status?.duration ?? 0;
+  const progressPercent = Number.isFinite(progressPosition) && Number.isFinite(progressDuration) && progressDuration > 0
+    ? Math.max(0, Math.min(100, progressPosition / progressDuration * 100)) : 0;
   const hasTrack = Boolean(status?.current_media && status.title);
   const deviceVolume = requiresDeviceVolumeControl(props.snapshot?.route, status);
   const volumeAvailable = Boolean(interactive && canToggleMute(status));
@@ -94,7 +98,8 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
   const immersive = props.fullscreen && !props.embedded && available && status?.state === "play"
     && !props.busy && !props.isSeeking && !props.hostingError && !props.controlFailed && !playbackNotice;
   return <NowPlayingImmersive enabled={Boolean(immersive)} className={`np-shell np-look-${layout} text-[color:var(--theme-fg-primary,#ffffff)]${props.embedded ? " np-embedded" : ""}`}
-    data-now-playing-layout={layout} data-psycho-placement={layout === "psycho" ? psychoPlacement : undefined} aria-busy={props.busy}>
+    data-now-playing-layout={layout} data-usage-mode={simpleMode ? "simple" : "full"}
+    data-psycho-placement={layout === "psycho" ? psychoPlacement : undefined} aria-busy={props.busy}>
     <div className="np-ambient" aria-hidden="true">{hasTrack && status && <TrackArtwork track={status} />}</div>
     <div className="np-layout">
       <header className="np-header">
@@ -112,9 +117,10 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
       <div className={`np-body${props.queueOpen ? " np-with-queue" : ""}`}>
         {props.queue}
         <section className="np-media" aria-label={t("nowPlaying.title")}>
-          {layout === "psycho" && <PsychoVisualizer levels={props.levels} active={Boolean((!advanced || props.analyzerAvailable) && available && status?.state === "play")}
-            inactiveLabel={!advanced && available && status?.state === "pause" ? t("nowPlaying.visualizer.paused") : visualizerMessage.label}
-            inactiveHelp={!advanced && available && status?.state === "pause" ? t("nowPlaying.visualizer.helpPaused") : visualizerMessage.help} />}
+          {layout === "psycho" && <PsychoVisualizer levels={props.levels} active={Boolean(props.analyzerAvailable && available && status?.state === "play")}
+            inactiveLabel={simpleMode && available && status?.state === "pause" ? t("nowPlaying.visualizer.paused") : visualizerMessage.label}
+            inactiveHelp={simpleMode && available && status?.state === "pause" ? t("nowPlaying.visualizer.helpPaused") : visualizerMessage.help}
+            compact={simpleMode} />}
           {layout === "sleeve" && <div className="np-sleeve-caption" aria-hidden="true"><span>{t("nowPlaying.layouts.sleeve")}</span><span>SONANTE</span></div>}
           {layout === "poster" && <div className="np-poster-caption" aria-hidden="true"><span>{t("nowPlaying.look.posterCaption")}</span><span>{hasTrack && status ? status.artist : "SONANTE"}</span></div>}
           <div className="np-cover" data-fullscreen-action={!props.busy && !props.controlsDisabled} data-fullscreen={props.fullscreen}
@@ -125,13 +131,15 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
           <div className="np-details">
             {props.hostingError && <p role="alert" className="np-error">{t("nowPlaying.transitionFailed")}</p>}
             {!status ? <p role="status">{t("nowPlaying.waitingForStatus")}</p> : <>
-              <div className="np-track-heading">
-                {layout !== "audiophile" && <div className="np-track-eyebrow">{t(`nowPlaying.look.${layout}Eyebrow`)}</div>}
-                <h2 className={layout === "poster" && (status.title?.length ?? 0) > 54 ? "np-title-long" : undefined} title={status.title}>{hasTrack ? status.title : t("player.noTrack")}</h2>
-                <p title={status.artist}>{props.onNavigate && hasTrack && status.current_media?.kind !== "upnp" && !isRadio ? <button type="button" onClick={() => props.onNavigate?.("artist")} disabled={props.busy}>{status.artist || "Sonante"}</button> : hasTrack ? status.artist || "Sonante" : "Sonante"}</p>
-                {hasTrack && status.album && <span title={status.album}>{props.onNavigate && status.current_media?.kind !== "upnp" && !isRadio ? <button type="button" onClick={() => props.onNavigate?.("album")} disabled={props.busy}>{status.album}</button> : status.album}</span>}
-              </div>
+              <div className={layout === "audiophile" ? "np-audiophile-meta" : undefined}>
+                <div className="np-track-heading">
+                  {layout !== "audiophile" && <div className="np-track-eyebrow">{t(`nowPlaying.look.${layout}Eyebrow`)}</div>}
+                  <h2 className={layout === "poster" && (status.title?.length ?? 0) > 54 ? "np-title-long" : undefined} title={status.title}>{hasTrack ? status.title : t("player.noTrack")}</h2>
+                  <p title={status.artist}>{props.onNavigate && hasTrack && status.current_media?.kind !== "upnp" && !isRadio ? <button type="button" onClick={() => props.onNavigate?.("artist")} disabled={props.busy}>{status.artist || "Sonante"}</button> : hasTrack ? status.artist || "Sonante" : "Sonante"}</p>
+                  {hasTrack && status.album && <span title={status.album}>{props.onNavigate && status.current_media?.kind !== "upnp" && !isRadio ? <button type="button" onClick={() => props.onNavigate?.("album")} disabled={props.busy}>{status.album}</button> : status.album}</span>}
+                </div>
                 {layout === "audiophile" && hasTrack && available && props.snapshot?.sourceInfo && currentMediaKey(props.snapshot.sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={props.snapshot.sourceInfo.info} />}
+              </div>
               {!available && <p role="status" className="np-notice">{t(health?.state === "unavailable" ? "player.engineUnavailable" : "player.engineTransitioning")}{hasTrack && ` · ${t("player.lastKnown")}`}</p>}
               {playbackNotice && <p role="alert" className="np-error">{t(status.current_media?.kind === "navidrome" && playbackNotice.code === "format_unsupported" ? "navidrome.streamError" : isRadio && playbackNotice.code === "format_unsupported" ? "radio.directError" : `player.playbackError.${playbackNotice.code}`)}</p>}
               {props.controlFailed && <p role="alert" className="np-error">{t("nowPlaying.controlFailed")}</p>}
@@ -144,15 +152,21 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
                   <div><dt>{t("nowPlaying.look.duration")}</dt><dd>{isRadio ? t("radio.live") : status.duration > 0 ? formatTime(status.duration) : "—"}</dd></div>
                 </dl>
               </div>}
-              {advanced && layout === "audiophile" && <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
-                inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} fullscreen={props.fullscreen} />}
+              {layout === "audiophile" && <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
+                inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} fullscreen={props.fullscreen} compact={simpleMode} />}
               <div className="np-progress">
-                <input type="range" aria-label={t("nowPlaying.seek")} min={0} max={available && status.duration > 0 ? status.duration : 100} step={0.5}
-                  value={available ? props.isSeeking ? props.seekValue : status.elapsed : 0} disabled={!interactive || isRadio || status.duration <= 0}
-                  onPointerDown={props.onSeekStart} onChange={event => { props.onSeekStart(); props.onSeekChange(Number(event.target.value)); }}
-                  onPointerUp={event => props.onSeekCommit(Number(event.currentTarget.value))}
-                  onKeyUp={event => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) props.onSeekCommit(Number(event.currentTarget.value)); }} />
-                <div><span>{isRadio ? t("radio.live") : available ? formatTime(props.isSeeking ? props.seekValue : status.elapsed) : "--:--"}</span><span>{isRadio ? "" : available ? formatTime(status.duration) : "--:--"}</span></div>
+                <div className="np-progress-control">
+                  <div className="np-progress-track" aria-hidden="true">
+                    <span className="np-progress-rail" />
+                    <span className="np-progress-fill" style={{ width: `${progressPercent}%` }} />
+                  </div>
+                  <input type="range" aria-label={t("nowPlaying.seek")} min={0} max={available && status.duration > 0 ? status.duration : 100} step={0.5}
+                    value={available ? props.isSeeking ? props.seekValue : status.elapsed : 0} disabled={!interactive || isRadio || status.duration <= 0}
+                    onPointerDown={props.onSeekStart} onChange={event => { props.onSeekStart(); props.onSeekChange(Number(event.target.value)); }}
+                    onPointerUp={event => props.onSeekCommit(Number(event.currentTarget.value))}
+                    onKeyUp={event => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) props.onSeekCommit(Number(event.currentTarget.value)); }} />
+                </div>
+                <div className="np-progress-times"><span>{isRadio ? t("radio.live") : available ? formatTime(props.isSeeking ? props.seekValue : status.elapsed) : "--:--"}</span><span>{isRadio ? "" : available ? formatTime(status.duration) : "--:--"}</span></div>
               </div>
               <div className="np-controls">
                 <button type="button" disabled={!interactive} onClick={props.onPrevious} aria-label={t("player.previous")} title={t("player.previous")}><SkipBack size={25} /></button>

@@ -61,7 +61,8 @@ test("three albums run in order with at most one active operation", async () => 
   gates[2].resolve(null);
   await until(() => queue.getSnapshot().processed === 3 && !queue.getSnapshot().active);
   assert.equal(maxActive, 1);
-  assert.deepEqual(queue.getSnapshot(), { active: false, total: 3, processed: 3, found: 0, onlineFound: 0, latestFoundTitle: undefined });
+  assert.deepEqual(queue.getSnapshot(), { active: false, outcome: "completed", total: 3, processed: 3,
+    found: 0, onlineFound: 0, failed: 0, latestFoundTitle: undefined });
 });
 
 test("known session cover is skipped; a newly found cover is published and counted once", async () => {
@@ -102,6 +103,8 @@ test("an item error is logged and the next album still runs", async () => {
   assert.deepEqual(calls, ["A", "B"]);
   assert.equal(errors.length, 1);
   assert.equal(queue.getSnapshot().processed, 2);
+  assert.equal(queue.getSnapshot().failed, 1);
+  assert.equal(queue.getSnapshot().outcome, "partial");
 });
 
 test("MPD update pauses before the next item and resumes only with a fresh catalog", async () => {
@@ -421,6 +424,49 @@ test("catalog reconciliation waits for browser yield and stale generation stays 
   paint.resolve();
   await until(() => queue.getSnapshot().processed === 1 && !queue.getSnapshot().active);
   assert.deepEqual(calls, ["new"]);
+  assert.equal(queue.getSnapshot().outcome, "completed");
+});
+
+test("progress stays running until its final persistence write completes", async () => {
+  const save = deferred();
+  let saveStarted = false;
+  const queue = new LocalArtworkEnrichment({ get: () => null, resolve: async () => null }, immediate, assert.fail, {
+    load: async () => ({}), save: async () => { saveStarted = true; return save.promise; },
+  });
+  queue.setOnlineEnabled(true);
+  queue.setCatalog([album("A")]);
+  await until(() => queue.getSnapshot().processed === 1 && queue.getSnapshot().active);
+  await until(() => saveStarted);
+  assert.equal(queue.getSnapshot().outcome, "running");
+  assert.equal(queue.getSnapshot().total, 1);
+  save.resolve();
+  await until(() => !queue.getSnapshot().active);
+  assert.equal(queue.getSnapshot().outcome, "completed");
+});
+
+test("an explicit cancellation remains visible after an in-flight cover request settles", async () => {
+  const gate = deferred();
+  const item = sqliteAlbum("sqlite:8:Y2FuY2Vs");
+  const job = new LocalArtworkEnrichment({
+    get: () => null,
+    resolve: async (_album, enabled, _updating, phase) => {
+      phase("online_request");
+      assert.equal(enabled(), true);
+      return gate.promise;
+    },
+  }, immediate, assert.fail, { load: async () => ({}), save: async () => {} });
+  job.setOnlineEnabled(true);
+  job.setUpdating(true);
+  assert.equal(job.searchMissing([item], () => true), true);
+  await until(() => job.getSnapshot().active);
+
+  job.setOnlineEnabled(false);
+  assert.equal(job.getSnapshot().outcome, "cancelled");
+  gate.resolve(null);
+  await until(() => !job.getSnapshot().active);
+
+  assert.equal(job.getSnapshot().outcome, "cancelled");
+  assert.equal(job.getSnapshot().processed, 0);
 });
 
 
@@ -466,4 +512,83 @@ test("the selected browser activity snapshot retains online search, success and 
   queue.setUpdating(true);
   unsubscribe();
   assert.deepEqual(notices, ["searching", null, "found", null]);
+});
+
+const sqliteAlbum = (id, artist = "Artist") => ({ id, title: "Same title", artist, year: "2000", folder_path: `sqlite-album://${id}`, track_count: 1, discs: [] });
+
+test("an explicit SQLite search uses canonical ids and never replaces an existing cover", async () => {
+  const albums = [sqliteAlbum("sqlite:1:YWxwaGE"), sqliteAlbum("sqlite:2:YWxwaGE", "Different Artist"), sqliteAlbum("sqlite-cue-album:3:Q3Vl")];
+  const calls = [], saved = [], covers = new Map([[albums[0].id, "local-cover"]]);
+  const resolver = {
+    get: id => covers.get(id) ?? null,
+    getSource: () => "local",
+    resolve: async (value, enabled, updating, phase) => {
+      assert.equal(enabled(), true);
+      assert.equal(updating(), false);
+      calls.push(value.id);
+      phase("online_request");
+      return value.id === albums[1].id ? "online-cover" : null;
+    },
+  };
+  const job = new LocalArtworkEnrichment(resolver, immediate, assert.fail, {
+    load: async () => ({}), save: async changes => saved.push(...changes),
+  });
+  job.setOnlineEnabled(true);
+  job.setUpdating(true); // SQLite keeps the ordinary background worker gated.
+  assert.equal(job.searchMissing(albums, () => true), true);
+  await until(() => job.getSnapshot().processed === 3 && !job.getSnapshot().active);
+  assert.deepEqual(calls, [albums[1].id, albums[2].id]);
+  assert.equal(job.getSnapshot().onlineFound, 1);
+  assert.ok(saved.some(change => change.album_id === albums[1].id && change.result === "online"));
+  assert.equal(covers.get(albums[0].id), "local-cover");
+  assert.ok(albums.every(value => value.id.startsWith("sqlite")));
+});
+
+test("manual search retries negative cache results but catalog loading alone stays gated", async () => {
+  let requests = 0;
+  const item = sqliteAlbum("sqlite:7:cmV0cnk");
+  const job = new LocalArtworkEnrichment({
+    get: () => null,
+    resolve: async (_album, _enabled, _updating, phase) => { requests++; phase("online_request"); return null; },
+  }, immediate, assert.fail, {
+    load: async () => ({ [item.id]: { result: "none", online_complete: true, checked_at: 1 } }), save: async () => {},
+  });
+  job.setOnlineEnabled(true);
+  job.setUpdating(true);
+  job.setCatalog([item]);
+  await immediate();
+  assert.equal(requests, 0);
+  assert.equal(job.searchMissing([item], () => true), true);
+  await until(() => job.getSnapshot().processed === 1 && !job.getSnapshot().active);
+  assert.equal(requests, 1);
+});
+
+test("manual SQLite search stops when its catalog guard becomes stale and stays off when disabled", async () => {
+  const albums = [sqliteAlbum("sqlite:3:YQ"), sqliteAlbum("sqlite:3:Yg")];
+  let allowed = true, requests = 0;
+  const job = new LocalArtworkEnrichment({
+    get: () => null,
+    resolve: async (_album, _enabled, _updating, phase) => { requests++; phase("online_request"); allowed = false; return null; },
+  }, immediate, assert.fail);
+  job.setUpdating(true);
+  assert.equal(job.searchMissing(albums, () => allowed), false);
+  job.setOnlineEnabled(true);
+  assert.equal(job.searchMissing(albums, () => allowed), true);
+  await until(() => requests > 0 && !job.getSnapshot().active);
+  assert.equal(requests, 1);
+  assert.equal(job.getSnapshot().processed, 0);
+  assert.equal(job.getSnapshot().outcome, "cancelled");
+});
+
+test("SQLite Sources exposes a manual artwork search and cards subscribe to resolved covers", () => {
+  const settings = readFileSync(new URL("../components/SqliteSourcesSettings.tsx", import.meta.url), "utf8");
+  const modal = readFileSync(new URL("../components/SettingsModal.tsx", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const browser = readFileSync(new URL("../components/LocalBrowserView.tsx", import.meta.url), "utf8");
+  assert.match(settings, /data-settings-section="sqlite-online-artwork"/);
+  assert.match(settings, /onSearchMissingArtwork/);
+  assert.match(settings, /artworkSearch\.processed[\s\S]*artworkSearch\.total/);
+  assert.match(modal, /onOnlineArtworkEnabledChange=\{enabled => setConfig\(\{ \.\.\.config, online_artwork_enabled: enabled \}\)\}/);
+  assert.match(app, /localArtworkEnrichment\.searchMissing\(localCatalog\.albums, \(\) =>/);
+  assert.match(browser, /localArtworkResolver\.subscribe\(album\.id, setCover\)/);
 });

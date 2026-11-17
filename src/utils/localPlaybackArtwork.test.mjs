@@ -29,7 +29,7 @@ const albums = [album("first", "Source/Album"), album("second", "Other/Album")];
 const raw = () => ({ current_media: { kind: "local", uri: "Source/Album/one.flac", queue_index: 0 }, title: "One", artist: "Fixture", album: "first", state: "pause", elapsed: 19.5, duration: 99, is_updating: false, thumb: null, plex_image: null });
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => {resolve=a;reject=b;}); return {promise,resolve,reject}; };
 const flush = async () => { for(let i=0;i<30;i++) await Promise.resolve(); };
-function mount({ cover = async () => "local-cover", cached = async () => null, inventory = albums, online = true, presentation, cardCover = () => null, thumbnail = new LocalPlaybackThumbnail(() => ({ getItem: () => null })) } = {}) {
+function mount({ cover = async () => "local-cover", cached = async () => null, inventory = albums, online = true, presentation, cardCover = () => null, thumbnail = new LocalPlaybackThumbnail(() => ({ getItem: () => null })), sqliteMode = false, albumForTrack = async () => null } = {}) {
   const calls = [], slots = [], effects = []; let cursor = 0, disposed = false, late = 0;
   const react = {
     useState(initial) { const i=cursor++; if(!(i in slots)) slots[i]=initial; return [slots[i], value=>{if(disposed)late++;slots[i]=value;}]; },
@@ -44,7 +44,7 @@ function mount({ cover = async () => "local-cover", cached = async () => null, i
       if(cmd==="get_local_covers")return Promise.all(args.paths.map(async path=>{try{return {Ok:await cover(path)}}catch(error){return {Err:String(error)}}}));
       if(cmd==="get_online_album_cover"){assert.equal(args.cacheOnly,true,"recovery must never permit HTTP lookup");return cached(args.request);}
       assert.fail(`Unexpected audio/playback command ${cmd}`);
-    } }, "../utils/frontendDiagnostics": { diagnosticInvoke: (invoke,cmd,args)=>invoke(cmd,args) },
+  } }, "../utils/frontendDiagnostics": { diagnosticInvoke: (invoke,cmd,args)=>invoke(cmd,args) }, "../utils/sqliteExperimentalMode": {isSqliteCatalogEnabled:()=>false},
   }).audioService;
   const resolver = new LocalArtworkResolver(audioService.getLocalCover, async()=>assert.fail("no online search"));
   const catalog = new LocalAlbumCatalog(audioService.getLocalAlbums,
@@ -52,21 +52,23 @@ function mount({ cover = async () => "local-cover", cached = async () => null, i
   if (presentation) catalog.setPresentationContext(["/music"]);
   const hook = compile("utils/useLocalPlaybackArtwork.ts", {
     react, "./localPlaybackThumbnail": { localPlaybackThumbnail: thumbnail }, "./playerNavigation": {currentMediaKey,localAlbumForMedia}, "./localArtwork": {artworkReadBlocked},
-    "./localArtworkSession": {localArtworkResolver:resolver,localAlbumThumbnails:{get:cardCover}}, "../services/audio": {audioService}, "./frontendDiagnostics": {logError},
+    "./localArtworkSession": {localArtworkResolver:resolver,localAlbumThumbnails:{get:cardCover}}, "../services/audio": {audioService},
+    "../services/sqliteLibrary": {sqliteLibrary:{albumForTrack:async locator=>{calls.push(["sqlite_library_album_for_track",{trackLocator:locator}]);return albumForTrack(locator);}}},
+    "./frontendDiagnostics": {logError},
   }).useLocalPlaybackArtwork;
   const ensure = ()=>catalog.ensureLoaded(false,true);
   const f = { status:raw(),available:true,showSettings:false,showAbout:false,online,catalog,calls,resolver,
     render() {
       cursor=0;const state=catalog.getSnapshot();resolver.setContext(artworkReadBlocked(f.status.is_updating,state),state.albums);
-      const vars={sourceEnabled,useLocalPlaybackArtwork:hook,playbackStatus:f.status,sourceArtworkPlayback:f.status,localCatalog:state,isPlaybackAvailable:f.available,
+      const vars={sourceEnabled,useLocalPlaybackArtwork:hook,playbackStatus:f.status,sourceArtworkPlayback:f.status,localCatalog:state,isPlaybackAvailable:f.available,sqliteMode:f.sqliteMode,
         config:{first_run:false,online_artwork_enabled:f.online},showSettings:f.showSettings,showAbout:f.showAbout,ensurePlaybackArtworkCatalog:ensure};
       f.display=new Function(...Object.keys(vars),`return (${projection});`)(...Object.values(vars));
       effects.splice(0).forEach(run=>run());return f.display;
     },
     dispose(){slots.forEach(s=>s?.cleanup?.());disposed=true;},late:()=>late,
-  }; return f;
+  }; f.sqliteMode=sqliteMode;f.albumForTrack=albumForTrack;return f;
 }
-async function ready(f){f.render();await flush();f.render();await flush();return f.render();}
+async function ready(f){if(f.sqliteMode&&!f.catalog.getSnapshot().loaded)f.catalog.ensureLoaded(false,true);f.render();await flush();f.render();await flush();return f.render();}
 
 test("actual App projection restores Local artwork before Play through focal IPC without changing cursor or polling data",async()=>{
   const f=mount();const original=structuredClone(f.status);const display=await ready(f);
@@ -167,6 +169,63 @@ test("startup queues the focal cover before the browser catalog, and malformed m
   for(const uri of ['../track.flac','Source/../track.flac','Source//track.flac','Source/Album/track.flac\n','https://fixture.invalid/music','/Source/Album/track.flac']){
     const g=mount();g.status.current_media.uri=uri;await ready(g);assert.equal(g.calls.length,0,uri);g.dispose();
   }
+});
+
+test("SQLite playback locator resolves the exact Local album and reuses its existing artwork cache",async()=>{
+ const albumId="sqlite:7:YWxidW0",folder="sqlite-album://sqlite:7:YWxidW0";
+ const sqliteAlbum={...album(albumId,folder),source_id:"sqlite-7"};
+ const locator="sqlite-track://7/QWxidW0vdHJhY2suZmxhYw";
+ const f=mount({sqliteMode:true,inventory:[sqliteAlbum],albumForTrack:async value=>value===locator?albumId:null,cover:async path=>`same-album:${path}`});
+ f.status={...f.status,current_media:{kind:"local",uri:locator,queue_index:0},title:"Track",album:"Album",thumb:null};
+ const displayed=await ready(f);
+ assert.equal(displayed.thumb,`same-album:${folder}`);
+ assert.deepEqual(f.calls.filter(call=>call[0]==="sqlite_library_album_for_track").map(call=>call[1].trackLocator),[locator]);
+ assert.deepEqual(coverPaths(f.calls),[folder],"the resolver requests the same virtual album cover used by the Local browser");
+ assert.equal(f.resolver.get(albumId),`same-album:${folder}`,"the existing album-scoped resolver cache owns the result");
+ f.dispose();
+});
+
+test("SQLite/CUE Now Playing upgrades its queued thumbnail to the original album artwork",async()=>{
+ const albumId="sqlite:7:YWxidW0",folder="sqlite-album://sqlite:7:YWxidW0";
+ const sqliteAlbum={...album(albumId,folder),source_id:"sqlite-7"};
+ const locator="sqlite-cue://7/QWxidW0vdHJhY2suY3Vl/1";
+ const f=mount({sqliteMode:true,inventory:[sqliteAlbum],albumForTrack:async value=>value===locator?albumId:null,cover:async path=>`full-art:${path}`});
+ f.status={...f.status,current_media:{kind:"local",uri:locator,queue_index:0},title:"CUE track",album:"Album",thumb:"queued-small-thumbnail"};
+ f.resolver.seedPersistedLocal(albumId,"saved-small-thumbnail");
+ const displayed=await ready(f);
+ assert.equal(displayed.thumb,`full-art:${folder}`);
+ assert.equal(f.status.thumb,"queued-small-thumbnail","raw queue metadata stays unchanged");
+ assert.deepEqual(coverPaths(f.calls),[folder]);
+ assert.equal(f.resolver.get(albumId),`full-art:${folder}`);
+ f.dispose();
+});
+
+test("SQLite Now Playing retains the queued thumbnail if original artwork is unavailable",async()=>{
+ const albumId="sqlite:7:YWxidW0",folder="sqlite-album://sqlite:7:YWxidW0";
+ const sqliteAlbum={...album(albumId,folder),source_id:"sqlite-7"};
+ const locator="sqlite-track://7/QWxidW0vdHJhY2suZmxhYw";
+ const f=mount({sqliteMode:true,inventory:[sqliteAlbum],albumForTrack:async()=>albumId,cover:async()=>null});
+ f.status={...f.status,current_media:{kind:"local",uri:locator,queue_index:0},thumb:"queued-small-thumbnail"};
+ const displayed=await ready(f);
+ assert.equal(displayed.thumb,"queued-small-thumbnail");
+ assert.deepEqual(coverPaths(f.calls),[folder]);
+ f.dispose();
+});
+
+test("late SQLite album mapping is discarded after playback moves to another opaque track",async()=>{
+ const albumId="sqlite:7:YWxidW0",folder="sqlite-album://sqlite:7:YWxidW0";
+ const sqliteAlbum={...album(albumId,folder),source_id:"sqlite-7"};
+ const oldLocator="sqlite-track://7/QWxidW0vb2xkLndhdg",nextLocator="sqlite-track://7/QWxidW0vbmV3Lndhdg";
+ const pending=deferred();
+ const f=mount({sqliteMode:true,inventory:[sqliteAlbum],albumForTrack:value=>value===oldLocator?pending.promise:Promise.resolve(null),cover:async path=>`cover:${path}`});
+ f.status={...f.status,current_media:{kind:"local",uri:oldLocator,queue_index:0},title:"Old",album:"Album",thumb:null};
+ await ready(f);
+ f.status={...f.status,current_media:{kind:"local",uri:nextLocator,queue_index:0},title:"New",album:"Album",thumb:null};
+ f.render();await flush();
+ pending.resolve(albumId);await flush();
+ assert.equal(f.render().thumb,null,"the old track's album result cannot become the new track's cover");
+ assert.deepEqual(coverPaths(f.calls),[]);
+ f.dispose();
 });
 
 

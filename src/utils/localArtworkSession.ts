@@ -4,9 +4,15 @@ import { LocalArtworkResolver } from "./localArtwork";
 import { LocalArtworkEnrichment } from "./localArtworkEnrichment";
 import { LocalAlbumThumbnails } from "./localAlbumThumbnails";
 import { logLocalThumbnailDiagnostic } from "./frontendDiagnostics";
+import { sqliteLibrary } from "../services/sqliteLibrary";
+import { isSqliteCatalogEnabled } from "./sqliteExperimentalMode";
+
+const getLocalCover = (path: string) => isSqliteCatalogEnabled() && path.startsWith("sqlite-album://")
+  ? sqliteLibrary.albumCover(path)
+  : audioService.getLocalCover(path);
 
 export const localArtworkResolver = new LocalArtworkResolver(
-  audioService.getLocalCover,
+  getLocalCover,
   audioService.getOnlineAlbumCover,
   150,
   audioService.getOnlineCoverCacheStatus,

@@ -460,9 +460,8 @@ mod tests {
 
     fn test_store(name: &str) -> (PathBuf, PlaylistStore) {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("playlist-tests")
+        let directory = std::env::temp_dir()
+            .join("sonante-playlist-tests")
             .join(format!("{}-{}-{}", std::process::id(), name, id));
         fs::create_dir_all(&directory).unwrap();
         let store = PlaylistStore::new(directory.join(PLAYLISTS_FILE_NAME));
@@ -652,6 +651,29 @@ mod tests {
         assert_ne!(with_plex.items[0].id, with_plex.items[1].id);
         assert!(matches!(with_plex.items[0].media_locator, MediaLocator::Local { .. }));
         assert!(matches!(with_plex.items[1].media_locator, MediaLocator::Plex { .. }));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sqlite_track_locator_is_persisted_opaquely_and_keeps_source_identity() {
+        let (directory, store) = test_store("sqlite-reference");
+        let playlist = store.create("SQLite").unwrap();
+        let locator = "sqlite-track://42/YQ";
+        let cue_locator = "sqlite-cue://42/YWxidW0uY3Vl/2";
+        let updated = store.add_items(&playlist.id, vec![
+            local_item(locator, "SQLite track"),
+            local_item(cue_locator, "CUE segment"),
+        ]).unwrap();
+        assert_eq!(updated.items.len(), 2);
+        assert!(matches!(&updated.items[0].media_locator, MediaLocator::Local { uri } if uri == locator));
+        assert!(matches!(&updated.items[1].media_locator, MediaLocator::Local { uri } if uri == cue_locator));
+        validate_media_locator(&updated.items[0].media_locator).unwrap();
+        validate_media_locator(&updated.items[1].media_locator).unwrap();
+
+        let reopened = PlaylistStore::new(store.path.clone());
+        let recovered = reopened.get(&playlist.id).unwrap();
+        assert!(matches!(&recovered.items[0].media_locator, MediaLocator::Local { uri } if uri == locator));
+        assert!(matches!(&recovered.items[1].media_locator, MediaLocator::Local { uri } if uri == cue_locator));
         fs::remove_dir_all(directory).unwrap();
     }
 

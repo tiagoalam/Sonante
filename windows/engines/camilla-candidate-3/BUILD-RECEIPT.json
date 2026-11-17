@@ -1,0 +1,17 @@
+{
+  "runtime": {
+    "file": "candidate3-final1.exe",
+    "bytes": 8692224,
+    "sha256": "3f6c997114204aba09368eb8b198f8c6ea6a8768d10ad463b560bfb54fbfac1d",
+    "fresh_complete_source_build": true,
+    "native_executed": false
+  },
+  "imports_identical_to_2": true,
+  "source_math_exact": true,
+  "complete_source_members": 22073,
+  "all_vendor_checksums_verified": true,
+  "patch_reapply_exact": true,
+  "portable_end_to_end_tests": 26,
+  "native_executed": false,
+  "engine_or_audio_executed": false
+}

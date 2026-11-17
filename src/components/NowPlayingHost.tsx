@@ -1,7 +1,7 @@
 import { canToggleMute, directMuteRequest, sharedMuteRequest } from "../utils/signalPath";
 import { PlaybackOptionsControls } from "./PlaybackOptionsControls";
 import { NowPlayingPresentation } from "./NowPlayingPresentation";
-import { NOW_PLAYING_LAYOUTS, NOW_PLAYING_LOOK_KEY, nowPlayingLayout, readNowPlayingLook, saveNowPlayingLook, parseNowPlayingLook, NOW_PLAYING_QUEUE_PANELS_KEY, readQueuePanels, saveQueuePanels, normalizeQueuePanels, parseQueuePanels, type NowPlayingLook } from "../utils/nowPlayingLayout";
+import { NOW_PLAYING_LAYOUTS, NOW_PLAYING_LOOK_KEY, nowPlayingLayout, nowPlayingVisualizersEnabled, readNowPlayingLook, saveNowPlayingLook, parseNowPlayingLook, NOW_PLAYING_QUEUE_PANELS_KEY, readQueuePanels, saveQueuePanels, normalizeQueuePanels, parseQueuePanels, type NowPlayingLook } from "../utils/nowPlayingLayout";
 import { NowPlayingFullscreen } from "../utils/nowPlayingFullscreen";
 import { NowPlayingQueue } from "./NowPlayingQueue";
 import { logError } from "../utils/frontendDiagnostics";
@@ -51,8 +51,8 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
   const [analyzerAvailable, setAnalyzerAvailable] = useState(false);
   const [analyzerReason, setAnalyzerReason] = useState<string | null>(null);
   const [look, setLook] = useState<NowPlayingLook>(readNowPlayingLook);
-  const advanced = snapshot != null && snapshot.usageMode !== "simple";
   const layout = nowPlayingLayout(look.layout);
+  const visualizersEnabled = snapshot !== null && nowPlayingVisualizersEnabled(layout);
   const queueOpen = normalizeQueuePanels(queuePanels)[layout];
   const changeQueuePanel = (open: boolean) => {
     const next = { ...normalizeQueuePanels(queuePanels), [layout]: open };
@@ -62,7 +62,7 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
   const levelTimeoutRef = useRef<number | undefined>(undefined);
   const showVisualsRef = useRef(true);
   const fullscreenController = useRef<NowPlayingFullscreen | null>(null);
-  showVisualsRef.current = ["audiophile", "psycho"].includes(nowPlayingLayout(look.layout));
+  showVisualsRef.current = nowPlayingVisualizersEnabled(layout);
 
   const status = snapshot?.playback;
   const health = snapshot?.health;
@@ -87,7 +87,7 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
     const cleanups: Array<() => void> = [];
     setLevels(zeroLevels()); setAnalyzerAvailable(false); setAnalyzerReason(null);
     if (!owner) return;
-    if (!advanced) { readyRef.current(owner); return; }
+    if (!visualizersEnabled) { readyRef.current(owner); return; }
     const leaseId = window.crypto.randomUUID();
     const captureOwner = { ...owner, leaseId };
     const register = async <T,>(name: string, callback: (data: T) => void) => {
@@ -125,7 +125,7 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
       cleanups.forEach(cleanup => cleanup());
       if (startRequested) void stopAudioAnalyzer(owner, leaseId).catch(err => logError("now-playing.analyzer-stop", err));
     };
-  }, [owner?.generation, owner?.sessionId, advanced]);
+  }, [owner?.generation, owner?.sessionId, visualizersEnabled]);
   useEffect(() => {
     const controller = new NowPlayingFullscreen({
       window: { isFullscreen: () => getCurrentWindow().isFullscreen(), setFullscreen: value => getCurrentWindow().setFullscreen(value) },

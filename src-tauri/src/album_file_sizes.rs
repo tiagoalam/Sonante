@@ -1,8 +1,8 @@
 //! Finite, read-only size observations of canonical album members. O_PATH and
 //! fstat only: never read tags, headers, artwork or audio payloads.
 use std::{collections::{BTreeMap, HashSet}, fs::{self, File, OpenOptions}, os::{fd::AsRawFd, unix::fs::{MetadataExt, OpenOptionsExt}}, path::{Component, Path, PathBuf}, time::{Duration, Instant}};
-const MAX_FILES: usize = 500;
-const MAX_SAFE_BYTES: u64 = 9_007_199_254_740_991;
+pub(crate) const MAX_FILES: usize = 500;
+pub(crate) const MAX_SAFE_BYTES: u64 = 9_007_199_254_740_991;
 #[derive(serde::Deserialize, serde::Serialize, Clone)]
 #[serde(tag="kind",rename_all="snake_case")]
 pub(crate) enum Request {

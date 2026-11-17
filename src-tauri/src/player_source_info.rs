@@ -56,11 +56,16 @@ fn snapshot(audio: &State<'_, AudioState>, media: &CurrentMedia) -> Option<Media
 }
 
 async fn acquire_player_source_info(media: CurrentMedia, audio_state: State<'_, AudioState>,
-    config_state: State<'_, ConfigState>, state: State<'_, PlexState>) -> Option<PlayerSourceInfo> {
+    config_state: State<'_, ConfigState>, state: State<'_, PlexState>,
+    sqlite_library: State<'_, crate::sqlite_library::SqliteLibraryState>) -> Option<PlayerSourceInfo> {
     let permit = SourcePermit::acquire()?;
     let locator = snapshot(&audio_state, &media)?;
     let info = match &locator {
         MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } | MediaLocator::Navidrome { .. } => return None,
+        MediaLocator::Local { uri } if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri) => {
+            let _permit = permit;
+            sqlite_library.player_source_facts(uri).ok()??
+        }
         MediaLocator::Local { uri } => {
             let file_permit = InspectionPermit::acquire().ok()?;
             let folders = config_state.0.lock().ok()?.local_folders.clone();
@@ -89,8 +94,9 @@ async fn acquire_player_source_info(media: CurrentMedia, audio_state: State<'_, 
 
 #[tauri::command]
 pub async fn get_player_source_info(media: CurrentMedia, audio_state: State<'_, AudioState>,
-    config_state: State<'_, ConfigState>, state: State<'_, PlexState>) -> Result<Option<PlayerSourceInfo>, ()> {
-    Ok(acquire_player_source_info(media, audio_state, config_state, state).await)
+    config_state: State<'_, ConfigState>, state: State<'_, PlexState>,
+    sqlite_library: State<'_, crate::sqlite_library::SqliteLibraryState>) -> Result<Option<PlayerSourceInfo>, ()> {
+    Ok(acquire_player_source_info(media, audio_state, config_state, state, sqlite_library).await)
 }
 
 #[derive(Clone, Deserialize)]

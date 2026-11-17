@@ -1,0 +1,20 @@
+{
+  "version": "0.24.18-sonante-windows-audio-candidate-5",
+  "sha256": "944c7e84023ba302a080cd5b6fd765a8a9f64847e6cb46ddfd6d35fb51d05911",
+  "sourceVersion": "0.24.18",
+  "candidate": true,
+  "nativeValidated": false,
+  "scope": "Inherits candidate 4 PCM Direct negotiation unchanged. In strict WASAPI Exclusive, DSD remains DSD and uses only exact-supported 24-valid-bit DoP at half the internal DSD rate with source channels preserved. Endpoint rejection is explicit; no DSD-to-PCM conversion, DoP resampling, alternate carrier, or Shared fallback.",
+  "sourceMaterialsSha256": "fb1dc17b07ca5e7b5edc92de3bf3dc61545d3bd8022edb0f3d9d284c4b0da6b0",
+  "sourceMaterialsFile": "audio-source-candidate-5.tar.xz",
+  "sourcePatchSha256": "b3801663d16d4a07e499732ba7f0070af8bfc52e2514879cd0e48c382a441491",
+  "sourceBaseMaterialsSha256": "9228fc75f83ca44d583e87783faa1b5c5cd9f92e47e8eb8b2dfde82a3c3b6837",
+  "previousCandidateSha256": "c9b0666bd07c5039fc89338bee5337b77dd9762b6c0cfe3127bde3ac0d40f46d",
+  "nativeValidation": {
+    "host_policy_and_actual_dop_encoder_fixture_passed": true,
+    "full_windows_x64_cross_build_passed": true,
+    "windows_executable_executed": false,
+    "native_windows_integration_passed": false,
+    "physical_audio_qualified": false
+  }
+}

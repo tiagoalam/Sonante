@@ -9,6 +9,7 @@ use crate::tags::{
     self, LocalAlbumTrackInspection, LocalAlbumTrackKind, LocalTrackTags, LocalTrackTagsError,
 };
 use serde::Serialize;
+use sonante_sqlite_catalog::{Album, AlbumTrack, MetadataStatus, SourceLibraryView};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -24,8 +25,16 @@ pub enum DoctorError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingCode {
+    TrackTitleAbsent,
+    TrackArtistAbsent,
+    AlbumAbsent,
+    AlbumEmpty,
     AlbumArtistAbsent,
     AlbumArtistEmpty,
+    AlbumDivergence,
+    AlbumArtistDivergence,
+    GenreDivergence,
+    PossibleFragmentedGrouping,
     DateUninterpretable,
     YearDivergence,
     NumberIndeterminate,
@@ -46,7 +55,12 @@ pub enum FindingLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Field {
+    TrackTitle,
+    TrackArtist,
+    Album,
     AlbumArtist,
+    Genre,
+    Grouping,
     Date,
     TrackNumber,
     TrackTotal,
@@ -103,11 +117,36 @@ pub struct Coverage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Report {
     pub album_id: String,
+    /// The legacy doctor reads the current MPD membership and opens every
+    /// physical file. SQLite diagnostics instead use current metadata already
+    /// committed in one source-generation snapshot.
+    pub inspection_source: InspectionSource,
+    /// Catalog grouping evidence is included for SQLite-backed reports only.
+    pub grouping_ambiguous: bool,
+    pub grouping_notes: Vec<String>,
+    /// Artwork reads are bounded and descriptor-anchored for SQLite reports.
+    pub artwork: Option<ArtworkStatus>,
     /// Includes all obtained values, even when they produce no finding.
     pub tracks: Vec<LocalAlbumTrackInspection>,
     pub coverage: Coverage,
     pub findings: Vec<Finding>,
     pub failures: Vec<ReadFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtworkStatus {
+    External,
+    Embedded,
+    Missing,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectionSource {
+    LiveFiles,
+    SqliteSnapshot,
 }
 
 pub(crate) fn inspect_album_at(
@@ -159,7 +198,174 @@ fn inspect_album_with(
     if tracks.is_empty() {
         return Err(DoctorError::AlbumNotFound);
     }
-    Ok(diagnose(album_id, tracks))
+    let mut report = diagnose(album_id, tracks);
+    report.inspection_source = InspectionSource::LiveFiles;
+    Ok(report)
+}
+
+/// Build a read-only Doctor report from the exact SQLite view that produced
+/// the displayed album. Stale/unsupported/failed metadata is represented as a
+/// read failure and never treated as evidence that tags are absent.
+pub(crate) fn inspect_sqlite_snapshot(
+    album_id: &str,
+    album: &Album,
+    view: &SourceLibraryView,
+    tracks: &[AlbumTrack],
+    artwork: ArtworkStatus,
+) -> Result<Report, DoctorError> {
+    if album.source_id != view.source_id() || album.id.source_id != view.source_id() {
+        return Err(DoctorError::AlbumNotFound);
+    }
+    let mut inspections = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let uri = track.track.relative_path.to_string_lossy().into_owned();
+        let (tags, issue) = match track.metadata.as_ref() {
+            Some(metadata)
+                if metadata.current_for_file
+                    && matches!(
+                        metadata.status,
+                        MetadataStatus::ParsedWithTags | MetadataStatus::ParsedWithoutTags
+                    ) =>
+            {
+                let values = metadata.last_success.clone().unwrap_or_default();
+                (
+                    Some(LocalTrackTags {
+                        title: values.title,
+                        artist: values.track_artists.first().cloned(),
+                        album: values.album,
+                        album_artist: values.album_artists.first().cloned(),
+                        genre: values.genre,
+                        date: values.date_text,
+                        track_number: values.track_number.and_then(|n| u32::try_from(n).ok()),
+                        // SQLite v4 does not persist totals; keep them unknown.
+                        track_total: None,
+                        disc_number: values.disc_number.and_then(|n| u32::try_from(n).ok()),
+                        disc_total: None,
+                        format: metadata.file_format.clone(),
+                        readable: true,
+                        // Editing requires a separate exact-source transactional writer.
+                        writable: false,
+                        editable: false,
+                        unsupported_reason: Some(
+                            "O diagnóstico SQLite usa um snapshot somente para leitura.".into(),
+                        ),
+                        revision: format!("sqlite-generation-{}", view.generation()),
+                    }),
+                    None,
+                )
+            }
+            Some(metadata) if metadata.status == MetadataStatus::Unsupported => (
+                None,
+                Some(LocalTrackTagsError::sqlite_doctor_issue(
+                    crate::tags::LocalTrackTagsErrorCode::UnsupportedFormat,
+                    "O formato ainda não tem metadados utilizáveis no catálogo.",
+                )),
+            ),
+            Some(_) => (
+                None,
+                Some(LocalTrackTagsError::sqlite_doctor_issue(
+                    crate::tags::LocalTrackTagsErrorCode::ReadFailed,
+                    "A última extração não corresponde aos atributos atuais do arquivo.",
+                )),
+            ),
+            None => (
+                None,
+                Some(LocalTrackTagsError::sqlite_doctor_issue(
+                    crate::tags::LocalTrackTagsErrorCode::ReadFailed,
+                    "O catálogo ainda não contém uma tentativa de extração para esta faixa.",
+                )),
+            ),
+        };
+        inspections.push(LocalAlbumTrackInspection {
+            uri,
+            kind: LocalAlbumTrackKind::Physical,
+            tags,
+            issue,
+        });
+    }
+    if inspections.is_empty() {
+        return Err(DoctorError::AlbumNotFound);
+    }
+    let mut report = diagnose(album_id, inspections);
+    report.inspection_source = InspectionSource::SqliteSnapshot;
+    report.grouping_ambiguous = album.ambiguous;
+    report.grouping_notes = album.grouping_notes.clone();
+    report.artwork = Some(artwork);
+    let normalized_title = normalize_grouping_value(&album.title);
+    let mut album_artist_key = album
+        .album_artists
+        .iter()
+        .map(|value| normalize_grouping_value(value))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    album_artist_key.sort();
+    album_artist_key.dedup();
+    if !normalized_title.is_empty() && !album_artist_key.is_empty() {
+        let related = view
+            .albums()
+            .iter()
+            .filter(|candidate| candidate.id != album.id)
+            .filter(|candidate| normalize_grouping_value(&candidate.title) == normalized_title)
+            .filter(|candidate| {
+                let mut key = candidate
+                    .album_artists
+                    .iter()
+                    .map(|value| normalize_grouping_value(value))
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>();
+                key.sort();
+                key.dedup();
+                key == album_artist_key
+            })
+            .collect::<Vec<_>>();
+        if !related.is_empty() {
+            let mut evidence = vec![Evidence {
+                uri: album.directory_hint.to_string_lossy().into_owned(),
+                field: Field::Grouping,
+                value: Some(album.title.clone()),
+            }];
+            evidence.extend(related.into_iter().map(|candidate| Evidence {
+                uri: candidate.directory_hint.to_string_lossy().into_owned(),
+                field: Field::Grouping,
+                value: Some(candidate.title.clone()),
+            }));
+            report.findings.push(Finding {
+                code: FindingCode::PossibleFragmentedGrouping,
+                level: FindingLevel::PossibleConflict,
+                evidence,
+            });
+        }
+    }
+    Ok(report)
+}
+
+/// CUE albums expose virtual segments rather than physical tag records. Keep
+/// Doctor available for them, but report the existing explicit CUE coverage
+/// limits instead of interpreting segment locators as filesystem paths.
+pub(crate) fn inspect_sqlite_cue_snapshot(
+    album_id: &str,
+    tracks: Vec<LocalAlbumTrackInspection>,
+    artwork: ArtworkStatus,
+) -> Result<Report, DoctorError> {
+    if tracks.is_empty()
+        || tracks
+            .iter()
+            .any(|track| track.kind != LocalAlbumTrackKind::CueVirtual)
+    {
+        return Err(DoctorError::AlbumNotFound);
+    }
+    let mut report = diagnose(album_id, tracks);
+    report.inspection_source = InspectionSource::SqliteSnapshot;
+    report.artwork = Some(artwork);
+    Ok(report)
+}
+
+fn normalize_grouping_value(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn evidence(uri: &str, field: Field, value: Option<String>) -> Evidence {
@@ -185,6 +391,9 @@ fn diagnose(album_id: &str, tracks: Vec<LocalAlbumTrackInspection>) -> Report {
     let mut cue_virtual_count = 0;
     let mut years = BTreeMap::<u32, Vec<Evidence>>::new();
     let mut numbers = BTreeMap::<(u32, u32), Vec<Evidence>>::new();
+    let mut albums = BTreeMap::<String, Vec<Evidence>>::new();
+    let mut album_artists = BTreeMap::<String, Vec<Evidence>>::new();
+    let mut genres = BTreeMap::<String, Vec<Evidence>>::new();
     for track in &tracks {
         let uri = &track.uri;
         if track.kind == LocalAlbumTrackKind::CueVirtual {
@@ -207,6 +416,66 @@ fn diagnose(album_id: &str, tracks: Vec<LocalAlbumTrackInspection>) -> Report {
             continue; // A failed read supplies no evidence of tag absence.
         };
         physical_tracks_read += 1;
+        if tags
+            .title
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            findings.push(finding(
+                FindingCode::TrackTitleAbsent,
+                FindingLevel::Advisory,
+                vec![evidence(uri, Field::TrackTitle, tags.title.clone())],
+            ));
+        }
+        if tags
+            .artist
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            findings.push(finding(
+                FindingCode::TrackArtistAbsent,
+                FindingLevel::Advisory,
+                vec![evidence(uri, Field::TrackArtist, tags.artist.clone())],
+            ));
+        }
+        match tags.album.as_deref() {
+            None => findings.push(finding(
+                FindingCode::AlbumAbsent,
+                FindingLevel::Advisory,
+                vec![evidence(uri, Field::Album, None)],
+            )),
+            Some(value) if value.trim().is_empty() => findings.push(finding(
+                FindingCode::AlbumEmpty,
+                FindingLevel::Advisory,
+                vec![evidence(uri, Field::Album, Some(value.to_owned()))],
+            )),
+            Some(value) => albums.entry(value.to_owned()).or_default().push(evidence(
+                uri,
+                Field::Album,
+                Some(value.to_owned()),
+            )),
+        }
+        if let Some(value) = tags
+            .genre
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            genres.entry(value.to_owned()).or_default().push(evidence(
+                uri,
+                Field::Genre,
+                Some(value.to_owned()),
+            ));
+        }
+        if let Some(value) = tags
+            .album_artist
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            album_artists
+                .entry(value.to_owned())
+                .or_default()
+                .push(evidence(uri, Field::AlbumArtist, Some(value.to_owned())));
+        }
         let artist_code = match tags.album_artist.as_deref() {
             None => Some(FindingCode::AlbumArtistAbsent),
             Some(value) if value.trim().is_empty() => Some(FindingCode::AlbumArtistEmpty),
@@ -288,6 +557,19 @@ fn diagnose(album_id: &str, tracks: Vec<LocalAlbumTrackInspection>) -> Report {
             years.into_values().flatten().collect(),
         ));
     }
+    for (code, values) in [
+        (FindingCode::AlbumDivergence, albums),
+        (FindingCode::AlbumArtistDivergence, album_artists),
+        (FindingCode::GenreDivergence, genres),
+    ] {
+        if values.len() > 1 {
+            findings.push(finding(
+                code,
+                FindingLevel::PossibleConflict,
+                values.into_values().flatten().collect(),
+            ));
+        }
+    }
     for evidence in numbers.into_values().filter(|values| values.len() > 2) {
         findings.push(finding(
             FindingCode::PossibleNumberConflict,
@@ -319,6 +601,10 @@ fn diagnose(album_id: &str, tracks: Vec<LocalAlbumTrackInspection>) -> Report {
     };
     Report {
         album_id: album_id.to_string(),
+        inspection_source: InspectionSource::LiveFiles,
+        grouping_ambiguous: false,
+        grouping_notes: Vec::new(),
+        artwork: None,
         tracks,
         coverage,
         findings,
@@ -371,9 +657,9 @@ mod tests {
 
     fn readable_tags() -> LocalTrackTags {
         LocalTrackTags {
-            title: None,
-            artist: None,
-            album: None,
+            title: Some("Title".into()),
+            artist: Some("Artist".into()),
+            album: Some("Album".into()),
             genre: None,
             album_artist: Some("Artist".into()),
             date: Some("2026".into()),

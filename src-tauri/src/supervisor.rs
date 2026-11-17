@@ -65,6 +65,62 @@ pub(crate) fn write_mpd_config_file(directory: &Path, content: &[u8]) -> Result<
     root.validate()
 }
 
+const EXPERIMENTAL_MPD_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+fn prepare_experimental_mpd_log(directory: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory_metadata = fs::symlink_metadata(directory)
+        .map_err(|_| "MPD_DIAGNOSTIC_DIRECTORY_UNAVAILABLE")?;
+    if !directory_metadata.is_dir()
+        || directory_metadata.file_type().is_symlink()
+        || directory_metadata.uid() != unsafe { libc::geteuid() }
+        || directory_metadata.mode() & 0o777 != 0o700
+    {
+        return Err("MPD_DIAGNOSTIC_DIRECTORY_UNSAFE".into());
+    }
+    let path = directory.join("mpd.log");
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    let file = options
+        .open(&path)
+        .map_err(|_| "MPD_DIAGNOSTIC_FILE_UNSAFE")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "MPD_DIAGNOSTIC_FILE_UNSAFE")?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+    {
+        return Err("MPD_DIAGNOSTIC_FILE_UNSAFE".into());
+    }
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|_| "MPD_DIAGNOSTIC_FILE_UNSAFE")?;
+    if metadata.len() > EXPERIMENTAL_MPD_LOG_MAX_BYTES {
+        file.set_len(0)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "MPD_DIAGNOSTIC_FILE_UNAVAILABLE")?;
+    }
+    let current = fs::symlink_metadata(&path)
+        .map_err(|_| "MPD_DIAGNOSTIC_FILE_UNSAFE")?;
+    let opened = file
+        .metadata()
+        .map_err(|_| "MPD_DIAGNOSTIC_FILE_UNSAFE")?;
+    if !current.is_file()
+        || current.file_type().is_symlink()
+        || (current.dev(), current.ino()) != (opened.dev(), opened.ino())
+        || opened.mode() & 0o777 != 0o600
+        || opened.nlink() != 1
+    {
+        return Err("MPD_DIAGNOSTIC_FILE_UNSAFE".into());
+    }
+    Ok(path)
+}
+
 pub struct MpdSupervisor {
     process: Option<Child>,
     socket_path: String,
@@ -84,6 +140,21 @@ pub struct MpdSupervisor {
     output_only_restart: bool,
     startup_early_exit: bool,
     startup_cleanup_confirmed: bool,
+    null_output_test_mode: bool,
+    // Read-only route projection state. It records successful supervisor
+    // admission and never participates in lifecycle decisions.
+    route_generation: u64,
+    route_operation: crate::audio_route::RouteOperationState,
+    applied_audio_route: Option<crate::audio_route::AudioRoute>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AudioRouteObservation {
+    pub generation: u64,
+    pub operation: crate::audio_route::RouteOperationState,
+    pub applied: Option<crate::audio_route::AudioRoute>,
+    pub null_output_test: bool,
+    pub eq_pipe_configured: bool,
 }
 
 pub struct LibrarySyncResult {
@@ -156,6 +227,10 @@ impl MpdSupervisor {
             output_only_restart: false,
             startup_early_exit: false,
             startup_cleanup_confirmed: false,
+            null_output_test_mode: crate::null_output_test_mode(),
+            route_generation: 0,
+            route_operation: crate::audio_route::RouteOperationState::Uncertain,
+            applied_audio_route: None,
         }
     }
 
@@ -180,6 +255,10 @@ impl MpdSupervisor {
             output_only_restart: false,
             startup_early_exit: false,
             startup_cleanup_confirmed: false,
+            null_output_test_mode: false,
+            route_generation: 0,
+            route_operation: crate::audio_route::RouteOperationState::Uncertain,
+            applied_audio_route: None,
         }
     }
 
@@ -213,6 +292,19 @@ impl MpdSupervisor {
     pub(crate) fn observed_process_pid(&self) -> Option<u32> {
         if self.health != MpdHealth::Available || !self.owns_runtime_files { return None; }
         self.process.as_ref().map(Child::id)
+    }
+
+    /// Current route evidence from the owned supervisor only. No status probe,
+    /// filesystem read or audio operation is performed here.
+    pub(crate) fn audio_route_observation(&self) -> AudioRouteObservation {
+        let owned_available = self.observed_process_pid().is_some();
+        AudioRouteObservation {
+            generation: self.route_generation,
+            operation: self.route_operation,
+            applied: owned_available.then(|| self.applied_audio_route.clone()).flatten(),
+            null_output_test: self.null_output_test_mode,
+            eq_pipe_configured: self.shared_eq_pipe.is_some(),
+        }
     }
 
     pub(crate) fn shared_mute_context(&self) -> Option<String> {
@@ -262,10 +354,28 @@ impl MpdSupervisor {
     }
 
     pub fn runtime_dir() -> PathBuf {
-        std::env::var_os("XDG_RUNTIME_DIR")
+        Self::runtime_dir_from(
+            std::env::var_os("SONANTE_064_RUNTIME_DIR").as_deref(),
+            std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+            &Self::sonante_config_dir(),
+        )
+    }
+
+    fn runtime_dir_from(
+        profile_runtime: Option<&std::ffi::OsStr>,
+        xdg_runtime: Option<&std::ffi::OsStr>,
+        config_dir: &Path,
+    ) -> PathBuf {
+        if let Some(path) = profile_runtime
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
-            .unwrap_or_else(|| Self::sonante_config_dir().join("runtime"))
+        {
+            return path;
+        }
+        xdg_runtime
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| config_dir.join("runtime"))
             .join("sonante")
     }
 
@@ -302,6 +412,9 @@ impl MpdSupervisor {
                 if let Some(gate)=&self.playback_gate {gate.clear();}
                 self.volume_backend = VolumeBackend::Unavailable;
                 self.health = MpdHealth::Unavailable(MpdUnavailableReason::ProcessExited);
+                self.route_generation = self.route_generation.saturating_add(1);
+                self.route_operation = crate::audio_route::RouteOperationState::Uncertain;
+                self.applied_audio_route = None;
                 if let Err(error) =
                     self.cleanup_owned_runtime_files(Some(child_pid), pid_was_confirmed)
                 {
@@ -524,7 +637,15 @@ impl MpdSupervisor {
     ) -> Result<(PathBuf, VolumeBackend, LibrarySyncResult), String> {
         let dir = crate::diagnostics::startup_stage("config.profile", crate::persistence::ensure_sonante_config_dir())?;
 
-        let library_sync = if let Some(admission)=existing {
+        if self.null_output_test_mode && self.shared_eq_pipe.is_some() {
+            return Err("NULL_OUTPUT_TEST_EQ_DISABLED".into());
+        }
+        let library_sync = if self.null_output_test_mode {
+            // Never mirror configured Local roots in the disposable test
+            // profile; the SQLite queue supplies absolute file URIs directly.
+            let library_dir = Self::prepare_null_test_music_directory(&dir)?;
+            LibrarySyncResult { library_dir, changed: false }
+        } else if let Some(admission)=existing {
             admission.validate(cfg)?;
             LibrarySyncResult { library_dir: Self::library_dir(), changed: false }
         } else if self.output_only_restart {
@@ -543,16 +664,20 @@ impl MpdSupervisor {
         let socket_path_value = Self::escape_config_value(&self.socket_path)?;
         let alsa_device_value = Self::escape_config_value(&cfg.alsa_device)?;
         let replay_gain_value = Self::escape_config_value(&cfg.replay_gain)?;
-        let analyzer_fifo_path = self.analyzer_fifo_path_for_instance();
-        if !analyzer_fifo_path.is_absolute() {
-            return Err(format!(
-                "O FIFO do analyzer precisa usar um caminho absoluto: {}",
-                analyzer_fifo_path.display()
-            ));
-        }
-        let analyzer_output_section = Self::analyzer_output_section(&analyzer_fifo_path)?;
+        let analyzer_output_section = if self.null_output_test_mode {
+            String::new()
+        } else {
+            let analyzer_fifo_path = self.analyzer_fifo_path_for_instance();
+            if !analyzer_fifo_path.is_absolute() {
+                return Err(format!(
+                    "O FIFO do analyzer precisa usar um caminho absoluto: {}",
+                    analyzer_fifo_path.display()
+                ));
+            }
+            Self::analyzer_output_section(&analyzer_fifo_path)?
+        };
 
-        let is_shared = cfg.audio_output_type == "pipewire"
+        let is_shared = self.null_output_test_mode || cfg.audio_output_type == "pipewire"
             || cfg.audio_output_type == "shared"
             || cfg.alsa_device == "default";
 
@@ -562,15 +687,38 @@ impl MpdSupervisor {
             is_shared,
             shared_volume_backend,
         );
-        let audio_output_section = if let Some(pipe) = &self.shared_eq_pipe {
-            Self::shared_eq_output_section(is_shared, pipe, shared_volume_backend)?
-        } else { Self::audio_output_section(
+        let audio_output_section = self.selected_audio_output_section(
             is_shared,
             &alsa_device_value,
             dop_flag,
             shared_volume_backend,
-        )? };
-        let audio_output_section = engine.configure_output(audio_output_section, is_shared)?;
+        )?;
+        let audio_output_section = if self.null_output_test_mode {
+            audio_output_section
+        } else {
+            engine.configure_output(audio_output_section, is_shared)?
+        };
+        let profile_root = if std::env::var("SONANTE_064_PROFILE").as_deref() == Ok("1") {
+            if let Some(root) = std::env::var_os("SONANTE_064_PROFILE_ROOT") {
+                let root = PathBuf::from(root);
+                if !root.is_absolute() {
+                    return Err("MPD_DIAGNOSTIC_PROFILE_UNAVAILABLE".into());
+                }
+                Some(root)
+            } else {
+                // Compatibility for older development launchers. New startup
+                // always supplies the profile root explicitly.
+                let config_home = std::env::var_os("XDG_CONFIG_HOME")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .ok_or("MPD_DIAGNOSTIC_PROFILE_UNAVAILABLE")?;
+                Some(config_home.parent().ok_or("MPD_DIAGNOSTIC_PROFILE_UNAVAILABLE")?.to_path_buf())
+            }
+        } else {
+            None
+        };
+        let (log_file, extra_options) =
+            Self::mpd_log_settings(self.null_output_test_mode, profile_root.as_deref(), &dir)?;
 
         // Sem state_file: o MPD inicia em modo neutro/stop sem tocar sozinho
         let audio_buffer_size = cfg.audio_buffer_size_kb.to_string();
@@ -584,6 +732,8 @@ impl MpdSupervisor {
             &replay_gain_value,
             &audio_output_section,
             &analyzer_output_section,
+            &log_file,
+            extra_options,
         );
 
         write_mpd_config_file(&dir, conf_content.as_bytes())?;
@@ -595,10 +745,29 @@ impl MpdSupervisor {
     pub(crate) fn clear_shared_eq_pipe(&mut self) { self.shared_eq_pipe = None; }
 
     pub(crate) fn start_shared_eq_output(&mut self, cfg: &AppConfig, pipe: Option<PathBuf>) -> Result<LibrarySyncResult, String> {
+        if self.null_output_test_mode { return Err("NULL_OUTPUT_TEST_EQ_DISABLED".into()); }
         if !crate::is_shared_output(cfg) { return Err("EQ_SHARED_ONLY".into()); }
         crate::managed_save_intent::check_startup(&Self::sonante_config_dir())?;
         crate::local_media::resolve_local_sources(&Self::library_dir(), &cfg.local_folders).map_err(|_| "EQ_LIBRARY_UNAVAILABLE")?;
-        if let Some(path) = &pipe { Self::validate_eq_pipe(path)?; }
+        if let Some(path) = &pipe {
+            match Self::validate_eq_pipe(path) {
+                Ok(()) => crate::shared_dsp::diagnostics::event(
+                    "fifo.mpd_validation",
+                    "ok",
+                    None,
+                    serde_json::json!({"fifo_type_verified": true, "permissions_verified": true}),
+                ),
+                Err(error) => {
+                    crate::shared_dsp::diagnostics::event(
+                        "fifo.mpd_validation",
+                        "error",
+                        None,
+                        serde_json::json!({"code": crate::shared_dsp::diagnostics::safe_error_code(&error)}),
+                    );
+                    return Err(error);
+                }
+            }
+        }
         self.shared_eq_pipe = pipe;
         self.output_only_restart = true;
         let result = self.start(cfg);
@@ -648,14 +817,17 @@ impl MpdSupervisor {
         replay_gain: &str,
         audio_output_section: &str,
         analyzer_output_section: &str,
+        log_file: &str,
+        extra_options: &str,
     ) -> String {
         format!(
             r#"music_directory "{}"
 playlist_directory "{}"
 {}
 pid_file "{}"
-log_file "/dev/null"
+log_file "{}"
 bind_to_address "{}"
+{}
 
 auto_update "no"
 follow_outside_symlinks "yes"
@@ -677,12 +849,71 @@ decoder {{
             playlist_dir,
             database_section,
             pid_path,
+            log_file,
             socket_path,
+            extra_options,
             audio_buffer_size,
             replay_gain,
             audio_output_section,
             analyzer_output_section
         )
+    }
+
+    fn prepare_null_test_music_directory(config_dir: &Path) -> Result<PathBuf, String> {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = config_dir.join("null-test-music");
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err("NULL_OUTPUT_TEST_MEDIA_DIRECTORY_UNSAFE".into()),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let mut builder = fs::DirBuilder::new();
+                builder.mode(0o700);
+                builder
+                    .create(&path)
+                    .map_err(|_| "NULL_OUTPUT_TEST_MEDIA_DIRECTORY_CREATE_FAILED")?;
+            }
+            Err(_) => return Err("NULL_OUTPUT_TEST_MEDIA_DIRECTORY_UNAVAILABLE".into()),
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| "NULL_OUTPUT_TEST_MEDIA_DIRECTORY_UNAVAILABLE")?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != 0o700
+        {
+            return Err("NULL_OUTPUT_TEST_MEDIA_DIRECTORY_UNSAFE".into());
+        }
+        let mut entries = fs::read_dir(&path)
+            .map_err(|_| "NULL_OUTPUT_TEST_MEDIA_DIRECTORY_UNAVAILABLE")?;
+        if entries
+            .next()
+            .transpose()
+            .map_err(|_| "NULL_OUTPUT_TEST_MEDIA_DIRECTORY_UNAVAILABLE")?
+            .is_some()
+        {
+            return Err("NULL_OUTPUT_TEST_MEDIA_DIRECTORY_NOT_EMPTY".into());
+        }
+        Ok(path)
+    }
+
+    fn null_test_output_section() -> String {
+        "audio_output {\n    type \"null\"\n    name \"Sonante Isolated Null Test\"\n}\n".into()
+    }
+
+    fn selected_audio_output_section(
+        &self,
+        is_shared: bool,
+        alsa_device_value: &str,
+        dop_flag: &str,
+        shared_volume_backend: Option<SharedVolumeBackend>,
+    ) -> Result<String, String> {
+        if self.null_output_test_mode {
+            return Ok(Self::null_test_output_section());
+        }
+        if let Some(pipe) = &self.shared_eq_pipe {
+            return Self::shared_eq_output_section(is_shared, pipe, shared_volume_backend);
+        }
+        Self::audio_output_section(is_shared, alsa_device_value, dop_flag, shared_volume_backend)
     }
 
     fn public_volume_backend(
@@ -709,6 +940,27 @@ decoder {{
 }}"#,
             database_path
         ))
+    }
+
+    fn mpd_log_settings(
+        null_output_test_mode: bool,
+        experimental_profile_root: Option<&Path>,
+        config_dir: &Path,
+    ) -> Result<(String, &'static str), String> {
+        let (path, options) = if null_output_test_mode {
+            (
+                config_dir.join("mpd-test.log"),
+                "zeroconf_enabled \"no\"\nlog_level \"warning\"\n",
+            )
+        } else if let Some(root) = experimental_profile_root {
+            (
+                prepare_experimental_mpd_log(&root.join("logs"))?,
+                "log_level \"warning\"\n",
+            )
+        } else {
+            return Ok(("/dev/null".to_owned(), ""));
+        };
+        Ok((Self::escape_config_value(&path.to_string_lossy())?, options))
     }
 
     fn audio_output_section(
@@ -757,6 +1009,10 @@ decoder {{
         ))
     }
 
+    fn analyzer_control_enabled(&self) -> bool {
+        !self.null_output_test_mode
+    }
+
     fn escape_config_value(value: &str) -> Result<String, String> {
         if value.contains(['\0', '\r', '\n']) {
             return Err(
@@ -771,18 +1027,32 @@ decoder {{
         self.start_admitted(cfg,None)
     }
     pub(crate) fn start_initial_existing(&mut self,cfg:&AppConfig,admission:&crate::InitialManagedGeneration<'_>)->Result<LibrarySyncResult,String> {
+        if self.null_output_test_mode {return Err("NULL_OUTPUT_TEST_INITIAL_ADMISSION_UNSUPPORTED".into());}
         if self.process.is_some() || self.output_only_restart {return Err("SOURCE_STARTUP_UNCONFIRMED".into());}
         self.start_admitted(cfg,Some(admission))
     }
     fn start_admitted(&mut self,cfg:&AppConfig,existing:Option<&crate::InitialManagedGeneration<'_>>)->Result<LibrarySyncResult,String> {
+        self.route_generation = self.route_generation.saturating_add(1);
+        self.route_operation = crate::audio_route::RouteOperationState::Transitioning;
         let result = self.start_inner(cfg,existing);
         match result {
             Ok(library_sync) => {
                 self.health = MpdHealth::Available;
+                self.applied_audio_route = if self.null_output_test_mode {
+                    None
+                } else {
+                    let interpreted = crate::audio_route::interpret_legacy_route(
+                        &cfg.audio_output_type,
+                        &cfg.alsa_device,
+                    );
+                    interpreted.route.validate().ok().map(|_| interpreted.route)
+                };
+                self.route_operation = crate::audio_route::RouteOperationState::Stable;
                 Ok(library_sync)
             }
             Err(error) => {
                 self.health = MpdHealth::Unavailable(MpdUnavailableReason::StartupFailed);
+                self.route_operation = crate::audio_route::RouteOperationState::Failed;
                 Err(error)
             }
         }
@@ -790,17 +1060,31 @@ decoder {{
 
     fn start_inner(&mut self, cfg: &AppConfig, existing:Option<&crate::InitialManagedGeneration<'_>>) -> Result<LibrarySyncResult, String> {
         if let Some(admission)=existing {admission.validate(cfg)?;}
+        if self.null_output_test_mode && self.shared_eq_pipe.is_some() {
+            return Err("NULL_OUTPUT_TEST_EQ_DISABLED".into());
+        }
         // Resolve/validate an explicit development engine before stopping
         // the current owned MPD. No override keeps the established path.
-        let engine = crate::diagnostics::startup_stage("engine.resolve", crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineResolve, || if self.shared_eq_pipe.is_some() { crate::mpd_engine::MpdEngine::resolve_eq() } else { crate::mpd_engine::MpdEngine::resolve() }))?;
+        let eq_output = self.shared_eq_pipe.is_some();
+        let resolve_started = Instant::now();
+        let engine_result = crate::diagnostics::startup_stage("engine.resolve", crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineResolve, || if eq_output { crate::mpd_engine::MpdEngine::resolve_eq() } else { crate::mpd_engine::MpdEngine::resolve() }));
+        if eq_output {
+            crate::shared_dsp::diagnostics::event(
+                "mpd.eq_runtime_validation",
+                if engine_result.is_ok() { "ok" } else { "error" },
+                Some(resolve_started.elapsed().as_millis()),
+                serde_json::json!({"private_engine_selected": engine_result.is_ok(), "integrity_verified": engine_result.is_ok(), "code": engine_result.as_ref().err().map(|error| crate::shared_dsp::diagnostics::safe_error_code(error))}),
+            );
+        }
+        let engine = engine_result?;
         if self.shared_eq_pipe.is_some() && !crate::is_shared_output(cfg) { return Err("EQ_SHARED_ONLY".into()); }
 
-        let is_shared = cfg.audio_output_type == "pipewire"
+        let is_shared = self.null_output_test_mode || cfg.audio_output_type == "pipewire"
             || cfg.audio_output_type == "shared"
             || cfg.alsa_device == "default";
-        let configured_as_pipewire =
-            cfg.audio_output_type == "pipewire" || cfg.audio_output_type == "shared";
-        let shared_volume_backend = is_shared.then(|| {
+        let configured_as_pipewire = !self.null_output_test_mode
+            && (cfg.audio_output_type == "pipewire" || cfg.audio_output_type == "shared");
+        let shared_volume_backend = (!self.null_output_test_mode && is_shared).then(|| {
             SharedVolumeBackend::detect(is_shared, configured_as_pipewire)
         });
 
@@ -834,6 +1118,14 @@ decoder {{
 
         let (conf_path, volume_backend, library_sync) =
             crate::diagnostics::startup_stage("config.ensure", crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineConfig, || self.ensure_config_file(cfg, shared_volume_backend, &engine, existing)))?;
+        if eq_output {
+            crate::shared_dsp::diagnostics::event(
+                "mpd.eq_config_generated",
+                "ok",
+                None,
+                serde_json::json!({"private_fifo_output": self.shared_eq_pipe.is_some(), "shared_route": crate::is_shared_output(cfg), "analyzer_control_enabled": self.analyzer_control_enabled()}),
+            );
+        }
         crate::diagnostics::startup_stage("runtime.prepare", crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineRuntime, || self.prepare_runtime_files()))?;
 
         if let Some(admission)=existing {
@@ -850,16 +1142,30 @@ decoder {{
             cfg.audio_buffer_size_kb
         );
 
-        self.start_owned_engine(&engine, &conf_path, cfg, existing)?;
-        if let Err(error) = crate::analyzer::set_output_enabled(
-            &self.socket_path,
-            Self::ANALYZER_OUTPUT_NAME,
-            false,
-        ) {
-            eprintln!(
-                "[Analyzer] Failed to confirm disabled output after MPD startup: {}",
-                crate::diagnostics::error_summary(&error)
+        let mpd_start = Instant::now();
+        let mpd_result = self.start_owned_engine(&engine, &conf_path, cfg, existing);
+        if eq_output {
+            crate::shared_dsp::diagnostics::event(
+                "mpd.eq_process_start",
+                if mpd_result.is_ok() { "ok" } else { "error" },
+                Some(mpd_start.elapsed().as_millis()),
+                serde_json::json!({"owned_process_confirmed": mpd_result.is_ok(), "code": mpd_result.as_ref().err().map(|error| crate::shared_dsp::diagnostics::safe_error_code(error))}),
             );
+        }
+        mpd_result?;
+        // The isolated null profile deliberately defines no analyzer output.
+        // Do not query a nonexistent physical/FIFO output or suggest fallback.
+        if self.analyzer_control_enabled() {
+            if let Err(error) = crate::analyzer::set_output_enabled(
+                &self.socket_path,
+                Self::ANALYZER_OUTPUT_NAME,
+                false,
+            ) {
+                eprintln!(
+                    "[Analyzer] Failed to confirm disabled output after MPD startup: {}",
+                    crate::diagnostics::error_summary(&error)
+                );
+            }
         }
         let pid = self.process.as_ref().ok_or(crate::direct_volume::STALE)?.id();
         if volume_backend == VolumeBackend::DirectEquipment {
@@ -891,7 +1197,13 @@ decoder {{
         if let Some(admission)=existing {
             if let Err(error)=admission.validate(cfg){return Err(self.cleanup_after_start_failure(error));}
         }
-        if let Some(gate)=&self.playback_gate {gate.bind(cfg,pid,self.direct_volume.clone());}
+        if let Some(gate)=&self.playback_gate {
+            if self.null_output_test_mode {
+                gate.bind_null_output_test();
+            } else {
+                gate.bind(cfg,pid,self.direct_volume.clone());
+            }
+        }
         Ok(library_sync)
     }
 
@@ -899,6 +1211,7 @@ decoder {{
     // failed, reaped startup can enter the read-only diagnostic probe below.
     fn start_owned_engine(&mut self, engine: &crate::mpd_engine::MpdEngine, conf_path: &Path,
         cfg: &AppConfig, existing: Option<&crate::InitialManagedGeneration<'_>>) -> Result<(), String> {
+        self.log_experimental_shared_runtime(cfg);
         let mut compatibility = false;
         loop {
             self.startup_early_exit = false;
@@ -962,6 +1275,41 @@ decoder {{
                 }
             }
         }
+    }
+
+    fn log_experimental_shared_runtime(&self, cfg: &AppConfig) {
+        if std::env::var("SONANTE_064_PROFILE").as_deref() != Ok("1")
+            || self.null_output_test_mode
+            || !(cfg.audio_output_type == "shared"
+                || cfg.audio_output_type == "pipewire"
+                || cfg.alsa_device == "default")
+        {
+            return;
+        }
+        let runtime = std::env::var_os("PIPEWIRE_RUNTIME_DIR")
+            .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+            .map(PathBuf::from);
+        let runtime_valid = runtime.as_ref().is_some_and(|path| {
+            path.is_absolute()
+                && fs::symlink_metadata(path).is_ok_and(|metadata| {
+                    metadata.is_dir()
+                        && !metadata.file_type().is_symlink()
+                        && metadata.uid() == unsafe { libc::geteuid() }
+                })
+        });
+        let socket_present = runtime.as_ref().is_some_and(|path| {
+            fs::symlink_metadata(path.join("pipewire-0")).is_ok_and(|metadata| {
+                metadata.file_type().is_socket()
+                    && metadata.uid() == unsafe { libc::geteuid() }
+            })
+        });
+        eprintln!(
+            "[Supervisor] Experimental Shared session: runtime_valid={}, pipewire_socket_present={}, runtime_override_present={}, remote_override_present={}",
+            runtime_valid,
+            socket_present,
+            std::env::var_os("PIPEWIRE_RUNTIME_DIR").is_some(),
+            std::env::var_os("PIPEWIRE_REMOTE").is_some(),
+        );
     }
 
     // Upstream --version exits before loading configuration or initializing
@@ -1489,9 +1837,8 @@ mod tests {
 
     fn test_runtime_paths(test_name: &str) -> (PathBuf, PathBuf, PathBuf) {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("supervisor-tests")
+        let dir = std::env::temp_dir()
+            .join("sonante-supervisor-tests")
             .join(format!("{}-{}-{}", std::process::id(), test_name, id));
         fs::create_dir_all(&dir).expect("deve criar diretório temporário do teste");
         // Fixture identity must survive a symlinked Cargo target/cache directory.
@@ -1499,6 +1846,30 @@ mod tests {
         let socket_path = dir.join("mpd.socket");
         let pid_path = dir.join("mpd.pid");
         (dir, socket_path, pid_path)
+    }
+
+    #[test]
+    fn private_mpd_spawn_preserves_explicit_session_runtime_environment() {
+        let (root, _, _) = test_runtime_paths("mpd-session-runtime-env");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let session_runtime = root.join("session-runtime");
+        fs::create_dir(&session_runtime).unwrap();
+        fs::set_permissions(&session_runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let observed = root.join("child-runtime.txt");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf '%s' \"$XDG_RUNTIME_DIR\" > \"$1\"")
+            .arg("sh")
+            .arg(&observed)
+            .env("XDG_RUNTIME_DIR", &session_runtime);
+        let status = spawn_private_mpd(&mut command).unwrap().wait().unwrap();
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(&observed).unwrap(),
+            session_runtime.to_string_lossy()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn library_test_paths(test_name: &str) -> (PathBuf, PathBuf) {
@@ -1525,6 +1896,93 @@ mod tests {
         assert_eq!(after.mode() & 0o7777, 0o600);
         assert_eq!(profile.read("mpd.conf", 4096, &||false).unwrap().unwrap(), content);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn experimental_mpd_log_is_private_and_capped_before_start() {
+        let (root, _, _) = test_runtime_paths("experimental-mpd-log");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let logs = root.join("logs");
+        fs::create_dir(&logs).unwrap();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
+        let log = logs.join("mpd.log");
+        fs::write(&log, vec![b'x'; EXPERIMENTAL_MPD_LOG_MAX_BYTES as usize + 1]).unwrap();
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o664)).unwrap();
+
+        assert_eq!(prepare_experimental_mpd_log(&logs).unwrap(), log);
+        let metadata = fs::metadata(&log).unwrap();
+        assert_eq!(metadata.len(), 0);
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn experimental_mpd_log_rejects_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+        let (root, _, _) = test_runtime_paths("experimental-mpd-log-symlink");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let logs = root.join("logs");
+        fs::create_dir(&logs).unwrap();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = root.join("target");
+        fs::write(&target, b"preserve").unwrap();
+        symlink(&target, logs.join("mpd.log")).unwrap();
+        assert_eq!(
+            prepare_experimental_mpd_log(&logs).unwrap_err(),
+            "MPD_DIAGNOSTIC_FILE_UNSAFE"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"preserve");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn experimental_profile_log_config_is_limited_and_other_modes_are_preserved() {
+        let (root, socket, pid) = test_runtime_paths("experimental-mpd-log-config");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let logs = root.join("logs");
+        fs::create_dir(&logs).unwrap();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
+        let (log_file, options) = MpdSupervisor::mpd_log_settings(false, Some(&root), &root).unwrap();
+        assert_eq!(log_file, logs.join("mpd.log").to_string_lossy());
+        assert_eq!(options, "log_level \"warning\"\n");
+        let output = MpdSupervisor::audio_output_section(true, "default", "no", None).unwrap();
+        let config = MpdSupervisor::render_config(
+            root.to_str().unwrap(), root.to_str().unwrap(),
+            &MpdSupervisor::database_section(&root.join("db")).unwrap(),
+            pid.to_str().unwrap(), socket.to_str().unwrap(), "4096", "off", &output,
+            "", &log_file, options,
+        );
+        assert!(config.contains(&format!("log_file \"{}\"", logs.join("mpd.log").display())));
+        assert!(config.contains("log_level \"warning\""));
+        assert!(config.contains("device \"default\""));
+        assert!(config.contains("mixer_type \"software\""));
+        assert!(!config.contains("port "));
+
+        let (null_log, null_options) = MpdSupervisor::mpd_log_settings(true, None, &root).unwrap();
+        assert_eq!(null_log, root.join("mpd-test.log").to_string_lossy());
+        assert!(null_options.contains("zeroconf_enabled \"no\""));
+        assert!(null_options.contains("log_level \"warning\""));
+        assert_eq!(MpdSupervisor::mpd_log_settings(false, None, &root).unwrap(), ("/dev/null".into(), ""));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_runtime_override_is_separate_and_legacy_runtime_behavior_is_preserved() {
+        let xdg = std::ffi::OsStr::new("/run/user/1000");
+        let app = std::ffi::OsStr::new("/run/user/1000/sonante-0.6.4-sqlite");
+        assert_eq!(
+            MpdSupervisor::runtime_dir_from(Some(app), Some(xdg), Path::new("/profile/config")),
+            PathBuf::from(app),
+        );
+        assert_eq!(
+            MpdSupervisor::runtime_dir_from(None, Some(xdg), Path::new("/profile/config")),
+            PathBuf::from("/run/user/1000/sonante"),
+        );
+        assert_eq!(
+            MpdSupervisor::runtime_dir_from(None, None, Path::new("/profile/config")),
+            PathBuf::from("/profile/config/runtime/sonante"),
+        );
     }
     #[test]
     fn mpd_config_private_writer_creates_private_file_without_a_global_umask_change() {
@@ -2416,6 +2874,8 @@ mod tests {
             "off",
             "audio_output {}",
             "audio_output {}",
+            "/dev/null",
+            "",
         );
         assert!(config.contains(&section));
         assert!(!config.contains("db_file"));
@@ -2423,7 +2883,85 @@ mod tests {
     }
 
     #[test]
+    fn null_output_test_config_is_private_socket_only_and_has_no_hardware_fallback() {
+        let (root, socket, pid) = test_runtime_paths("null-output-test");
+        let media = MpdSupervisor::prepare_null_test_music_directory(&root).unwrap();
+        assert_eq!(media, root.join("null-test-music"));
+        let mut cfg = AppConfig::default();
+        cfg.audio_output_type = "alsa".into();
+        cfg.alsa_device = "hw:CARD=MustNeverOpen,DEV=0".into();
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket, &pid);
+        supervisor.null_output_test_mode = true;
+        assert!(!supervisor.analyzer_control_enabled());
+        let section = supervisor
+            .selected_audio_output_section(false, &cfg.alsa_device, "yes", None)
+            .unwrap();
+        assert!(section.contains("type \"null\""));
+        assert!(!section.contains("MustNeverOpen"));
+        let config = MpdSupervisor::render_config(
+            media.to_str().unwrap(),
+            root.to_str().unwrap(),
+            &MpdSupervisor::database_section(&root.join("mpd-v2.db")).unwrap(),
+            pid.to_str().unwrap(),
+            socket.to_str().unwrap(),
+            "4096",
+            "off",
+            &section,
+            "",
+            root.join("mpd-test.log").to_str().unwrap(),
+            "zeroconf_enabled \"no\"\n",
+        );
+        assert!(config.contains(&format!("bind_to_address \"{}\"", socket.display())));
+        assert!(config.contains(&format!("log_file \"{}\"", root.join("mpd-test.log").display())));
+        assert!(config.contains("type \"null\""));
+        assert!(config.contains("zeroconf_enabled \"no\""));
+        assert!(!config.contains("type \"alsa\""));
+        assert!(!config.contains("type \"fifo\""));
+        assert!(!config.contains("port "));
+        assert!(!config.contains("state_file"));
+        assert!(!config.contains("/dev/null"));
+        assert_eq!(config.matches("audio_output {").count(), 1);
+
+        let unexpected = media.join("should-not-be-reused.wav");
+        fs::write(&unexpected, b"synthetic placeholder").unwrap();
+        assert_eq!(
+            MpdSupervisor::prepare_null_test_music_directory(&root).unwrap_err(),
+            "NULL_OUTPUT_TEST_MEDIA_DIRECTORY_NOT_EMPTY"
+        );
+        fs::remove_file(unexpected).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn null_test_supervisor_refuses_shared_eq_instead_of_falling_back() {
+        let (_root, socket, pid) = test_runtime_paths("null-output-eq");
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket, &pid);
+        supervisor.null_output_test_mode = true;
+        supervisor.shared_eq_pipe = Some(PathBuf::from("/tmp/unused-shared-eq/pcm.s32le"));
+        let cfg = AppConfig::default();
+        let result = supervisor.start_inner(&cfg, None);
+        assert!(matches!(result, Err(error) if error == "NULL_OUTPUT_TEST_EQ_DISABLED"));
+    }
+
+    #[test]
+    fn null_test_output_cannot_be_replaced_by_a_saved_direct_device() {
+        let (_root, socket, pid) = test_runtime_paths("null-output-forced-direct-config");
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket, &pid);
+        supervisor.null_output_test_mode = true;
+        let section = supervisor
+            .selected_audio_output_section(false, "hw:CARD=Fixture,DEV=0", "yes", None)
+            .unwrap();
+        assert!(section.contains("type \"null\""));
+        assert!(!section.contains("type \"alsa\""));
+        assert!(!section.contains("hw:CARD=Fixture"));
+        assert!(!section.contains("dop \"yes\""));
+    }
+
+    #[test]
     fn analyzer_output_is_separate_disabled_and_fixed_to_pcm() {
+        let (_root, socket, pid) = test_runtime_paths("analyzer-control-normal");
+        let supervisor = MpdSupervisor::new_with_runtime_paths(&socket, &pid);
+        assert!(supervisor.analyzer_control_enabled());
         let section = MpdSupervisor::analyzer_output_section(Path::new(
             "/run/user/1000/sonante/analyzer.pcm",
         ))

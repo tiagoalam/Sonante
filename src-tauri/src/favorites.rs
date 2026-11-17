@@ -83,6 +83,21 @@ fn check_local_path_exists_in(
     result
 }
 
+fn is_sqlite_local_favorite(album: &FavoriteAlbum) -> bool {
+    album.source == "local" && album.path_or_key.starts_with("sqlite-album://")
+}
+
+fn local_favorite_exists(album: &FavoriteAlbum, config: &AppConfig) -> Result<bool, String> {
+    if is_sqlite_local_favorite(album) {
+        // SQLite favorite paths are opaque catalog references, not filesystem
+        // paths in the MPD mirror. Their exact identity is checked by the
+        // SQLite-aware consumer when it resolves the favorite's tracks.
+        Ok(true)
+    } else {
+        check_local_path_exists(&album.path_or_key, config)
+    }
+}
+
 impl FavoriteAlbum {
     fn favorites_file_path() -> PathBuf {
         crate::persistence::sonante_config_dir().join("favorites.json")
@@ -132,10 +147,17 @@ impl FavoriteAlbum {
             return Err("favorites.json contém favoritos sem identidade válida e foi preservado.".to_string());
         }
 
+        let mut changed = false;
         for fav in &mut list {
             if fav.source == "local" {
                 if let Some(config) = config.filter(|c| c.sources.unwrap_or_default().local) {
-                    fav.exists = check_local_path_exists(&fav.path_or_key, config)?;
+                    let exists = local_favorite_exists(fav, config)?;
+                    if is_sqlite_local_favorite(fav) && fav.exists != exists {
+                        // Normalize rows written by builds that treated the
+                        // virtual locator as a missing physical directory.
+                        changed = true;
+                    }
+                    fav.exists = exists;
                 }
             } else {
                 fav.exists = true;
@@ -143,8 +165,9 @@ impl FavoriteAlbum {
         }
 
         // Sem configuração confiável, proteger a resposta em memória sem gravar migrações.
-        let changed = list.iter_mut().fold(false, |changed, fav| {
-            fav.sanitize_artwork(config.and_then(|config| config.plex_server_id.as_deref())) || changed
+        let changed = list.iter_mut().fold(changed, |changed, fav| {
+            fav.sanitize_artwork(config.and_then(|config| config.plex_server_id.as_deref()))
+                || changed
         });
         if config.is_some() && changed {
             Self::save_all_to_path(path, &list)?;
@@ -187,7 +210,7 @@ impl FavoriteAlbum {
             let mut new_fav = album;
             new_fav.id = clean_id;
             if new_fav.source == "local" {
-                new_fav.exists = check_local_path_exists(&new_fav.path_or_key, config)?;
+                new_fav.exists = local_favorite_exists(&new_fav, config)?;
             }
             list.push(new_fav);
             Self::save_all_to_path(path, &list)?;
@@ -303,6 +326,85 @@ mod tests {
             &removed_config,
         )
         .unwrap());
+        remove_test_path(&path);
+    }
+
+    #[test]
+    fn sqlite_local_favorites_are_not_misclassified_as_missing_disk_and_keep_source_identity() {
+        let path = test_path();
+        let config = AppConfig {
+            sources: Some(crate::config::EnabledSources {
+                local: true,
+                plex: true,
+                navidrome: true,
+            }),
+            ..AppConfig::default()
+        };
+        let local = FavoriteAlbum {
+            id: "sqlite:42:YWxidW0".into(),
+            source: "local".into(),
+            title: "Synthetic Album".into(),
+            artist: "Fixture Artist".into(),
+            year: None,
+            thumb: None,
+            plex_image: None,
+            path_or_key: "sqlite-album://sqlite:42:YWxidW0".into(),
+            exists: false,
+        };
+
+        assert!(FavoriteAlbum::toggle_at_path(&path, local.clone(), &config).unwrap());
+        let loaded = FavoriteAlbum::load_all_from_path(&path, Some(&config)).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(
+            loaded[0].exists,
+            "an opaque SQLite locator is not evidence of a missing disk"
+        );
+
+        let mut stale_legacy_result = local.clone();
+        stale_legacy_result.exists = false;
+        fs::write(
+            &path,
+            serde_json::to_vec(&vec![stale_legacy_result]).unwrap(),
+        )
+        .unwrap();
+        let loaded = FavoriteAlbum::load_all_from_path(&path, Some(&config)).unwrap();
+        assert!(loaded[0].exists);
+        let persisted: Vec<FavoriteAlbum> =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(
+            persisted[0].exists,
+            "the corrected state survives later app restarts"
+        );
+
+        let same_id_plex = FavoriteAlbum {
+            source: "plex".into(),
+            path_or_key: "plex-rating-key".into(),
+            ..local.clone()
+        };
+        assert!(FavoriteAlbum::toggle_at_path(&path, same_id_plex, &config).unwrap());
+        let loaded = FavoriteAlbum::load_all_from_path(&path, Some(&config)).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded
+            .iter()
+            .any(|fav| fav.source == "local" && fav.id == local.id && fav.exists));
+        assert!(loaded
+            .iter()
+            .any(|fav| fav.source == "plex" && fav.id == local.id));
+
+        assert!(!FavoriteAlbum::toggle_at_path(&path, local.clone(), &config).unwrap());
+        let remaining = FavoriteAlbum::load_all_from_path(&path, Some(&config)).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].source, "plex");
+
+        let legacy = FavoriteAlbum {
+            id: "sqlite:legacy-folder-name".into(),
+            path_or_key: "Music/Album".into(),
+            ..local
+        };
+        assert!(
+            !is_sqlite_local_favorite(&legacy),
+            "legacy filesystem identity is determined by its path, not an ID prefix"
+        );
         remove_test_path(&path);
     }
 

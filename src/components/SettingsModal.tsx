@@ -6,7 +6,6 @@ import {
   Server,
   HardDrive,
   Sliders,
-  ShieldCheck,
   FolderPlus,
   Trash2,
   RefreshCw,
@@ -19,11 +18,12 @@ import {
   CircleHelp,
   LoaderCircle,
   Languages,
-  Radio,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { sourceEnabled } from "../utils/musicSources";
 import { SourcesSettings } from "./SourcesSettings";
+import { SqliteSourcesSettings } from "./SqliteSourcesSettings";
+import type { Source as SqliteSource, SqliteIndexProgress } from "../services/sqliteLibrary";
 import { SettingsPages, type SettingsPage } from "./SettingsPages";
 import { RemoteControlSetting } from "./RemoteControlSetting";
 import { UpnpSetting } from "./UpnpSetting";
@@ -32,7 +32,11 @@ import { UsageModeSetting } from "./UsageModeSetting";
 import { fullModeEnabled } from "../utils/usageMode";
 import { ExperimentalFeaturesSetting } from "./ExperimentalFeatures";
 import { AppearanceSetting } from "./AppearanceSetting";
-import { AudioSignalDiagram } from "./AudioSignalDiagram";
+import { EqualizerToggle } from "./EqualizerToggle";
+import { AudioRouteStatus } from "./AudioRouteStatus";
+import { AudioModeSelector, type AudioExperienceMode } from "./AudioModeSelector";
+import type { DspSnapshot } from "../types/equalizer";
+import type { AudioRouteProjection, OutputObservation } from "../types/audio";
 import { AppConfig, ConfigSaveOperation, ConfigSaveWarning } from "../types/config";
 import { AudioDevice } from "../types/audio";
 import { PlexServerResource } from "../types/plex";
@@ -41,12 +45,31 @@ import { audioService } from "../services/audio";
 import { plexService } from "../services/plex";
 import { audioRestartExpected, localFoldersOnlyChanged } from "../utils/audioConfigChange";
 import { refreshCatalogAfterSuccessfulCheck } from "../utils/localAlbumCatalog";
-import { createDeviceAvailabilityQuery, newPhysicalOutputChoice, shouldCheckContextualDevice, type AvailabilityQueryState } from "../utils/deviceAvailability";
+import { createDeviceAvailabilityQuery, newPhysicalOutputChoice, releasesSharedBeforeDirect, shouldCheckContextualDevice, type AvailabilityQueryState } from "../utils/deviceAvailability";
+import { interpretLegacyAudioRoute } from "../utils/audioRoute.ts";
+import { isWindowsPreview } from "../utils/platform";
 
 interface Props {
   initialPage?: SettingsPage;
   initialDraft?: AppConfig | null;
   initialFolderOverlap?: boolean;
+  equalizerAvailable?: boolean;
+  equalizerShared?: boolean;
+  equalizerRuntime?: DspSnapshot | null;
+  audioRoute?: AudioRouteProjection | null;
+  isPlaying?: boolean;
+  outputObservation?: OutputObservation | null;
+  readOnly?: boolean;
+  sqliteExperimental?: boolean;
+  sqliteSources?: SqliteSource[];
+  sqliteIndexing?: boolean;
+  sqliteProgress?: SqliteIndexProgress | null;
+  artworkCatalogReady?: boolean;
+  onSearchMissingArtwork?: () => void;
+  onSqliteAddFolder?: () => void;
+  onSqliteVerifySource?: (sourceId: string) => Promise<boolean>;
+  onSqliteReindexSource?: (sourceId: string) => Promise<void>;
+  onSqliteRemoveSource?: (sourceId: string) => Promise<void>;
   onClose: () => void;
   onSaved: (audioRestartExpected: boolean, warning?: ConfigSaveWarning) => void;
   onSaveStarted: (audioRestartExpected: boolean) => boolean;
@@ -81,6 +104,23 @@ export const SettingsModal: React.FC<Props> = ({
   initialPage,
   initialDraft,
   initialFolderOverlap,
+  equalizerAvailable = true,
+  equalizerShared = false,
+  equalizerRuntime = null,
+  audioRoute = null,
+  isPlaying = false,
+  outputObservation = null,
+  readOnly = false,
+  sqliteExperimental = false,
+  sqliteSources = [],
+  sqliteIndexing = false,
+  sqliteProgress = null,
+  artworkCatalogReady = false,
+  onSearchMissingArtwork = () => {},
+  onSqliteAddFolder,
+  onSqliteVerifySource,
+  onSqliteReindexSource,
+  onSqliteRemoveSource,
   onClose,
   onSaved,
   onSaveStarted,
@@ -91,11 +131,14 @@ export const SettingsModal: React.FC<Props> = ({
   isLibraryUpdating,
 }) => {
   const { t, i18n } = useTranslation();
+  const windowsPreview = isWindowsPreview();
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
+  const [pendingDirect, setPendingDirect] = useState(false);
+  const [nullOutputTestMode, setNullOutputTestMode] = useState(false);
   const [loading, setLoading] = useState(true);
   const [savingState, setSaving] = useState(false);
   const [connectionBusy, setConnectionBusy] = useState(false);
@@ -127,6 +170,10 @@ export const SettingsModal: React.FC<Props> = ({
 
   useEffect(() => {
     mountedRef.current = true;
+    if (readOnly || nullOutputTestMode) {
+      availabilityQueryRef.current = null;
+      return () => { mountedRef.current = false; };
+    }
     const query = createDeviceAvailabilityQuery(configService.checkDirectDeviceAvailability, setAvailability);
     availabilityQueryRef.current = query;
     return () => {
@@ -136,17 +183,22 @@ export const SettingsModal: React.FC<Props> = ({
       query.dispose();
       availabilityQueryRef.current = null;
     };
-  }, []);
+  }, [readOnly, nullOutputTestMode]);
 
   useEffect(() => {
     let active = true;
-    Promise.all([configService.getConfig(), configService.getAudioDevices()])
-      .then(([cfg, devs]) => {
+    Promise.all([
+      configService.getConfig(),
+      readOnly ? Promise.resolve([] as AudioDevice[]) : configService.getAudioDevices(),
+      configService.getNullOutputTestMode(),
+    ] as const)
+      .then(([cfg, devs, nullOutputTest]) => {
         if (!active) return;
         originalConfigRef.current = { ...cfg, local_folders: [...cfg.local_folders] };
         setConfig(initialDraft ? { ...initialDraft, local_folders: [...initialDraft.local_folders] } : cfg);
         setDevices(devs);
-        if (sourceEnabled(cfg, "plex") && cfg.plex_token && cfg.plex_token.trim().length > 0) {
+        setNullOutputTestMode(nullOutputTest);
+        if (!readOnly && !sqliteExperimental && sourceEnabled(cfg, "plex") && cfg.plex_token && cfg.plex_token.trim().length > 0) {
           const generation = authGenerationRef.current;
           const current = () => active && mountedRef.current && generation === authGenerationRef.current;
           setLoadingServers(true);
@@ -159,7 +211,7 @@ export const SettingsModal: React.FC<Props> = ({
       .catch(error => { if (active) logError("settings.load", error); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, []);
+  }, [readOnly, sqliteExperimental]);
 
   useEffect(() => {
     if (loading) return;
@@ -336,11 +388,12 @@ export const SettingsModal: React.FC<Props> = ({
   }, [config?.sources?.plex]);
 
   const handleSave = async () => {
-    if (!config || saveInProgressRef.current || connectionBusy) return;
+    if (!config || pendingDirect || saveInProgressRef.current || connectionBusy) return;
     saveInProgressRef.current = true;
     // A displayed busy result is momentary. Retry once on Save rather than
     // permanently refusing a choice based on an old observation.
-    if (newPhysicalOutputChoice(originalConfigRef.current, config)
+    if (!releasesSharedBeforeDirect(originalConfigRef.current, config)
+      && newPhysicalOutputChoice(originalConfigRef.current, config)
       && availability.results.some(row => row.id === config.alsa_device && row.state === "busy")) {
       setSaving(true);
       const result = await availabilityQueryRef.current?.check(config.alsa_device);
@@ -417,7 +470,34 @@ export const SettingsModal: React.FC<Props> = ({
 
   if (loading || !config) return null;
 
-  const isDirect = (config.audio_output_type || "alsa") === "alsa";
+  const configuredRoute = interpretLegacyAudioRoute(config.audio_output_type, config.alsa_device).route;
+  const effectiveIsDirect = configuredRoute.access === "exclusive";
+  const isDirect = pendingDirect || effectiveIsDirect;
+  const routeDraftChanged = Boolean(originalConfigRef.current
+    && (config.audio_output_type !== originalConfigRef.current.audio_output_type
+      || config.alsa_device !== originalConfigRef.current.alsa_device));
+  const selectedAudioMode: AudioExperienceMode = pendingDirect || effectiveIsDirect ? "direct" : "shared";
+  const requestOutputMode = (mode: "shared" | "direct") => {
+    if (saveInProgressRef.current || nullOutputTestMode) return;
+    if (mode === "shared" && !pendingDirect && config.audio_output_type === "pipewire") return;
+    if (mode === "direct" && !pendingDirect && effectiveIsDirect && config.audio_output_type === "alsa") return;
+    availabilityQueryRef.current?.invalidate();
+    if (mode === "shared") {
+      setPendingDirect(false);
+      setConfig({ ...config, audio_output_type: "pipewire" });
+      return;
+    }
+    if (config.alsa_device === "default" || !config.alsa_device) {
+      setPendingDirect(true);
+      return;
+    }
+    setPendingDirect(false);
+    const proposed: AppConfig = { ...config, audio_output_type: "alsa" };
+    setConfig(proposed);
+    if (shouldCheckContextualDevice(originalConfigRef.current, proposed, devices.map(device => device.id))) {
+      void availabilityQueryRef.current?.check(proposed.alsa_device);
+    }
+  };
   const isSelectedInList = devices.some((d) => d.id === config.alsa_device);
   const isPlexConnected = Boolean(config.plex_token && config.plex_token.trim().length > 0);
   const canCheckSelectedDevice = config.alsa_device.startsWith("hw:")
@@ -464,123 +544,90 @@ export const SettingsModal: React.FC<Props> = ({
         </div>
 
         {initialFolderOverlap && <div role="alert" className="px-6 py-3 text-sm text-[color:var(--theme-fg-accent,var(--color-amber-300))]">{t("settings.localFolderOverlap")}</div>}
+        {readOnly && <div role="status" className="mx-6 mt-4 rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-base,#121212)] px-3 py-2 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)]">{t("sqliteLibrary.readOnlySettings")}</div>}
+        {nullOutputTestMode && <div role="status" className="mx-6 mt-2 rounded-lg border border-[color:var(--theme-border-soft,#333333)] bg-[var(--theme-surface-base,#121212)] px-3 py-2 text-xs text-[color:var(--theme-fg-secondary,#BBBBBB)]">{t("sqliteLibrary.nullOutputTestSettings")}</div>}
         <SettingsPages
           initialPage={initialPage}
-          general={<>
-            <UsageModeSetting value={config.usage_mode} disabled={saving} onChange={usage_mode => setConfig({ ...config, usage_mode })} />
-            <AppearanceSetting />
-            {fullModeEnabled(config) && <ExperimentalFeaturesSetting enabled={config.experimental_features === true} disabled={saving || connectionBusy} onChange={enabled => setConfig({ ...config, experimental_features: enabled })} />}
-            {fullModeEnabled(config) && (fullModeEnabled(originalConfigRef.current) ? <UpnpSetting /> : <p className="text-xs text-[color:var(--theme-fg-muted,#888)]">{t("usageMode.saveFirst")}</p>)}
-            {fullModeEnabled(config) && config.experimental_features === true && (fullModeEnabled(originalConfigRef.current) && originalConfigRef.current?.experimental_features === true
-              ? <RemoteControlSetting />
-              : <p className="text-xs text-[color:var(--theme-fg-muted,#888888)]">{t("remote.saveBetaFirst")}</p>)}
-            <ScrobblingSetting />
-            {/* Idioma da interface */}
-            <div className="space-y-3">
-              <h3 className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider flex items-center space-x-1.5">
-                <Languages size={14} />
-                <span>{t("settings.language")}</span>
-              </h3>
-              <div className="flex space-x-3">
-                <button
-                  type="button"
-                  onClick={() => handleLanguageChange("pt-BR")}
-                  className={`flex-1 py-2.5 px-4 rounded-xl border font-semibold text-xs transition-all cursor-pointer ${
-                    selectedLang.startsWith("pt")
-                      ? "border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-accent,#221B0E)] text-[color:var(--theme-fg-accent,#E5A00D)]"
-                      : "border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
-                  }`}
-                >
-                  Português (Brasil)
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleLanguageChange("en")}
-                  className={`flex-1 py-2.5 px-4 rounded-xl border font-semibold text-xs transition-all cursor-pointer ${
-                    selectedLang.startsWith("en")
-                      ? "border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-accent,#221B0E)] text-[color:var(--theme-fg-accent,#E5A00D)]"
-                      : "border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
-                  }`}
-                >
-                  English (US)
-                </button>
-              </div>
+          readOnly={readOnly}
+          disabledPages={fullModeEnabled(config) ? [] : ["experimental"]}
+          interfacePage={<>
+            <div className="settings-section-list" data-settings-interface-primary>
+              <fieldset className="settings-section" data-settings-section="language">
+                <legend className="settings-section-title">
+                  <Languages size={14} aria-hidden="true" />
+                  <span>{t("settings.language")}</span>
+                </legend>
+                <div className="grid max-w-2xl grid-cols-1 gap-2 sm:grid-cols-2 sm:gap-3">
+                  <button
+                    type="button"
+                    onClick={() => handleLanguageChange("pt-BR")}
+                    className={`min-h-10 rounded-lg border px-3 py-2 text-center text-xs font-semibold transition-colors cursor-pointer ${
+                      selectedLang.startsWith("pt")
+                        ? "border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-accent,#221B0E)] text-[color:var(--theme-fg-accent,#E5A00D)]"
+                        : "border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
+                    }`}
+                  >
+                    Português (Brasil)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleLanguageChange("en")}
+                    className={`min-h-10 rounded-lg border px-3 py-2 text-center text-xs font-semibold transition-colors cursor-pointer ${
+                      selectedLang.startsWith("en")
+                        ? "border-[color:var(--theme-border-accent,#E5A00D)] bg-[var(--theme-surface-accent,#221B0E)] text-[color:var(--theme-fg-accent,#E5A00D)]"
+                        : "border-[color:var(--theme-border-soft,#2B2B2B)] bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
+                    }`}
+                  >
+                    English (US)
+                  </button>
+                </div>
+              </fieldset>
+              <UsageModeSetting value={config.usage_mode} disabled={saving} onChange={usage_mode => setConfig({ ...config, usage_mode })} />
             </div>
+          </>}
+          appearance={<AppearanceSetting />}
+          experimental={fullModeEnabled(config)
+            ? <ExperimentalFeaturesSetting enabled={config.experimental_features === true} disabled={saving || connectionBusy} onChange={enabled => setConfig({ ...config, experimental_features: enabled })} />
+            : null}
+          network={<>
+            {fullModeEnabled(config) && (readOnly
+              ? <p className="settings-section-note text-[color:var(--theme-fg-muted,#888)]">{t("sqliteLibrary.settingsUnavailable")}</p>
+              : nullOutputTestMode
+                ? <p role="status" className="settings-section-note text-[color:var(--theme-fg-muted,#888)]">{t("sqliteLibrary.nullOutputServicesUnavailable")}</p>
+                : fullModeEnabled(originalConfigRef.current)
+                  ? <UpnpSetting />
+                  : <p className="settings-section-note text-[color:var(--theme-fg-muted,#888)]">{t("usageMode.saveFirst")}</p>)}
+            {fullModeEnabled(config) && config.experimental_features === true && !readOnly && (nullOutputTestMode
+              ? <p role="status" className="settings-section-note text-[color:var(--theme-fg-muted,#888)]">{t("sqliteLibrary.nullOutputServicesUnavailable")}</p>
+              : fullModeEnabled(originalConfigRef.current) && originalConfigRef.current?.experimental_features === true
+                ? <RemoteControlSetting />
+                : <p className="settings-section-note text-[color:var(--theme-fg-muted,#888888)]">{t("remote.saveBetaFirst")}</p>)}
+            {readOnly
+              ? <p className="settings-section-note text-[color:var(--theme-fg-muted,#888)]">{t("sqliteLibrary.settingsUnavailable")}</p>
+              : nullOutputTestMode
+                ? <p role="status" className="settings-section-note text-[color:var(--theme-fg-muted,#888)]">{t("sqliteLibrary.nullOutputServicesUnavailable")}</p>
+                : <ScrobblingSetting />}
           </>}
           audio={<>
             {/* Saída e dispositivo */}
-            <div className="space-y-3 pt-3 border-t border-[color:var(--theme-border-soft,#242424)]">
-              <h3 className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider">
+            <div className="settings-section" data-settings-section="audio-output">
+              <h3 className="settings-section-title">
                 {t("settings.audioGroups.output")}
               </h3>
 
-              {/* Alternador de Modos Claros */}
-              <div>
-                <label className="block text-[color:var(--theme-fg-secondary,#CCCCCC)] font-semibold mb-2 text-xs">
-                  {t("settings.audioBackend")}
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    aria-pressed={isDirect}
-                    onClick={() => {
-                      if (isDirect || saveInProgressRef.current) return;
-                      const proposed: AppConfig = { ...config, audio_output_type: "alsa" };
-                      availabilityQueryRef.current?.invalidate();
-                      setConfig(proposed);
-                      if (shouldCheckContextualDevice(originalConfigRef.current, proposed, devices.map(device => device.id))) {
-                        void availabilityQueryRef.current?.check(proposed.alsa_device);
-                      }
-                    }}
-                    className={`p-3 rounded-xl text-left border transition-all cursor-pointer flex flex-col justify-between ${
-                      isDirect
-                        ? "bg-[var(--theme-surface-accent,#221B0E)] border-[color:var(--theme-border-accent,#E5A00D)] text-[color:var(--theme-fg-primary,#ffffff)]"
-                        : "bg-[var(--theme-surface-base,#141414)] border-[color:var(--theme-border-soft,#2A2A2A)] text-[color:var(--theme-fg-muted,#888888)] hover:border-[color:var(--theme-border-soft,#3A3A3A)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
-                    }`}
-                  >
-                    <div className="flex items-center space-x-2">
-                      <ShieldCheck size={16} className={isDirect ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#777777)]"} />
-                      <span className="font-bold text-xs">{t("settings.alsaMode")}</span>
-                    </div>
-                    <span className="text-[10px] text-[color:var(--theme-fg-muted,#777777)] mt-1 line-clamp-2">
-                      {t("settings.directModeCaption")}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    aria-pressed={!isDirect}
-                    onClick={() => {
-                      availabilityQueryRef.current?.invalidate();
-                      setConfig({ ...config, audio_output_type: "pipewire" });
-                    }}
-                    className={`p-3 rounded-xl text-left border transition-all cursor-pointer flex flex-col justify-between ${
-                      !isDirect
-                        ? "bg-[var(--theme-surface-accent,#221B0E)] border-[color:var(--theme-border-accent,#E5A00D)] text-[color:var(--theme-fg-primary,#ffffff)]"
-                        : "bg-[var(--theme-surface-base,#141414)] border-[color:var(--theme-border-soft,#2A2A2A)] text-[color:var(--theme-fg-muted,#888888)] hover:border-[color:var(--theme-border-soft,#3A3A3A)] hover:text-[color:var(--theme-fg-primary,#ffffff)]"
-                    }`}
-                  >
-                    <div className="flex items-center space-x-2">
-                      <Radio size={16} className={!isDirect ? "text-[color:var(--theme-fg-accent,#E5A00D)]" : "text-[color:var(--theme-fg-muted,#777777)]"} />
-                      <span className="font-bold text-xs">{t("settings.pipewireMode")}</span>
-                    </div>
-                    <span className="text-[10px] text-[color:var(--theme-fg-muted,#777777)] mt-1 line-clamp-2">
-                      {t("settings.sharedModeCaption")}
-                    </span>
-                  </button>
-                </div>
-              </div>
+              <AudioModeSelector selected={selectedAudioMode} pendingSave={routeDraftChanged}
+                onSelect={requestOutputMode} disabled={readOnly || saving || nullOutputTestMode} />
 
               {/* Painel Contextual do Modo Selecionado */}
               {isDirect ? (
-                <div className="space-y-2.5 pt-1">
+                <div className="space-y-2 rounded-lg bg-[var(--theme-surface-base,#121212)] p-3">
                   <label htmlFor={`${titleId}-device`} className="block text-[color:var(--theme-fg-secondary,#CCCCCC)] font-semibold text-xs">
                     {t("settings.alsaDevice")}
                   </label>
                   <select
                     id={`${titleId}-device`}
                     value={config.alsa_device}
+                    disabled={nullOutputTestMode}
                     // Native selects have no portable popup-open event. A new
                     // focus entry (mouse or keyboard) refreshes a busy observation;
                     // reopening while already focused retains the manual retry.
@@ -592,9 +639,10 @@ export const SettingsModal: React.FC<Props> = ({
                     }}
                     onChange={(e) => {
                       const id = e.target.value;
-                      if (id === config.alsa_device) return;
+                      if (id === config.alsa_device || id === "default") return;
                       availabilityQueryRef.current?.invalidate();
-                      setConfig({ ...config, alsa_device: id });
+                      setPendingDirect(false);
+                      setConfig({ ...config, audio_output_type: "alsa", alsa_device: id });
                       if (id.startsWith("hw:") && devices.some(device => device.id === id)) {
                         void availabilityQueryRef.current?.check(id);
                       }
@@ -602,7 +650,7 @@ export const SettingsModal: React.FC<Props> = ({
                     className="w-full bg-[var(--theme-surface-base,#121212)] border border-[color:var(--theme-border-soft,#333333)] rounded-lg px-3 py-2 text-[color:var(--theme-fg-primary,#ffffff)] outline-none focus:border-[color:var(--theme-border-accent,#E5A00D)] cursor-pointer text-sm"
                   >
                     {!isSelectedInList && config.alsa_device && (
-                      <option value={config.alsa_device} className="bg-[var(--theme-surface-panel,#1A1A1A)] text-[color:var(--theme-fg-primary,#ffffff)] py-1">
+                      <option value={config.alsa_device} disabled={config.alsa_device === "default"} className="bg-[var(--theme-surface-panel,#1A1A1A)] text-[color:var(--theme-fg-primary,#ffffff)] py-1">
                         {t("settings.currentDevice", { id: config.alsa_device })}
                       </option>
                     )}
@@ -628,12 +676,12 @@ export const SettingsModal: React.FC<Props> = ({
                         <CircleHelp size={15} aria-hidden="true" />
                       </button>
                     </div>
-                    <button type="button"
-                      disabled={availability.checking || saving || !canCheckSelectedDevice}
+                    {!windowsPreview && <button type="button"
+                      disabled={nullOutputTestMode || availability.checking || saving || !canCheckSelectedDevice}
                       onClick={() => { void availabilityQueryRef.current?.check(config.alsa_device); }}
                       className="text-[11px] text-[color:var(--theme-fg-accent,#E5A00D)] hover:text-[color:var(--theme-fg-primary,#ffffff)] disabled:opacity-50 disabled:cursor-not-allowed">
                       {t("settings.deviceAvailability.check")}
-                    </button>
+                    </button>}
                   </div>
                   <div id={availabilityHelpId} hidden={!showAvailabilityHelp}
                     className="text-[11px] text-[color:var(--theme-fg-secondary,#AAAAAA)] leading-relaxed space-y-1 rounded-lg bg-[var(--theme-surface-base,#121212)] p-3">
@@ -643,23 +691,29 @@ export const SettingsModal: React.FC<Props> = ({
                     <p>{t("settings.deviceAvailability.helpLimits")}</p>
                   </div>
                   {selectedAvailability === "busy" && !availability.checking && newPhysicalOutputChoice(originalConfigRef.current, config) && (
-                    <p role="alert" className="text-[11px] text-[color:var(--theme-fg-accent,#E5A00D)]">{t("settings.deviceAvailability.busyAction")}</p>
+                    <p role="alert" className="text-[11px] text-[color:var(--theme-fg-accent,#E5A00D)]">
+                      {t(releasesSharedBeforeDirect(originalConfigRef.current, config)
+                        ? "settings.deviceAvailability.busyAfterRelease"
+                        : "settings.deviceAvailability.busyAction")}
+                    </p>
                   )}
                 </div>
               ) : (
-                <p className="text-[11px] text-[color:var(--theme-fg-secondary,#AAAAAA)]">{t("settings.sharedActiveNotice")}</p>
+                <p className="text-[11px] text-[color:var(--theme-fg-secondary,#AAAAAA)]">{t("audioExperience.systemDefault")}</p>
               )}
-            </div>
+              {pendingDirect && <p role="note" className="text-xs text-[color:var(--theme-fg-accent,#C9A45D)]">{t("audioExperience.directNeedsDevice")}</p>}
+              {isDirect && !pendingDirect && <p className="text-xs text-[color:var(--theme-fg-muted,#888888)]">{t("audioExperience.directAvailabilityNotice")}</p>}
+            <AudioRouteStatus projection={audioRoute} selectedMode={selectedAudioMode} pendingSave={routeDraftChanged}
+              playing={isPlaying} outputObservation={outputObservation} />
+            {fullModeEnabled(config) && <EqualizerToggle shared={equalizerShared && !isDirect} available={equalizerAvailable}
+              runtime={equalizerRuntime} audioRoute={audioRoute} disabled={readOnly || saving || nullOutputTestMode} />}
 
-            <AudioSignalDiagram mode={!isDirect || config.alsa_device === "default" ? "shared" : "direct"} device={config.alsa_device} />
             {originalConfigRef.current && !originalConfigRef.current.first_run && audioRestartExpected(originalConfigRef.current, config) && (
-              <p role="status" className="text-[11px] text-[color:var(--theme-fg-accent,#C9A45D)]">{t("settings.audioChangeNotice")}</p>
+              <p role="status" className="settings-section-note text-[color:var(--theme-fg-accent,#C9A45D)]">{t("settings.audioChangeNotice")}</p>
             )}
-            {isDirect && config.alsa_device === "default" && (
-              <p className="text-[11px] text-[color:var(--theme-fg-accent,#C9A45D)]">{t("settings.defaultEndpointNotice")}</p>
-            )}
-            <div className="space-y-3 pt-3 border-t border-[color:var(--theme-border-soft,#242424)]">
-              <h3 className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider">{t("settings.audioGroups.processing")}</h3>
+            </div>
+            <div className="settings-section" data-settings-section="audio-processing">
+              <h3 className="settings-section-title">{t("settings.audioGroups.processing")}</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
                 <div>
                   <label htmlFor={`${titleId}-replaygain`} className="block text-[color:var(--theme-fg-secondary,#CCCCCC)] font-semibold mb-1">{t("settings.replayGain")}</label>
@@ -679,7 +733,7 @@ export const SettingsModal: React.FC<Props> = ({
                     <option value="track">{t("settings.rgTrack")}</option>
                   </select>
                 </div>
-                {/* Chave de DoP - Disponível apenas em ALSA Direct */}
+                {/* DoP is available on each platform's Direct route. */}
                 <div
                   className={`flex items-center justify-between p-3 rounded-lg border transition-opacity ${
                     isDirect
@@ -696,8 +750,8 @@ export const SettingsModal: React.FC<Props> = ({
                   <input
                     type="checkbox"
                     aria-label={t("settings.dop")}
-                    disabled={!isDirect}
-                    checked={isDirect && config.dop_enabled}
+                    disabled={!effectiveIsDirect}
+                    checked={effectiveIsDirect && config.dop_enabled}
                     onChange={(e) => setConfig({ ...config, dop_enabled: e.target.checked })}
                     className="w-4 h-4 accent-[var(--theme-control-accent,#E5A00D)] cursor-pointer shrink-0 disabled:cursor-not-allowed"
                   />
@@ -711,8 +765,8 @@ export const SettingsModal: React.FC<Props> = ({
                 <p>{t("settings.dopTransportNotice")}</p>
               </details>
             </div>
-            <div className="space-y-3 pt-3 border-t border-[color:var(--theme-border-soft,#242424)]">
-              <h3 className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider">{t("settings.audioGroups.performance")}</h3>
+            <div className="settings-section" data-settings-section="audio-performance">
+              <h3 className="settings-section-title">{t("settings.audioGroups.performance")}</h3>
               <div>
                 <label htmlFor={`${titleId}-buffer`} className="block text-[color:var(--theme-fg-secondary,#CCCCCC)] font-semibold mb-1">{t("settings.ramBuffer")}</label>
                 <select
@@ -735,13 +789,23 @@ export const SettingsModal: React.FC<Props> = ({
               </details>
             </div>
           </>}
-          sources={<SourcesSettings config={config} onChange={setConfig} disabled={saving || connectionBusy || scanning !== null || isLibraryUpdating}
+          sources={<SourcesSettings config={config} onChange={setConfig} disabled={readOnly || saving || connectionBusy || scanning !== null || (!sqliteExperimental && isLibraryUpdating)}
             initialSource={initialPage === 'local' || initialPage === 'plex' || initialPage === 'navidrome' ? initialPage : undefined}
-            localCommitted={sourceEnabled(originalConfigRef.current, "local")} onConnectionBusy={setConnectionBusy} local={<>
+          localCommitted={sqliteExperimental || sourceEnabled(originalConfigRef.current, "local")} onConnectionBusy={setConnectionBusy} local={sqliteExperimental ? <SqliteSourcesSettings
+              sources={sqliteSources} progress={sqliteProgress} busy={sqliteIndexing || saving || connectionBusy}
+              onlineArtworkEnabled={config.online_artwork_enabled}
+              onOnlineArtworkEnabledChange={enabled => setConfig({ ...config, online_artwork_enabled: enabled })}
+              artworkCatalogReady={artworkCatalogReady}
+              onSearchMissingArtwork={onSearchMissingArtwork}
+              onAddFolder={() => onSqliteAddFolder?.()}
+              onVerify={sourceId => onSqliteVerifySource?.(sourceId) ?? Promise.reject(new Error("SQLite source verification is unavailable"))}
+              onReindex={sourceId => onSqliteReindexSource?.(sourceId) ?? Promise.reject(new Error("SQLite source reindex is unavailable"))}
+              onRemove={sourceId => onSqliteRemoveSource?.(sourceId) ?? Promise.reject(new Error("SQLite source removal is unavailable"))}
+            /> : <>
             {/* Fontes e atualização */}
-            <div className="space-y-3 pt-3 border-t border-[color:var(--theme-border-soft,#242424)]">
+            <div className="settings-section" data-settings-section="local-libraries">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider flex items-center space-x-1.5">
+                <h3 className="settings-section-title">
                   <HardDrive size={14} />
                   <span>{t("settings.localFolders")}</span>
                 </h3>
@@ -802,9 +866,7 @@ export const SettingsModal: React.FC<Props> = ({
                   ))
                 )}
               </div>
-            </div>
-
-            <label className="flex items-start gap-2 pt-3 border-t border-[color:var(--theme-border-soft,#242424)] cursor-pointer">
+            <label className="flex items-start gap-2 cursor-pointer">
               <input
                 type="checkbox"
                 checked={config.online_artwork_enabled}
@@ -816,12 +878,13 @@ export const SettingsModal: React.FC<Props> = ({
                 <span className="block text-[11px] text-[color:var(--theme-fg-muted,#888888)]">{t("settings.onlineArtworkDescription")}</span>
               </span>
             </label>
+            </div>
           </>}
           plex={<>
             {/* Conexão Plex */}
-            <div className="space-y-3 pt-3 border-t border-[color:var(--theme-border-soft,#242424)]">
+            <div className="settings-section" data-settings-section="plex-connection">
               <div className="flex items-center justify-between">
-                <h3 className="text-[11px] font-bold text-[color:var(--theme-fg-accent,#E5A00D)] uppercase tracking-wider flex items-center space-x-1.5">
+                <h3 className="settings-section-title">
                   <Server size={14} />
                   <span>{t("settings.plexConnection")}</span>
                 </h3>
@@ -999,7 +1062,7 @@ export const SettingsModal: React.FC<Props> = ({
 
           <button
             onClick={handleSave}
-            disabled={saving || connectionBusy || (newPhysicalOutputChoice(originalConfigRef.current, config) && availability.checking)}
+            disabled={readOnly || saving || connectionBusy || pendingDirect || (newPhysicalOutputChoice(originalConfigRef.current, config) && availability.checking)}
             className="flex shrink-0 items-center space-x-2 px-5 py-2 rounded-lg bg-[#E5A00D] hover:bg-[#F5B01D] text-black font-bold text-xs shadow-md transition-transform active:scale-95 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving ? <RefreshCw size={15} className="animate-spin" /> : <Check size={15} />}

@@ -29,15 +29,22 @@ import { PlexImage } from "./PlexImage";
 import { PlaylistPickerModal } from "./PlaylistPickerModal";
 import { LibrarySourceTabs } from "./LibrarySourceTabs";
 import type { NewPlaylistItem } from "../types/playlist";
+import type { LocalAlbum } from "../types/local";
+import { FavoriteLocalArtwork } from "./FavoriteLocalArtwork";
+import { localAlbumArtworkIdentity, sqliteFavoriteArtworkIdentity } from "../utils/favoriteArtwork";
 
 
 interface Props {
   config: AppConfig;
   onFavoritesChanged?: () => void;
   isPlaybackAvailable: boolean;
+  sqliteBacked?: boolean;
+  localAlbums?: readonly LocalAlbum[];
+  sqliteArtworkReady?: boolean;
 }
 
-export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isPlaybackAvailable }) => {
+export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isPlaybackAvailable,
+  sqliteBacked = false, localAlbums = [], sqliteArtworkReady = false }) => {
   const { t } = useTranslation();
   const [favorites, setFavorites] = useState<FavoriteAlbum[]>([]);
   const [activeTab, setActiveTab] = useState<"local" | "plex" | "navidrome">(() => MUSIC_SOURCES.find(source => sourceEnabled(config, source)) ?? "local");
@@ -61,9 +68,20 @@ export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isP
   const selectedIdentity=JSON.stringify([selectedAlbum?.source,selectedAlbum?.id,selectedAlbum?.path_or_key]);
   const selectedIdentityRef=useRef(selectedIdentity);selectedIdentityRef.current=selectedIdentity;
   const closeAlbum=()=>{albumGeneration.current++;setSelectedAlbum(null);setTracks([]);setLoadingTracks(false);setPlaylistItems(null);};
-  const loadFavoriteTracks=(fav:FavoriteAlbum)=>fav.source==='local'?favoriteLocalTracks(fav,audioService):plexService.getAlbumTracks(fav.path_or_key).then(items=>favoritePlexTracks(items,fav));
+  const loadFavoriteTracks=(fav:FavoriteAlbum)=>fav.source==='local'?favoriteLocalTracks(fav,audioService,sqliteBacked):plexService.getAlbumTracks(fav.path_or_key).then(items=>favoritePlexTracks(items,fav));
   const queueContext = useMemo(() => ({}), [selectedIdentity, activeTab, search, tracks]);
-  const metadata = (track: typeof tracks[number], fav: FavoriteAlbum): TrackMetadata => ({ ...track, album: fav.title, media_locator: track.media_locator ?? { kind: "local", uri: track.uri || "" } });
+  const metadata = (track: typeof tracks[number], fav: FavoriteAlbum): TrackMetadata => {
+    const sqliteLocator = track.uri?.startsWith("sqlite-track://") || track.uri?.startsWith("sqlite-cue://");
+    const { uri, ...rest } = track;
+    return {
+      ...rest,
+      album: fav.title,
+      media_locator: track.media_locator ?? (uri ? { kind: "local", uri } : undefined),
+      // SQLite virtual locators belong in media_locator. The playback adapter
+      // rejects them in the legacy uri field before Rust can resolve them.
+      ...(sqliteLocator ? {} : uri ? { uri } : {}),
+    };
+  };
   const queueActions = useQueueInsertion(queueContext, isPlaybackAvailable && !loadingTracks);
   const selection = useTrackSelection(queueContext, selectedAlbum ? tracks.map(track => metadata(track, selectedAlbum)) : [], isPlaybackAvailable && !loadingTracks);
   const albumRequest = (fav: FavoriteAlbum) => ({ track: { title: fav.title, artist: fav.artist, album: fav.title }, scope: "album" as const,
@@ -118,7 +136,7 @@ export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isP
     setSelectedAlbum(fav);setTracks([]);setPlaylistItems(null);setLoadingTracks(true);
     const current=()=>alive.current&&generation===albumGeneration.current;
     try {const loaded=await loadFavoriteTracks(fav);if(current())setTracks(loaded);}
-    catch(err){if(current())logError("favorites.load-tracks",err);}
+    catch(err){if(current()){logError("favorites.load-tracks",err);if(err instanceof Error&&['SQLITE_LEGACY_FAVORITE_REQUIRES_RESOLUTION','SQLITE_FAVORITE_REFERENCE_UNAVAILABLE'].includes(err.message))alert(t("favorites.legacyLocalRequiresResolution"));}}
     finally {if(current())setLoadingTracks(false);}
   };
 
@@ -126,15 +144,10 @@ export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isP
   const handlePlayAll = (startIndex = 0) => {
     if (!isPlaybackAvailable) return;
     if (loadingTracks || !selectedAlbum || tracks.length === 0) return;
-    const meta = tracks.map((t) => ({
-      title: t.title,
-      artist: t.artist,
-      album: selectedAlbum.title,
+    const meta = tracks.map((track) => ({
+      ...metadata(track, selectedAlbum),
       thumb: selectedAlbum.source === "local" ? selectedAlbum.thumb || null : null,
       plex_image: selectedAlbum.source === "plex" ? selectedAlbum.plex_image || null : null,
-      uri: t.uri,
-      media_locator: t.media_locator,
-      duration: t.duration,
     }));
     void request.run(intent => audioService.playTracks(meta, startIndex, intent));
   };
@@ -151,7 +164,7 @@ export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isP
     await request.run(async intent => {
       const loaded=await loadFavoriteTracks(fav);
       if(!intent.current())return;
-      const meta=loaded.map(track=>({...track,album:fav.title,thumb:fav.source==='local'?fav.thumb||null:null,plex_image:fav.source==='plex'?fav.plex_image||null:null}));
+      const meta=loaded.map(track=>({...metadata(track,fav),thumb:fav.source==='local'?fav.thumb||null:null,plex_image:fav.source==='plex'?fav.plex_image||null:null}));
       if(meta.length)await audioService.playTracks(meta,0,intent);
     });
   };
@@ -188,10 +201,17 @@ export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isP
       (f.title || "").toLowerCase().includes(search.toLowerCase()) ||
       (f.artist || "").toLowerCase().includes(search.toLowerCase())
   );
+  const localAlbumsByArtworkIdentity = useMemo(() => new Map(
+    localAlbums.map(album => [localAlbumArtworkIdentity(album), album] as const),
+  ), [localAlbums]);
+  const sqliteAlbumForFavorite = (favorite: FavoriteAlbum): LocalAlbum | null => {
+    const identity = sqliteFavoriteArtworkIdentity(favorite, sqliteBacked);
+    return identity ? localAlbumsByArtworkIdentity.get(identity) ?? null : null;
+  };
 
   return (
     <main className="min-h-0 min-w-0 flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)] select-none">
-      <PlaybackRequestNotice failure={request.failure} />{queueActions.menu}{queueActions.notice}{selection.toolbar}
+      <PlaybackRequestNotice failure={request.failure} />{queueActions.menu}{queueActions.notice}
       <div className="flex shrink-0 items-center justify-between p-8 pb-4 border-b border-[color:var(--theme-border-soft,#222222)]">
         <div className="flex items-center space-x-3">
           {selectedAlbum && (
@@ -244,7 +264,7 @@ export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isP
         {activeTab === "navidrome" && navidromeConfigured ? <NavidromeView available={isPlaybackAvailable} favoritesOnly embedded onFavoritesChange={setNavidromeCount} /> : selectedAlbum ? (
           <div className="space-y-8 animate-in fade-in duration-100">
             <div className="flex items-end space-x-6">
-              <div className="w-52 h-52 rounded-xl bg-[var(--theme-surface-raised,#202020)] border border-[color:var(--theme-border-soft,#2B2B2B)] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
+              <div className="relative w-52 h-52 rounded-xl bg-[var(--theme-surface-raised,#202020)] border border-[color:var(--theme-border-soft,#2B2B2B)] overflow-hidden shrink-0 shadow-2xl flex items-center justify-center">
                 {selectedAlbum.source === "plex" && selectedAlbum.plex_image ? (
                   <PlexImage
                     image={selectedAlbum.plex_image}
@@ -254,6 +274,11 @@ export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isP
                   />
                 ) : selectedAlbum.thumb ? (
                   <img src={selectedAlbum.thumb} alt="" className="w-full h-full object-cover" />
+                ) : selectedAlbum.source === "local" && sqliteBacked ? (
+                  <FavoriteLocalArtwork favorite={selectedAlbum} album={sqliteAlbumForFavorite(selectedAlbum)}
+                    localAlbums={localAlbums} artworkReady={sqliteArtworkReady} alt={selectedAlbum.title}
+                    className="w-full h-full object-cover"
+                    fallback={<div className="absolute inset-0 flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]"><Disc3 size={64} /></div>} />
                 ) : (
                   <Disc3 size={64} className="text-[color:var(--theme-fg-faint,#444444)]" />
                 )}
@@ -315,9 +340,12 @@ export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isP
               </div>
             ) : (
               <div className="bg-[var(--theme-surface-base,#141414)] border border-[color:var(--theme-border-soft,#222222)] rounded-xl overflow-hidden divide-y divide-[color:var(--theme-border-soft,#1D1D1D)]">
-                <div className="grid grid-cols-12 px-4 py-2.5 text-[11px] font-bold text-[color:var(--theme-fg-muted,#666666)] uppercase tracking-wider bg-[var(--theme-surface-panel,#181818)]">
+                <div className="grid grid-cols-12 items-center gap-2 px-4 py-2.5 text-[11px] font-bold text-[color:var(--theme-fg-muted,#666666)] uppercase tracking-wider bg-[var(--theme-surface-panel,#181818)]">
                   <span className="col-span-1 text-center">#</span>
-                  <span className="col-span-8">{t("plex.tracks")}</span>
+                  <div className="col-span-8 flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                    <span>{t("plex.tracks")} ({tracks.length})</span>
+                    {selectedAlbum && !loadingTracks && tracks.length > 0 && selection.toolbar}
+                  </div>
                   <span className="col-span-3 text-right flex items-center justify-end space-x-1">
                     <Clock size={12} />
                     <span>{t("player.queue")}</span>
@@ -385,7 +413,7 @@ export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isP
               const isMissing = fav.source === "local" && fav.exists === false;
               return (
                 <div
-                  key={fav.id}
+                  key={JSON.stringify([fav.source, fav.id, fav.path_or_key])}
                   onClick={() => handleOpenAlbum(fav)}
                   onContextMenu={event => { if (!isMissing) queueActions.open(event, albumRequest(fav)); }}
                   className={`group flex flex-col cursor-pointer ${isMissing ? "opacity-60" : ""}`}
@@ -411,6 +439,11 @@ export const FavoritesView: React.FC<Props> = ({ config, onFavoritesChanged, isP
                         className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
                         loading="lazy"
                       />
+                    ) : fav.source === "local" && sqliteBacked ? (
+                      <FavoriteLocalArtwork favorite={fav} album={sqliteAlbumForFavorite(fav)}
+                        localAlbums={localAlbums} artworkReady={sqliteArtworkReady} alt={fav.title}
+                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                        fallback={<div className="absolute inset-0 flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]"><Disc3 size={40} /></div>} />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-[color:var(--theme-fg-faint,#444444)]">
                         <Disc3 size={40} />

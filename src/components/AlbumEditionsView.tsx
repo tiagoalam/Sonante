@@ -9,6 +9,7 @@ import type { SelectedArtist } from '../types/plex';
 import type { SourceReadiness } from '../utils/sourceReadiness';
 import { sourceEnabled } from '../utils/musicSources';
 import { editionWorkKey, filterEditionGroups, groupAlbumEditions, type EditionAnchor, type EditionEntry, type EditionLane, type EditionSource } from '../utils/albumEditions';
+import { activateEditionAvailability, publishVerifiedEditionAvailability } from '../utils/albumEditionAvailability';
 import { analyzeEditionGroup, checkEditionCandidates, compareEditionProfiles, editionCandidateKey, editionComparisonEntries, verifiedEditionGroups, type EditionProfile, type VerifiedEditionGroup } from '../utils/albumEditionAnalysis';
 import { cachedEditionProfiles, editionArchiveAvailable, restoreEditionProfiles, editionReadScope, invalidateEditionProfiles, readEditionProfile, loadEditionSource } from '../services/albumEditions';
 import { LibrarySourceTabs } from './LibrarySourceTabs';
@@ -84,6 +85,13 @@ export function SourceAlbumEditionsView({ config, available, active, status, anc
   // track correspondence AND edition evidence can publish a result.
   const candidates = useMemo(() => groups.filter(group => group.entries.length > 1), [groups]);
   const currentList = listCheck?.context === context ? listCheck : null;
+  useEffect(() => { activateEditionAvailability(source, context); }, [source, context]);
+  useEffect(() => {
+    const albumIds = [...currentList?.matches.values() ?? []].flatMap(matches => matches.flatMap(match => match.group.entries
+      .filter(entry => entry.source === source)
+      .map(entry => entry.source === 'plex' ? entry.album.rating_key : entry.album.id)));
+    publishVerifiedEditionAvailability(source, context, albumIds);
+  }, [source, context, currentList]);
   const families = useMemo(() => [...currentList?.matches.values() ?? []].flat(), [currentList]);
   const suggestions = useMemo(() => {
     const byKey = new Map(families.map(match => [match.group.key, match]));

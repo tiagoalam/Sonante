@@ -111,7 +111,9 @@ impl State {
             enabled: state
                 .worker
                 .as_ref()
-                .is_some_and(|worker| !worker.stop.load(Ordering::SeqCst)),
+                .is_some_and(|worker| {
+                    !worker.stop.load(Ordering::SeqCst) && !worker.join.is_finished()
+                }),
             name: if state.prefs.name.is_empty() {
                 "Sonante".into()
             } else {

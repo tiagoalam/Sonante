@@ -1,0 +1,4 @@
+import test from 'node:test';import assert from 'node:assert/strict';import{createWindowsBridge}from'../src/compat.ts';
+for(const[command,args]of[['get_remote_control',{}],['set_remote_control',{enabled:true,port:8787}],['pair_remote_control',{}],['revoke_remote_control',{}],['remote_control_qr',{url:'http://127.0.0.1:8787'}]]){
+ test(`Windows forwards the original ${command} command and exact response without configuring audio`,async()=>{const calls=[];const expected={enabled:command!=='revoke_remote_control',requested_enabled:true,port:8787,urls:['http://127.0.0.1:8787'],code:null,devices:[]};const bridge=createWindowsBridge(async(name,actual)=>{calls.push([name,actual]);return expected},()=>({getItem(){throw Error('No web storage')},setItem(){throw Error('No web storage')}}));assert.equal(await bridge(command,args),expected);assert.deepEqual(calls,[[command,args]]);});
+}

@@ -19,6 +19,57 @@ test("local artwork wins and online is not called", async () => {
   assert.equal(online, 0);
 });
 
+test("a generation-scoped persisted SQLite thumbnail avoids rereading its source", async () => {
+  let reads = 0;
+  const resolver = new LocalArtworkResolver(async () => { reads++; return "network-cover"; }, async () => assert.fail("online disabled"));
+  resolver.setContext(false, [album]);
+  resolver.seedPersistedLocal(album.id, "persisted-thumbnail");
+  assert.equal(await resolver.resolve(album, false, false), "persisted-thumbnail");
+  assert.equal(resolver.getSource(album.id), "local");
+  assert.equal(reads, 0);
+});
+
+test("playback can upgrade a persisted SQLite presentation thumbnail to full source artwork", async () => {
+  let reads = 0;
+  const resolver = new LocalArtworkResolver(async () => { reads++; return "original-source-art"; }, async () => assert.fail("online disabled"));
+  resolver.setContext(false, [album]);
+  resolver.seedPersistedLocal(album.id, "small-persisted-thumbnail");
+  assert.equal(await resolver.resolve(album, false, false, undefined, true, false, true), "original-source-art");
+  assert.equal(reads, 1);
+  assert.equal(resolver.get(album.id), "original-source-art");
+  assert.equal(await resolver.resolve(album, false, false), "original-source-art", "later cards reuse the upgraded image");
+  assert.equal(reads, 1);
+});
+
+test("a browser remount cannot replace upgraded source artwork with its saved thumbnail", async () => {
+  const resolver = new LocalArtworkResolver(async () => "original-source-art", async () => null);
+  resolver.setContext(false, [album]);
+  resolver.seedPersistedLocal(album.id, "small-preview");
+  await resolver.resolve(album, false, false, undefined, true, false, true);
+  resolver.seedPersistedLocal(album.id, "small-preview");
+  assert.equal(resolver.get(album.id), "original-source-art");
+});
+
+test("a changed SQLite catalog drops session-local covers before generation-scoped thumbnails are reseeded", () => {
+  const resolver = new LocalArtworkResolver(async () => null, async () => null);
+  resolver.setContext(false, [album]);
+  resolver.seedPersistedLocal(album.id, "old-generation-cover");
+  resolver.clearLocalCovers();
+  assert.equal(resolver.get(album.id), null);
+  assert.equal(resolver.getSource(album.id), null);
+});
+
+test("SQLite browser and Explore seed persisted thumbnails before scheduling source reads", () => {
+  const browser = readFileSync(new URL("../components/LocalBrowserView.tsx", import.meta.url), "utf8");
+  const explore = readFileSync(new URL("../components/ExploreView.tsx", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(browser, /sqliteBacked \? localAlbumThumbnails\.get\(album\) : null[\s\S]*seedPersistedLocal/);
+  assert.match(browser, /sqliteBacked \? localAlbumThumbnails\.get\(selectedAlbum\) : null[\s\S]*seedPersistedLocal[\s\S]*return;/);
+  assert.match(explore, /sqliteBacked && entry\.source === "local" \? localAlbumThumbnails\.get\(entry\.album\) : null[\s\S]*seedPersistedLocal/);
+  assert.match(app, /<ExploreView context=\{exploreContext\} sqliteBacked=\{sqliteMode\}/);
+  assert.match(app, /if \(sqliteMode && sqliteArtworkAlbumsRef\.current !== localCatalog\.albums\)[\s\S]*localArtworkResolver\.clearLocalCovers\(\)/);
+});
+
 test("online waits for all discs and is skipped when disabled or updating", async () => {
   const paths = [];
   let online = 0;
@@ -89,6 +140,20 @@ test("fast scrolling skips abandoned queued cards without increasing the two-req
   await Promise.all([...first, ...abandoned]);
   assert.equal(await visible, "cover:7");
   assert.deepEqual(calls, ["0", "1", "7"]);
+});
+
+test("visible artwork reads jump ahead of queued Windows background prefetch without exceeding concurrency", async () => {
+  const gates=[pending(),pending()],calls=[];
+  const albums=Array.from({length:4},(_,index)=>({...album,id:String(index),folder_path:String(index),discs:[]}));
+  const resolver=new LocalArtworkResolver(async path=>{calls.push(path);const index=Number(path);return index<2?gates[index].promise:`cover:${path}`},async()=>assert.fail("prefetch must not query online"));
+  const visibleFirst=albums.slice(0,2).map(item=>resolver.resolve(item,false,false));
+  const background=resolver.resolve(albums[2],false,false,undefined,true,true);
+  const newlyVisible=resolver.resolve(albums[3],false,false);
+  assert.deepEqual(calls,["0","1"]);
+  gates.forEach(gate=>gate.resolve(null));
+  await Promise.all([...visibleFirst,background]);
+  assert.equal(await newlyVisible,"cover:3");
+  assert.deepEqual(calls,["0","1","3","2"]);
 });
 
 test("a background or remounted consumer keeps a shared queued lookup alive", async () => {
@@ -243,12 +308,14 @@ test("cards and selected album retain covers, invalidate obsolete reads and resu
   assert.match(view, /isLibraryUpdating=\{artworkBlocked\}/);
   assert.match(view, /catalog\.albums !== version \|\| !catalog\.albums\.includes\(album\)/);
   assert.match(view, /if \(!selectedAlbum \|\| artworkBlocked\) return/);
+  assert.match(view, /const persistedThumbnail = sqliteBacked \? localAlbumThumbnails\.get\(selectedAlbum\) : null[\s\S]*if \(persistedThumbnail\)[\s\S]*return;/);
   assert.match(view, /if \(active && cover\) setAlbumCover\(cover\)/);
-  assert.equal((view.match(/getLocalAlbumCover\([^\n]+, \(\) => active && (?:readEnabledRef|browserReads)\.current\)/g) ?? []).length, 2, "both cards and album details must invalidate their consumer on cleanup");
-  assert.match(view, /return \(\) => \{ active = false; \};\s*\}, \[selectedAlbum, artworkBlocked\]/);
+  assert.equal((view.match(/getLocalAlbumCover\(/g) ?? []).length, 3, "definition, cards and selected album share the bounded resolver");
+  assert.match(view, /sqliteBacked \? false : onlineEnabledRef\.current/);
+  assert.match(view, /return \(\) => \{ active = false; \};\s*\}, \[selectedAlbum, artworkBlocked, sqliteBacked\]/);
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   assert.match(app, /localArtworkResolver\.setContext\(blocked, localCatalog\.albums\)/);
-  assert.match(app, /localArtworkEnrichment\.setUpdating\(blocked \|\| localCatalog\.manualCheckPlayback === true\)/);
+  assert.match(app, /localArtworkEnrichment\.setUpdating\(sqliteMode \|\| blocked \|\| localCatalog\.manualCheckPlayback === true\)/);
   assert.match(app, /useLayoutEffect\(\(\) => \{\s*\/\/ Publish the artwork gate/);
 });
 

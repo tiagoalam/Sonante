@@ -1,0 +1,15 @@
+{
+  "version": "4.1.3-sonante-windows-pcm-wasapi-analyzer-candidate-3",
+  "sourceVersion": "4.1.3",
+  "sha256": "3f6c997114204aba09368eb8b198f8c6ea6a8768d10ad463b560bfb54fbfac1d",
+  "candidate": true,
+  "nativeValidated": false,
+  "scope": "Windows private PCM Stdin/WASAPI Shared with optional bounded observer using original Linux0.6.2 analyzer math; DSP/render/audio reader unchanged; native/hardware validation pending",
+  "sourceMaterialsFile": "camilla-source-candidate-3.tar.xz",
+  "sourceMaterialsSha256": "f2cac4d044f92eddcc0ffd1f4710bae8b9170e1156bc25ba73ba2bae1385565d",
+  "sourcePatchSha256": "0912d0a6a1fbfa19a96f06fb3a83eecdf0482bfdbde1e28b5ec4a54038f07743",
+  "upstreamCommit": "05e9cfcdf43c0dfe078ed3feb8af4c8bd701fd74",
+  "base2SourceMaterialsSha256": "6a3e932dabbe60e0712f0e85b7b7cd94b63bb1bc97907cd7d462691c8a7f09dd",
+  "analyzerProtocol": 1,
+  "analyzerScope": "Full-mode EQ input PCM only; metrics from sole existing reader, not output-device measurement"
+}

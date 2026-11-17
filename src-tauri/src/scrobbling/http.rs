@@ -193,9 +193,14 @@ fn decode_reply(provider: Provider, status: u16, body: &[u8]) -> Result<Value, F
 pub struct Api {
     client: reqwest::Client,
     next: [Instant; 2],
+    lastfm_endpoint: String,
+    listenbrainz_endpoint: String,
 }
 impl Api {
     pub fn new() -> Result<Self, Failure> {
+        Self::with_endpoints(LASTFM, LISTENBRAINZ)
+    }
+    fn with_endpoints(lastfm_endpoint: &str, listenbrainz_endpoint: &str) -> Result<Self, Failure> {
         let client = reqwest::Client::builder()
             .user_agent(concat!(
                 "Sonante/",
@@ -210,6 +215,8 @@ impl Api {
         Ok(Self {
             client,
             next: [Instant::now(); 2],
+            lastfm_endpoint: lastfm_endpoint.into(),
+            listenbrainz_endpoint: listenbrainz_endpoint.into(),
         })
     }
     async fn request(
@@ -295,7 +302,7 @@ impl Api {
         let sig = signature(&params, secret);
         params.insert("api_sig".into(), sig);
         params.insert("format".into(), "json".into());
-        let request = self.client.post(LASTFM).form(&params);
+        let request = self.client.post(&self.lastfm_endpoint).form(&params);
         let response = self.request(Provider::Lastfm, request).await;
         let result = match response {
             Ok(value) => {
@@ -332,7 +339,7 @@ impl Api {
         header.set_sensitive(true);
         let request = self
             .client
-            .get(format!("{LISTENBRAINZ}validate-token"))
+            .get(format!("{}validate-token", self.listenbrainz_endpoint))
             .header(reqwest::header::AUTHORIZATION, header);
         let v = self.request(Provider::Listenbrainz, request).await?;
         if v.get("valid").and_then(Value::as_bool) != Some(true) {
@@ -355,7 +362,7 @@ impl Api {
         header.set_sensitive(true);
         let request = self
             .client
-            .post(format!("{LISTENBRAINZ}submit-listens"))
+            .post(format!("{}submit-listens", self.listenbrainz_endpoint))
             .header(reqwest::header::AUTHORIZATION, header)
             .json(&lb_payload(track, timestamp));
         let v = self.request(Provider::Listenbrainz, request).await?;
@@ -370,6 +377,207 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{io::{Read, Write}, net::TcpListener, thread};
+
+    // A one-request provider fixture bound only to loopback and an OS-assigned
+    // port. No test can reach either public provider endpoint.
+    fn mock_provider(
+        status: u16,
+        body: impl Into<String>,
+    ) -> (String, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let body = body.into();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0u8; 2048];
+                let count = stream.read(&mut chunk).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + length {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            request
+        });
+        (endpoint, worker)
+    }
+
+    fn request_parts(request: &[u8]) -> (String, Vec<u8>) {
+        let split = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        (
+            String::from_utf8_lossy(&request[..split]).into_owned(),
+            request[split + 4..].to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn lastfm_scrobble_request_uses_signed_whitelisted_metadata_on_loopback_fixture() {
+        let (base, server) = mock_provider(200, r#"{"scrobbles":{"@attr":{"accepted":1,"ignored":0}}}"#);
+        let endpoint = format!("{base}2.0/");
+        let mut api = Api::with_endpoints(&endpoint, &format!("{base}1/")).unwrap();
+        let secret = "b".repeat(32);
+        api.lastfm(
+            &"a".repeat(32),
+            &secret,
+            Some(&"c".repeat(32)),
+            "track.scrobble",
+            vec![
+                ("artist", "Fixture Artist".into()),
+                ("track", "Fixture Track".into()),
+                ("album", "Fixture Album".into()),
+                ("duration", "180".into()),
+                ("timestamp", "1700000000".into()),
+            ],
+        )
+        .await
+        .unwrap();
+        let request = server.join().unwrap();
+        let (headers, body) = request_parts(&request);
+        assert!(headers.starts_with("POST /2.0/ HTTP/1.1"));
+        let params = reqwest::Url::parse(&format!(
+            "http://fixture.invalid/?{}",
+            String::from_utf8(body).unwrap()
+        ))
+        .unwrap()
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<BTreeMap<_, _>>();
+        assert_eq!(params["method"], "track.scrobble");
+        assert_eq!(params["artist"], "Fixture Artist");
+        assert_eq!(params["track"], "Fixture Track");
+        assert_eq!(params["album"], "Fixture Album");
+        assert_eq!(params["timestamp"], "1700000000");
+        assert_eq!(params["api_sig"], signature(&params, &secret));
+        for private in ["sqlite-track://", "/home/", "source-17", "track-91"] {
+            assert!(!String::from_utf8_lossy(&request).contains(private));
+        }
+    }
+
+    #[tokio::test]
+    async fn listenbrainz_validation_and_submission_use_simulated_loopback_provider() {
+        let (base, validate_server) = mock_provider(200, r#"{"valid":true,"user_name":"fixture-user"}"#);
+        let endpoint = format!("{base}1/");
+        let mut api = Api::with_endpoints(&format!("{base}2.0/"), &endpoint).unwrap();
+        assert_eq!(api.validate_lb("fixture-token-123").await.unwrap(), "fixture-user");
+        let validate = validate_server.join().unwrap();
+        let validate_headers = String::from_utf8_lossy(&validate);
+        assert!(validate_headers.starts_with("GET /1/validate-token HTTP/1.1"));
+        assert!(validate_headers.to_ascii_lowercase().contains("authorization: token fixture-token-123"));
+
+        let (base, submit_server) = mock_provider(200, r#"{"status":"ok"}"#);
+        let endpoint = format!("{base}1/");
+        let mut api = Api::with_endpoints(&format!("{base}2.0/"), &endpoint).unwrap();
+        let track = Track::new("Fixture Artist", "Fixture Track", "Fixture Album", 180.).unwrap();
+        api.submit_lb("fixture-token-123", &track, Some(1_700_000_000))
+            .await
+            .unwrap();
+        let submit = submit_server.join().unwrap();
+        let (headers, body) = request_parts(&submit);
+        assert!(headers.starts_with("POST /1/submit-listens HTTP/1.1"));
+        assert!(headers.to_ascii_lowercase().contains("authorization: token fixture-token-123"));
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let listen = &payload["payload"][0];
+        assert_eq!(listen["listened_at"], 1_700_000_000);
+        assert_eq!(listen["track_metadata"]["track_name"], "Fixture Track");
+        assert_eq!(listen["track_metadata"]["artist_name"], "Fixture Artist");
+        assert_eq!(listen["track_metadata"]["release_name"], "Fixture Album");
+        for private in ["sqlite-track://", "/home/", "source-17", "track-91"] {
+            assert!(!String::from_utf8_lossy(&submit).contains(private));
+        }
+    }
+
+    #[tokio::test]
+    async fn lastfm_authorization_token_and_session_are_exercised_against_loopback_fixtures() {
+        let key = "a".repeat(32);
+        let secret = "b".repeat(32);
+        let (base, token_server) =
+            mock_provider(200, format!(r#"{{"token":"{}"}}"#, "g".repeat(32)));
+        let endpoint = format!("{base}2.0/");
+        let mut api = Api::with_endpoints(&endpoint, &format!("{base}1/")).unwrap();
+        let token = api
+            .lastfm(&key, &secret, None, "auth.getToken", vec![])
+            .await
+            .unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(token, "g".repeat(32));
+        let token_request = token_server.join().unwrap();
+        assert!(String::from_utf8_lossy(&token_request).starts_with("POST /2.0/ HTTP/1.1"));
+
+        let session = "h".repeat(32);
+        let body = format!(r#"{{"session":{{"key":"{session}","name":"fixture-user"}}}}"#);
+        let (base, session_server) = mock_provider(200, body);
+        let endpoint = format!("{base}2.0/");
+        let mut api = Api::with_endpoints(&endpoint, &format!("{base}1/")).unwrap();
+        let response = api
+            .lastfm(
+                &key,
+                &secret,
+                None,
+                "auth.getSession",
+                vec![("token", token.clone())],
+            )
+            .await
+            .unwrap();
+        let request = session_server.join().unwrap();
+        let (headers, body) = request_parts(&request);
+        assert!(headers.starts_with("POST /2.0/ HTTP/1.1"));
+        let params = reqwest::Url::parse(&format!(
+            "http://fixture.invalid/?{}",
+            String::from_utf8(body).unwrap()
+        ))
+        .unwrap()
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<BTreeMap<_, _>>();
+        assert_eq!(params["method"], "auth.getSession");
+        assert_eq!(params["token"], token);
+        assert_eq!(params["api_sig"], signature(&params, &secret));
+        assert_eq!(response["session"]["name"], "fixture-user");
+        assert_eq!(response["session"]["key"], session);
+    }
+
+    #[tokio::test]
+    async fn simulated_provider_failure_is_reported_without_retrying_or_contacting_external_hosts() {
+        let (base, server) = mock_provider(503, r#"{"error":"fixture"}"#);
+        let endpoint = format!("{base}2.0/");
+        let mut api = Api::with_endpoints(&endpoint, &format!("{base}1/")).unwrap();
+        let error = api
+            .lastfm("a".repeat(32).as_str(), "b".repeat(32).as_str(), None, "auth.getToken", vec![])
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "temporary");
+        let request = server.join().unwrap();
+        assert!(String::from_utf8_lossy(&request).starts_with("POST /2.0/ HTTP/1.1"));
+    }
+
     #[test]
     fn lastfm_non_hex_tokens_and_sessions_are_accepted_without_weakening_api_key_checks() {
         let token = "G".repeat(32);

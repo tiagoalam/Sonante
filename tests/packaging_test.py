@@ -20,14 +20,14 @@ validator_spec.loader.exec_module(rpm_inspect)
 
 
 class PackagingTests(unittest.TestCase):
-    def test_tray_indicator_is_optional_and_existing_runtime_is_preserved(self):
+    def test_private_mpd_runtime_does_not_install_the_system_daemon(self):
         cfg = json.loads(Path('src-tauri/tauri.conf.json').read_text())
         for fmt, indicator in [('deb', 'libayatana-appindicator3-1'), ('rpm', 'libappindicator-gtk3')]:
             with self.subTest(format=fmt):
                 package = cfg['bundle']['linux'][fmt]
                 self.assertEqual(package['recommends'].count(indicator), 1)
                 self.assertNotIn(indicator, package['depends'])
-                self.assertIn('mpd', package['depends'])
+                self.assertNotIn('mpd', package['depends'])
         metadata = subprocess.check_output([
             'bash', '-c', 'source sonante-arch/PKGBUILD\n'
             'printf "required:%s\\n" "${depends[@]}" "${makedepends[@]}"\n'
@@ -36,8 +36,68 @@ class PackagingTests(unittest.TestCase):
         entries = [line.partition(':') for line in metadata.splitlines()]
         required = [value for kind, _, value in entries if kind == 'required']
         optional = [value.split(':', 1)[0] for kind, _, value in entries if kind == 'optional']
+        self.assertNotIn('mpd', required)
         self.assertNotIn('libappindicator', required)
         self.assertEqual(optional.count('libappindicator'), 1)
+
+    def test_release_workflow_requires_a_fixed_candidate_commit(self):
+        release = Path('.github/workflows/release.yml').read_text()
+        ci = Path('.github/workflows/ci.yml').read_text()
+        self.assertRegex(release, r'candidate_sha:[\s\S]{0,180}required: true')
+        self.assertIn('candidate_sha: ${{ inputs.candidate_sha }}', release)
+        self.assertEqual(ci.count('ref: ${{ inputs.candidate_sha || github.sha }}'), 3)
+        self.assertEqual(ci.count('scripts/verify-candidate-source.py'), 3)
+        for checkout in ci.split('uses: actions/checkout@v4')[1:]:
+            block = checkout.split('      - name:', 1)[0]
+            self.assertIn('ref: ${{ inputs.candidate_sha || github.sha }}', block)
+            self.assertIn('fetch-depth: 0', block)
+        self.assertIn('sonante-0.7.0-candidate-${{ inputs.candidate_sha || github.sha }}', ci)
+        self.assertNotIn('actions/create-release', release + ci)
+
+    def test_candidate_source_gate_builds_exact_checked_out_full_sha(self):
+        script = Path('scripts/verify-candidate-source.py').resolve()
+        with tempfile.TemporaryDirectory(prefix='sn-candidate-source-') as directory:
+            root = Path(directory)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            subprocess.run(['git', '-C', str(root), 'config', 'user.name', 'Sonante test'], check=True)
+            subprocess.run(['git', '-C', str(root), 'config', 'user.email', 'test@example.invalid'], check=True)
+            (root / 'package.json').write_text('{"version":"0.7.0"}\n')
+            (root / 'payload.txt').write_text('first\n')
+            subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(root), 'commit', '-qm', 'first'], check=True)
+            first = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            (root / 'payload.txt').write_text('second\n')
+            subprocess.run(['git', '-C', str(root), 'commit', '-qam', 'second'], check=True)
+            second = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            subprocess.run(['git', '-C', str(root), 'checkout', '-q', '-b', 'divergent', first], check=True)
+            (root / 'divergent.txt').write_text('divergent\n')
+            subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(root), 'commit', '-qm', 'divergent'], check=True)
+            divergent = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            def verify(candidate, event):
+                return subprocess.run(['python3', str(script), '--repo', str(root),
+                                       '--candidate-sha', candidate, '--event-sha', event], capture_output=True)
+
+            # The ancestor commit exists, but a different checked-out tree
+            # must never be accepted as the candidate build input.
+            self.assertNotEqual(verify(first, second).returncode, 0)
+            self.assertNotEqual(verify(first[:12], second).returncode, 0)
+            self.assertNotEqual(verify('0' * 40, second).returncode, 0)
+            self.assertNotEqual(verify(divergent, second).returncode, 0)
+
+            # Match the workflow: explicitly check out the selected candidate
+            # and retain history for the event-branch ancestry check.
+            subprocess.run(['git', '-C', str(root), 'checkout', '-q', '--detach', first], check=True)
+            self.assertEqual(verify(first, second).returncode, 0)
+            self.assertNotEqual(verify(first, '0' * 40).returncode, 0)
+            subprocess.run(['git', '-C', str(root), 'checkout', '-q', '--detach', second], check=True)
+            self.assertNotEqual(verify(second, divergent).returncode, 0)
+
+            # A requested SHA absent from the repository is rejected.
+            self.assertNotEqual(verify('1' * 40, second).returncode, 0)
+            subprocess.run(['git', '-C', str(root), 'checkout', '-q', '--detach', second], check=True)
+            (root / 'untracked.txt').write_text('dirty\n')
+            self.assertNotEqual(verify(second, second).returncode, 0)
 
     def test_versions_and_runtime_contract(self):
         subprocess.run(['node', 'scripts/verify-packaging.mjs'], check=True)
@@ -73,7 +133,8 @@ class PackagingTests(unittest.TestCase):
             self.assertIn(value, authors)
         notices = Path('THIRD_PARTY_NOTICES').read_text()
         for value in ['ISC License', 'Lucide Icons and Contributors', 'Cole Bemis',
-                      'MPL-2.0', 'MIT License']:
+                      'MPL-2.0', 'MIT License', 'scarletbook-pcm 0.5.7',
+                      'MIT OR Apache-2.0', 'The scarletbook-rs authors']:
             self.assertIn(value, notices)
         self.assertIn('GPL-3.0-only', Path('packaging/debian-copyright').read_text())
 
@@ -143,8 +204,8 @@ class PackagingTests(unittest.TestCase):
             fake = root / 'tools'
             fake.mkdir()
             contents = 'usr/bin/sonante\nusr/share/applications/sonante.desktop\nusr/share/icons/hicolor/icon.png\nusr/share/licenses/sonante/LICENSE\nusr/share/doc/sonante/AUTHORS\nusr/share/doc/sonante/THIRD_PARTY_NOTICES'
-            deb_dependencies = 'mpd, alsa-utils, xdg-utils, xdg-desktop-portal, libasound2, libssl3'
-            rpm_dependencies = 'mpd\nalsa-utils\nxdg-utils\nxdg-desktop-portal\nalsa-lib\nopenssl-libs\nlibssl.so.3()(64bit)'
+            deb_dependencies = 'alsa-utils, xdg-utils, xdg-desktop-portal, libasound2, libssl3'
+            rpm_dependencies = 'alsa-utils\nxdg-utils\nxdg-desktop-portal\nalsa-lib\nopenssl-libs\nlibssl.so.3()(64bit)'
             tool = f'''#!/usr/bin/env python3
 import os, pathlib, sys
 args = sys.argv[1:]

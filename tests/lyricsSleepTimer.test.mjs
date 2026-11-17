@@ -128,7 +128,9 @@ test('actual timer controls expose options, direct cancellation, failure and cle
   const {SleepTimerControl}=compile('components/SleepTimerControl.tsx',{
    react:{...h.react,useSyncExternalStore:()=>view},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../services/sleepTimer':{sleepTimer:{subscribe(){},getSnapshot:()=>view,change:value=>changes.push(value),refresh:async()=>{}}},'../utils/sleepTimer':{remainingSleepMinutes},'./sleepTimer.css':{}
   });
-  const render=()=>h.render(()=>SleepTimerControl({}));let tree=render();assert.match(text(tree),/15 min/);assert.equal(intervals.size,1);
+  const render=(compact=false)=>h.render(()=>SleepTimerControl({compact}));let tree=render();assert.match(text(tree),/15 min/);assert.equal(intervals.size,1);
+  const compactTree=render(true),summary=nodes(compactTree,n=>n.type==='summary')[0];assert.match(text(compactTree),/15m/);assert.match(summary.props.className,/sleep-timer-summary-active/);
+  const timerCss=readFileSync(new URL('../src/components/sleepTimer.css',import.meta.url),'utf8');assert.match(timerCss,/sleep-timer-compact summary \{[^}]*width: 36px; height: 36px;[^}]*border-color/);
   const buttons=nodes(tree,n=>n.type==='button');for(const count of [15,30,60])buttons.find(n=>text(n)===`Parar em ${count} minutos`).props.onClick();
   buttons.find(n=>n.props['aria-label']==='Cancelar temporizador').props.onClick();assert.deepEqual(changes,[15,30,60,null]);
   view={...view,timer:{revision:2,phase:'failed',remaining_ms:0}};tree=render();assert.equal(intervals.size,0);assert.equal(nodes(tree,n=>n.props?.role==='alert').length,1);

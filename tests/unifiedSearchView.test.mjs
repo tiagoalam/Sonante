@@ -48,6 +48,8 @@ function fixture(language = "en", overrides = {}) {
     close() { host.slots.forEach(slot => slot?.cleanup?.()); },
   };
   const LocalView = () => React.createElement("div", { "data-local-detail": true });
+  const SearchArtwork = props => React.createElement("span", { "data-search-artwork": props.row.source,
+    "data-artwork-id": props.row.source === "plex" ? props.row.album.rating_key : props.row.source === "navidrome" ? props.row.album.id : props.row.album.id });
   const AlbumView = props => React.createElement("div", { "data-plex-album-detail": true }, React.createElement("button", { onClick: props.onBack }, props.backLabel ?? "Back to library"));
   const ArtistView = props => React.createElement("div", { "data-plex-artist-detail": true }, React.createElement("button", { onClick: props.onBack }, props.backLabel ?? "Back to library"));
   const dependencies = {...passiveQueueInsertion, react: { __esModule: true, ...React, ...hooks, default: React }, "react/jsx-runtime": jsx,
@@ -58,6 +60,7 @@ function fixture(language = "en", overrides = {}) {
     "../utils/localAlbumCatalog": { confirmedCatalogPlaybackAllowed }, "../utils/frontendDiagnostics": { logError: (...args) => errors.push(args) },
     "../utils/usePlaybackAttempt": { usePlaybackAttempt: () => ({ failure: null, run: action => action({ current: () => true }) }) },
     "./PlaybackRequestNotice": { PlaybackRequestNotice: () => null }, "./LocalBrowserView": { LocalBrowserView: LocalView },
+    "./SearchAlbumArtwork": { SearchAlbumArtwork: SearchArtwork },
     "./AlbumView": { AlbumView }, "./ArtistView": { ArtistView },
     "../services/navidrome": {navidromeService:{status:()=>{calls.push(["nav-status"]);return host.navStatus();},search:(...args)=>{calls.push(["nav-search",...args]);return host.readNav(...args);}}},
     "../utils/navidromeTracks": {navidromeQueueTrack},
@@ -68,7 +71,7 @@ function fixture(language = "en", overrides = {}) {
     fn => { const id = ++timerId; timers.set(id, fn); return id; }, id => timers.delete(id),
     { addEventListener: (name, fn) => events.set(name, fn), removeEventListener: name => events.delete(name) }, fn => fn());
   const View = exports.UnifiedSearchView;
-  host.paint(); return { host, calls, errors, t, LocalView, AlbumView, ArtistView };
+  host.paint(); return { host, calls, errors, t, LocalView, AlbumView, ArtistView, SearchArtwork };
 }
 
 test("opening unified Search performs no catalog, network or track reads until a valid query", async () => {
@@ -84,6 +87,22 @@ test("cached Local albums appear immediately while track/Plex reads are pending;
   plex.reject(Error("private network diagnostic")); tracks.resolve({ tracks: [], limited: false }); await flush(); tree = host.paint();
   const html = renderToStaticMarkup(tree); assert.match(html, /Open: Live · Local/); assert.ok(html.includes(t("unifiedSearch.partialError")));
   assert.doesNotMatch(html, /private network diagnostic/); assert.equal(errors.length, 1); host.close();
+});
+
+test("SQLite Local search queries the persisted catalog without requiring an available player", async () => {
+  const { host, calls } = fixture("en", {
+    props: {
+      sqliteBacked: true,
+      isPlaybackAvailable: false,
+      config: { local_folders: [], plex_token: "", plex_server_id: "", online_artwork_enabled: false },
+    },
+    readLocal: async () => ({ tracks: [{ item_type: "file", path: "sqlite-track://1/fixture", name: "SQLite result" }], limited: false }),
+  });
+  host.type("SQLite result");
+  await host.tick();
+  assert.deepEqual(calls.map(call => call[0]), ["local"]);
+  assert.match(renderToStaticMarkup(host.tree), /SQLite result/);
+  host.close();
 });
 test("result navigation retains query and scroll; track clicks alone submit the correct source metadata", async () => {
   const { host, calls, LocalView } = fixture("en", { readLocal: async () => ({ tracks: [{ item_type: "file", path: "Source/Live/image.cue/track0001", name: "Live cue", title: "Live cue", duration: 1801 }], limited: false }) });
@@ -110,6 +129,30 @@ test("source/type filters avoid irrelevant calls and both languages render witho
     nodes(host.tree, node => node.type === "button" && node.props.children === t("plex.artists"))[0].props.onClick(); host.paint(); await host.tick();
     assert.deepEqual(calls.map(call => call[0]), ["local"]); assert.doesNotMatch(renderToStaticMarkup(host.tree), /unifiedSearch\.|common\.albumsLabel|common\.artistsLabel/); host.close();
   }
+});
+
+test("album search rows receive source-specific artwork while artist and track rows keep their icons", async () => {
+  const plexImage = { server_id: "server", path: "/library/metadata/remote/thumb/1" };
+  const nav = { connection_id: "fixture-nav", account_id: "a".repeat(64), albums: [{ id: "nav-album", title: "Live Nav", artist: "Nav Artist", cover_id: "nav-cover" }],
+    artists: [{ id: "nav-artist", name: "Live Nav Artist", album_count: 1 }],
+    songs: [{ id: "nav-track", title: "Live Nav Track", artist: "Nav Artist", album: "Live Nav", duration: 120, disc: 1, track: 1, album_id: "nav-album" }] };
+  const { host, SearchArtwork } = fixture("en", {
+    props: { navidromeConfigured: true },
+    readLocal: async () => ({ tracks: [{ item_type: "file", path: "Source/Live/track.flac", name: "Live Local Track", title: "Live Local Track" }], limited: false }),
+    readPlex: async () => ({ albums: [{ rating_key: "remote", title: "Live Plex", artist: "Plex Artist", server_id: "server", thumb: plexImage }],
+      artists: [{ rating_key: "plex-artist", name: "Live Plex Artist", server_id: "server" }],
+      tracks: [{ rating_key: "plex-track", title: "Live Plex Track", media_locator: { kind: "plex", server_id: "server", part_key: "/fixture" } }] }),
+    readNav: async () => nav,
+  });
+  host.type("Live"); await host.tick();
+  const artwork = nodes(host.tree, node => node.type === SearchArtwork);
+  assert.deepEqual(artwork.map(node => [node.props.row.source, node.props.row.kind]).sort(), [
+    ["local", "album"], ["navidrome", "album"], ["plex", "album"],
+  ].sort());
+  assert.ok(nodes(host.tree, node => node.props?.["data-search-result"] === "local:track:Source/Live/track.flac").length);
+  assert.ok(nodes(host.tree, node => node.props?.["data-search-result"] === "plex:track:plex-track").length);
+  assert.ok(nodes(host.tree, node => node.props?.["data-search-result"] === `navidrome:${nav.account_id}:track:nav-track`).length);
+  host.close();
 });
 
 test("Plex connection replacement fences the old response and serializes the next query", async () => {

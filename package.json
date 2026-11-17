@@ -1,15 +1,16 @@
 {
   "name": "sonante",
   "private": true,
-  "version": "0.6.3",
+  "version": "0.7.0",
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "dev": "vite --configLoader runner",
+    "build": "tsc && vite build --configLoader runner",
     "test:frontend": "node --test src/utils/*.test.mjs tests/*.test.mjs",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "node scripts/tauri-dev.mjs",
+    "build:windows-preview": "tsc -p windows/tsconfig.json && vite build --config windows/vite.config.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

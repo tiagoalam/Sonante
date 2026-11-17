@@ -52,11 +52,11 @@ export function ScrobblingSetting() {
     finally { active.current = false; if (generation.current === own) setBusy(false); }
   };
   const link = (url: string) => { const own = generation.current; void openUrl(url).catch(() => { if (generation.current === own) setError("browser_link"); }); };
-  const disabled = busy || !status?.ready || status.storage_error;
+  const disabled = busy || !status?.ready || !status.service_available || status.storage_error;
   const service = (provider: ScrobblingProvider) => {
     const current = status?.[provider]; const lastfm = provider === "lastfm";
     return <section key={provider} className="min-w-0 space-y-3 rounded-xl border border-[color:var(--theme-border-soft,#333333)] p-4" aria-labelledby={`${id}-${provider}`}>
-      <div className="flex flex-wrap items-center justify-between gap-2"><h4 id={`${id}-${provider}`} className="font-semibold text-sm">{lastfm ? "Last.fm" : "ListenBrainz"}</h4>
+      <div className="flex flex-wrap items-center justify-between gap-2"><h4 id={`${id}-${provider}`} className="settings-subsection-title">{lastfm ? "Last.fm" : "ListenBrainz"}</h4>
         <button type="button" className="inline-flex items-center gap-1 text-xs underline text-[color:var(--theme-fg-muted,#aaaaaa)]" onClick={() => link(lastfm ? "https://www.last.fm/api/account/create" : "https://listenbrainz.org/settings/")}>{t(lastfm ? "scrobbling.appCredentials" : "scrobbling.getToken")}<ExternalLink size={12}/></button>
       </div>
       {current?.connected && <>
@@ -84,11 +84,12 @@ export function ScrobblingSetting() {
       {current?.error && <p role="status" className="text-xs leading-relaxed text-[color:var(--theme-fg-accent,#E5A00D)]">{t(`scrobbling.errors.${scrobblingError(current.error)}`)}</p>}
     </section>;
   };
-  return <fieldset className="space-y-3 border-t border-[color:var(--theme-border-soft,#333333)] pt-4" aria-describedby={`${id}-help`}>
-    <legend className="flex items-center gap-2 text-sm font-semibold"><Music2 size={16}/>{t("scrobbling.title")}</legend>
+  return <fieldset data-settings-section="scrobbling" className="settings-section" aria-describedby={`${id}-help`}>
+    <legend className="settings-section-title"><Music2 size={14}/>{t("scrobbling.title")}</legend>
     <p id={`${id}-help`} className="text-xs leading-relaxed text-[color:var(--theme-fg-muted,#aaaaaa)]">{t("scrobbling.help")}</p>
     <p className="text-xs leading-relaxed text-[color:var(--theme-fg-muted,#aaaaaa)]">{t("scrobbling.threshold")}</p>
     {(!status?.ready || busy) && !error && <p role="status" className="flex items-center gap-2 text-xs"><LoaderCircle size={14} className="animate-spin"/>{t(busy ? "scrobbling.working" : "scrobbling.loading")}</p>}
+    {status?.ready && !status.service_available && <p role="alert" className="text-xs text-[color:var(--theme-fg-error,#ff9999)]">{t("scrobbling.errors.service_unavailable")}</p>}
     {status?.storage_error && <p role="alert" className="text-xs text-[color:var(--theme-fg-error,#ff9999)]">{t("scrobbling.errors.storage_unavailable")}</p>}
     {error && <p role="alert" className="text-xs text-[color:var(--theme-fg-error,#ff9999)]">{t(`scrobbling.errors.${error}`)}</p>}
     <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">{service("lastfm")}{service("listenbrainz")}</div>

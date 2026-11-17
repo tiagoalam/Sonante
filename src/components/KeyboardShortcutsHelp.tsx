@@ -23,8 +23,8 @@ export function KeyboardShortcutsHelp() {
     <button ref={trigger} type="button" aria-haspopup="dialog" aria-expanded={open}
       onClick={event => { event.stopPropagation(); setOpen(true); }}
       onKeyDown={event => { if (event.key === " " || event.key === "Enter") event.stopPropagation(); }}
-      className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-[color:var(--theme-fg-muted,#8A8A8A)] hover:bg-[var(--theme-surface-raised,#202020)] hover:text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:outline focus-visible:outline-[color:var(--theme-border-accent,#E5A00D)]">
-      <Keyboard size={17} aria-hidden="true" /><span>{t("shortcuts.title")}</span>
+      className="group relative flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] font-medium text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer hover:bg-[var(--theme-surface-raised,#202020)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]">
+      <Keyboard size={17} aria-hidden="true" className="shrink-0 text-[color:var(--theme-fg-primary,#ffffff)]" /><span className="min-w-0 flex-1 truncate">{t("shortcuts.title")}</span>
     </button>
     {open && <dialog ref={dialog} aria-labelledby={title} aria-modal="true" tabIndex={-1}
       onKeyDown={event => event.stopPropagation()} onCancel={event => { event.preventDefault(); setOpen(false); }} onClose={() => setOpen(false)}

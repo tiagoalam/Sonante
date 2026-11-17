@@ -1,0 +1,8 @@
+Music Player Daemon 0.24.18 — official Windows x64 binary
+Copyright: see AUTHORS and COPYING. MPD is GPL-2.0-or-later.
+Sonante does not patch this runtime. Binary and exact upstream source archive
+are bundled under runtimes/mpd; pinned hashes and origin: windows/mpd-runtime.json.
+Source and Windows build recipes: https://github.com/MusicPlayerDaemon/MPD/tree/v0.24.18
+Upstream Windows cross-build scripts are in win32/ of the bundled source.
+This is a private testing package. A complete distribution audit of statically
+linked third-party dependencies remains necessary before any public release.

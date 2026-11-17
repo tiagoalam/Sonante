@@ -28,6 +28,7 @@ static TAG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalTrackTagsErrorCode {
+    ExperimentalFeaturesDisabled,
     InvalidLocalPath,
     OutsideConfiguredRoots,
     FileNotFound,
@@ -75,6 +76,13 @@ impl LocalTrackTagsError {
         }
     }
 
+    pub(crate) fn sqlite_doctor_issue(
+        code: LocalTrackTagsErrorCode,
+        message: &str,
+    ) -> Self {
+        Self::new(code, message)
+    }
+
     pub(crate) fn state_unavailable() -> Self {
         Self::new(
             LocalTrackTagsErrorCode::ReadFailed,
@@ -100,6 +108,13 @@ impl LocalTrackTagsError {
         Self::new(
             LocalTrackTagsErrorCode::ReadFailed,
             "O álbum local não foi encontrado no catálogo atual.",
+        )
+    }
+
+    pub(crate) fn experimental_features_disabled() -> Self {
+        Self::new(
+            LocalTrackTagsErrorCode::ExperimentalFeaturesDisabled,
+            "Ative Acesso Antecipado nas configurações para usar o editor SQLite de tags.",
         )
     }
 
@@ -172,6 +187,8 @@ pub struct LocalAlbumTagFields {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocalAlbumTagInspection {
     pub album_id: String,
+    #[serde(default)]
+    pub catalog_generation: Option<i64>,
     pub tracks: Vec<LocalAlbumTrackInspection>,
     pub fields: LocalAlbumTagFields,
     pub physical_track_count: usize,
@@ -201,6 +218,8 @@ pub struct LocalAlbumTagBatchUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LocalAlbumTagBatchPreflightRequest {
     pub album_id: String,
+    #[serde(default)]
+    pub catalog_generation: Option<i64>,
     pub tracks: Vec<LocalAlbumTagBatchExpectedTrack>,
     pub update: LocalAlbumTagBatchUpdate,
 }
@@ -265,6 +284,7 @@ pub struct LocalAlbumTagBatchApplyResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalAlbumTagBatchPreflightErrorCode {
+    ExperimentalFeaturesDisabled,
     AlbumCatalogFailure,
     AlbumNotFound,
     MembershipChanged,
@@ -294,6 +314,13 @@ impl LocalAlbumTagBatchPreflightError {
         )
     }
 
+    pub(crate) fn experimental_features_disabled() -> Self {
+        Self::new(
+            LocalAlbumTagBatchPreflightErrorCode::ExperimentalFeaturesDisabled,
+            "Ative Acesso Antecipado nas configurações para usar o editor SQLite de tags.",
+        )
+    }
+
     pub(crate) fn album_not_found() -> Self {
         Self::new(
             LocalAlbumTagBatchPreflightErrorCode::AlbumNotFound,
@@ -312,6 +339,17 @@ impl LocalAlbumTagBatchPreflightError {
         Self::new(
             LocalAlbumTagBatchPreflightErrorCode::AlbumCatalogFailure,
             "A tarefa de preflight das tags do álbum falhou.",
+        )
+    }
+
+    pub(crate) fn membership_changed() -> Self {
+        membership_changed()
+    }
+
+    pub(crate) fn revision_conflict() -> Self {
+        Self::new(
+            LocalAlbumTagBatchPreflightErrorCode::RevisionConflict,
+            "A geração ou revisão mudou desde a inspeção do álbum.",
         )
     }
 }
@@ -470,6 +508,92 @@ pub fn inspect_local_track_tags(
     Ok(local_track_tags_from_file(&tagged_file, revision))
 }
 
+/// Inspect a SQLite catalog member by its native relative-path identity. The
+/// catalog scanner opens the file relative to the verified source root and
+/// checks its identity before and after the parser callback.
+pub(crate) fn inspect_sqlite_track_tags(
+    catalog: &sonante_sqlite_catalog::Catalog,
+    source_id: i64,
+    generation: i64,
+    relative: &Path,
+) -> Result<LocalTrackTags, LocalTrackTagsError> {
+    let result = catalog
+        .with_verified_source_track_file(source_id, generation, relative, |reader, _length| {
+            let metadata = reader
+                .get_ref()
+                .metadata()
+                .map_err(|_| transaction_error("Não foi possível identificar a revisão da faixa."))?;
+            let revision = revision_for_metadata(&metadata);
+            let options = ParseOptions::new()
+                .read_properties(false)
+                .read_cover_art(false);
+            let tagged_file = Probe::new(reader)
+                .options(options)
+                .guess_file_type()
+                .map_err(|_| transaction_error("Não foi possível identificar o formato da faixa."))?
+                .read()
+                .map_err(|_| transaction_error("Não foi possível ler as tags da faixa."))?;
+            let mut tags = local_track_tags_from_file(&tagged_file, revision);
+            if tags.editable && metadata.nlink() != 1 {
+                tags.writable = false;
+                tags.editable = false;
+                tags.unsupported_reason = Some("Arquivos com hard links adicionais não podem ser substituídos com segurança.".into());
+            } else if tags.editable && metadata.mode() & 0o222 == 0 {
+                tags.writable = false;
+                tags.editable = false;
+                tags.unsupported_reason = Some("O arquivo não possui permissão de escrita.".into());
+            }
+            Ok::<_, LocalTrackTagsError>(tags)
+        })
+        .map_err(|_| revision_conflict())?;
+    result
+}
+
+pub(crate) fn inspect_sqlite_album_from_tracks(
+    album_id: &str,
+    generation: i64,
+    tracks: Vec<LocalAlbumTrackInspection>,
+) -> LocalAlbumTagInspection {
+    let physical_track_count = tracks
+        .iter()
+        .filter(|track| track.kind == LocalAlbumTrackKind::Physical)
+        .count();
+    let cue_virtual_count = tracks.len() - physical_track_count;
+    let inspection_complete = tracks
+        .iter()
+        .all(|track| track.kind == LocalAlbumTrackKind::CueVirtual || track.tags.is_some());
+    let fields = LocalAlbumTagFields {
+        album: summarize_album_field(&tracks, |tags| tags.album.as_deref()),
+        album_artist: summarize_album_field(&tracks, |tags| tags.album_artist.as_deref()),
+        date: summarize_album_field(&tracks, |tags| tags.date.as_deref()),
+        genre: summarize_album_field(&tracks, |tags| tags.genre.as_deref()),
+    };
+    LocalAlbumTagInspection {
+        album_id: album_id.to_owned(),
+        catalog_generation: Some(generation),
+        tracks,
+        fields,
+        physical_track_count,
+        cue_virtual_count,
+        inspection_complete,
+    }
+}
+
+pub(crate) fn sqlite_cue_issue() -> LocalTrackTagsError {
+    LocalTrackTagsError::unsupported(
+        LocalTrackTagsErrorCode::CueVirtual,
+        "CUE",
+        "Esta faixa está associada a uma folha CUE nesta pasta e não pode ser editada pelo catálogo SQLite.",
+    )
+}
+
+pub(crate) fn sqlite_catalog_write_blocked() -> LocalTrackTagsError {
+    LocalTrackTagsError::new(
+        LocalTrackTagsErrorCode::TransactionFailed,
+        "A edição SQLite foi interrompida antes de uma gravação segura.",
+    )
+}
+
 pub fn inspect_local_album_tags(
     library_dir: &Path,
     album_id: &str,
@@ -517,6 +641,7 @@ pub fn inspect_local_album_tags(
 
     LocalAlbumTagInspection {
         album_id: album_id.to_string(),
+        catalog_generation: None,
         tracks,
         fields,
         physical_track_count,
@@ -646,6 +771,142 @@ pub fn preflight_local_album_tag_batch(
     })
 }
 
+pub(crate) fn preflight_sqlite_album_tag_batch(
+    request: LocalAlbumTagBatchPreflightRequest,
+    inspection: LocalAlbumTagInspection,
+) -> Result<LocalAlbumTagBatchPlan, LocalAlbumTagBatchPreflightError> {
+    if request.album_id != inspection.album_id
+        || request.catalog_generation.is_none()
+        || request.catalog_generation != inspection.catalog_generation
+    {
+        return Err(LocalAlbumTagBatchPreflightError::new(
+            LocalAlbumTagBatchPreflightErrorCode::RevisionConflict,
+            "A geração da fonte mudou desde a inspeção do álbum.",
+        ));
+    }
+    let mut expected = HashMap::with_capacity(request.tracks.len());
+    for item in &request.tracks {
+        if expected.insert(item.uri.as_str(), item).is_some()
+            || (item.kind == LocalAlbumTrackKind::Physical
+                && item.revision.as_deref().is_none_or(str::is_empty))
+        {
+            return Err(LocalAlbumTagBatchPreflightError::new(
+                LocalAlbumTagBatchPreflightErrorCode::InvalidSnapshot,
+                "O snapshot esperado do álbum é inválido.",
+            ));
+        }
+    }
+    let current = inspection
+        .tracks
+        .iter()
+        .map(|track| track.uri.as_str())
+        .collect::<HashSet<_>>();
+    if current.len() != inspection.tracks.len()
+        || current.len() != expected.len()
+        || current.iter().any(|uri| !expected.contains_key(uri))
+    {
+        return Err(membership_changed());
+    }
+
+    let requested_change = request.update.has_changes();
+    let has_virtual_cue = inspection.cue_virtual_count > 0
+        || inspection
+            .tracks
+            .iter()
+            .any(|track| track.kind == LocalAlbumTrackKind::CueVirtual
+                || track.issue.as_ref().is_some_and(|issue| issue.code == LocalTrackTagsErrorCode::CueVirtual));
+    let mut inspection_failed = !inspection.inspection_complete;
+    let mut tracks = Vec::new();
+    for inspected in inspection.tracks {
+        if inspected.kind == LocalAlbumTrackKind::CueVirtual {
+            continue;
+        }
+        let Some(expected_revision) = expected
+            .get(inspected.uri.as_str())
+            .and_then(|track| track.revision.clone())
+        else {
+            return Err(LocalAlbumTagBatchPreflightError::new(
+                LocalAlbumTagBatchPreflightErrorCode::InvalidSnapshot,
+                "O snapshot esperado do álbum é inválido.",
+            ));
+        };
+        let issue = inspected.issue;
+        let tags = inspected.tags;
+        if issue.is_some() || tags.as_ref().is_none_or(|tags| !tags.readable) {
+            inspection_failed |= !issue.as_ref().is_some_and(|issue| issue.code == LocalTrackTagsErrorCode::CueVirtual);
+            tracks.push(LocalAlbumTagBatchTrackPlan {
+                uri: inspected.uri,
+                expected_revision,
+                update: LocalTrackTagUpdate::default(),
+                needs_write: false,
+                issue,
+            });
+            continue;
+        }
+        let Some(tags) = tags else {
+            inspection_failed = true;
+            tracks.push(LocalAlbumTagBatchTrackPlan {
+                uri: inspected.uri,
+                expected_revision,
+                update: LocalTrackTagUpdate::default(),
+                needs_write: false,
+                issue: Some(LocalTrackTagsError::new(
+                    LocalTrackTagsErrorCode::ReadFailed,
+                    "Não foi possível confirmar as tags da faixa.",
+                )),
+            });
+            continue;
+        };
+        if tags.revision != expected_revision {
+            return Err(LocalAlbumTagBatchPreflightError::new(
+                LocalAlbumTagBatchPreflightErrorCode::RevisionConflict,
+                "Uma faixa do álbum mudou desde a inspeção anterior.",
+            ));
+        }
+        let update = request.update.for_track(&tags);
+        let needs_write = !update.is_unchanged();
+        let write_supported = tags.writable && tags.editable;
+        let issue = (!write_supported).then(|| {
+            LocalTrackTagsError::unsupported(
+                LocalTrackTagsErrorCode::UnsupportedFormat,
+                &tags.format,
+                "A escrita transacional está habilitada somente para FLAC nesta versão.",
+            )
+        });
+        inspection_failed |= issue.is_some() && needs_write;
+        tracks.push(LocalAlbumTagBatchTrackPlan {
+            uri: inspected.uri,
+            expected_revision,
+            update,
+            needs_write,
+            issue,
+        });
+    }
+    let blocked_reason = if has_virtual_cue && requested_change {
+        Some(LocalAlbumTagBatchBlockedReason::CueVirtual)
+    } else if inspection_failed {
+        Some(LocalAlbumTagBatchBlockedReason::TrackInspectionFailed)
+    } else {
+        None
+    };
+    let change_count = tracks
+        .iter()
+        .filter(|track| track.needs_write && track.issue.is_none())
+        .count();
+    let unchanged_count = tracks
+        .iter()
+        .filter(|track| !track.needs_write && track.issue.is_none())
+        .count();
+    Ok(LocalAlbumTagBatchPlan {
+        album_id: request.album_id,
+        applicable: blocked_reason.is_none(),
+        blocked_reason,
+        tracks,
+        change_count,
+        unchanged_count,
+    })
+}
+
 pub fn apply_local_album_tag_batch(
     library_dir: &Path,
     request: LocalAlbumTagBatchPreflightRequest,
@@ -666,6 +927,153 @@ pub fn apply_local_album_tag_batch(
         plan,
         local_folders,
     ))
+}
+
+pub(crate) fn execute_sqlite_album_tag_batch_with<F>(
+    plan: LocalAlbumTagBatchPlan,
+    writer: F,
+) -> LocalAlbumTagBatchApplyResult
+where
+    F: FnMut(&LocalAlbumTagBatchTrackPlan) -> Result<LocalTrackTagWriteResult, LocalTrackTagsError>,
+{
+    if !plan.applicable {
+        return batch_result_without_writes(plan);
+    }
+    execute_local_album_tag_batch_plan_with(plan, writer)
+}
+
+pub(crate) fn update_sqlite_track_tags(
+    catalog: &mut sonante_sqlite_catalog::Catalog,
+    source_id: i64,
+    generation: i64,
+    relative: &Path,
+    expected_revision: &str,
+    patch: &LocalTrackTagUpdate,
+) -> Result<LocalTrackTagWriteResult, LocalTrackTagsError> {
+    validate_patch_values(patch)?;
+    if !matches!(patch.title, TagFieldUpdate::Unchanged)
+        || !matches!(patch.artist, TagFieldUpdate::Unchanged)
+        || !matches!(patch.track_number, TagFieldUpdate::Unchanged)
+        || !matches!(patch.track_total, TagFieldUpdate::Unchanged)
+        || !matches!(patch.disc_number, TagFieldUpdate::Unchanged)
+        || !matches!(patch.disc_total, TagFieldUpdate::Unchanged)
+    {
+        return Err(LocalTrackTagsError::new(
+            LocalTrackTagsErrorCode::InvalidTagUpdate,
+            "A edição SQLite permite somente Album, Album Artist, Date e Genre.",
+        ));
+    }
+    let _write_guard = TAG_WRITE_LOCK.lock().map_err(|_| {
+        transaction_error("Outra transação de tags deixou o estado de escrita indisponível.")
+    })?;
+    let extension = relative
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("unknown")
+        .to_ascii_lowercase();
+    let touched_keys = patch.touched_keys();
+    let replacement = catalog.replace_source_track_file(
+        source_id,
+        generation,
+        relative,
+        |original, temp, original_metadata| {
+            if revision_for_metadata(original_metadata) != expected_revision {
+                return Err("REVISION_CONFLICT".into());
+            }
+            if original_metadata.nlink() != 1 {
+                return Err("MULTIPLE_HARD_LINKS".into());
+            }
+            if original_metadata.mode() & 0o222 == 0 {
+                return Err("PERMISSION_DENIED".into());
+            }
+            let mut tagged_file = read_tagged_file_for_update(original, &extension)
+                .map_err(|error| error.message)?;
+            if tagged_file.file_type() != FileType::Flac {
+                return Err("UNSUPPORTED_FORMAT".into());
+            }
+            ensure_primary_flac_tag(&mut tagged_file);
+            validate_effective_numbers(tagged_file.primary_tag(), patch)
+                .map_err(|error| error.message)?;
+            if patch.is_unchanged() {
+                return Ok(tagged_file);
+            }
+            let preserved_tags = preserved_tag_state(&tagged_file, &touched_keys);
+            let original_properties = AudioPropertiesSnapshot::from_properties(tagged_file.properties());
+            apply_patch(tagged_file.primary_tag_mut().ok_or_else(|| {
+                "FLAC primary tag is unavailable".to_owned()
+            })?, patch);
+            original
+                .seek(SeekFrom::Start(0))
+                .map_err(|_| "cannot rewind original FLAC".to_owned())?;
+            io::copy(original, temp).map_err(|_| "cannot stage original FLAC bytes".to_owned())?;
+            temp.seek(SeekFrom::Start(0))
+                .map_err(|_| "cannot position staged FLAC for tag write".to_owned())?;
+            tagged_file
+                .save_to(temp, WriteOptions::new())
+                .map_err(|_| "Lofty failed to save FLAC tags".to_owned())?;
+            temp.flush().map_err(|_| "cannot flush staged FLAC".to_owned())?;
+            preserve_filesystem_metadata(original, temp, original_metadata)
+                .map_err(|error| error.message)?;
+            temp.sync_all().map_err(|_| "cannot sync staged FLAC".to_owned())?;
+            temp.seek(SeekFrom::Start(0))
+                .map_err(|_| "cannot validate staged FLAC".to_owned())?;
+            let validated_file = read_tagged_file(temp, true).map_err(|error| error.message)?;
+            if validated_file.file_type() != FileType::Flac {
+                return Err("staged file is no longer recognized as FLAC".into());
+            }
+            validate_patch_result(validated_file.primary_tag(), patch)
+                .map_err(|error| error.message)?;
+            if preserved_tag_state(&validated_file, &touched_keys) != preserved_tags {
+                return Err("untouched tags or embedded artwork were not preserved".into());
+            }
+            if AudioPropertiesSnapshot::from_properties(validated_file.properties())
+                != original_properties
+            {
+                return Err("audio properties changed during tag writing".into());
+            }
+            Ok(validated_file)
+        },
+    );
+    match replacement {
+        Ok(success) => {
+            let revision = revision_for_metadata(&success.metadata);
+            Ok(LocalTrackTagWriteResult {
+                tags: local_track_tags_from_file(&success.value, revision),
+                committed: true,
+            })
+        }
+        Err(failure) => {
+            let (code, message) = match failure.message.as_str() {
+                "REVISION_CONFLICT" => (
+                    LocalTrackTagsErrorCode::RevisionConflict,
+                    "A faixa mudou desde a inspeção do editor.",
+                ),
+                "MULTIPLE_HARD_LINKS" => (
+                    LocalTrackTagsErrorCode::MetadataPreservationFailed,
+                    "Arquivos com múltiplos hard links não podem ser substituídos com segurança.",
+                ),
+                "PERMISSION_DENIED" => (
+                    LocalTrackTagsErrorCode::PermissionDenied,
+                    "O arquivo não possui permissão de escrita.",
+                ),
+                "UNSUPPORTED_FORMAT" => (
+                    LocalTrackTagsErrorCode::UnsupportedFormat,
+                    "A escrita transacional está habilitada somente para FLAC.",
+                ),
+                _ => (
+                    LocalTrackTagsErrorCode::TransactionFailed,
+                    "Não foi possível concluir a transação de tags do arquivo.",
+                ),
+            };
+            let mut error = if failure.committed {
+                LocalTrackTagsError::committed(code, message)
+            } else {
+                LocalTrackTagsError::new(code, message)
+            };
+            error.message = format!("{} ({})", error.message, failure.message);
+            Err(error)
+        }
+    }
 }
 
 fn batch_result_without_writes(
@@ -2451,6 +2859,7 @@ mod tests {
     ) -> LocalAlbumTagBatchPreflightRequest {
         LocalAlbumTagBatchPreflightRequest {
             album_id: "album-id".to_string(),
+            catalog_generation: None,
             tracks,
             update,
         }
@@ -3530,7 +3939,7 @@ mod tests {
     fn batch_apply_reports_partial_commit_and_not_attempted_tracks() {
         let fixture = Fixture::new("Music");
         for name in ["a.flac", "b.flac", "c.flac"] {
-            write_minimal_flac(&fixture.root.join(name), &["ALBUM=Before"]);
+            write_minimal_flac(&fixture.root.join(name), &["ALBUM=Before", "GENRE=Before"]);
         }
         let uris = ["Music/a.flac", "Music/b.flac", "Music/c.flac"];
         let mut permissions = fs::metadata(fixture.root.join("b.flac"))
@@ -3549,7 +3958,7 @@ mod tests {
             batch_request(
                 expected,
                 LocalAlbumTagBatchUpdate {
-                    album: TagFieldUpdate::Set("After".to_string()),
+                    genre: TagFieldUpdate::Set("After".to_string()),
                     ..LocalAlbumTagBatchUpdate::default()
                 },
             ),
@@ -3574,7 +3983,9 @@ mod tests {
             result.tracks[2].state,
             LocalAlbumTagBatchTrackOutcomeState::NotAttempted
         );
-        assert_eq!(fixture.inspect(uris[0]).unwrap().album.as_deref(), Some("After"));
+        assert_eq!(fixture.inspect(uris[0]).unwrap().genre.as_deref(), Some("After"));
+        assert_eq!(fixture.inspect(uris[1]).unwrap().genre.as_deref(), Some("Before"));
+        assert_eq!(fixture.inspect(uris[2]).unwrap().genre.as_deref(), Some("Before"));
         assert_eq!(fs::read(fixture.root.join("c.flac")).unwrap(), before_c);
     }
 

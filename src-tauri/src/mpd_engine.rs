@@ -12,6 +12,7 @@ use std::process::Child;
 const PRIVATE_SHA256: &str = "46ea7b1eaa1969f377698155b041589e9475998a3859a4c96f7937565fda7841";
 const INSTALLED_DIRECT_SHA256: &str = "7bf2a6c96fad672ee6a056335c1b8054a71107975c637b76f549751b43d0d4b1";
 const INSTALLED_EQ_SHA256: &str = "6b9cb9820c1704175af312377fae6f20ad80486f69ee17cd190bc6390bc1d5ff";
+const DEV_EQ_SHA256: &str = "f7157589c34c8c98e8989112e1e53284dee6abdba83c5bf4b894592d134674b0";
 const MAX_ENGINE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -59,11 +60,22 @@ impl MpdEngine {
         if !cfg!(debug_assertions) {
             return Ok(Self { program: crate::installed_runtimes::release(crate::installed_runtimes::Kind::Direct,"SONANTE_DEV_MPD_PATH")?, private_sha256: Some(INSTALLED_DIRECT_SHA256.into()) });
         }
-        Self::resolve_override(
-            std::env::var_os("SONANTE_DEV_MPD_PATH").as_deref(),
-            cfg!(all(debug_assertions, target_os = "linux")),
-            PRIVATE_SHA256,
-        )
+        if let Some(override_path) = std::env::var_os("SONANTE_DEV_MPD_PATH") {
+            return Self::resolve_override(
+                Some(override_path.as_os_str()),
+                cfg!(all(debug_assertions, target_os = "linux")),
+                PRIVATE_SHA256,
+            );
+        }
+
+        // Development must use the same package-owned Direct runtime as the
+        // release path. Falling back to `mpd` from PATH silently changes the
+        // engine build and can attach the private profile to an unrelated
+        // system daemon/runtime.
+        let program =
+            crate::installed_runtimes::resolve(crate::installed_runtimes::Kind::Direct)?;
+        let actual = hash_file(&program)?;
+        Self::from_packaged_identity(program, actual)
     }
 
     /// EQ-only variant: the proven Direct binary and its evidence remain unchanged.
@@ -72,7 +84,7 @@ impl MpdEngine {
             return Ok(Self { program: crate::installed_runtimes::release(crate::installed_runtimes::Kind::Eq,"SONANTE_EQ_MPD_PATH")?, private_sha256: Some(INSTALLED_EQ_SHA256.into()) });
         }
         let value=std::env::var_os("SONANTE_EQ_MPD_PATH").ok_or("EQ_MPD_RUNTIME_MISSING")?;
-        Self::resolve_override(Some(value.as_os_str()),cfg!(all(debug_assertions,target_os="linux")),"6b9cb9820c1704175af312377fae6f20ad80486f69ee17cd190bc6390bc1d5ff")
+        Self::resolve_override(Some(value.as_os_str()),cfg!(all(debug_assertions,target_os="linux")),DEV_EQ_SHA256)
     }
 
     fn resolve_override(
@@ -81,10 +93,7 @@ impl MpdEngine {
         expected: &str,
     ) -> Result<Self, String> {
         let Some(value) = value else {
-            return Ok(Self {
-                program: PathBuf::from("mpd"),
-                private_sha256: None,
-            });
+            return Err("Runtime MPD privado não foi selecionado.".into());
         };
         if !allowed {
             return Err(
@@ -103,6 +112,18 @@ impl MpdEngine {
             return Err("O motor MPD experimental precisa ser um arquivo executável.".into());
         }
         let actual = Self::validated_override_hash(hash_file(&program)?, expected)?;
+        Ok(Self {
+            program,
+            private_sha256: Some(actual),
+        })
+    }
+
+    fn from_packaged_identity(program: PathBuf, actual: String) -> Result<Self, String> {
+        if actual != INSTALLED_DIRECT_SHA256 {
+            return Err(
+                "Runtime MPD Direct do pacote não corresponde ao manifesto validado.".into(),
+            );
+        }
         Ok(Self {
             program,
             private_sha256: Some(actual),
@@ -243,8 +264,11 @@ mod tests {
 
     #[test]
     fn evidence_is_scoped_to_the_pinned_build_and_output_configuration() {
-        let system = MpdEngine::resolve_override(None, false, PRIVATE_SHA256).unwrap();
-        assert!(system.evidence(false).is_none());
+        let unidentified = MpdEngine {
+            program: PathBuf::from("/unused"),
+            private_sha256: None,
+        };
+        assert!(unidentified.evidence(false).is_none());
         let private = MpdEngine {
             program: PathBuf::from("/unused"),
             private_sha256: Some(PRIVATE_SHA256.into()),
@@ -378,12 +402,42 @@ mod tests {
     }
 
     #[test]
-    fn default_uses_system_and_preserves_config() {
-        let engine = MpdEngine::resolve_override(None, false, PRIVATE_SHA256).unwrap();
-        assert_eq!(engine.program(), Path::new("mpd"));
+    fn missing_debug_override_is_not_a_path_fallback() {
+        assert!(MpdEngine::resolve_override(None, true, PRIVATE_SHA256).is_err());
+        assert!(MpdEngine::resolve_override(None, false, PRIVATE_SHA256).is_err());
+    }
+
+    #[test]
+    fn packaged_direct_runtime_requires_the_qualified_identity() {
+        let path = PathBuf::from("/usr/lib/sonante/runtimes/v1/mpd-direct");
+        let engine =
+            MpdEngine::from_packaged_identity(path.clone(), INSTALLED_DIRECT_SHA256.into())
+                .unwrap();
+        assert_eq!(engine.program(), path);
+        assert_eq!(
+            engine.private_sha256.as_deref(),
+            Some(INSTALLED_DIRECT_SHA256)
+        );
+        assert!(MpdEngine::from_packaged_identity(path, PRIVATE_SHA256.into()).is_err());
+    }
+
+    #[test]
+    fn packaged_direct_engine_preserves_config_policy() {
+        let engine = MpdEngine::from_packaged_identity(
+            PathBuf::from("/usr/lib/sonante/runtimes/v1/mpd-direct"),
+            INSTALLED_DIRECT_SHA256.into(),
+        )
+        .unwrap();
         let section = "audio_output {\n type \"alsa\"\n}".to_string();
         assert_eq!(
             engine.configure_output(section.clone(), false).unwrap(),
+            format!(
+                "{}\n    pcm_eof_flush \"yes\"\n    sonante_direct_strict \"no\"\n}}",
+                section.strip_suffix("\n}").unwrap()
+            )
+        );
+        assert_eq!(
+            engine.configure_output(section.clone(), true).unwrap(),
             section
         );
     }

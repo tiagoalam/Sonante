@@ -30,7 +30,7 @@ export const NowPlayingQueue: React.FC<{ open: boolean; available: boolean; stat
   const ready = queueAvailable && state.phase === "ready";
   const queueContext = useMemo(() => ({}), [presentation.identity, open, queueAvailable]);
   const queueActions = useQueueInsertion(queueContext, open && ready);
-  const selection = useTrackSelection(queueContext, state.items, open && ready);
+  const selection = useTrackSelection(queueContext, state.items, open && ready, false);
   const queueRequest = (track: TrackMetadata, index: number) => ({ track: track.media_locator ? track : { ...track, media_locator: { kind: "local" as const, uri: track.uri || "" } },
     album: () => loadQueuedAlbum(track, index),
     actions: [
@@ -124,7 +124,6 @@ export const NowPlayingQueue: React.FC<{ open: boolean; available: boolean; stat
       {queueCoherent && state.items.length > 0 && <button type="button" onClick={() => void act()} disabled={!queueAvailable || actionBusy}
         aria-label={t(filter.trim() ? "queue.clearAll" : "queue.clear")} title={t(filter.trim() ? "queue.clearAll" : "queue.clear")}><Trash2 size={15} /></button>}
     </div>
-    {selection.toolbar}
     <div className="np-queue-tools">
       <label className="np-queue-filter" htmlFor={filterId}><Search size={14} aria-hidden="true" />
         <input ref={filterRef} id={filterId} type="search" value={filter} maxLength={160} aria-label={t("queue.filterLabel")} placeholder={t("queue.filterPlaceholder")}

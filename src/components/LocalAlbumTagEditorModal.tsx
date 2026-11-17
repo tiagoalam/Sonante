@@ -58,7 +58,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
   const [preview, setPreview] = useState<{ view: LocalAlbumTagPreviewView; request: LocalAlbumTagBatchPreflightRequest; token: { context: number; generation: number } } | null>(null);
   const [applying, setApplying] = useState(false);
   const [result, setResult] = useState<LocalAlbumTagBatchResult | null>(null);
-  const [applyIssue, setApplyIssue] = useState<"conflict" | "unknown" | null>(null);
+  const [applyIssue, setApplyIssue] = useState<"conflict" | "access_disabled" | "unknown" | null>(null);
   const applyInFlight = useRef(false);
   const consumed = useRef(false);
   const previewRef = useRef(preview);
@@ -256,7 +256,9 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
     } catch (cause) {
       if (!guard.isCurrent(request) || !isAvailable()) return;
       const code = backendErrorCode(cause);
-      if (code === "membership_changed" || code === "revision_conflict" || code === "invalid_snapshot") {
+      if (code === "experimental_features_disabled") {
+        setMessage({ kind: "warning", text: t("sqliteLibrary.tagEditorRequiresEarlyAccess") });
+      } else if (code === "membership_changed" || code === "revision_conflict" || code === "invalid_snapshot") {
         setStale(true);
         setMessage({ kind: "warning", text: t("albumTagEditor.stale") });
       } else if (code === "album_not_found") {
@@ -358,7 +360,8 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
         )}
         {applying && <p role="status" className="mx-5 mt-4 text-sm text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t("albumTagEditor.applying")}</p>}
         {applyIssue && <p role="alert" className="mx-5 mt-4 text-sm text-[color:var(--theme-fg-accent,var(--color-amber-200))]">
-          {t(applyIssue === "conflict" ? "albumTagEditor.applyConflict" : "albumTagEditor.applyUnknown")}
+          {t(applyIssue === "conflict" ? "albumTagEditor.applyConflict"
+            : applyIssue === "access_disabled" ? "albumTagEditor.accessDisabled" : "albumTagEditor.applyUnknown")}
         </p>}
         {message && (
           <div
@@ -461,6 +464,7 @@ export const LocalAlbumTagEditorModal: React.FC<Props> = ({ albumId, displayName
                   })}</p>
                   <p className="mt-2">{t("albumTagEditor.partialCommitStatus", { value: t(result.partial_commit ? "albumTagEditor.yes" : "albumTagEditor.no") })}</p>
                   {result.partial_commit && <p className="mt-2 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t("albumTagEditor.partialCommit")}</p>}
+                  {result.catalog_reconciled === false && <p role="alert" className="mt-2 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t("albumTagEditor.catalogReconcilePending")}</p>}
                   {!result.applicable && <p className="mt-2 text-[color:var(--theme-fg-accent,var(--color-amber-200))]">{t(result.blocked_reason === "cue_virtual"
                     ? "albumTagEditor.cueBlocked" : "albumTagEditor.inspectionBlocked")}</p>}
                   <p className="mt-2">{t("albumTagEditor.independentWrites")}</p>

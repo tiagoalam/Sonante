@@ -1,0 +1,8 @@
+[package]
+name = "sonante-sqlite-catalog"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled"] }
+lofty = { version = "=0.25.4", default-features = false, features = ["id3v2_compression_support"] }

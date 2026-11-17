@@ -9,7 +9,7 @@ class Host{slots=[];cursor=0;effects=[];writes=0;render(component,props){this.cu
 const nodes=(tree,p)=>Array.isArray(tree)?tree.flatMap(n=>nodes(n,p)):!tree||typeof tree!=='object'?[]:[...(p(tree)?[tree]:[]),...nodes(tree.props?.children,p)];
 const calls=[],errors=[];let navidromeStatus={connection_id:null};let navidromeReads=0;let favorites=[],readTracks=async()=>[],readAlbums=async()=>[],readLocalTracks=async()=>[],readDirectory=async()=>[];
 const audio={playTracks:async(...args)=>calls.push(['play',...args]),setVolume:async n=>calls.push(['volume',n]),setSharedMute:async r=>calls.push(['mute',r]),getLocalAlbums:()=>readAlbums(),getLocalAlbumTracks:id=>readLocalTracks(id),listLocalDirectory:p=>readDirectory(p)};
-const deps={'../services/navidrome':{navidromeService:{status:async()=>{navidromeReads++;return navidromeStatus}}},'./deferredViews':{NavidromeView:()=>null},'./SleepTimerControl':{SleepTimerControl:()=>null},...passiveQueueInsertion,'react':{__esModule:true,...hooks,default:React},'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,'../services/audio':{audioService:audio},'../services/plex':{plexService:{getAlbumTracks:key=>readTracks(key)}},'../services/favorites':{favoritesService:{getFavorites:async()=>favorites,toggleFavorite:async()=>true}},'../utils/frontendDiagnostics':{logError:(...args)=>errors.push(args)},'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null},'./PlexImage':{PlexImage:()=>null},'./SignalPath':{SignalPath:()=>null},'./SourceAudioBadges':{SourceAudioBadges:()=>null},'./PlaybackOptionsControls':{PlaybackOptionsControls:()=>null}};
+const deps={'../services/navidrome':{navidromeService:{status:async()=>{navidromeReads++;return navidromeStatus}}},'./deferredViews':{NavidromeView:()=>null},'./SleepTimerControl':{SleepTimerControl:()=>null},'./playerBar.css':{},...passiveQueueInsertion,'react':{__esModule:true,...hooks,default:React},'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,'../services/audio':{audioService:audio},'../services/plex':{plexService:{getAlbumTracks:key=>readTracks(key)}},'../services/favorites':{favoritesService:{getFavorites:async()=>favorites,toggleFavorite:async()=>true}},'../utils/frontendDiagnostics':{logError:(...args)=>errors.push(args)},'./FavoriteLocalArtwork':{FavoriteLocalArtwork:()=>null},'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},'./PlaylistPickerModal':{PlaylistPickerModal:()=>null},'./PlexImage':{PlexImage:()=>null},'./SignalPath':{SignalPath:()=>null},'./SourceAudioBadges':{SourceAudioBadges:()=>null},'./PlaybackOptionsControls':{PlaybackOptionsControls:()=>null}};
 const cache=new Map();function load(file){file=path.resolve(file);if(cache.has(file))return cache.get(file);const out={};cache.set(file,out);const code=ts.transpileModule(readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2020}}).outputText;new Function('require','exports',code)(name=>{if(name in deps)return deps[name];if(name.endsWith('/frontendDiagnostics'))return deps['../utils/frontendDiagnostics'];if(name.endsWith('/playbackIntent'))return intents;let resolved=path.resolve(path.dirname(file),name);if(name.startsWith('.')){if(!existsSync(resolved)){resolved+=existsSync(resolved+'.tsx')?'.tsx':'.ts'}return load(resolved)}throw Error(name)},out);return out}
 const Favorites=load(path.join(root,'src/components/FavoritesView.tsx')).FavoritesView;
 const SourceTabs=load(path.join(root,'src/components/LibrarySourceTabs.tsx')).LibrarySourceTabs;
@@ -51,6 +51,53 @@ test('collections: A slow/B fast plus obsolete errors cannot overwrite inventory
 test('collections: Back, changed library/account visit and unmount fence success/error/finally',async()=>{for(const exit of ['back','library','unmount']){const c=collections(),p=c.select({server_id:'s',rating_key:'A'});if(exit==='back')c.clear();if(exit==='library')c.contextRef.current={};if(exit==='unmount')c.alive.current=false;c.state.albums=[{title:'Valid current inventory'}];c.state.loading=true;c.pending.get('A').resolve([{title:'stale'}]);await p;assert.deepEqual(c.state.albums,[{title:'Valid current inventory'}],exit);assert.equal(c.state.loading,true,exit)}});
 test('Plex search sends track artist, never album-as-artist, and preserves locator/artwork/duration',async()=>{const source=readFileSync(path.join(root,'src/App.tsx'),'utf8'),file=ts.createSourceFile('App.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let action;function visit(n){if(ts.isJsxAttribute(n)&&n.name.getText(file)==='onClick'&&n.initializer&&ts.isJsxExpression(n.initializer)){const expr=n.initializer.expression,text=expr?.getText(file)??'';if(text.includes('const meta = [')&&text.includes('track.album_title'))action=text}ts.forEachChild(n,visit)}visit(file);assert(action);const meta=load(path.join(W,'src/utils/plexTrackMetadata.ts'));for(const artist of ['Artist Y',undefined]){const track={...pt('X'),title:'Track X',artist,album_title:'Album Z',thumb:{server_id:'s',path:'/image'}};let sent;expression(action,{track,isPlaybackAvailable:true,appPlayback:{run:fn=>fn({current:()=>true})},audioService:{playTracks:async tracks=>sent=tracks},...meta})();await flush();assert.equal(sent[0].artist,artist??'');assert.equal(sent[0].album,'Album Z');assert.equal(sent[0].media_locator,track.media_locator);assert.equal(sent[0].plex_image,track.thumb);assert.equal(sent[0].duration,123.456)}});
 test('local Favorites UI plays both ordered discs/CUE tracks with duration, instead of a shallow lsinfo listing',async()=>{const fav=fa('root/Album','local');favorites=[fav];readAlbums=async()=>[{id:'canonical-album',folder_path:fav.path_or_key,title:fav.title}];readDirectory=async()=>[];readLocalTracks=async id=>{assert.equal(id,'canonical-album');return[{disc:{number:1},tracks:[{item_type:'file',name:'Cue One',path:'root/Album/CD1/image.cue/track0001',duration:1801}]},{disc:{number:2},tracks:[{item_type:'file',name:'Disc Two',path:'root/Album/CD2/two.flac',duration:233}]}]};calls.length=0;const h=new Host();h.render(Favorites,props);await flush();let view=h.render(Favorites,props);await open(view,'root/Album');view=h.render(Favorites,props);const row=nodes(view,n=>n.props.onClick&&n.props['aria-disabled']!==undefined&&nodes(n,x=>x.props.children==='Cue One').length)[0];assert(row,'catalog album tracks should be present');row.props.onClick();await flush();assert.deepEqual(calls[0][1].map(t=>t.uri),['root/Album/CD1/image.cue/track0001','root/Album/CD2/two.flac']);assert.equal(calls[0][1][0].duration,1801);h.unmount()});
+
+test('SQLite Local favorites open by exact catalog identity and remain source-scoped beside Plex',async()=>{
+ const local=fa('sqlite:42:YWxidW0','local');local.path_or_key='sqlite-album://sqlite:42:YWxidW0';
+ const plex={...local,source:'plex',path_or_key:'plex-rating-key'};favorites=[local,plex];
+ readAlbums=async()=>[{id:local.id,folder_path:local.path_or_key,title:local.title}];
+ readLocalTracks=async id=>{assert.equal(id,local.id);return[{disc:{number:1},tracks:[{item_type:'file',name:'Synthetic Track',path:'sqlite-track://42/YWxidW0vMDEud2F2',title:'Synthetic Track',artist:'Fixture Artist',duration:12}]}]};
+ readDirectory=async()=>assert.fail('SQLite favorite must not fall back to a physical or MPD directory lookup');
+ const h=new Host();h.render(Favorites,props);await flush();let view=h.render(Favorites,props);
+ assert.equal(nodes(view,n=>n.props.children===i18n.t('favorites.missingDisk')).length,0);
+ await open(view,local.id);view=h.render(Favorites,props);
+ assert.equal(nodes(view,n=>n.props.children==='Synthetic Track').length,1);
+ assert.equal(nodes(view,n=>n.props.children===i18n.t('favorites.missingDisk')).length,0);
+ button(view,i18n.t('favorites.back')).props.onClick();view=h.render(Favorites,props);
+ const remove=nodes(view,n=>n.type==='button'&&n.props.title===i18n.t('favorites.removeFavorite'))[0];assert.ok(remove);
+ remove.props.onClick({stopPropagation(){}});await flush();view=h.render(Favorites,props);
+ assert.equal(nodes(view,n=>n.props.children===local.title).length,0);
+ nodes(view,n=>n.type===SourceTabs)[0].props.onChange('plex');view=h.render(Favorites,props);
+ assert.equal(nodes(view,n=>n.props.children===local.title).length,1,'removing a Local favorite with the same ID must not remove Plex');
+ h.unmount();
+});
+
+test('SQLite favorite cover click opens album details, not Now Playing, and bounds its artwork to the cover frame',async()=>{
+ const local=fa('sqlite:42:YWxidW0','local');local.path_or_key='sqlite-album://sqlite:42:YWxidW0';
+ favorites=[local];readAlbums=async()=>[{id:local.id,folder_path:local.path_or_key,title:local.title}];
+ readLocalTracks=async()=>[{disc:{number:1},tracks:[{item_type:'file',name:'Synthetic Track',path:'sqlite-track://42/YWxidW0vMDEud2F2',title:'Synthetic Track'}]}];
+ const h=new Host();h.render(Favorites,props);await flush();let view=h.render(Favorites,props);
+ const coverCard=nodes(view,n=>n.props.onClick&&nodes(n,x=>x.type==='img'||x.type==='div'&&x.props.className?.includes('aspect-square')).length)[0];
+ assert.ok(coverCard,'favorite cover is inside an album card with a click handler');
+ await coverCard.props.onClick();view=h.render(Favorites,props);
+ assert.equal(nodes(view,n=>n.type==='h1'&&n.props.children===local.title).length,1,'the click enters album details');
+ assert.equal(nodes(view,n=>n.props['data-now-playing-embedded']).length,0,'Favorites has no Now Playing expansion action');
+ const coverFrame=nodes(view,n=>n.type==='div'&&n.props.className?.includes('w-52 h-52'))[0];
+ assert.ok(coverFrame?.props.className.includes('relative'),'absolute artwork content is contained by the detail cover frame');
+ assert.equal(nodes(view,n=>n.type==='img'&&n.props.src==='sqlite-track://42/YWxidW0vMDEud2F2').length,0,'a track locator is never treated as an artwork URL');
+ h.unmount();
+});
+
+test('SQLite favorite album playback sends canonical media_locator without legacy virtual uri',async()=>{
+ const local=fa('sqlite:42:YWxidW0','local');local.path_or_key='sqlite-album://sqlite:42/YWxidW0';favorites=[local];
+ readAlbums=async()=>[{id:local.id,folder_path:local.path_or_key,title:local.title}];
+ readLocalTracks=async()=>[{disc:{number:1},tracks:[{item_type:'file',name:'Synthetic Track',path:'sqlite-track://42/YWxidW0vMDEud2F2',title:'Synthetic Track',artist:'Fixture',duration:12}]}];
+ calls.length=0;const h=new Host();h.render(Favorites,props);await flush();let view=h.render(Favorites,props);await open(view,local.id);view=h.render(Favorites,props);
+ const playAlbum=nodes(view,n=>n.type==='button'&&nodes(n,x=>x.type==='span'&&x.props.children===i18n.t('favorites.playAlbum')).length)[0];assert.ok(playAlbum);await playAlbum.props.onClick();await flush();
+ assert.equal(calls.length,1);assert.deepEqual(calls[0][1].map(track=>track.media_locator),[{kind:'local',uri:'sqlite-track://42/YWxidW0vMDEud2F2'}]);
+ assert.equal(calls[0][1][0].uri,undefined,'the legacy uri field would be rejected before SQLite resolution');
+ assert.equal(calls[0][2],0);h.unmount();
+});
 
 
 test('Navidrome favorites tab exists only for a configured connection and leaves Local/Plex counts and actions intact',async()=>{

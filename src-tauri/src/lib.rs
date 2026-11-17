@@ -1,3 +1,6 @@
+#[cfg(all(feature = "experimental-package", dev))]
+compile_error!("experimental-package must be built with `tauri build` so it embeds the production frontend");
+
 mod ab_comparison;
 mod ab_commands;
 mod direct_volume;
@@ -76,6 +79,7 @@ mod tags;
 mod local_file_info;
 mod album_file_sizes;
 mod player_source_info;
+mod sqlite_library;
 
 use audio::{
     list_audio_devices, AudioDevice, AudioEngine, AudioState, DeviceSwitchSnapshot,
@@ -94,6 +98,7 @@ use plex::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use shared_volume::{PipeWireVolume, SharedVolumeBackend};
+use sqlite_library::SqliteLibraryState;
 use std::cell::Cell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -105,6 +110,43 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, State, Window, WindowEvent};
 pub struct PlexState(pub Mutex<PlexClient>);
 pub struct SupervisorState(pub Mutex<MpdSupervisor>);
 pub struct ConfigState(pub Mutex<AppConfig>);
+
+#[derive(Default)]
+struct ProfileServiceRestoreState {
+    attempted: AtomicBool,
+    shutdown_started: AtomicBool,
+    lifecycle: Mutex<()>,
+}
+
+impl ProfileServiceRestoreState {
+    fn run_once_if(&self, eligible: bool, shutdown_requested: bool, restore: impl FnOnce()) -> bool {
+        if !eligible || shutdown_requested || self.shutdown_started.load(Ordering::Acquire) {
+            return false;
+        }
+        let Ok(_lifecycle) = self.lifecycle.lock() else {
+            return false;
+        };
+        if shutdown_requested
+            || self.shutdown_started.load(Ordering::Acquire)
+            || self
+                .attempted
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        restore();
+        true
+    }
+
+    fn begin_shutdown(&self) {
+        if let Ok(_lifecycle) = self.lifecycle.lock() {
+            self.shutdown_started.store(true, Ordering::Release);
+        }
+    }
+}
+
+static AUDIO_ROUTE_SNAPSHOT_GENERATION: AtomicU64 = AtomicU64::new(0);
 pub struct ConfigTransactionState {
     operations: Arc<config_save_operation::Coordinator>,
     initial_plex: initial_plex_playback::Gate,
@@ -214,10 +256,85 @@ fn should_start_mpd_on_startup(config_valid: bool, config: &AppConfig) -> bool {
     config_valid && !config.first_run
 }
 
+fn should_start_mpd_for_null_test(
+    config_valid: bool,
+    config: &AppConfig,
+    null_output_test: bool,
+) -> bool {
+    null_output_test || should_start_mpd_on_startup(config_valid, config)
+}
+
+const NULL_OUTPUT_TEST_ENV: &str = "SONANTE_064_TEST_NULL_OUTPUT";
+
+fn parse_null_output_test_mode(value: Option<&std::ffi::OsStr>, debug_build: bool) -> Result<bool, String> {
+    match value {
+        None => Ok(false),
+        Some(value) if value == "1" && debug_build => Ok(true),
+        Some(value) if value == "1" => Err("NULL_OUTPUT_TEST_REQUIRES_DEVELOPMENT_BUILD".into()),
+        Some(_) => Err("NULL_OUTPUT_TEST_VALUE_INVALID".into()),
+    }
+}
+
+fn requested_null_output_test_mode() -> Result<bool, String> {
+    parse_null_output_test_mode(std::env::var_os(NULL_OUTPUT_TEST_ENV).as_deref(), cfg!(debug_assertions))
+}
+
+pub(crate) fn null_output_test_mode() -> bool {
+    requested_null_output_test_mode().unwrap_or(false)
+}
+
+#[cfg(test)]
+mod null_output_test_mode_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn null_output_mode_requires_an_exact_opt_in_and_a_debug_build() {
+        assert!(!parse_null_output_test_mode(None, true).unwrap());
+        assert!(parse_null_output_test_mode(Some(OsStr::new("1")), true).unwrap());
+        assert_eq!(
+            parse_null_output_test_mode(Some(OsStr::new("1")), false).unwrap_err(),
+            "NULL_OUTPUT_TEST_REQUIRES_DEVELOPMENT_BUILD"
+        );
+        assert_eq!(
+            parse_null_output_test_mode(Some(OsStr::new("true")), true).unwrap_err(),
+            "NULL_OUTPUT_TEST_VALUE_INVALID"
+        );
+    }
+
+    #[test]
+    fn null_test_starts_private_supervisor_on_a_fresh_first_run_profile() {
+        let config = AppConfig::default();
+        assert!(!should_start_mpd_for_null_test(false, &config, false));
+        assert!(should_start_mpd_for_null_test(false, &config, true));
+    }
+}
+
 fn is_shared_output(config: &AppConfig) -> bool {
-    config.audio_output_type == "pipewire"
-        || config.audio_output_type == "shared"
-        || config.alsa_device == "default"
+    null_output_test_mode()
+        || crate::audio_route::interpret_legacy_route(&config.audio_output_type, &config.alsa_device)
+            .route.access
+            == crate::audio_route::AudioAccess::Shared
+}
+
+fn is_shared_to_direct_transition(current: &AppConfig, proposed: &AppConfig) -> bool {
+    !current.first_run
+        && is_shared_output(current)
+        && proposed.audio_output_type == "alsa"
+        && !is_shared_output(proposed)
+}
+
+fn configured_audio_route(
+    config: &AppConfig,
+    processing: crate::audio_route::AudioProcessing,
+) -> Result<crate::audio_route::AudioRoute, String> {
+    let mut route = crate::audio_route::interpret_legacy_route(
+        &config.audio_output_type,
+        &config.alsa_device,
+    ).route;
+    route.processing = processing;
+    route.validate().map_err(|_| "A rota de áudio solicitada é inválida.".to_string())?;
+    Ok(route)
 }
 
 fn validate_config_change_preflight(
@@ -233,19 +350,213 @@ fn validate_config_change_preflight(
         );
     }
     let current_direct = (!is_shared_output(current)).then_some(current.alsa_device.as_str());
-    // Keep the existing Shared -> Direct gate, including legacy hw: spellings.
-    // Only the new Direct -> Direct case uses proof of distinct ownership.
-    let shared_to_direct = is_shared_output(current)
-        && proposed.alsa_device.starts_with("hw:")
-        && proposed.alsa_device.len() > 3;
-    if !is_shared_output(proposed)
-        && proposed.audio_output_type == "alsa"
-        && (shared_to_direct
-            || alsa_preflight::should_probe(&proposed.alsa_device, current_direct))
+    let direct_endpoint_changed = proposed.audio_output_type != current.audio_output_type
+        || proposed.alsa_device != current.alsa_device;
+    let proposed_direct = proposed.audio_output_type == "alsa" && !is_shared_output(proposed);
+    if proposed_direct && direct_endpoint_changed
+        && !alsa_preflight::is_physical_address(&proposed.alsa_device)
+    {
+        return Err("ALSA_DIRECT_ENDPOINT_INVALID".into());
+    }
+    // A preflight PCM open while Shared is active reports the current
+    // PipeWire owner as a conflict. Defer availability to the owned
+    // supervisor after it has released its route; identity syntax remains
+    // checked above and the post-release path observes the real PCM state.
+    if proposed_direct && direct_endpoint_changed
+        && !is_shared_to_direct_transition(current, proposed)
+        && alsa_preflight::should_probe(&proposed.alsa_device, current_direct)
     {
         probe(&proposed.alsa_device).map_err(|error| error.code().to_string())?;
     }
     Ok(())
+}
+
+fn alsa_transition_error(stage: &str, reason: alsa_observation::Reason) -> String {
+    let (code, message) = match reason {
+        alsa_observation::Reason::Occupied => ("ALSA_DIRECT_DEVICE_BUSY", "o dispositivo continua ocupado por outro cliente"),
+        alsa_observation::Reason::Changed => ("ALSA_DIRECT_DEVICE_CHANGED", "a identidade do dispositivo mudou durante a transição"),
+        alsa_observation::Reason::Unavailable => ("ALSA_DIRECT_DEVICE_UNAVAILABLE", "o dispositivo selecionado não está disponível"),
+        alsa_observation::Reason::NotOwned => ("ALSA_DIRECT_ACQUISITION_UNCONFIRMED", "o MPD não adquiriu o PCM dentro do prazo"),
+        alsa_observation::Reason::Busy => ("ALSA_DIRECT_ACQUISITION_UNCONFIRMED", "a observação do PCM permaneceu ocupada até o prazo"),
+        _ => ("ALSA_DIRECT_STATE_UNCONFIRMED", "não foi possível comprovar com segurança o estado do dispositivo"),
+    };
+    format!("{code}: {message} (etapa {stage}).")
+}
+
+fn start_direct_after_shared_release<T>(
+    stop_owned_route: impl FnOnce() -> Result<(), String>,
+    wait_for_physical_release: impl FnOnce() -> Result<(), String>,
+    start_direct: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    stop_owned_route()?;
+    wait_for_physical_release()?;
+    start_direct()
+}
+
+fn confirm_playing_direct_route_before_commit(
+    required: bool,
+    resume_and_confirm_mpd: impl FnOnce() -> Result<(), String>,
+    verify_owned_pcm: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    if !required { return Ok(false); }
+    // MPD is the sole PCM acquisition owner. A successful protocol state alone
+    // is insufficient; the read-only procfs observation must attribute the
+    // selected PCM stream to that exact child before config is persisted.
+    resume_and_confirm_mpd()?;
+    verify_owned_pcm()?;
+    Ok(true)
+}
+
+fn verify_direct_pcm_owned(
+    supervisor: &Mutex<MpdSupervisor>,
+    config: &AppConfig,
+    identity: &alsa_observation::DeviceIdentity,
+) -> Result<(), String> {
+    let expected_route = configured_audio_route(config, crate::audio_route::AudioProcessing::Off)?;
+    let (pid, generation) = {
+        let supervisor = supervisor.lock().map_err(|_| "ALSA_DIRECT_SUPERVISOR_UNAVAILABLE")?;
+        let route = supervisor.audio_route_observation();
+        if route.null_output_test || route.eq_pipe_configured
+            || route.operation != crate::audio_route::RouteOperationState::Stable
+            || route.applied.as_ref() != Some(&expected_route)
+        {
+            return Err("ALSA_DIRECT_ROUTE_NOT_APPLIED".into());
+        }
+        (supervisor.observed_process_pid().ok_or("ALSA_DIRECT_SUPERVISOR_UNAVAILABLE")?, route.generation)
+    };
+    if identity.endpoint() != config.alsa_device {
+        return Err("ALSA_DIRECT_DEVICE_CHANGED: identidade do endpoint divergiu da configuração solicitada.".into());
+    }
+    alsa_observation::wait_for_owned_pcm(identity, pid, Duration::from_secs(1))
+        .map_err(|reason| alsa_transition_error("mpd_pcm_acquisition", reason))?;
+    let supervisor = supervisor.lock().map_err(|_| "ALSA_DIRECT_SUPERVISOR_UNAVAILABLE")?;
+    let route = supervisor.audio_route_observation();
+    if supervisor.observed_process_pid() != Some(pid)
+        || route.generation != generation
+        || route.operation != crate::audio_route::RouteOperationState::Stable
+        || route.applied.as_ref() != Some(&expected_route)
+        || route.null_output_test || route.eq_pipe_configured
+    {
+        return Err("ALSA_DIRECT_DEVICE_CHANGED: a instância ou a rota mudou durante a confirmação.".into());
+    }
+    Ok(())
+}
+
+struct ProvisionalDirectChoice {
+    gate: Arc<direct_playback::Gate>,
+    previous: AppConfig,
+    finalized: bool,
+}
+
+impl ProvisionalDirectChoice {
+    fn stage(gate: Arc<direct_playback::Gate>, previous: &AppConfig, next: &AppConfig) -> Self {
+        gate.commit_choice(next);
+        Self { gate, previous: previous.clone(), finalized: false }
+    }
+    fn finalize(&mut self) { self.finalized = true; }
+}
+
+impl Drop for ProvisionalDirectChoice {
+    fn drop(&mut self) {
+        if !self.finalized { self.gate.commit_choice(&self.previous); }
+    }
+}
+
+#[cfg(test)]
+mod direct_route_release_tests {
+    use super::*;
+
+    fn shared_config() -> AppConfig {
+        AppConfig { first_run: false, audio_output_type: "pipewire".into(), alsa_device: "hw:2,0".into(), ..AppConfig::default() }
+    }
+
+    fn direct_config() -> AppConfig {
+        AppConfig { audio_output_type: "alsa".into(), alsa_device: "hw:2,0".into(), ..shared_config() }
+    }
+
+    #[test]
+    fn legacy_shared_to_direct_skips_the_pre_release_pcm_probe_but_keeps_endpoint_validation() {
+        let current = shared_config();
+        let proposed = direct_config();
+        let mut called = false;
+        validate_config_change_preflight(&current, &current, &proposed, |_| {
+            called = true;
+            Err(alsa_preflight::PreflightError::Busy)
+        }).unwrap();
+        assert!(!called, "opening a second PCM before releasing Shared would only report the current route");
+
+        let invalid = AppConfig { alsa_device: "plughw:2,0".into(), ..proposed.clone() };
+        assert_eq!(validate_config_change_preflight(&current, &current, &invalid, |_| panic!("invalid endpoint must fail before probing")), Err("ALSA_DIRECT_ENDPOINT_INVALID".into()));
+
+        let mut stale = current.clone();
+        stale.alsa_device = "hw:3,0".into();
+        assert!(validate_config_change_preflight(&stale, &current, &proposed, |_| panic!("stale config must fail before probing")).is_err());
+
+        let first_run = AppConfig { first_run: true, ..current.clone() };
+        let mut called = false;
+        validate_config_change_preflight(&first_run, &first_run, &direct_config(), |_| {
+            called = true;
+            Err(alsa_preflight::PreflightError::Busy)
+        }).unwrap_err();
+        assert!(called, "first-run has no existing Sonante Shared route to release");
+    }
+
+    #[test]
+    fn direct_start_is_ordered_after_owned_route_stop_and_observed_release() {
+        let steps = std::cell::RefCell::new(Vec::new());
+        let result = start_direct_after_shared_release(
+            || { steps.borrow_mut().push("stop-owned"); Ok(()) },
+            || { steps.borrow_mut().push("wait-released"); Ok(()) },
+            || { steps.borrow_mut().push("start-direct"); Ok(17) },
+        ).unwrap();
+        assert_eq!(result, 17);
+        assert_eq!(*steps.borrow(), ["stop-owned", "wait-released", "start-direct"]);
+
+        let steps = std::cell::RefCell::new(Vec::new());
+        let result = start_direct_after_shared_release::<()>(
+            || { steps.borrow_mut().push("stop-owned"); Ok(()) },
+            || { steps.borrow_mut().push("wait-released"); Err("another client still owns the PCM".into()) },
+            || { steps.borrow_mut().push("start-direct"); Ok(()) },
+        );
+        assert_eq!(result, Err("another client still owns the PCM".into()));
+        assert_eq!(*steps.borrow(), ["stop-owned", "wait-released"], "a busy device must not start Direct or fall back");
+    }
+
+    #[test]
+    fn failed_owned_stop_never_waits_or_starts_a_second_supervisor() {
+        let steps = std::cell::RefCell::new(Vec::new());
+        let result = start_direct_after_shared_release::<()>(
+            || { steps.borrow_mut().push("stop-owned"); Err("owned MPD stop failed".into()) },
+            || { steps.borrow_mut().push("wait-released"); Ok(()) },
+            || { steps.borrow_mut().push("start-direct"); Ok(()) },
+        );
+        assert_eq!(result, Err("owned MPD stop failed".into()));
+        assert_eq!(*steps.borrow(), ["stop-owned"]);
+    }
+
+    #[test]
+    fn direct_playback_is_confirmed_only_after_mpd_and_pcm_ownership_both_succeed() {
+        let steps = std::cell::RefCell::new(Vec::new());
+        assert!(confirm_playing_direct_route_before_commit(true,
+            || { steps.borrow_mut().push("mpd-playing"); Ok(()) },
+            || { steps.borrow_mut().push("owned-pcm"); Ok(()) },
+        ).unwrap());
+        assert_eq!(*steps.borrow(), ["mpd-playing", "owned-pcm"]);
+
+        let steps = std::cell::RefCell::new(Vec::new());
+        assert_eq!(confirm_playing_direct_route_before_commit(false,
+            || { steps.borrow_mut().push("unexpected-resume"); Ok(()) },
+            || { steps.borrow_mut().push("unexpected-pcm-check"); Ok(()) },
+        ), Ok(false));
+        assert!(steps.borrow().is_empty(), "paused and stopped route saves must not auto-resume to prove acquisition");
+
+        let steps = std::cell::RefCell::new(Vec::new());
+        assert_eq!(confirm_playing_direct_route_before_commit(true,
+            || { steps.borrow_mut().push("mpd-playing"); Ok(()) },
+            || { steps.borrow_mut().push("owned-pcm"); Err("not owned".into()) },
+        ), Err("not owned".into()));
+        assert_eq!(*steps.borrow(), ["mpd-playing", "owned-pcm"]);
+    }
 }
 
 fn should_rescan_library_on_startup(
@@ -359,6 +670,8 @@ struct LocalAlbumTagBatchResult {
     failed_count: usize,
     not_attempted_count: usize,
     partial_commit: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_reconciled: Option<bool>,
 }
 
 fn complete_local_tag_update<F>(
@@ -454,6 +767,7 @@ where
         failed_count: write_result.failed_count,
         not_attempted_count: write_result.not_attempted_count,
         partial_commit: write_result.partial_commit,
+        catalog_reconciled: None,
     }
 }
 
@@ -1387,7 +1701,7 @@ fn persist_experimental_local_folders_config(
     drop(plex_guard);
     drop(config_guard);
     remote_bridge::beta_preference_changed(app, expected_current.experimental_features, new_config.experimental_features);
-    if expected_current.full_mode() != new_config.full_mode() {
+    if expected_current.full_mode() != new_config.full_mode() && !null_output_test_mode() {
         remote_bridge::usage_mode_changed(app);
         upnp_bridge::usage_mode_changed(app);
     }
@@ -2052,6 +2366,97 @@ fn prepare_initial_preferences(
     }
 }
 
+fn confirm_sqlite_initial_preferences<T>(
+    current: &AppConfig,
+    next: &AppConfig,
+    library: &SqliteLibraryState,
+    publish: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if !is_finishing_first_run(current, next) {
+        return Err("FIRST_RUN_CONFIG_CHANGED".into());
+    }
+    library.with_initial_sources_guard(
+        &next.local_folders,
+        next.sources.unwrap_or_default().local,
+        publish,
+    )
+}
+
+fn prepare_initial_sqlite_preferences(
+    app: &AppHandle,
+    observed: &AppConfig,
+    next: &AppConfig,
+    operation: &config_save_operation::Operation,
+) -> (Result<(), String>, bool) {
+    let committed = Cell::new(false);
+    let uncertain_save = Cell::new(false);
+    let started_here = Cell::new(false);
+    let result = (|| {
+        let transactions = app.state::<ConfigTransactionState>();
+        let owner = app.state::<profile_lease::State>().lease()?;
+        owner.validate()?;
+        let _startup = transactions
+            .startup_config_read_gate
+            .try_lock()
+            .map_err(|_| "SOURCE_AVAILABILITY_BUSY")?;
+        let cancelled = || operation.shutdown_requested() || transactions.shutdown_requested();
+        recovery_fs::check(&cancelled)?;
+        managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())?;
+        let current = app
+            .state::<ConfigState>()
+            .0
+            .lock()
+            .map_err(|_| "Config unavailable")?
+            .clone();
+        validate_config_change_preflight(observed, &current, next, alsa_preflight::probe)?;
+        let library = app.state::<SqliteLibraryState>();
+        library.with_initial_sources_guard(
+            &next.local_folders,
+            next.sources.unwrap_or_default().local,
+            || Ok(()),
+        )?;
+        // The null-output test already owns its private MPD on first run.
+        // Normal first run admits the requested output before committing the
+        // completed preferences, as the legacy Wizard does.
+        let supervisor = app.state::<SupervisorState>();
+        {
+            let mut supervisor = supervisor.0.lock().map_err(|_| "MPD unavailable")?;
+            if supervisor.observed_process_pid().is_none() {
+                local_diagnostics::wizard_step(local_diagnostics::Stage::WizardEngine, || {
+                    supervisor.start(next).map(|_| ())
+                })?;
+                started_here.set(true);
+            }
+        }
+        confirm_sqlite_initial_preferences(&current, next, &library, || {
+            owner.validate()?;
+            recovery_fs::check(&cancelled)?;
+            match persist_experimental_local_folders_config(app, &current, next) {
+                Ok(()) => {
+                    committed.set(true);
+                    music_sources::install(next);
+                    Ok(())
+                }
+                Err(error) => {
+                    uncertain_save.set(matches!(error, ConfigSaveError::AfterRenameUnconfirmed(_)));
+                    Err(config_save_error_message(&error))
+                }
+            }
+        })
+    })();
+    // A confirmed write is terminal success unless a later generation-guard
+    // validation fails. Only an unconfirmed rename, or a post-write failure,
+    // leaves the caller unable to know whether preferences and catalog agree.
+    let uncertain = uncertain_save.get() || (committed.get() && result.is_err());
+    let result = if result.is_err() && started_here.get() && !uncertain {
+        let supervisor = app.state::<SupervisorState>();
+        result.map_err(|error| error_with_rollback(error, stop_supervisor(&supervisor.0)))
+    } else {
+        result
+    };
+    (result, uncertain)
+}
+
 fn run_initial_catalog(app: &AppHandle, operation: &config_save_operation::Operation, start_mpd: bool, prepared_watch: Option<local_watcher::PreparedWatch>) -> Result<(), String> {
     let transactions = app.state::<ConfigTransactionState>();
     let owner = app.state::<profile_lease::State>().lease()?;
@@ -2105,7 +2510,13 @@ fn run_initial_catalog(app: &AppHandle, operation: &config_save_operation::Opera
     result
 }
 
-fn spawn_initial_catalog(app: AppHandle, operation: config_save_operation::Operation, start_mpd: bool, watch: Option<local_watcher::PreparedWatch>) {
+fn spawn_initial_catalog(
+    app: AppHandle,
+    operation: config_save_operation::Operation,
+    start_mpd: bool,
+    watch: Option<local_watcher::PreparedWatch>,
+    resume_initial: bool,
+) {
     operation.initial_catalog_background();
     tauri::async_runtime::spawn_blocking(move || {
         let result = run_initial_catalog(&app, &operation, start_mpd, watch).map_err(|error| {
@@ -2123,7 +2534,12 @@ fn spawn_initial_catalog(app: AppHandle, operation: config_save_operation::Opera
         });
         let failed = result.is_err();
         operation.finish(result, failed);
-        if !failed { let _ = app.emit(LOCAL_LIBRARY_RECONCILED_EVENT, ()); }
+        if !failed {
+            let _ = app.emit(LOCAL_LIBRARY_RECONCILED_EVENT, ());
+            if resume_initial && start_mpd {
+                restore_profile_services_after_resume(&app);
+            }
+        }
     });
 }
 
@@ -3114,6 +3530,8 @@ pub struct MpdStatusSnapshot {
     pub(crate) engine_evidence: Option<mpd_engine::EngineEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) shared_dsp: Option<shared_dsp::Snapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_route: Option<crate::audio_route::AudioRouteProjection>,
 }
 
 impl ConfigTransactionState {
@@ -3137,6 +3555,27 @@ impl ConfigTransactionState {
 
     fn begin(&self) -> Result<config_save_operation::Transaction<'_>, String> {
         self.operations.begin()
+    }
+
+    fn begin_audio_transition(
+        &self,
+        requested: crate::audio_route::AudioRoute,
+        kind: config_save_operation::AudioTransitionKind,
+        before: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(
+        config_save_operation::Transaction<'_>,
+        config_save_operation::AudioTransitionHandle,
+    ), String> {
+        let mut transaction = self.operations.begin()?;
+        before()?;
+        let generation = transaction.begin_audio_transition(requested, kind)?;
+        Ok((transaction, self.operations.audio_transition_handle(generation)))
+    }
+
+    fn audio_transition_snapshot(
+        &self,
+    ) -> Option<config_save_operation::AudioTransitionSnapshot> {
+        self.operations.audio_transition_snapshot().ok().flatten()
     }
 
     fn lock_startup_config_reads(
@@ -3251,6 +3690,7 @@ async fn get_playback_status(app: AppHandle, diagnostic_id: Option<u64>) -> Resu
 async fn get_mpd_status_snapshot(app: AppHandle, diagnostic_id: Option<u64>) -> Result<MpdStatusSnapshot, String> {
     let diagnostic = diagnostics::DevSpan::ipc("health.snapshot", diagnostic_id);
     diagnostic.phase("executor.queued");
+    let route_snapshot_generation = next_audio_route_snapshot_generation();
     tauri::async_runtime::spawn_blocking(move || {
         let mut diagnostic = diagnostic;
         let before = output_observation_context(&app);
@@ -3306,6 +3746,11 @@ async fn get_mpd_status_snapshot(app: AppHandle, diagnostic_id: Option<u64>) -> 
                     },
                 );
                 if let Some(playback) = &snapshot.playback { listening_history::observe(&app, playback); upnp_bridge::publish(&app, playback, true); }
+                snapshot.audio_route = Some(project_linux_audio_route(
+                    &app,
+                    &snapshot,
+                    route_snapshot_generation,
+                ));
                 snapshot
             });
         diagnostic.result(&result);
@@ -3322,7 +3767,16 @@ fn output_observation_context(app: &AppHandle) -> Option<alsa_observation::Conte
         let config = app.state::<ConfigState>();
         let config = config.0.try_lock().ok()?;
         if config.first_run { return None; }
-        (config.alsa_device.clone(), matches!(config.audio_output_type.as_str(), "pipewire" | "shared") || config.alsa_device == "default")
+        (
+            config.alsa_device.clone(),
+            crate::audio_route::interpret_legacy_route(
+                &config.audio_output_type,
+                &config.alsa_device,
+            )
+            .route
+            .access
+                == crate::audio_route::AudioAccess::Shared,
+        )
     };
     let pid = {
         let supervisor = app.state::<SupervisorState>();
@@ -3348,7 +3802,198 @@ fn unavailable_snapshot(health: MpdHealth) -> MpdStatusSnapshot {
         output_observation: None,
         engine_evidence: None,
         shared_dsp: None,
+        audio_route: None,
     }
+}
+
+fn next_audio_route_snapshot_generation() -> u64 {
+    let mut current = AUDIO_ROUTE_SNAPSHOT_GENERATION.load(Ordering::Acquire);
+    loop {
+        if current == u64::MAX {
+            return current;
+        }
+        match AUDIO_ROUTE_SNAPSHOT_GENERATION.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return current + 1,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn project_linux_audio_route(
+    app: &AppHandle,
+    snapshot: &MpdStatusSnapshot,
+    generation: u64,
+) -> crate::audio_route::AudioRouteProjection {
+    use crate::audio_route::{
+        project_audio_route, RouteDspState, RouteOperationState,
+        RoutePlatform, RouteProjectionInput, RouteSupervisorState,
+    };
+    let persisted = app
+        .state::<ConfigState>()
+        .0
+        .try_lock()
+        .ok()
+        .filter(|config| !config.first_run)
+        .map(|config| crate::audio_route::interpret_legacy_route(
+            &config.audio_output_type,
+            &config.alsa_device,
+        ));
+    let runtime = app
+        .state::<SupervisorState>()
+        .0
+        .try_lock()
+        .ok()
+        .map(|supervisor| supervisor.audio_route_observation());
+    let supervisor_state = match (&snapshot.health, runtime.is_some()) {
+        (_, false) => RouteSupervisorState::Unknown,
+        (MpdHealth::Available, true) => RouteSupervisorState::Available,
+        (MpdHealth::Starting, true) => RouteSupervisorState::Starting,
+        (MpdHealth::Stopping, true) => RouteSupervisorState::Stopping,
+        (MpdHealth::Unavailable(MpdUnavailableReason::StartupFailed), true) => RouteSupervisorState::Failed,
+        (MpdHealth::Unavailable(_), true) => RouteSupervisorState::Unavailable,
+    };
+    let dsp_state = snapshot
+        .shared_dsp
+        .as_ref()
+        .map(|dsp| match dsp.phase {
+            shared_dsp::Phase::Off => RouteDspState::Off,
+            shared_dsp::Phase::Preparing => RouteDspState::Preparing,
+            shared_dsp::Phase::Ready => RouteDspState::Ready,
+            shared_dsp::Phase::Active if dsp.verified && dsp.in_path == Some(true) => RouteDspState::ActiveVerified,
+            shared_dsp::Phase::Active => RouteDspState::ActiveUnverified,
+            shared_dsp::Phase::Updating => RouteDspState::Updating,
+            shared_dsp::Phase::Stopping => RouteDspState::Stopping,
+            shared_dsp::Phase::Error => RouteDspState::Failed,
+        })
+        .unwrap_or_else(|| {
+            if runtime.as_ref().is_some_and(|value| value.eq_pipe_configured) {
+                RouteDspState::ActiveUnverified
+            } else {
+                RouteDspState::Unavailable
+            }
+        });
+    let applied = runtime.as_ref().and_then(|value| value.applied.clone());
+    let configured = persisted.as_ref().map(|value| &value.route);
+    let route_differs = match (configured, applied.as_ref()) {
+        (Some(requested), Some(current)) => {
+            requested.destination != current.destination || requested.access != current.access
+        }
+        (Some(_), None) => true,
+        _ => false,
+    };
+    let config_operation = if route_differs {
+        app.state::<ConfigTransactionState>()
+            .operations
+            .snapshot()
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let config_operation_state = config_operation.as_ref().map(|operation| match operation.phase {
+        config_save_operation::Phase::Preparing
+        | config_save_operation::Phase::Removing
+        | config_save_operation::Phase::Indexing
+        | config_save_operation::Phase::Validating => RouteOperationState::Transitioning,
+        config_save_operation::Phase::Failed => RouteOperationState::Failed,
+        config_save_operation::Phase::Uncertain => RouteOperationState::Uncertain,
+        config_save_operation::Phase::Completed => RouteOperationState::Stable,
+    });
+    let operation_diagnostic = config_operation.as_ref().and_then(|operation| match operation.phase {
+        config_save_operation::Phase::Failed => Some(crate::audio_route::RouteDiagnostic::ConfigurationFailed),
+        config_save_operation::Phase::Uncertain => Some(crate::audio_route::RouteDiagnostic::ConfigurationUncertain),
+        _ => None,
+    });
+    let mut operation = runtime
+        .as_ref()
+        .map_or(RouteOperationState::Uncertain, |value| value.operation);
+    if let Some(value) = config_operation_state {
+        if value != RouteOperationState::Stable {
+            operation = value;
+        }
+    }
+    if matches!(dsp_state, RouteDspState::Preparing | RouteDspState::Ready | RouteDspState::Updating | RouteDspState::Stopping) {
+        operation = RouteOperationState::Transitioning;
+    } else if dsp_state == RouteDspState::Failed {
+        operation = RouteOperationState::Failed;
+    } else if dsp_state == RouteDspState::ActiveUnverified {
+        operation = RouteOperationState::Uncertain;
+    }
+    let operation_id = config_operation
+        .filter(|_| route_differs)
+        .map(|value| format!("config:{}", value.id))
+        .or_else(|| {
+            snapshot.shared_dsp.as_ref().and_then(|dsp| {
+                (dsp.revision > 0 && dsp_state != RouteDspState::Off)
+                    .then(|| format!("dsp:{}", dsp.revision))
+            })
+        })
+        .or_else(|| {
+            runtime.as_ref().and_then(|value| {
+                (value.generation > 0).then(|| format!("mpd:{}", value.generation))
+            })
+        });
+    let direct_pcm_observed = matches!(
+        snapshot.output_observation,
+        Some(alsa_observation::Observation::Observed { .. })
+    );
+    let mut projection = project_audio_route(RouteProjectionInput {
+        persisted,
+        applied,
+        supervisor: supervisor_state,
+        playback_consistent: snapshot
+            .playback
+            .as_ref()
+            .is_some_and(|playback| playback.snapshot_consistent),
+        playing: snapshot
+            .playback
+            .as_ref()
+            .is_some_and(|playback| playback.state == "play" && playback.snapshot_consistent),
+        direct_pcm_observed,
+        dsp: dsp_state,
+        operation,
+        diagnostic: operation_diagnostic,
+        operation_id,
+        generation,
+        platform: RoutePlatform::Linux,
+        null_output_test: runtime.as_ref().is_some_and(|value| value.null_output_test),
+    });
+
+    // The route coordinator is backed by the same admission guard used by
+    // Config Save and EQ. Overlay only its current generation; stale worker
+    // completions are discarded by the coordinator before reaching here.
+    if let Some(transition) = app.state::<ConfigTransactionState>().audio_transition_snapshot() {
+        match transition.state {
+            RouteOperationState::Transitioning => {
+                projection.operation = RouteOperationState::Transitioning;
+                projection.operation_id = Some(format!("route:{}", transition.generation));
+                let previously_confirmed = projection.route.as_ref().and_then(|route| route.confirmed.clone());
+                projection.route = crate::audio_route::AudioRouteSnapshot::transitioning(
+                    transition.requested,
+                    previously_confirmed,
+                ).ok();
+            }
+            RouteOperationState::Failed | RouteOperationState::Uncertain => {
+                projection.operation = transition.state;
+                projection.operation_id = Some(format!("route:{}", transition.generation));
+                projection.diagnostic = Some(match (transition.kind, transition.state) {
+                    (config_save_operation::AudioTransitionKind::Configuration, RouteOperationState::Failed) => crate::audio_route::RouteDiagnostic::ConfigurationFailed,
+                    (config_save_operation::AudioTransitionKind::Configuration, RouteOperationState::Uncertain) => crate::audio_route::RouteDiagnostic::ConfigurationUncertain,
+                    (config_save_operation::AudioTransitionKind::Equalizer, RouteOperationState::Failed) => crate::audio_route::RouteDiagnostic::DspFailed,
+                    (config_save_operation::AudioTransitionKind::Equalizer, RouteOperationState::Uncertain) => crate::audio_route::RouteDiagnostic::DspNotVerified,
+                    _ => unreachable!(),
+                });
+                projection.route = crate::audio_route::AudioRouteSnapshot::uncertain(transition.requested).ok();
+            }
+            RouteOperationState::Stable => {}
+        }
+    }
+    projection
 }
 
 fn apply_volume_context(playback: &mut PlaybackStatus, before: &direct_volume::Context, after: &direct_volume::Context) {
@@ -3450,6 +4095,7 @@ fn collect_mpd_status_snapshot_with_diagnostic(
                 output_observation: None,
         engine_evidence: None,
         shared_dsp: None,
+        audio_route: None,
             })
         }
         Err(_) => {
@@ -3630,11 +4276,9 @@ fn initial_queue_uris(audio: &AudioEngine, context: &initial_plex_playback::Sess
         return Err(initial_plex_playback::WAIT.into());
     }
     let actual = AudioEngine::capture_mpd_queue_structure(&audio.local_album_socket_path()).map_err(|_| "PLAYBACK_QUEUE_UNCERTAIN")?;
-    if actual.entries.len() != queue.len() || queue.iter().zip(&actual.entries).any(|(track, entry)| match &track.media_locator {
-        Some(MediaLocator::Local { uri }) => uri != &entry.uri,
-        None if context.is_addition() => track.uri != entry.uri,
-        _ => false,
-    }) { return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
+    if actual.entries.len() != queue.len() || queue.iter().zip(&actual.entries)
+        .any(|(track, entry)| !crate::audio::queue_entry_matches_track(entry, track))
+    { return Err("PLAYBACK_QUEUE_UNCERTAIN".into()); }
     Ok(actual.entries.into_iter().map(|entry| entry.uri).collect())
 }
 fn finish_playback_effect<T>(
@@ -3726,12 +4370,24 @@ fn play_uris(uris: Vec<String>, start_index: usize, intent: Option<String>, stat
 async fn resolve_playback_uris(
     tracks: &[TrackMetadata],
     plex_client: &PlexClient,
+    sqlite_library: Option<&SqliteLibraryState>,
+    configured_roots: &[String],
 ) -> Result<Vec<String>, String> {
     let mut uris = Vec::with_capacity(tracks.len());
     for track in tracks {
+        let sqlite_locator = match &track.media_locator {
+            Some(MediaLocator::Local { uri }) if uri.starts_with("sqlite-track://") || uri.starts_with("sqlite-cue://") => Some(uri),
+            _ => None,
+        };
         let uri = if let Some(MediaLocator::Radio { station_id }) = &track.media_locator {
             if !radio::valid_id(station_id) { return Err("RADIO_INVALID".into()); }
             radio::stream_url(&track.uri)?
+        } else if let Some(locator) = sqlite_locator {
+            if !SqliteLibraryState::is_sqlite_track_locator(locator) {
+                return Err("SQLITE_TRACK_LOCATOR_INVALID".into());
+            }
+            let library = sqlite_library.ok_or("SQLITE_LIBRARY_UNAVAILABLE")?;
+            library.resolve_playback_locator_with_roots(locator, configured_roots)?
         } else if let Some(locator) = &track.media_locator {
             plex_client.resolve_media_locator(locator).await?
         } else {
@@ -3751,15 +4407,38 @@ async fn resolve_playback_uris(
     Ok(uris)
 }
 
+fn revalidate_sqlite_playback_bindings(
+    tracks: &[TrackMetadata],
+    uris: &[String],
+    sqlite_library: &SqliteLibraryState,
+    configured_roots: &[String],
+) -> Result<(), String> {
+    if tracks.len() != uris.len() { return Err("SQLITE_TRACK_RESOLUTION_UNCONFIRMED".into()); }
+    for (track, uri) in tracks.iter().zip(uris) {
+        let Some(MediaLocator::Local { uri: locator }) = &track.media_locator else { continue };
+        if !locator.starts_with("sqlite-track://") && !locator.starts_with("sqlite-cue://") { continue; }
+        if !SqliteLibraryState::is_sqlite_track_locator(locator) {
+            return Err("SQLITE_TRACK_LOCATOR_INVALID".into());
+        }
+        if sqlite_library.resolve_playback_locator_with_roots(locator, configured_roots)? != *uri {
+            return Err("SQLITE_TRACK_CHANGED_DURING_RESOLUTION".into());
+        }
+    }
+    Ok(())
+}
+
 async fn resolve_device_switch_queue(
     audio: &Mutex<AudioEngine>,
     plex_client: &PlexClient,
+    sqlite_library: Option<&SqliteLibraryState>,
+    configured_roots: &[String],
 ) -> Result<ResolvedDeviceSwitchQueue, String> {
     let captured = audio
         .lock()
         .map_err(|e| format!("Falha ao acessar a fila antes da troca de saída: {}", e))?
         .capture_device_switch_queue()?;
-    let uris = resolve_playback_uris(captured.tracks(), plex_client).await?;
+    let uris = resolve_playback_uris(captured.tracks(), plex_client, sqlite_library, configured_roots).await?;
+    if let Some(library) = sqlite_library { revalidate_sqlite_playback_bindings(captured.tracks(), &uris, library, configured_roots)?; }
     captured.bind_resolved_uris(uris)
 }
 
@@ -3784,6 +4463,15 @@ async fn restore_cached_queue_after_ready(app: AppHandle) {
         }
     };
     let resolve_clock = Instant::now();
+    let sqlite_library = app.state::<SqliteLibraryState>().clone();
+    let configured_roots = match app.state::<ConfigState>().0.lock() {
+        Ok(config) => config.local_folders.clone(),
+        Err(_) => {
+            eprintln!("[Audio] Failed to access local source configuration for queue restoration.");
+            if let Ok(mut audio) = audio_state.0.lock() { audio.fail_startup_queue_restore(); }
+            return;
+        }
+    };
     let resolved = async {
         let mut rebound = queue.clone();
         if rebound.iter().any(|track| matches!(track.media_locator, Some(MediaLocator::Navidrome { .. }))) {
@@ -3793,17 +4481,27 @@ async fn restore_cached_queue_after_ready(app: AppHandle) {
             navidrome::navidrome_status(app.clone()).await?;
             navidrome::bind_tracks(&mut rebound)?;
         }
-        let uris = resolve_playback_uris(&rebound, &plex_client).await?;
-        Ok::<_, String>((rebound, uris))
+        let uris = resolve_playback_uris(&rebound, &plex_client, Some(&sqlite_library), &configured_roots).await?;
+        revalidate_sqlite_playback_bindings(&rebound, &uris, &sqlite_library, &configured_roots)?;
+        for (track, uri) in rebound.iter_mut().zip(&uris) {
+            if matches!(&track.media_locator, Some(MediaLocator::Local { uri }) if SqliteLibraryState::is_sqlite_track_locator(uri)) {
+                track.uri = uri.clone();
+            }
+        }
+        let source_generations = sqlite_library.playback_source_generations(&rebound)?;
+        Ok::<_, String>((rebound, uris, source_generations))
     }.await;
     local_diagnostics::record(local_diagnostics::Stage::QueueResolve, resolve_clock.elapsed(), resolved.as_ref().err().map(String::as_str));
     match resolved {
-        Ok((rebound, uris)) => match audio_state.0.lock() {
+        Ok((rebound, uris, source_generations)) => match audio_state.0.lock() {
             Ok(mut audio) => {
                 if let Err(error) = local_diagnostics::timed(local_diagnostics::Stage::QueueApply, || {
                     // Audio -> Navidrome lease matches explicit playback. A
                     // reconnect cannot retire the proxy during the MPD effect.
-                    navidrome::with_bound_tracks(rebound, |tracks| audio.restore_startup_queue_references(&queue, tracks, &uris))
+                    sqlite_library.with_playback_generation_guard(&source_generations, || {
+                        revalidate_sqlite_playback_bindings(&rebound, &uris, &sqlite_library, &configured_roots)?;
+                        navidrome::with_bound_tracks(rebound, |tracks| audio.restore_startup_queue_references(&queue, tracks, &uris))
+                    })
                 }) {
                     audio.fail_startup_queue_restore();
                     eprintln!(
@@ -3937,7 +4635,10 @@ async fn complete_startup_after_ready(app: AppHandle) {
     // queue must not register a recursive watcher, enumerate source contents,
     // rebuild the mirror or schedule an MPD update/rescan.
     let started = std::time::Instant::now();
-    restore_cached_queue_after_ready(app).await;
+    restore_cached_queue_after_ready(app.clone()).await;
+    // Startup is one-shot and only reaches this function after the existing
+    // supervisor reports MPD started. EQ restoration reuses that owned route.
+    equalizer_commands::restore_desired_on_startup(app.clone()).await;
     // Duration describes completion of the existing restoration attempt, not proof of playback.
     local_diagnostics::record(local_diagnostics::Stage::QueueRestoreAttempt, started.elapsed(), None);
 }
@@ -3951,7 +4652,10 @@ async fn enqueue_tracks(app: AppHandle, mut tracks: Vec<TrackMetadata>, placemen
     if initial_playback_context(&app.state::<ConfigTransactionState>(), Some(&token))?.is_some() { return Err(initial_plex_playback::WAIT.into()); }
     if music_sources::navidrome() && tracks.iter().any(|t|matches!(t.media_locator,Some(MediaLocator::Navidrome{..}))) { navidrome::navidrome_status(app.clone()).await?; navidrome::bind_tracks(&mut tracks)?; }
     let client = app.state::<PlexState>().0.lock().map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?.clone();
-    let resolved = resolve_playback_uris(&tracks, &client).await;
+    let sqlite_library = app.state::<SqliteLibraryState>().inner().clone();
+    let configured_roots = app.state::<ConfigState>().0.lock().map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?.local_folders.clone();
+    let resolved = resolve_playback_uris(&tracks, &client, Some(&sqlite_library), &configured_roots).await;
+    let source_generations = sqlite_library.playback_source_generations(&tracks)?;
     tauri::async_runtime::spawn_blocking(move || {
         let transactions = app.state::<ConfigTransactionState>();
         let _permit = begin_volume_transaction(&transactions)?;
@@ -3961,10 +4665,19 @@ async fn enqueue_tracks(app: AppHandle, mut tracks: Vec<TrackMetadata>, placemen
         { let plex = app.state::<PlexState>(); let plex = plex.0.lock().map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
           if tracks.iter().any(|track| matches!(track.media_locator, Some(MediaLocator::Plex { .. }))
               && !plex.playback_references_match(std::slice::from_ref(track))) { return Err("QUEUE_INSERT_CONTEXT_CHANGED".into()); } }
+        let uris = resolved.map_err(|error| if error.starts_with("SQLITE_") { error } else { "QUEUE_INSERT_UNAVAILABLE".into() })?;
+        for (track, uri) in tracks.iter_mut().zip(&uris) {
+            if matches!(&track.media_locator, Some(MediaLocator::Local { uri }) if SqliteLibraryState::is_sqlite_track_locator(uri)) {
+                track.uri = uri.clone();
+            }
+        }
         let state = app.state::<AudioState>();
         let mut audio = state.0.lock().map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?;
         audio.validate_playback_intent(&token)?;
-        navidrome::with_bound_tracks(tracks, |tracks| audio.enqueue_tracks(tracks, resolved.map_err(|_| "QUEUE_INSERT_UNAVAILABLE")?, placement))
+        sqlite_library.with_playback_generation_guard(&source_generations, || {
+            revalidate_sqlite_playback_bindings(&tracks, &uris, &sqlite_library, &configured_roots)?;
+            navidrome::with_bound_tracks(tracks, |tracks| audio.enqueue_tracks(tracks, uris, placement))
+        })
     }).await.map_err(|_| "QUEUE_INSERT_UNAVAILABLE".to_string())?
 }
 
@@ -4076,19 +4789,33 @@ async fn play_tracks(
     let context = initial_playback_context(&transactions, Some(&token))?;
     let initial = context.is_some();
     if context.as_ref().is_some_and(|scope| !scope.accepts_tracks(&tracks, &plex_client)) { return Err(initial_plex_playback::WAIT.into()); }
-    if music_sources::navidrome() && tracks.iter().any(|t|matches!(t.media_locator,Some(MediaLocator::Navidrome{..}))) { navidrome::navidrome_status(app).await?; navidrome::bind_tracks(&mut tracks)?; }
-    let resolved = resolve_playback_uris(&tracks, &plex_client).await;
+    if music_sources::navidrome() && tracks.iter().any(|t|matches!(t.media_locator,Some(MediaLocator::Navidrome{..}))) { navidrome::navidrome_status(app.clone()).await?; navidrome::bind_tracks(&mut tracks)?; }
+    let sqlite_library = app.state::<SqliteLibraryState>().clone();
+    let configured_roots = app.state::<ConfigState>().0.lock().map_err(|_| "LOCAL_PLAYBACK_UNAVAILABLE")?.local_folders.clone();
+    let resolved = resolve_playback_uris(&tracks, &plex_client, Some(&sqlite_library), &configured_roots).await;
     // Supersession/revocation wins even over a resolver error.
     { let audio = audio_state.0.lock().map_err(|_| "Playback unavailable")?;
       initial_playback_context(&transactions, Some(&token))?; audio.validate_playback_intent(&token)?; }
     let uris = resolved?;
+    revalidate_sqlite_playback_bindings(&tracks, &uris, &sqlite_library, &configured_roots)?;
+    let source_generations = sqlite_library.playback_source_generations(&tracks)?;
+    for (track, uri) in tracks.iter_mut().zip(&uris) {
+        if matches!(&track.media_locator, Some(MediaLocator::Local { uri }) if SqliteLibraryState::is_sqlite_track_locator(uri)) {
+            track.uri = uri.clone();
+        }
+    }
     if let Some(scope) = &context {
         let plex = plex_state.0.lock().map_err(|_| "Plex unavailable")?;
         if !scope.accepts_resolved(&tracks, &uris, &plex) { return Err(initial_plex_playback::WAIT.into()); }
     }
     let effect = if initial { InitialPlaybackEffect::VerifiedMedia(uris.clone()) } else { InitialPlaybackEffect::Queue };
     finish_playback_effect(&audio_state.0, &transactions, &token, effect,
-        |audio| navidrome::with_bound_tracks(tracks, |tracks| audio.play_tracks(tracks, uris, start_index)))
+        |audio| {
+            sqlite_library.with_playback_generation_guard(&source_generations, || {
+                revalidate_sqlite_playback_bindings(&tracks, &uris, &sqlite_library, &configured_roots)?;
+                navidrome::with_bound_tracks(tracks, |tracks| audio.play_tracks(tracks, uris, start_index))
+            })
+        })
 }
 
 #[tauri::command]
@@ -4275,22 +5002,60 @@ fn read_queue_from_audio(audio: &Mutex<AudioEngine>, diagnostic: &diagnostics::D
 }
 
 #[tauri::command]
-fn play_queue_index(
+async fn play_queue_index(
+    app: AppHandle,
     index: usize,
     intent: Option<String>,
-    transactions: State<ConfigTransactionState>,
-    config_state: State<ConfigState>,
-    audio_state: State<AudioState>,
 ) -> Result<(), String> {
+    let audio_state = app.state::<AudioState>();
+    let transactions = app.state::<ConfigTransactionState>();
     let token = admit_or_validate_playback(&audio_state.0, &transactions, intent)?;
+    let queued_track = {
+        let audio = audio_state.0.lock().map_err(|_| "Playback unavailable")?;
+        audio.ensure_queue_coherent()?;
+        audio.get_queue().get(index).cloned().ok_or("QUEUE_INDEX_INVALID")?
+    };
+    let sqlite_locator = match &queued_track.media_locator {
+        Some(MediaLocator::Local { uri }) if SqliteLibraryState::is_sqlite_track_locator(uri) => {
+            Some(uri.clone())
+        }
+        _ => None,
+    };
+    let sqlite_uri = if let Some(locator) = &sqlite_locator {
+        let library = app.state::<SqliteLibraryState>().inner().clone();
+        let locator = locator.clone();
+        let configured_roots = app.state::<ConfigState>().0.lock().map_err(|_| "SQLITE_TRACK_UNAVAILABLE_OR_CHANGED")?.local_folders.clone();
+        Some(tauri::async_runtime::spawn_blocking(move || {
+            library.resolve_playback_locator_with_roots(&locator, &configured_roots)
+        }).await.map_err(|_| "SQLITE_TRACK_UNAVAILABLE_OR_CHANGED")??)
+    } else {
+        None
+    };
     let is_shared = {
-        let config = config_state
-            .0
-            .lock()
-            .map_err(|e| format!("Falha ao acessar configuração durante seleção da fila: {e}"))?;
+        let config = app.state::<ConfigState>();
+        let config = config.0.lock().map_err(|e| format!("Falha ao acessar configuração durante seleção da fila: {e}"))?;
         is_shared_output(&config)
     };
-    finish_playback_intent(&audio_state.0, &transactions, &token, |audio| audio.play_index(index, is_shared))
+    tauri::async_runtime::spawn_blocking(move || {
+        let sqlite_library = app.state::<SqliteLibraryState>().inner().clone();
+        let configured_roots = app.state::<ConfigState>().0.lock().map_err(|_| "SQLITE_TRACK_UNAVAILABLE_OR_CHANGED")?.local_folders.clone();
+        let transactions = app.state::<ConfigTransactionState>();
+        finish_playback_intent(
+            &app.state::<AudioState>().0,
+            &transactions,
+            &token,
+            |audio| {
+                if let (Some(locator), Some(uri)) = (&sqlite_locator, &sqlite_uri) {
+                    // Serialize the final locator check with source removal.
+                    let current = sqlite_library.resolve_playback_locator_with_roots(locator, &configured_roots)?;
+                    if current != *uri { return Err("SQLITE_TRACK_CHANGED_DURING_RESOLUTION".into()); }
+                    audio.play_sqlite_index(index, locator, uri, is_shared)
+                } else {
+                    audio.play_index(index, is_shared)
+                }
+            },
+        )
+    }).await.map_err(|_| "Playback unavailable".to_string())?
 }
 
 #[tauri::command]
@@ -4397,6 +5162,12 @@ async fn get_edition_profile(source: album_file_sizes::Request, app: AppHandle) 
             client.edition_profile(&server_id,&library_id,&album_id).await
         },
         Request::Navidrome {connection_id,account_id,album_id} => navidrome::edition_profile(&connection_id,&account_id,&album_id).await,
+        Request::Local {album_id} if album_id.starts_with("sqlite:") => {
+            let state = app.state::<SqliteLibraryState>().inner().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                state.local_edition_profile(&album_id)
+            }).await.map_err(|_| "EDITIONS_SOURCE".to_string())?
+        },
         Request::Local {album_id} => tauri::async_runtime::spawn_blocking(move || {
             let (result,_)=with_local_source_context(&app,|before,recheck,context| {
                 if before.observed_conflict {return Err("LOCAL_CATALOG_IDENTITY_CONFLICT".into());}
@@ -4557,6 +5328,89 @@ async fn get_local_album_tag_inspection(
     })
     .await
     .map_err(|_| tags::LocalTrackTagsError::task_failed())?
+}
+
+#[tauri::command]
+async fn sqlite_library_tag_album_inspection(
+    album_id: String,
+    app: AppHandle,
+    state: State<'_, SqliteLibraryState>,
+) -> Result<tags::LocalAlbumTagInspection, tags::LocalTrackTagsError> {
+    require_experimental_features(&app)
+        .map_err(|_| tags::LocalTrackTagsError::experimental_features_disabled())?;
+    let library = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library.sqlite_tag_album_inspection(&album_id)
+            .map_err(|_| tags::LocalTrackTagsError::album_catalog_failed())
+    })
+    .await
+    .map_err(|_| tags::LocalTrackTagsError::task_failed())?
+}
+
+#[tauri::command]
+async fn sqlite_library_tag_album_preflight(
+    request: tags::LocalAlbumTagBatchPreflightRequest,
+    app: AppHandle,
+    state: State<'_, SqliteLibraryState>,
+) -> Result<tags::LocalAlbumTagBatchPlan, tags::LocalAlbumTagBatchPreflightError> {
+    require_experimental_features(&app)
+        .map_err(|_| tags::LocalAlbumTagBatchPreflightError::experimental_features_disabled())?;
+    let library = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library.preflight_sqlite_tag_batch(request)
+    })
+    .await
+    .map_err(|_| tags::LocalAlbumTagBatchPreflightError::task_failed())?
+}
+
+#[tauri::command]
+async fn sqlite_library_tag_album_apply(
+    request: tags::LocalAlbumTagBatchPreflightRequest,
+    app: AppHandle,
+    state: State<'_, SqliteLibraryState>,
+) -> Result<LocalAlbumTagBatchResult, tags::LocalAlbumTagBatchPreflightError> {
+    require_experimental_features(&app)
+        .map_err(|_| tags::LocalAlbumTagBatchPreflightError::experimental_features_disabled())?;
+    let library = state.inner().clone();
+    let (write_result, catalog_reconciled, refresh_paths) = tauri::async_runtime::spawn_blocking(move || {
+        library.apply_sqlite_tag_batch(request)
+    })
+    .await
+    .map_err(|_| tags::LocalAlbumTagBatchPreflightError::task_failed())??;
+    let socket_path = MpdSupervisor::socket_path().to_string_lossy().into_owned();
+    let fallback = write_result.clone();
+    let refresh_paths_fallback = refresh_paths.clone();
+    let mut result = match tauri::async_runtime::spawn_blocking(move || {
+        complete_local_album_tag_batch(write_result, |uri| {
+            let path = refresh_paths.get(uri).ok_or(TargetedLibraryUpdateErrorCode::InvalidUri)?;
+            AudioEngine::update_library_path(&socket_path, path)
+        })
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("[SQLiteTags] MPD metadata refresh task failed: {}", crate::diagnostics::error_summary(&error));
+            complete_local_album_tag_batch(fallback, |uri| {
+                if refresh_paths_fallback.contains_key(uri) {
+                    Err(TargetedLibraryUpdateErrorCode::RefreshTaskFailed)
+                } else {
+                    Err(TargetedLibraryUpdateErrorCode::InvalidUri)
+                }
+            })
+        }
+    };
+    result.catalog_reconciled = Some(catalog_reconciled);
+    eprintln!(
+        "[SQLiteTags] album_batch_result committed={} unchanged={} failed={} not_attempted={} partial_commit={} catalog_reconciled={}",
+        result.committed_count,
+        result.unchanged_count,
+        result.failed_count,
+        result.not_attempted_count,
+        result.partial_commit,
+        catalog_reconciled,
+    );
+    Ok(result)
 }
 
 #[tauri::command]
@@ -4954,7 +5808,10 @@ async fn resolve_playlist_items(
     playlist_state: State<'_, PlaylistState>,
     audio_state: State<'_, AudioState>,
     plex_state: State<'_, PlexState>,
+    sqlite_library: State<'_, SqliteLibraryState>,
 ) -> Result<Vec<PlaylistItemAvailability>, String> {
+    let configured_roots = app.state::<ConfigState>().0.lock()
+        .map_err(|_| "SQLITE_TRACK_UNAVAILABLE_OR_CHANGED")?.local_folders.clone();
     let playlist = playlist_state
         .0
         .lock()
@@ -4973,11 +5830,15 @@ async fn resolve_playlist_items(
             MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } => local_playlist_item_availability(item.id, Err("UPNP_SESSION_EXPIRED".into())),
             MediaLocator::Navidrome { .. } => local_playlist_item_availability(item.id, navidrome::available(&item.media_locator).await),
             MediaLocator::Local { uri } => {
-                let result = audio_state
-                    .0
-                    .lock()
-                    .map_err(|_| "O estado da biblioteca local está indisponível.".to_string())
-                    .and_then(|audio| audio.local_media_exists(uri));
+                let result = if SqliteLibraryState::is_sqlite_track_locator(uri) {
+                    sqlite_library.resolve_playback_locator_with_roots(uri, &configured_roots).map(|_| true)
+                } else {
+                    audio_state
+                        .0
+                        .lock()
+                        .map_err(|_| "O estado da biblioteca local está indisponível.".to_string())
+                        .and_then(|audio| audio.local_media_exists(uri))
+                };
                 local_playlist_item_availability(item.id, result)
             }
             MediaLocator::Plex { .. } => {
@@ -5037,7 +5898,10 @@ fn prepare_playlist_playback(
                 plex_image: artwork,
                 media_locator: Some(item.media_locator.clone()),
                 uri: match &item.media_locator {
-                    MediaLocator::Local { uri } => uri.clone(),
+                    // Resolve Local occurrences afresh for this exact locator.
+                    // For SQLite CUE this is the transient range token, not
+                    // the persisted opaque locator.
+                    MediaLocator::Local { .. } => uri.clone(),
                     MediaLocator::Plex { .. } | MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } | MediaLocator::Navidrome { .. } => String::new(),
                 },
                 duration: item.metadata.duration,
@@ -5099,7 +5963,10 @@ async fn play_playlist(
     playlist_state: State<'_, PlaylistState>,
     audio_state: State<'_, AudioState>,
     plex_state: State<'_, PlexState>,
+    sqlite_library: State<'_, SqliteLibraryState>,
 ) -> Result<PlaylistPlaybackResult, String> {
+    let configured_roots = app.state::<ConfigState>().0.lock()
+        .map_err(|_| "SQLITE_TRACK_UNAVAILABLE_OR_CHANGED")?.local_folders.clone();
     let token = admit_or_validate_playback(&audio_state.0, &transactions, intent)?;
     if shuffle == Some(true) && start_item_id.is_some() {
         return Err("Não é possível combinar embaralhamento com início em uma faixa.".into());
@@ -5129,17 +5996,27 @@ async fn play_playlist(
             MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } => None,
             MediaLocator::Navidrome { .. } => match navidrome::resolve_saved(&item.media_locator).await { Ok((uri, locator)) => { item.media_locator=locator; Some((uri,None)) }, Err(_) => None },
             MediaLocator::Local { uri } => {
-                let exists = audio_state
-                    .0
-                    .lock()
-                    .map_err(|_| "O estado de reprodução está indisponível.".to_string())?
-                    .local_media_exists(uri);
-                match exists {
-                    Ok(true) => Some((uri.clone(), None)),
-                    Ok(false) => None,
-                    Err(_) => {
-                        eprintln!("[Playlist] Failed to verify local item {} in MPD.", item.id);
-                        None
+                if SqliteLibraryState::is_sqlite_track_locator(uri) {
+                    match sqlite_library.resolve_playback_locator_with_roots(uri, &configured_roots) {
+                        Ok(path) => Some((path, None)),
+                        Err(_) => {
+                            eprintln!("[Playlist] SQLite item {} is unavailable or no longer current.", item.id);
+                            None
+                        }
+                    }
+                } else {
+                    let exists = audio_state
+                        .0
+                        .lock()
+                        .map_err(|_| "O estado de reprodução está indisponível.".to_string())?
+                        .local_media_exists(uri);
+                    match exists {
+                        Ok(true) => Some((uri.clone(), None)),
+                        Ok(false) => None,
+                        Err(_) => {
+                            eprintln!("[Playlist] Failed to verify local item {} in MPD.", item.id);
+                            None
+                        }
                     }
                 }
             }
@@ -5181,8 +6058,14 @@ async fn play_playlist(
         if !scope.accepts_resolved(&prepared.tracks, &prepared.playback_uris, &plex) { return Err(initial_plex_playback::WAIT.into()); }
     }
     let effect = if initial { InitialPlaybackEffect::VerifiedMedia(prepared.playback_uris.clone()) } else { InitialPlaybackEffect::Queue };
+    let source_generations = sqlite_library.playback_source_generations(&prepared.tracks)?;
     finish_playback_effect(&audio_state.0, &transactions, &token, effect,
-        |audio| navidrome::with_bound_tracks(prepared.tracks, |tracks| audio.play_tracks(tracks, prepared.playback_uris, prepared.start_index)))?;
+        |audio| {
+            sqlite_library.with_playback_generation_guard(&source_generations, || {
+                revalidate_sqlite_playback_bindings(&prepared.tracks, &prepared.playback_uris, &sqlite_library, &configured_roots)?;
+                navidrome::with_bound_tracks(prepared.tracks, |tracks| audio.play_tracks(tracks, prepared.playback_uris, prepared.start_index))
+            })
+        })?;
     Ok(PlaylistPlaybackResult {
         skipped_count: prepared.skipped_count,
     })
@@ -5697,7 +6580,16 @@ async fn get_local_import_artwork(
 
 #[tauri::command]
 fn get_audio_devices() -> Vec<AudioDevice> {
-    list_audio_devices()
+    if null_output_test_mode() {
+        Vec::new()
+    } else {
+        list_audio_devices()
+    }
+}
+
+#[tauri::command]
+fn is_null_output_test_mode() -> bool {
+    null_output_test_mode()
 }
 
 fn check_direct_device_availability_with(
@@ -5736,6 +6628,9 @@ async fn check_direct_device_availability(
     device_id: String,
     app: AppHandle,
 ) -> Result<Vec<alsa_preflight::DeviceAvailability>, String> {
+    if null_output_test_mode() {
+        return Err("NULL_OUTPUT_TEST_HARDWARE_DISABLED".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         check_direct_device_availability_with(
             &device_id,
@@ -5880,6 +6775,31 @@ async fn save_config_inner(
         if queue_clear_authorization.is_some() {
             return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE".into());
         }
+        if app.try_state::<SqliteLibraryState>().is_some() {
+            let worker_app = app.clone();
+            let (_, operation) = transaction_state.operations.reserve()?;
+            let prepared = tauri::async_runtime::spawn_blocking(move || {
+                let uncertain = Cell::new(false);
+                let result = local_diagnostics::wizard_step(
+                    local_diagnostics::Stage::WizardPreparation,
+                    || {
+                        let (result, pending) = prepare_initial_sqlite_preferences(
+                            &worker_app,
+                            &observed_cfg,
+                            &new_config,
+                            &operation,
+                        );
+                        uncertain.set(pending);
+                        result
+                    },
+                );
+                ((result, uncertain.get()), operation)
+            }).await.map_err(|_| "FIRST_RUN_PREPARATION_INCOMPLETE".to_string())?;
+            let ((result, uncertain), operation) = prepared;
+            operation.finish(result.clone(), uncertain);
+            result?;
+            return Ok(config_save_operation::SaveResponse::completed(audio::DeviceSwitchRestoreOutcome::Complete));
+        }
         let worker_app = app.clone();
         let (_, operation) = transaction_state.operations.reserve()?;
         let prepared = tauri::async_runtime::spawn_blocking(move || {
@@ -5896,7 +6816,7 @@ async fn save_config_inner(
                 return Err(if pending { format!("FIRST_RUN_PREPARATION_INCOMPLETE: {error}") } else { error });
             }
         };
-        spawn_initial_catalog(app.clone(), operation, false, Some(watch));
+        spawn_initial_catalog(app.clone(), operation, false, Some(watch), false);
         return Ok(config_save_operation::SaveResponse::completed(audio::DeviceSwitchRestoreOutcome::Complete));
     }
 
@@ -5928,7 +6848,7 @@ async fn save_config_inner(
         return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE".into());
     }
 
-    let _transaction_guard = transaction_state.begin()?;
+    let mut _transaction_guard = transaction_state.begin()?;
     {
         let mut audio=audio_state.0.lock().map_err(|_| "Playback unavailable".to_string())?;
         if observed_cfg.sources.unwrap_or_default() != new_config.sources.unwrap_or_default() {
@@ -5955,7 +6875,8 @@ async fn save_config_inner(
             .lock()
             .map_err(|_| "O estado da conexão Plex está indisponível.".to_string())?
             .clone();
-        Some(resolve_device_switch_queue(&audio_state.0, &plex_client).await?)
+        let sqlite_library = app.state::<SqliteLibraryState>().clone();
+        Some(resolve_device_switch_queue(&audio_state.0, &plex_client, Some(&sqlite_library), &observed_cfg.local_folders).await?)
     } else {
         None
     };
@@ -5974,6 +6895,26 @@ async fn save_config_inner(
         alsa_preflight::probe,
     )?;
 
+    // Capture the selected physical identity before pausing playback. This is
+    // read-only procfs/sysfs validation; it does not compete with MPD for ALSA.
+    let direct_device_identity = if route_save_resume
+        && new_config.audio_output_type == "alsa"
+        && !is_shared_output(&new_config)
+    {
+        Some(alsa_observation::capture_device_identity(&new_config.alsa_device)
+            .map_err(|reason| alsa_transition_error("identity_preflight", reason))?)
+    } else { None };
+    let release_shared_before_direct = direct_device_identity.is_some()
+        && is_shared_to_direct_transition(&current_cfg, &new_config)
+        && !current_cfg.first_run;
+
+    if output_change_expected {
+        _transaction_guard.begin_audio_transition(
+            configured_audio_route(&new_config, crate::audio_route::AudioProcessing::Off)?,
+            config_save_operation::AudioTransitionKind::Configuration,
+        )?;
+    }
+
     let finishing_first_run = is_finishing_first_run(&current_cfg, &new_config);
     let audio_hw_changed = current_cfg.audio_output_type != new_config.audio_output_type
         || current_cfg.alsa_device != new_config.alsa_device
@@ -5990,6 +6931,7 @@ async fn save_config_inner(
     let mut library_changed_during_start = false;
     let mut restore_outcome = audio::DeviceSwitchRestoreOutcome::Complete;
     let mut playback_snapshot = None;
+    let mut provisional_direct_choice: Option<ProvisionalDirectChoice> = None;
     let source_muted = if route_save_resume {
         if is_shared_output(&current_cfg) {
             let backend=sup_state.0.lock().map_err(|_|"OUTPUT_SAVE_VOLUME_UNAVAILABLE")?.shared_volume_backend();
@@ -6080,24 +7022,33 @@ async fn save_config_inner(
         }
         // Shared DSP is stopped before Direct/new Shared can open. Returning
         // to Shared never silently reactivates a saved preset.
+        // From this point DSP/output resources may change. If any subsequent
+        // rollback cannot prove restoration, the shared route snapshot remains
+        // explicitly uncertain instead of inferring success from saved config.
+        _transaction_guard.mark_audio_transition_uncertain();
         if let Err(error) = equalizer_commands::stop_for_output_switch(&app) {
             return Err(error_with_rollback(error, resume_analyzer.after_rollback(restore_prepared_playback(playback_snapshot, switch_queue.as_ref(), &audio_state))));
         }
-        // 2. Reinicia o MPD com a nova saída (liberando o ALSA)
-        let switch_result = match sup_state.0.lock() {
-            Ok(mut supervisor) => supervisor.start(&new_config),
-            Err(e) => {
-                let original = format!(
-                    "Falha ao iniciar nova saída: não foi possível acessar o supervisor do MPD: {}",
-                    e
-                );
-                let rollback = resume_analyzer.after_rollback(restore_prepared_playback(
-                    playback_snapshot,
-                    switch_queue.as_ref(),
-                    &audio_state,
-                ));
-                return Err(error_with_rollback(original, rollback));
-            }
+        // 2. For Shared -> Direct, reap only our owned MPD, observe natural
+        // PipeWire/ALSA release for a bounded interval, then start Direct.
+        // No second PCM open is used; MPD remains the sole acquisition owner.
+        let start_direct = || -> Result<_, String> {
+            sup_state.0.lock()
+                .map_err(|e| format!("Falha ao acessar o supervisor do MPD: {e}"))?
+                .start(&new_config)
+        };
+        let switch_result = if release_shared_before_direct {
+            let identity = direct_device_identity.as_ref().ok_or("ALSA_DIRECT_ENDPOINT_IDENTITY_MISSING")?;
+            start_direct_after_shared_release(
+                || sup_state.0.lock()
+                    .map_err(|e| format!("Falha ao acessar o supervisor para liberar a rota: {e}"))?
+                    .stop(),
+                || alsa_observation::wait_for_pcm_release(identity, Duration::from_secs(5))
+                    .map_err(|reason| alsa_transition_error("shared_release", reason)),
+                start_direct,
+            )
+        } else {
+            start_direct()
         };
         library_changed_during_start =
             confirm_device_switch_start(switch_result.map(|sync| sync.changed), || {
@@ -6107,6 +7058,7 @@ async fn save_config_inner(
                     switch_queue.as_ref(),
                     &sup_state,
                     &audio_state,
+                Some(&_transaction_guard),
                 ))
             })?;
 
@@ -6126,10 +7078,61 @@ async fn save_config_inner(
                 switch_queue.as_ref(),
                 &sup_state,
                 &audio_state,
+                Some(&_transaction_guard),
             ));
             rollback
         })?;
     }
+
+    let verify_direct_before_commit = direct_device_identity.is_some()
+        && route_save_resume
+        && restore_outcome == audio::DeviceSwitchRestoreOutcome::Complete
+        && playback_snapshot.is_some_and(|snapshot| snapshot.state == audio::PlaybackState::Playing);
+    let direct_result = confirm_playing_direct_route_before_commit(
+        verify_direct_before_commit,
+        || {
+            let gate = Arc::clone(app.state::<Arc<direct_playback::Gate>>().inner());
+            provisional_direct_choice = Some(ProvisionalDirectChoice::stage(gate, &current_cfg, &new_config));
+            let _restart = transaction_state.try_begin_restart().ok_or("ALSA_DIRECT_TRANSITION_CANCELLED")?;
+            let mut audio = audio_state.0.lock().map_err(|_| "ALSA_DIRECT_PLAYBACK_UNAVAILABLE")?;
+            let queue = switch_queue.as_ref().ok_or("OUTPUT_SAVE_QUEUE_UNAVAILABLE")?;
+            match audio.resume_saved_route(
+                playback_snapshot,
+                queue,
+                &route_save_watch,
+                &_transaction_guard,
+                |_| Ok(()),
+            )? {
+                "resumed" => Ok(()),
+                _ => Err("ALSA_DIRECT_PLAYBACK_NOT_RESUMED".into()),
+            }
+        },
+        || verify_direct_pcm_owned(
+            &sup_state.0,
+            &new_config,
+            direct_device_identity.as_ref().ok_or("ALSA_DIRECT_ENDPOINT_IDENTITY_MISSING")?,
+        ),
+    );
+    let direct_acquisition_confirmed = match direct_result {
+        Ok(confirmed) => confirmed,
+        Err(error) => {
+            let rollback = resume_analyzer.after_rollback(rollback_applied_config_change(
+                finishing_first_run,
+                audio_hw_changed,
+                folders_changed,
+                &current_cfg,
+                playback_snapshot,
+                switch_queue.as_ref(),
+                &sup_state,
+                &audio_state,
+                &_transaction_guard,
+            ));
+            return Err(error_with_rollback(
+                format!("Falha ao confirmar a aquisição Direct antes de salvar a configuração: {error}"),
+                rollback,
+            ));
+        }
+    };
 
     if folders_changed
         || library_changed_during_start
@@ -6166,6 +7169,7 @@ async fn save_config_inner(
                 switch_queue.as_ref(),
                 &sup_state,
                 &audio_state,
+                &_transaction_guard,
             ));
             return Err(error_with_rollback(
                 format!("Falha ao atualizar a biblioteca local: {}", library_error),
@@ -6192,7 +7196,7 @@ async fn save_config_inner(
         })();
         if let Err(error)=preserved {
             return Err(error_with_rollback(error,resume_analyzer.after_rollback(rollback_applied_config_change(
-                finishing_first_run,audio_hw_changed,folders_changed,&current_cfg,playback_snapshot,switch_queue.as_ref(),&sup_state,&audio_state,
+                finishing_first_run,audio_hw_changed,folders_changed,&current_cfg,playback_snapshot,switch_queue.as_ref(),&sup_state,&audio_state,&_transaction_guard,
             ))));
         }
     }
@@ -6210,6 +7214,7 @@ async fn save_config_inner(
                 switch_queue.as_ref(),
                 &sup_state,
                 &audio_state,
+                &_transaction_guard,
             ));
             return Err(error_with_rollback(original, rollback));
         }
@@ -6228,6 +7233,7 @@ async fn save_config_inner(
                 switch_queue.as_ref(),
                 &sup_state,
                 &audio_state,
+                &_transaction_guard,
             ));
             return Err(error_with_rollback(original, rollback));
         }
@@ -6248,6 +7254,7 @@ async fn save_config_inner(
                     switch_queue.as_ref(),
                     &sup_state,
                     &audio_state,
+                    &_transaction_guard,
                 ))
                 .map_err(ConfigSaveError::BeforeRename)
         });
@@ -6255,6 +7262,7 @@ async fn save_config_inner(
     }
 
     app.state::<Arc<direct_playback::Gate>>().commit_choice(&new_config);
+    if let Some(choice) = provisional_direct_choice.as_mut() { choice.finalize(); }
     plex_guard.update_config(&new_config);
     music_sources::install(&new_config);
     if !music_sources::navidrome() { navidrome::suspend(); }
@@ -6265,14 +7273,22 @@ async fn save_config_inner(
     drop(plex_guard);
     drop(config_guard);
     remote_bridge::beta_preference_changed(&app, current_cfg.experimental_features, experimental_enabled);
-    if usage_mode_changed {
+    if usage_mode_changed && !null_output_test_mode() {
         remote_bridge::usage_mode_changed(&app);
         upnp_bridge::usage_mode_changed(&app);
     }
     if !music_sources::local() { app.state::<LocalWatcherState>().stop_and_join(); }
 
     resume_analyzer.confirmed = true;
-    if route_save_resume && restore_outcome==audio::DeviceSwitchRestoreOutcome::Complete {
+    if output_change_expected {
+        // The supervisor accepted the target and config.json has been
+        // published. This confirms software route application only; the
+        // snapshot still requires independent PCM/DSP evidence for hardware.
+        _transaction_guard.confirm_audio_transition();
+    }
+    if route_save_resume && restore_outcome==audio::DeviceSwitchRestoreOutcome::Complete
+        && !direct_acquisition_confirmed
+    {
         if let Some(_restart)=transaction_state.try_begin_restart() {
             let backend=sup_state.0.lock().map_err(|_|"OUTPUT_SAVE_COMMITTED_PLAYBACK_UNAVAILABLE")?.shared_volume_backend();
             let mut audio=audio_state.0.lock().map_err(|_|"OUTPUT_SAVE_COMMITTED_PLAYBACK_UNAVAILABLE")?;
@@ -6371,8 +7387,9 @@ fn rollback_audio_switch(
     switch_queue: Option<&ResolvedDeviceSwitchQueue>,
     sup_state: &State<'_, SupervisorState>,
     audio_state: &State<'_, AudioState>,
+    route: Option<&config_save_operation::Transaction<'_>>,
 ) -> Result<(), String> {
-    rollback_audio_switch_with(
+    let result = rollback_audio_switch_with(
         playback_snapshot,
         switch_queue.ok_or("Fila da troca de saída indisponível no rollback.")?,
         &audio_state.0,
@@ -6384,7 +7401,15 @@ fn rollback_audio_switch(
                 .start(previous_config)
                 .map(|_| ())
         },
-    )
+    );
+    if let Some(route) = route {
+        if result.is_ok() {
+            route.fail_audio_transition_after_rollback();
+        } else {
+            route.mark_audio_transition_uncertain();
+        }
+    }
+    result
 }
 
 fn rollback_audio_switch_with(
@@ -6421,6 +7446,7 @@ fn rollback_applied_config_change(
     switch_queue: Option<&ResolvedDeviceSwitchQueue>,
     sup_state: &State<'_, SupervisorState>,
     audio_state: &State<'_, AudioState>,
+    route: &config_save_operation::Transaction<'_>,
 ) -> Result<(), String> {
     if finishing_first_run {
         return rollback_first_run_completion(folders_changed, previous_config, sup_state);
@@ -6459,6 +7485,7 @@ fn rollback_applied_config_change(
                 switch_queue,
                 sup_state,
                 audio_state,
+                Some(route),
             )
         {
             failures.push(format!("saída de áudio: {}", error));
@@ -6921,6 +7948,9 @@ fn start_coordinated_shutdown(app_handle: &AppHandle, exit_code: i32) {
     }
     let transaction_state = app_handle.state::<ConfigTransactionState>();
     transaction_state.request_shutdown();
+    app_handle
+        .state::<ProfileServiceRestoreState>()
+        .begin_shutdown();
     scrobbling::shutdown(app_handle);
     app_handle.state::<shared_dsp::State>().begin_shutdown();
     if !transaction_state.start_shutdown_worker() {
@@ -7081,8 +8111,436 @@ fn start_initial_mpd(
     supervisor.start_initial_existing(config,&admission)
 }
 
+
+fn prepare_application_profile(null_output_test: bool) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let home = dirs::home_dir().ok_or_else(|| "HOME_UNAVAILABLE".to_string())?;
+    let data_home = dirs::data_local_dir().ok_or_else(|| "DATA_DIRECTORY_UNAVAILABLE".to_string())?;
+    let (root, isolated_profile) = application_profile_root(
+        &home,
+        &data_home,
+        cfg!(debug_assertions),
+        cfg!(feature = "experimental-package"),
+        null_output_test,
+        std::env::var_os("SONANTE_EXPERIMENTAL_PROFILE_ROOT").as_deref(),
+    )?;
+    if !root.parent().is_some_and(|parent| parent.is_dir()) {
+        std::fs::create_dir_all(root.parent().ok_or("PROFILE_PARENT_UNAVAILABLE")?)
+            .map_err(|_| "PROFILE_PARENT_CREATE_FAILED")?;
+    }
+    for path in [
+        root.clone(),
+        root.join("config"),
+        root.join("data"),
+        root.join("cache"),
+        root.join("state"),
+        root.join("runtime"),
+        root.join("logs"),
+    ] {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err("PROFILE_DIRECTORY_UNSAFE".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&path).map_err(|_| "PROFILE_DIRECTORY_CREATE_FAILED")?;
+            }
+            Err(_) => return Err("PROFILE_DIRECTORY_UNAVAILABLE".into()),
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| "PROFILE_DIRECTORY_PROTECTION_FAILED")?;
+    }
+    if isolated_profile {
+        for (name, path) in [
+            ("XDG_CONFIG_HOME", root.join("config")),
+            ("XDG_DATA_HOME", root.join("data")),
+            ("XDG_CACHE_HOME", root.join("cache")),
+            ("XDG_STATE_HOME", root.join("state")),
+        ] {
+            std::env::set_var(name, path);
+        }
+    }
+    // XDG_RUNTIME_DIR belongs to the desktop session. PipeWire's ALSA plugin
+    // and clients such as pw-cli use it to find the user's session socket.
+    // Keep it inherited, and put Sonante's own MPD socket/FIFO in a separate
+    // private child directory instead of replacing the session runtime.
+    let app_runtime = prepare_064_runtime_dir(
+        &root,
+        null_output_test,
+        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+    )?;
+    std::env::set_var("SONANTE_064_RUNTIME_DIR", app_runtime);
+    std::env::set_var("SONANTE_064_PROFILE_ROOT", &root);
+    std::env::set_var("SONANTE_064_PROFILE", "1");
+    // Keep the explicit EQ development override supplied by scripts/dev-eq.sh.
+    // MpdEngine and CamillaDSP independently require a private executable and
+    // the pinned SHA-256 before using either path. The ordinary MPD override is
+    // still cleared so ambient development settings cannot change Shared/Direct.
+    for key in [
+        "MPD_HOST", "MPD_PORT", "LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES",
+        "SONANTE_DEV_MPD_PATH",
+    ] {
+        std::env::remove_var(key);
+    }
+    if null_output_test {
+        for key in ["SONANTE_EQ_MPD_PATH", "SONANTE_EQ_CAMILLA_PATH"] {
+            std::env::remove_var(key);
+        }
+    }
+    initialize_sqlite_config_if_missing()?;
+    Ok(root)
+}
+
+fn application_profile_root(
+    home: &Path,
+    data_home: &Path,
+    development_build: bool,
+    experimental_package: bool,
+    null_output_test: bool,
+    experimental_root: Option<&std::ffi::OsStr>,
+) -> Result<(PathBuf, bool), String> {
+    if experimental_package {
+        let root = PathBuf::from(experimental_root.ok_or("EXPERIMENTAL_PROFILE_ROOT_REQUIRED")?);
+        validate_experimental_profile_root(&root)?;
+        return Ok((if null_output_test { root.join("null-output-test") } else { root }, true));
+    }
+    if null_output_test || development_build {
+        let local = home.join(".local");
+        let share = local.join("share");
+        for parent in [&local, &share] {
+            let metadata = std::fs::symlink_metadata(parent)
+                .map_err(|_| "PROFILE_PARENT_UNAVAILABLE".to_string())?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err("PROFILE_PARENT_UNSAFE".into());
+            }
+        }
+        let name = if null_output_test {
+            "sonante-0.6.4-sqlite-null-test"
+        } else {
+            "sonante-0.6.4-sqlite"
+        };
+        return Ok((share.join(name), true));
+    }
+    Ok((data_home.join("sonante"), false))
+}
+
+/// The experimental launcher selects one absolute user-owned profile root.
+/// Reject symlinked path components and unsafe writable ancestors before any
+/// XDG directory is redirected into it. The ordinary build never calls this.
+fn validate_experimental_profile_root(root: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    if !root.is_absolute()
+        || root.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err("EXPERIMENTAL_PROFILE_ROOT_INVALID".into());
+    }
+    let home = dirs::home_dir().ok_or_else(|| "HOME_UNAVAILABLE".to_string())?;
+    let stable_root = home.join(".local/share/sonante-0.6.4-sqlite");
+    if root.starts_with(&stable_root) || stable_root.starts_with(root) {
+        return Err("EXPERIMENTAL_PROFILE_ROOT_OVERLAPS_STABLE".into());
+    }
+    let uid = unsafe { libc::geteuid() };
+    let mut missing_parent = false;
+    for ancestor in root.ancestors().take_while(|path| !path.as_os_str().is_empty()) {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                if !metadata.is_dir()
+                    || metadata.file_type().is_symlink()
+                    || (metadata.uid() != uid && metadata.uid() != 0)
+                    || (metadata.mode() & 0o022 != 0
+                        && !(metadata.uid() == 0 && metadata.mode() & 0o1000 != 0))
+                {
+                    return Err("EXPERIMENTAL_PROFILE_ROOT_UNSAFE".into());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if ancestor == root {
+                    missing_parent = true;
+                } else {
+                    return Err("EXPERIMENTAL_PROFILE_PARENT_UNAVAILABLE".into());
+                }
+            }
+            Err(_) => return Err("EXPERIMENTAL_PROFILE_ROOT_UNAVAILABLE".into()),
+        }
+    }
+    if !missing_parent {
+        let metadata = std::fs::symlink_metadata(root)
+            .map_err(|_| "EXPERIMENTAL_PROFILE_ROOT_UNAVAILABLE")?;
+        if metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
+            return Err("EXPERIMENTAL_PROFILE_ROOT_UNSAFE".into());
+        }
+    }
+    Ok(())
+}
+
+fn prepare_064_runtime_dir(
+    profile_root: &std::path::Path,
+    null_output_test: bool,
+    session_runtime: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let suffix = if cfg!(feature = "experimental-package") && null_output_test {
+        "sonante-exp065-null"
+    } else if cfg!(feature = "experimental-package") {
+        "sonante-experimental-065"
+    } else if null_output_test {
+        "sonante-0.6.4-sqlite-null-test"
+    } else if cfg!(debug_assertions) {
+        "sonante-0.6.4-sqlite"
+    } else {
+        "sonante"
+    };
+    let parent = if let Some(raw) = session_runtime {
+        let path = PathBuf::from(raw);
+        if !path.is_absolute() {
+            return Err("SESSION_RUNTIME_INVALID".into());
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|_| "SESSION_RUNTIME_UNAVAILABLE")?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err("SESSION_RUNTIME_UNSAFE".into());
+        }
+        path
+    } else {
+        profile_root.join("runtime")
+    };
+    let runtime = parent.join(suffix);
+    match std::fs::symlink_metadata(&runtime) {
+        Ok(metadata)
+            if metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && metadata.uid() == unsafe { libc::geteuid() } => {}
+        Ok(_) => return Err("PROFILE_RUNTIME_UNSAFE".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&runtime).map_err(|_| "PROFILE_RUNTIME_CREATE_FAILED")?;
+        }
+        Err(_) => return Err("PROFILE_RUNTIME_UNAVAILABLE".into()),
+    }
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
+        .map_err(|_| "PROFILE_RUNTIME_PROTECTION_FAILED")?;
+    let metadata = std::fs::symlink_metadata(&runtime)
+        .map_err(|_| "PROFILE_RUNTIME_UNAVAILABLE")?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o700
+        || runtime.join("mpd.socket").as_os_str().as_encoded_bytes().len() >= 104
+    {
+        return Err("PROFILE_RUNTIME_UNSAFE".into());
+    }
+    Ok(runtime)
+}
+
+fn initialize_sqlite_config_if_missing() -> Result<(), String> {
+    let config_path = MpdSupervisor::sonante_config_dir().join("config.json");
+    initialize_sqlite_config_at(&config_path)
+}
+
+fn initialize_sqlite_config_at(config_path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(config_path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Give a new public SQLite profile the normal setup-wizard state.
+            // Existing config files are never rewritten here.
+            let config = AppConfig::default();
+            let bytes = serde_json::to_vec_pretty(&config)
+                .map_err(|_| "SQLITE_PROFILE_CONFIG_ENCODE_FAILED".to_owned())?;
+            persistence::atomic_write_private_synced(config_path, &bytes, "config.json")
+                .map_err(|_| "SQLITE_PROFILE_CONFIG_WRITE_FAILED".to_owned())
+        }
+        Err(_) => Err("SQLITE_PROFILE_CONFIG_UNAVAILABLE".into()),
+    }
+}
+
+#[cfg(test)]
+mod sqlite_profile_initialization_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_config() -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "sonante-064-first-run-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        (root.join("sonante"), root)
+    }
+
+    #[test]
+    fn empty_sqlite_profile_shows_first_run_and_preserves_completed_config_on_restart() {
+        let (config_dir, root) = temp_config();
+        let config_path = config_dir.join("config.json");
+        initialize_sqlite_config_at(&config_path).unwrap();
+        let seeded = AppConfig::load_from_path(&config_path).unwrap();
+        assert!(seeded.first_run);
+        assert!(seeded.sources.unwrap_or_default().local);
+
+        let mut configured = seeded;
+        configured.first_run = false;
+        configured.sources = Some(config::EnabledSources {
+            local: true,
+            plex: false,
+            navidrome: false,
+        });
+        configured.local_folders = vec!["/synthetic/music".into()];
+        let configured_bytes = serde_json::to_vec_pretty(&configured).unwrap();
+        persistence::atomic_write_private_synced(&config_path, &configured_bytes, "config.json")
+            .unwrap();
+        initialize_sqlite_config_at(&config_path).unwrap();
+        let restarted = AppConfig::load_from_path(&config_path).unwrap();
+        assert!(!restarted.first_run);
+        assert_eq!(restarted.sources, configured.sources);
+        assert_eq!(restarted.local_folders, configured.local_folders);
+        assert_eq!(std::fs::read(&config_path).unwrap(), configured_bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn release_profile_uses_public_data_location_without_importing_development_profile() {
+        let (_unused, home) = temp_config();
+        let data_home = home.join("xdg-data");
+        let share = home.join(".local/share");
+        std::fs::create_dir_all(&share).unwrap();
+        let (release, isolated) = application_profile_root(&home, &data_home, false, false, false, None).unwrap();
+        assert_eq!(release, data_home.join("sonante"));
+        assert!(!isolated);
+        assert_ne!(release, share.join("sonante-0.6.4-sqlite"));
+        assert_ne!(release, share.join("sonante-0.6.4-sqlite-null-test"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn development_and_null_profiles_remain_separate_from_public_data() {
+        let (_unused, home) = temp_config();
+        let data_home = home.join("xdg-data");
+        let share = home.join(".local/share");
+        std::fs::create_dir_all(&share).unwrap();
+        let (development, development_isolated) = application_profile_root(&home, &data_home, true, false, false, None).unwrap();
+        let (null_test, null_isolated) = application_profile_root(&home, &data_home, true, false, true, None).unwrap();
+        assert_eq!(development, share.join("sonante-0.6.4-sqlite"));
+        assert_eq!(null_test, share.join("sonante-0.6.4-sqlite-null-test"));
+        assert!(development_isolated && null_isolated);
+        assert_ne!(development, data_home.join("sonante"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn experimental_profile_root_requires_absolute_non_symlink_private_location() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let (_unused, root) = temp_config();
+        let candidate = root.join("candidate-profile");
+        validate_experimental_profile_root(&candidate).unwrap();
+        std::fs::create_dir(&candidate).unwrap();
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700)).unwrap();
+        validate_experimental_profile_root(&candidate).unwrap();
+        assert_eq!(
+            validate_experimental_profile_root(std::path::Path::new("relative/profile"))
+                .unwrap_err(),
+            "EXPERIMENTAL_PROFILE_ROOT_INVALID"
+        );
+        assert_eq!(
+            validate_experimental_profile_root(&candidate.join("../outside")).unwrap_err(),
+            "EXPERIMENTAL_PROFILE_ROOT_INVALID"
+        );
+        let link = root.join("profile-link");
+        symlink(&candidate, &link).unwrap();
+        assert_eq!(
+            validate_experimental_profile_root(&link).unwrap_err(),
+            "EXPERIMENTAL_PROFILE_ROOT_UNSAFE"
+        );
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            validate_experimental_profile_root(&candidate).unwrap_err(),
+            "EXPERIMENTAL_PROFILE_ROOT_UNSAFE"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn experimental_runtime_preserves_session_pipewire_runtime_and_separates_profiles() {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let (_unused, root) = temp_config();
+        let session = root.join("session-runtime");
+        std::fs::DirBuilder::new().mode(0o700).create(&session).unwrap();
+        let regular = prepare_064_runtime_dir(&root, false, Some(session.as_os_str())).unwrap();
+        let null_test = prepare_064_runtime_dir(&root, true, Some(session.as_os_str())).unwrap();
+        assert_eq!(regular.parent(), Some(session.as_path()));
+        assert_eq!(null_test.parent(), Some(session.as_path()));
+        assert_ne!(regular, null_test);
+        assert_eq!(std::fs::metadata(&regular).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::metadata(&regular).unwrap().uid(), unsafe { libc::geteuid() });
+        assert!(!session.join("mpd.socket").exists());
+        std::fs::remove_dir_all(&regular).unwrap();
+        std::fs::remove_dir_all(&null_test).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn experimental_runtime_rejects_unsafe_session_runtime_without_fallback() {
+        use std::os::unix::fs::DirBuilderExt;
+        let (_unused, root) = temp_config();
+        let unsafe_session = root.join("unsafe-runtime");
+        std::fs::DirBuilder::new().mode(0o755).create(&unsafe_session).unwrap();
+        assert_eq!(
+            prepare_064_runtime_dir(&root, false, Some(unsafe_session.as_os_str())).unwrap_err(),
+            "SESSION_RUNTIME_UNSAFE"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let null_output_test = requested_null_output_test_mode()
+        .expect("invalid Sonante null-output test mode");
+    let profile_root = prepare_application_profile(null_output_test)
+        .expect("could not prepare Sonante application profile");
+    if cfg!(feature = "experimental-package") {
+        shared_dsp::diagnostics::set_experimental_profile_root(&profile_root);
+    }
+    // SQLite backs Local in public and development profiles. Desktop
+    // integrations are admitted only after the private MPD and profile
+    // configuration are ready; each service still requires an explicit opt-in.
+    let sqlite_mode = true;
+    let sqlite_data = profile_root.join("data").join("catalog");
+    match std::fs::symlink_metadata(&sqlite_data) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => panic!("isolated SQLite catalog path is unsafe"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&sqlite_data)
+                .expect("could not create isolated SQLite catalog directory");
+        }
+        Err(_) => panic!("could not inspect isolated SQLite catalog directory"),
+    }
+    std::fs::set_permissions(
+        &sqlite_data,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("could not protect isolated SQLite catalog directory");
+    let sqlite_database = sqlite_data.join("catalog.sqlite3");
+    match std::fs::symlink_metadata(&sqlite_database) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => panic!("isolated SQLite database path is unsafe"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => panic!("could not inspect isolated SQLite database path"),
+    }
+    let sqlite_library = SqliteLibraryState::open(&sqlite_database)
+        .expect("could not open isolated SQLite catalog");
+    std::fs::set_permissions(
+        &sqlite_database,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .expect("could not protect isolated SQLite database");
     let startup_clock = std::time::Instant::now();
     let config_clock = std::time::Instant::now();
     let socket_path = MpdSupervisor::socket_path().to_string_lossy().to_string();
@@ -7121,8 +8579,9 @@ pub fn run() {
 
     music_sources::install(&initial_config);
     if config_valid { local_diagnostics::record(local_diagnostics::Stage::StartupConfig, config_clock.elapsed(), None); }
-    let should_start_mpd = !resume_initial && should_start_mpd_on_startup(config_valid, &initial_config);
-    let startup_rescan = if should_start_mpd {
+    let should_start_mpd = !resume_initial
+        && should_start_mpd_for_null_test(config_valid, &initial_config, null_output_test);
+    let startup_rescan = if should_start_mpd && !null_output_test {
         match MpdSupervisor::database_path().try_exists() {
             Ok(database_exists) => {
                 should_rescan_library_on_startup(config_valid, &initial_config, database_exists)
@@ -7148,7 +8607,13 @@ pub fn run() {
     let mut supervisor = MpdSupervisor::new(&socket_path);
     supervisor.attach_playback_gate(playback_gate.clone());
     let mpd_started = if should_start_mpd {
-        match local_diagnostics::timed(local_diagnostics::Stage::StartupEngine, || start_initial_mpd(&mut supervisor,&initial_config,&profile_owner,&transactions)) {
+        match local_diagnostics::timed(local_diagnostics::Stage::StartupEngine, || {
+            if null_output_test {
+                supervisor.start(&initial_config)
+            } else {
+                start_initial_mpd(&mut supervisor,&initial_config,&profile_owner,&transactions)
+            }
+        }) {
             Ok(_) => true,
             Err(error) => {
                 eprintln!(
@@ -7162,6 +8627,12 @@ pub fn run() {
         supervisor.mark_unavailable(MpdUnavailableReason::StartupFailed);
         false
     };
+    let start_scrobbling = should_start_scrobbling_for_profile(
+        sqlite_mode,
+        config_valid,
+        mpd_started,
+        null_output_test,
+    );
 
     let mut audio_engine = AudioEngine::new(
         &socket_path,
@@ -7182,11 +8653,18 @@ pub fn run() {
     }
 
     let plex_client = PlexClient::from_config(&initial_config);
+    let remote_state = if sqlite_mode {
+        remote::State::isolated_profile()
+    } else {
+        remote::State::default()
+    };
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
-        .setup(|app| {
-            scrobbling::start(app.handle());
+        .setup(move |app| {
+            if start_scrobbling {
+                scrobbling::start(app.handle());
+            }
             if let Err(reason) = system_tray::install(app.handle()) {
                 eprintln!("[Tray] Optional system tray disabled: {reason}.");
             }
@@ -7198,6 +8676,7 @@ pub fn run() {
         .manage(SupervisorState(Mutex::new(supervisor)))
         .manage(ConfigState(Mutex::new(initial_config)))
         .manage(transactions)
+        .manage(ProfileServiceRestoreState::default())
         .manage(playback_gate)
         .manage(library_recovery::State::new(!config_valid))
         .manage(profile_owner)
@@ -7212,8 +8691,9 @@ pub fn run() {
         .manage(PlaylistState(Mutex::new(PlaylistStore::default())))
         .manage(mpris::MprisState::default())
         .manage(upnp::State::default())
-        .manage(remote::State::default())
+        .manage(remote_state)
         .manage(remote_bridge::MediaState::default())
+        .manage(sqlite_library)
         .invoke_handler(tauri::generate_handler![
             local_diagnostics::get_local_diagnostics,
             analyze_library_recovery,
@@ -7351,6 +8831,7 @@ pub fn run() {
             get_local_import_preview,
             get_local_import_artwork,
             get_audio_devices,
+            is_null_output_test_mode,
             check_direct_device_availability,
             get_plex_libraries,
             resolve_player_plex_navigation,
@@ -7374,6 +8855,29 @@ pub fn run() {
             plex_check_pin,
             plex_get_servers,
             open_external_url,
+            sqlite_library::sqlite_library_choose_folder,
+            sqlite_library::sqlite_library_cancel_folder_selection,
+            sqlite_library::sqlite_library_sources,
+            sqlite_library::sqlite_library_legacy_source_migration_status,
+            sqlite_library::sqlite_library_import_legacy_sources,
+            sqlite_library::sqlite_library_local_albums,
+            sqlite_library::sqlite_library_local_album_tracks,
+            sqlite_library::sqlite_library_search_tracks,
+            sqlite_library::sqlite_library_album_cover,
+            sqlite_library::sqlite_library_album_for_track,
+            sqlite_library::sqlite_library_add_and_index,
+            sqlite_library::sqlite_library_verify_source,
+            sqlite_library::sqlite_library_reindex_source,
+            sqlite_library::sqlite_library_remove_source,
+            sqlite_library::sqlite_library_open_view,
+            sqlite_library::sqlite_library_albums,
+            sqlite_library::sqlite_library_artists,
+            sqlite_library::sqlite_library_albums_for_artist,
+            sqlite_library::sqlite_library_tracks_for_album,
+            sqlite_library::sqlite_library_album_doctor,
+            sqlite_library_tag_album_inspection,
+            sqlite_library_tag_album_preflight,
+            sqlite_library_tag_album_apply,
         ])
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::CloseRequested { .. }) {
@@ -7403,13 +8907,48 @@ pub fn run() {
             RunEvent::Ready => {
                 local_diagnostics::record(local_diagnostics::Stage::StartupReady, startup_clock.elapsed(), None);
                 if let Some(operation) = initial_catalog_operation.take() {
-                    spawn_initial_catalog(app_handle.clone(), operation, true, None);
+                    spawn_initial_catalog(
+                        app_handle.clone(),
+                        operation,
+                        true,
+                        None,
+                        resume_initial,
+                    );
                 }
-                if managed_startup_allowed || resume_initial {
+                if should_start_mpris_for_profile(
+                    sqlite_mode,
+                    managed_startup_allowed,
+                    resume_initial,
+                    mpd_started,
+                    null_output_test,
+                ) {
                     mpris::start(app_handle.clone());
-                    upnp_bridge::restore(app_handle);
-                    remote_bridge::restore(app_handle);
                 }
+                let restore_services = should_restore_profile_services(
+                    sqlite_mode,
+                    config_valid,
+                    mpd_started,
+                    null_output_test,
+                    managed_startup_allowed || resume_initial,
+                );
+                let transactions = app_handle.state::<ConfigTransactionState>();
+                let restore_state = app_handle.state::<ProfileServiceRestoreState>();
+                restore_state.run_once_if(
+                    restore_services,
+                    transactions.shutdown_requested() || transactions.shutdown_started(),
+                    || {
+                        if !transactions.shutdown_requested()
+                            && !transactions.shutdown_started()
+                        {
+                            upnp_bridge::restore(app_handle);
+                        }
+                        if !transactions.shutdown_requested()
+                            && !transactions.shutdown_started()
+                        {
+                            remote_bridge::restore(app_handle);
+                        }
+                    },
+                );
                 if mpd_started && !restore_started.swap(true, Ordering::SeqCst) {
                     let app = app_handle.clone();
                     tauri::async_runtime::spawn(complete_startup_after_ready(app));
@@ -7425,6 +8964,280 @@ pub fn run() {
             _ => {}
         }
     });
+}
+
+fn should_start_mpris_for_profile(
+    sqlite_mode: bool,
+    config_admitted: bool,
+    resume_initial: bool,
+    mpd_started: bool,
+    null_output_test: bool,
+) -> bool {
+    if null_output_test {
+        return false;
+    }
+    if sqlite_mode {
+        config_admitted && mpd_started
+    } else {
+        config_admitted || resume_initial
+    }
+}
+
+fn should_start_scrobbling_for_profile(
+    sqlite_mode: bool,
+    config_admitted: bool,
+    mpd_started: bool,
+    null_output_test: bool,
+) -> bool {
+    !null_output_test && (!sqlite_mode || (config_admitted && mpd_started))
+}
+
+fn should_restore_profile_services(
+    sqlite_mode: bool,
+    config_admitted: bool,
+    mpd_started: bool,
+    null_output_test: bool,
+    startup_admitted: bool,
+) -> bool {
+    if null_output_test {
+        return false;
+    }
+    if sqlite_mode {
+        config_admitted && mpd_started && startup_admitted
+    } else {
+        startup_admitted
+    }
+}
+
+fn should_restore_after_resume(
+    resume_initial: bool,
+    preparation_succeeded: bool,
+    mpd_ready: bool,
+    config_admitted: bool,
+    null_output_test: bool,
+    startup_admitted: bool,
+    shutdown_requested: bool,
+) -> bool {
+    resume_initial
+        && preparation_succeeded
+        && !shutdown_requested
+        && should_restore_profile_services(
+            true,
+            config_admitted,
+            mpd_ready,
+            null_output_test,
+            startup_admitted,
+        )
+}
+
+fn profile_configuration_is_admitted(app: &AppHandle) -> bool {
+    app.state::<profile_lease::State>()
+        .lease()
+        .and_then(|owner| {
+            owner.validate()?;
+            managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())?;
+            AppConfig::load().map(|_| ())
+        })
+        .is_ok()
+}
+
+fn supervised_mpd_is_ready(app: &AppHandle) -> bool {
+    let state = app.state::<SupervisorState>();
+    let Ok(mut supervisor) = state.0.lock() else {
+        return false;
+    };
+    matches!(
+        supervisor.observe_health(),
+        Ok(MpdProcessObservation::Running)
+    ) && supervisor.observed_process_pid().is_some()
+}
+
+fn restore_profile_services_after_resume(app: &AppHandle) {
+    let transactions = app.state::<ConfigTransactionState>();
+    let Some(_restart_permit) = transactions.try_begin_restart() else {
+        return;
+    };
+    let shutting_down = || {
+        transactions.shutdown_requested() || transactions.shutdown_started()
+    };
+    if shutting_down() {
+        return;
+    }
+
+    // The successful resume path already started MPD through MpdSupervisor.
+    // Re-observe that owned child here so a scan result alone cannot authorize
+    // restoring any listener or observer.
+    let mpd_ready = supervised_mpd_is_ready(app);
+    let config_admitted = profile_configuration_is_admitted(app);
+    let null_output_test = null_output_test_mode();
+    let eligible = should_restore_after_resume(
+        true,
+        true,
+        mpd_ready,
+        config_admitted,
+        null_output_test,
+        true,
+        shutting_down(),
+    );
+    let state = app.state::<ProfileServiceRestoreState>();
+    state.run_once_if(eligible, shutting_down(), || {
+        if !shutting_down() {
+            upnp_bridge::restore(app);
+        }
+        if !shutting_down() {
+            remote_bridge::restore(app);
+        }
+        if !shutting_down()
+            && should_start_scrobbling_for_profile(
+                true,
+                config_admitted,
+                mpd_ready,
+                null_output_test,
+            )
+        {
+            scrobbling::start(app);
+        }
+    });
+}
+
+#[cfg(test)]
+mod profile_mpris_startup_tests {
+    use super::should_start_mpris_for_profile;
+
+    #[test]
+    fn sqlite_mpris_requires_admitted_profile_and_its_supervised_mpd() {
+        assert!(should_start_mpris_for_profile(true, true, false, true, false));
+        assert!(!should_start_mpris_for_profile(true, false, false, true, false));
+        assert!(!should_start_mpris_for_profile(true, true, false, false, false));
+        assert!(!should_start_mpris_for_profile(true, true, false, true, true));
+    }
+
+    #[test]
+    fn standard_profile_keeps_its_existing_managed_startup_policy() {
+        assert!(should_start_mpris_for_profile(false, true, false, false, false));
+        assert!(should_start_mpris_for_profile(false, false, true, false, false));
+        assert!(!should_start_mpris_for_profile(false, false, false, false, false));
+    }
+}
+
+#[cfg(test)]
+mod profile_service_startup_tests {
+    use super::{should_restore_profile_services, should_start_scrobbling_for_profile};
+
+    #[test]
+    fn sqlite_scrobbling_waits_for_valid_profile_and_private_mpd_and_never_starts_in_null_mode() {
+        assert!(should_start_scrobbling_for_profile(true, true, true, false));
+        assert!(!should_start_scrobbling_for_profile(true, false, true, false));
+        assert!(!should_start_scrobbling_for_profile(true, true, false, false));
+        assert!(!should_start_scrobbling_for_profile(true, true, true, true));
+        // Preserve the original profile's actor policy outside the SQLite build.
+        assert!(should_start_scrobbling_for_profile(false, false, false, false));
+        assert!(!should_start_scrobbling_for_profile(false, true, true, true));
+    }
+
+    #[test]
+    fn network_services_restore_only_after_admitted_non_null_mpd_startup() {
+        assert!(should_restore_profile_services(true, true, true, false, true));
+        assert!(!should_restore_profile_services(true, false, true, false, true));
+        assert!(!should_restore_profile_services(true, true, false, false, true));
+        assert!(!should_restore_profile_services(true, true, true, true, true));
+        assert!(!should_restore_profile_services(true, true, true, false, false));
+        // Preserve the original admission rule outside this SQLite profile.
+        assert!(should_restore_profile_services(false, false, false, false, true));
+    }
+}
+
+#[cfg(test)]
+mod resume_profile_service_restore_tests {
+    use super::{
+        should_restore_after_resume, should_restore_profile_services,
+        ProfileServiceRestoreState,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn ready_without_mpd_does_not_restore_but_successful_resume_restores_once() {
+        let state = ProfileServiceRestoreState::default();
+        let restores = AtomicUsize::new(0);
+
+        // The existing Ready decision sees no MPD during resume_initial.
+        let initial_ready = should_restore_profile_services(true, true, false, false, true);
+        assert!(!initial_ready);
+        assert!(!state.run_once_if(initial_ready, false, || {
+            restores.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // After successful preparation, the supervised MPD is checked again.
+        let resumed = should_restore_after_resume(true, true, true, true, false, true, false);
+        assert!(resumed);
+        assert!(state.run_once_if(resumed, false, || {
+            restores.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert!(!state.run_once_if(resumed, false, || {
+            restores.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert_eq!(restores.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_resume_shutdown_invalid_profile_and_null_output_do_not_restore() {
+        let state = ProfileServiceRestoreState::default();
+        let restores = AtomicUsize::new(0);
+        for allowed in [
+            should_restore_after_resume(false, true, true, true, false, true, false),
+            should_restore_after_resume(true, false, true, true, false, true, false),
+            should_restore_after_resume(true, true, false, true, false, true, false),
+            should_restore_after_resume(true, true, true, false, false, true, false),
+            should_restore_after_resume(true, true, true, true, true, true, false),
+            should_restore_after_resume(true, true, true, true, false, false, false),
+            should_restore_after_resume(true, true, true, true, false, true, true),
+        ] {
+            assert!(!state.run_once_if(allowed, false, || {
+                restores.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        assert_eq!(restores.load(Ordering::SeqCst), 0);
+
+        state.begin_shutdown();
+        assert!(!state.run_once_if(true, false, || {
+            restores.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert_eq!(restores.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn service_restore_uses_latest_preferences_and_respects_each_service_gate() {
+        let state = ProfileServiceRestoreState::default();
+        let eligible = should_restore_after_resume(true, true, true, true, false, true, false);
+        let mut current = [true, true, true];
+        current[1] = false; // Remote control was disabled while preparation ran.
+        let started = [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)];
+
+        assert!(state.run_once_if(eligible, false, || {
+            for (enabled, counter) in current.into_iter().zip(&started) {
+                if enabled {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        assert_eq!(started[0].load(Ordering::SeqCst), 1);
+        assert_eq!(started[1].load(Ordering::SeqCst), 0);
+        assert_eq!(started[2].load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn normal_ready_restore_is_once_and_does_not_require_resume_preparation() {
+        let state = ProfileServiceRestoreState::default();
+        let restores = AtomicUsize::new(0);
+        let eligible = should_restore_profile_services(true, true, true, false, true);
+        assert!(state.run_once_if(eligible, false, || {
+            restores.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert!(!state.run_once_if(eligible, false, || {
+            restores.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert_eq!(restores.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[cfg(test)]

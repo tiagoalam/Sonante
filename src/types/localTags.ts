@@ -54,6 +54,7 @@ export interface LocalTrackTagUpdateResult {
 }
 
 export type LocalTrackTagsErrorCode =
+  | "experimental_features_disabled"
   | "invalid_local_path"
   | "outside_configured_roots"
   | "file_not_found"
@@ -106,6 +107,7 @@ export interface LocalAlbumTrackInspection {
 
 export interface LocalAlbumTagInspection {
   album_id: string;
+  catalog_generation?: number | null;
   tracks: LocalAlbumTrackInspection[];
   fields: LocalAlbumTagFields;
   physical_track_count: number;
@@ -128,6 +130,7 @@ export interface LocalAlbumTagBatchUpdate {
 
 export interface LocalAlbumTagBatchPreflightRequest {
   album_id: string;
+  catalog_generation?: number | null;
   tracks: LocalAlbumTagBatchExpectedTrack[];
   update: LocalAlbumTagBatchUpdate;
 }
@@ -154,6 +157,7 @@ export interface LocalAlbumTagBatchPlan {
 }
 
 export type LocalAlbumTagBatchPreflightErrorCode =
+  | "experimental_features_disabled"
   | "album_catalog_failure"
   | "album_not_found"
   | "membership_changed"
@@ -194,4 +198,6 @@ export interface LocalAlbumTagBatchResult {
   failed_count: number;
   not_attempted_count: number;
   partial_commit: boolean;
+  /** False means one or more files were written but SQLite reconciliation is pending. */
+  catalog_reconciled?: boolean;
 }

@@ -1,0 +1,96 @@
+{
+  "entries": [
+    {
+      "path": "src/output/Filtered.cxx",
+      "before": "cb197083566680907a9e84d717c311fa47d8c55e1483dd815a1ddadcfdd18300",
+      "after": "78e067e4c5997659a0816519006e487d817f9cfe7a7e6d5569f9d53514ecd806"
+    },
+    {
+      "path": "src/output/Filtered.hxx",
+      "before": "5c05ba499e4bdeae8eba76a985a789ee3ebd34abb361b9852432d7acc3003208",
+      "after": "65bd7b241e9b4fe60bd86ad632403a8473c0e058a68b30dfe76d9736651097a3"
+    },
+    {
+      "path": "src/output/Init.cxx",
+      "before": "af671a784c32f3bd7de1e47915254fa4219e448c6cc688aab32beb31ff10c6ea",
+      "after": "25cd4f6503c6834c06db5bd112eca1930873532a0a4fdf4ae2b27b5a78127a85"
+    },
+    {
+      "path": "src/output/Registry.cxx",
+      "before": "bf37a235da7ac6569b93cf41369d212cb05a0c9367f18f4d63dea17450819428",
+      "after": "cca2dfd32c465702f65932d2ece6f16b9b3899f9a1d84d17fd60dfd15dd89d04"
+    },
+    {
+      "path": "src/output/plugins/SonantePcmOutputPlugin.cxx",
+      "before": null,
+      "after": "88b0eaa9e0f76245f80f6ec9739e869ef5a1509bdf5e47ec4ae7fdc3ba8051b3"
+    },
+    {
+      "path": "src/output/plugins/SonantePcmOutputPlugin.hxx",
+      "before": null,
+      "after": "b0fad8a5ad0c282147e1b23ba95900df7188a5b8fc2432402950dd9e4610aff4"
+    },
+    {
+      "path": "src/output/plugins/SonantePcmPause.hxx",
+      "before": null,
+      "after": "6cf3f6429c2f7fc185e99122e48249a6f3e8eeac70dc730eb664dc596db85b94"
+    },
+    {
+      "path": "src/output/plugins/SonantePcmRing.hxx",
+      "before": null,
+      "after": "87727e7fa0c1df24736859f7e695709693746bf16b13d4ab93c30d8a762202ae"
+    },
+    {
+      "path": "src/output/plugins/meson.build",
+      "before": "620cbe6c74dee517d0d2d48f68798177eee654c676287abc0f655b1c1daf2d8e",
+      "after": "95136f724bbf69684833c40cf81dd64320e706d0431f1dbbbbcdb0c60d724b58"
+    },
+    {
+      "path": "src/output/plugins/wasapi/WasapiOutputPlugin.cxx",
+      "before": "a759b6d6d79e82b2a3d3e68caa9ba8f125ef04b1ce28acdc218975d864aea82a",
+      "after": "2615aa39bec26ecd961d511f57664215360ad715cc2cf90e8e5d7a28c49304ac"
+    }
+  ],
+  "unchanged_files": 1935,
+  "patch_sha256": "d66f32d95f5c3a9f1ec2d08aa3feb30fd730dcf0ebaacddf85814e043472caea",
+  "exact_reapply": true,
+  "sha256": "e24b329755743b547208d8edc7eb705bc2574f63a6de968bd9d2ed667fd95584",
+  "bytes": 40224256,
+  "imports": [
+    "WS2_32.dll",
+    "ADVAPI32.dll",
+    "KERNEL32.dll",
+    "api-ms-win-crt-stdio-l1-1-0.dll",
+    "api-ms-win-crt-runtime-l1-1-0.dll",
+    "api-ms-win-crt-locale-l1-1-0.dll",
+    "api-ms-win-crt-convert-l1-1-0.dll",
+    "api-ms-win-crt-math-l1-1-0.dll",
+    "api-ms-win-crt-heap-l1-1-0.dll",
+    "api-ms-win-crt-private-l1-1-0.dll",
+    "api-ms-win-crt-string-l1-1-0.dll",
+    "api-ms-win-crt-time-l1-1-0.dll",
+    "SHELL32.dll",
+    "api-ms-win-crt-filesystem-l1-1-0.dll",
+    "api-ms-win-crt-environment-l1-1-0.dll",
+    "api-ms-win-crt-multibyte-l1-1-0.dll",
+    "api-ms-win-crt-utility-l1-1-0.dll",
+    "WINMM.dll",
+    "ole32.dll",
+    "SHLWAPI.dll",
+    "IPHLPAPI.DLL",
+    "Secur32.dll",
+    "WLDAP32.dll",
+    "CRYPT32.dll",
+    "bcrypt.dll",
+    "Normaliz.dll",
+    "USER32.dll"
+  ],
+  "native_executed": false,
+  "source_patch_matches_build_tree": true,
+  "imports_need_review": [],
+  "os_ucrt_imports_identical_to_full_candidate_1": true,
+  "compiled": true,
+  "build_steps": 705,
+  "profile_unchanged": true,
+  "build_config_sha256": "c86ff9f2a41e0631348551b97b5a24b9874e674c73abfec1116248d073189fe0"
+}

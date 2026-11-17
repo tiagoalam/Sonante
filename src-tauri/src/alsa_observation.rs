@@ -15,6 +15,7 @@ pub(crate) enum Reason {
     Unavailable,
     NotPlaying,
     Shared,
+    Occupied,
     Unreadable,
     Malformed,
     NotOwned,
@@ -105,6 +106,24 @@ pub(crate) struct Context {
     pub shared: bool,
 }
 
+/// Read-only identity captured before a route transition. The token is valid
+/// only for this transaction; it is never persisted or exposed over IPC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceIdentity {
+    endpoint: String,
+    card: u32,
+    device: u32,
+    card_id: String,
+    sys_device: Option<PathBuf>,
+}
+
+impl DeviceIdentity {
+    pub(crate) fn endpoint(&self) -> &str { &self.endpoint }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PcmReleaseState { Released, Occupied }
+
 static READING: AtomicBool = AtomicBool::new(false);
 struct Permit<'a>(&'a AtomicBool);
 impl Drop for Permit<'_> {
@@ -137,12 +156,174 @@ fn address(value: &str) -> Option<(&str, u32)> {
     {
         return None;
     }
-    let device = parts.next()?;
+    // Keep identity parsing aligned with ALSA's hw:<card> shorthand and the
+    // admission parser: an omitted device denotes device 0, never an
+    // arbitrary plugin or path.
+    let device = parts.next().unwrap_or("0");
     let device = number(device.strip_prefix("DEV=").unwrap_or(device), 255)?;
     if parts.next().is_some() {
         return None;
     }
     Some((card, device))
+}
+
+fn resolve_device_identity_in(
+    proc: &Path,
+    sys: &Path,
+    endpoint: &str,
+    read: &mut impl FnMut(&Path) -> Result<String, Reason>,
+) -> Result<DeviceIdentity, Reason> {
+    let (card_id, device) = address(endpoint).ok_or(Reason::Unavailable)?;
+    let asound = proc.join("asound");
+    let card = if card_id.bytes().all(|b| b.is_ascii_digit()) {
+        number(card_id, 1023).ok_or(Reason::Malformed)?
+    } else {
+        let alias = fs::read_link(asound.join(card_id)).map_err(|_| Reason::Unreadable)?;
+        let alias = alias.to_str().ok_or(Reason::Malformed)?;
+        alias.strip_prefix("card").and_then(|v| number(v, 1023)).ok_or(Reason::Malformed)?
+    };
+    let actual_card_id = read(&asound.join(format!("card{card}/id")))?;
+    let actual_card_id = actual_card_id.trim();
+    if actual_card_id.is_empty() || actual_card_id.len() > 64 || actual_card_id.chars().any(char::is_control) {
+        return Err(Reason::Malformed);
+    }
+    if !card_id.bytes().all(|b| b.is_ascii_digit()) && actual_card_id != card_id {
+        return Err(Reason::Changed);
+    }
+    let link = sys.join(format!("class/sound/card{card}/device"));
+    let sys_device = match fs::symlink_metadata(&link) {
+        Ok(_) => {
+            let path = fs::canonicalize(&link).map_err(|_| Reason::Unreadable)?;
+            if !path.starts_with(sys.join("devices")) { return Err(Reason::Malformed); }
+            Some(path)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(Reason::Unreadable),
+    };
+    Ok(DeviceIdentity {
+        endpoint: endpoint.to_owned(), card, device,
+        card_id: actual_card_id.to_owned(), sys_device,
+    })
+}
+
+pub(crate) fn capture_device_identity(endpoint: &str) -> Result<DeviceIdentity, Reason> {
+    resolve_device_identity_in(Path::new("/proc"), Path::new("/sys"), endpoint, &mut |path| {
+        let mut bytes = Vec::new();
+        fs::File::open(path).map_err(|_| Reason::Unreadable)?
+            .take(8193).read_to_end(&mut bytes).map_err(|_| Reason::Unreadable)?;
+        if bytes.len() > 8192 { return Err(Reason::Limit); }
+        String::from_utf8(bytes).map_err(|_| Reason::Malformed)
+    })
+}
+
+fn same_device_identity_in(
+    proc: &Path,
+    sys: &Path,
+    expected: &DeviceIdentity,
+    read: &mut impl FnMut(&Path) -> Result<String, Reason>,
+) -> Result<(), Reason> {
+    let current = resolve_device_identity_in(proc, sys, &expected.endpoint, read)?;
+    if current == *expected { Ok(()) } else { Err(Reason::Changed) }
+}
+
+fn pcm_release_state_in(
+    proc: &Path,
+    sys: &Path,
+    expected: &DeviceIdentity,
+    read: &mut impl FnMut(&Path) -> Result<String, Reason>,
+) -> Result<PcmReleaseState, Reason> {
+    same_device_identity_in(proc, sys, expected, read)?;
+    let directory = proc.join(format!("asound/card{}/pcm{}p", expected.card, expected.device));
+    let subdevices = subdevices_in(&directory)?;
+    if subdevices.is_empty() { return Err(Reason::Unavailable); }
+    let mut occupied = false;
+    for subdevice in &subdevices {
+        let status = read(&directory.join(format!("sub{subdevice}/status")))?;
+        let trimmed = status.trim();
+        if trimmed == "closed" { continue; }
+        let state = field(&status, "state")?;
+        if !["OPEN", "SETUP", "PREPARED", "RUNNING", "XRUN", "DRAINING", "PAUSED", "SUSPENDED", "DISCONNECTED"].contains(&state) {
+            return Err(Reason::Malformed);
+        }
+        occupied = true;
+    }
+    same_device_identity_in(proc, sys, expected, read)?;
+    Ok(if occupied { PcmReleaseState::Occupied } else { PcmReleaseState::Released })
+}
+
+fn wait_for_pcm_release_with(
+    timeout: Duration,
+    interval: Duration,
+    mut observe: impl FnMut() -> Result<PcmReleaseState, Reason>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<(), Reason> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match observe()? {
+            PcmReleaseState::Released => return Ok(()),
+            PcmReleaseState::Occupied => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() { return Err(Reason::Occupied); }
+                sleep(interval.min(remaining));
+            }
+        }
+    }
+}
+
+pub(crate) fn wait_for_pcm_release(identity: &DeviceIdentity, timeout: Duration) -> Result<(), Reason> {
+    wait_for_pcm_release_with(timeout, Duration::from_millis(50), || {
+        pcm_release_state_in(Path::new("/proc"), Path::new("/sys"), identity, &mut |path| {
+            let mut bytes = Vec::new();
+            fs::File::open(path).map_err(|_| Reason::Unreadable)?
+                .take(8193).read_to_end(&mut bytes).map_err(|_| Reason::Unreadable)?;
+            if bytes.len() > 8192 { return Err(Reason::Limit); }
+            String::from_utf8(bytes).map_err(|_| Reason::Malformed)
+        })
+    }, std::thread::sleep)
+}
+
+fn wait_for_owned_pcm_with(
+    identity: &DeviceIdentity,
+    timeout: Duration,
+    interval: Duration,
+    mut observe: impl FnMut() -> Observation,
+    mut identity_current: impl FnMut() -> Result<(), Reason>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<Observation, Reason> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let sample = observe();
+        match &sample {
+            Observation::Observed { configured_endpoint, card, device, .. } => {
+                identity_current()?;
+                if configured_endpoint != &identity.endpoint || *card != identity.card || *device != identity.device {
+                    return Err(Reason::Changed);
+                }
+                return Ok(sample);
+            }
+            Observation::Unverified { reason: Reason::NotOwned | Reason::Busy } => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() { return Err(Reason::NotOwned); }
+                sleep(interval.min(remaining));
+            }
+            Observation::Unverified { reason } => return Err(*reason),
+        }
+    }
+}
+
+pub(crate) fn wait_for_owned_pcm(
+    identity: &DeviceIdentity,
+    pid: u32,
+    timeout: Duration,
+) -> Result<Observation, Reason> {
+    let context = Context { pid, endpoint: identity.endpoint.clone(), shared: false };
+    wait_for_owned_pcm_with(identity, timeout, Duration::from_millis(25),
+        || observe(&context),
+        || {
+            let current = capture_device_identity(&identity.endpoint)?;
+            if current == *identity { Ok(()) } else { Err(Reason::Changed) }
+        },
+        std::thread::sleep)
 }
 fn field<'a>(text: &'a str, key: &str) -> Result<&'a str, Reason> {
     let mut found = text.lines().filter_map(|line| {
@@ -187,6 +368,10 @@ fn thread_belongs(text: &str, tid: u32, pid: u32) -> Result<(), Reason> {
         return Err(Reason::NotOwned);
     }
     Ok(())
+}
+fn thread_group(text: &str, tid: u32) -> Result<u32, Reason> {
+    if number(field(text, "Pid")?, u32::MAX) != Some(tid) { return Err(Reason::Changed); }
+    number(field(text, "Tgid")?, u32::MAX).filter(|n| *n > 0).ok_or(Reason::Malformed)
 }
 #[derive(Debug, PartialEq, Eq)]
 struct Parameters {
@@ -405,6 +590,7 @@ fn observe_in(
     let initial_subdevices = subdevices.clone();
     let mut observed = None;
     let mut unavailable = false;
+    let mut occupied_by_other = false;
     for subdevice in subdevices {
         let path = directory.join(format!("sub{subdevice}"));
         let status = match read(&path.join("status")) {
@@ -417,21 +603,34 @@ fn observe_in(
         if status.trim() == "closed" {
             continue;
         }
-        let tid = match owner(&status) {
-            Ok(tid) => tid,
-            Err(Reason::NotPlaying) => continue,
-            Err(_) => {
-                unavailable = true;
-                continue;
-            }
+        let state = match field(&status, "state") {
+            Ok(state) if ["OPEN", "SETUP", "PREPARED", "RUNNING", "XRUN", "DRAINING", "PAUSED", "SUSPENDED", "DISCONNECTED"].contains(&state) => state,
+            _ => { unavailable = true; continue; }
+        };
+        let tid = match number(field(&status, "owner_pid").unwrap_or_default(), u32::MAX).filter(|n| *n > 0) {
+            Some(tid) => tid,
+            None => { unavailable = true; continue; }
         };
         // ALSA owner_pid can be the MPD output thread's TID, not the main PID.
         let task = process.join(format!("task/{tid}/status"));
         let task_before = match read(&task) {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(_) => match read(&proc.join(tid.to_string()).join("status")) {
+                Ok(text) if thread_group(&text, tid).is_ok_and(|group| group != context.pid) => {
+                    occupied_by_other = true;
+                    continue;
+                }
+                _ => { unavailable = true; continue; }
+            },
         };
         if thread_belongs(&task_before, tid, context.pid).is_err() {
+            match thread_group(&task_before, tid) {
+                Ok(group) if group != context.pid => occupied_by_other = true,
+                _ => unavailable = true,
+            }
+            continue;
+        }
+        if state != "RUNNING" {
             continue;
         }
         let hw = parameters(&read(&path.join("hw_params"))?)?;
@@ -475,6 +674,9 @@ fn observe_in(
         return Err(Reason::Changed);
     }
     // A readable match cannot hide an unreadable/ambiguous second substream.
+    if occupied_by_other {
+        return Err(Reason::Occupied);
+    }
     if unavailable {
         return Err(Reason::Unreadable);
     }

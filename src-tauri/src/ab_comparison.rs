@@ -25,6 +25,11 @@ pub(crate) const MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_RATE: u32 = 192_000;
 const MIN_FRAMES: usize = RATE as usize * 3;
 const DEADLINE: Duration = Duration::from_secs(40);
+const DSD64_RATE: u32 = 2_822_400;
+const DSF_PCM_RATE: u32 = 176_400;
+const DSF_BLOCK_BYTES: usize = 4096;
+const DSD_BYTES_PER_FRAME: usize = 4704;
+const DSF_PCM_FRAMES_PER_DSD_FRAME: usize = 2352;
 // Only fixed identifiers and numeric media facts cross IPC. Decoder/parser
 // messages may contain input data and are deliberately never serialized.
 #[derive(Clone, Debug, Serialize)]
@@ -41,7 +46,8 @@ impl From<&str> for DecodeFailure {
             | "AB_TRACKS" | "AB_NETWORK" | "AB_LIMIT" | "AB_STORAGE" | "AB_FORMAT"
             | "AB_DECODE" | "AB_SEEK" | "AB_TOO_SHORT" | "AB_INVALID" | "AB_PAUSE"
             | "AB_CONTAINER" | "AB_CODEC" | "AB_SAMPLE_RATE" | "AB_CHANNELS" | "AB_FORMAT_INFO"
-            | "AB_FORMAT_CHANGE" | "AB_RESAMPLE" => code,
+            | "AB_FORMAT_CHANGE" | "AB_RESAMPLE" | "AB_DSD_RATE" | "AB_DSD_FORMAT"
+            | "AB_DSD_CLIPPING" => code,
             _ => "AB_UNAVAILABLE",
         };
         Self {
@@ -201,7 +207,13 @@ struct Slot {
     input: Option<Input>,
     identity: Option<String>,
     alive: Option<Check>,
+    segment: Option<Segment>,
     ready: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Segment {
+    pub start_seconds: f64,
+    pub end_seconds: Option<f64>,
 }
 pub(crate) struct Job {
     pub token: String,
@@ -230,9 +242,27 @@ impl Job {
                     .all(|v| v.ready && v.alive.as_ref().is_some_and(|c| c()))
             })
     }
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub(crate) fn install(&self, side: Side, input: Input) -> Result<(), String> {
+        self.install_segment(side, input, None)
+    }
+    pub(crate) fn install_segment(
+        &self,
+        side: Side,
+        input: Input,
+        segment: Option<Segment>,
+    ) -> Result<(), String> {
         if !self.current() || !(input.validate)() || !(input.alive)() {
             return Err("AB_CHANGED".into());
+        }
+        if segment.is_some_and(|range| {
+            !range.start_seconds.is_finite()
+                || range.start_seconds < 0.
+                || range
+                    .end_seconds
+                    .is_some_and(|end| !end.is_finite() || end <= range.start_seconds)
+        }) {
+            return Err("AB_SOURCE".into());
         }
         let mut slots = self.slots.lock().map_err(|_| "AB_UNAVAILABLE")?;
         let other = 1 - side.index();
@@ -243,6 +273,7 @@ impl Job {
             identity: Some(input.identity.clone()),
             alive: Some(input.alive.clone()),
             input: Some(input),
+            segment,
             ready: false,
         };
         Ok(())
@@ -351,11 +382,506 @@ pub(crate) fn parameters(start: f64, seconds: u32) -> Result<(), String> {
         Ok(())
     }
 }
+fn requested_decode_seconds(seconds: u32, sync_context: bool, cue_remaining: Option<f64>) -> f64 {
+    let requested = seconds as f64 + if sync_context { 3.0 } else { 0.0 };
+    cue_remaining.map_or(requested, |remaining| remaining.min(requested))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DsfHeader {
+    sample_rate: u32,
+    channels: usize,
+    sample_count: u64,
+    logical_bytes_per_channel: u64,
+    block_groups: u64,
+    data_offset: u64,
+    frame_count: u64,
+}
+
+fn dsf_failure(code: &str, sample_rate: Option<u32>, channels: Option<u32>) -> DecodeFailure {
+    DecodeFailure {
+        code: DecodeFailure::from(code).code,
+        codec: Some("DSD (DSF)"),
+        sample_rate,
+        channels,
+    }
+}
+
+fn dsf_io_failure(
+    error: &std::io::Error,
+    check: &Check,
+    rate: Option<u32>,
+    channels: Option<u32>,
+) -> DecodeFailure {
+    let code = if !check() {
+        "AB_CHANGED"
+    } else if error.kind() == std::io::ErrorKind::Interrupted || error.to_string() == "AB_LIMIT" {
+        "AB_LIMIT"
+    } else if error.kind() == std::io::ErrorKind::UnexpectedEof {
+        "AB_CONTAINER"
+    } else {
+        "AB_DECODE"
+    };
+    dsf_failure(code, rate, channels)
+}
+
+fn dsf_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+fn dsf_u64(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes([
+        bytes[at],
+        bytes[at + 1],
+        bytes[at + 2],
+        bytes[at + 3],
+        bytes[at + 4],
+        bytes[at + 5],
+        bytes[at + 6],
+        bytes[at + 7],
+    ])
+}
+
+fn parse_dsf(source: &mut BudgetSource, check: &Check) -> Result<DsfHeader, DecodeFailure> {
+    let container = || dsf_failure("AB_CONTAINER", None, None);
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| dsf_io_failure(&e, check, None, None))?;
+    let mut header = [0u8; 92];
+    source
+        .read_exact(&mut header)
+        .map_err(|e| dsf_io_failure(&e, check, None, None))?;
+    if &header[0..4] != b"DSD "
+        || dsf_u64(&header, 4) != 28
+        || &header[28..32] != b"fmt "
+        || dsf_u64(&header, 32) != 52
+        || &header[80..84] != b"data"
+    {
+        return Err(container());
+    }
+    let file_bytes = dsf_u64(&header, 12);
+    let metadata_offset = dsf_u64(&header, 20);
+    if source.byte_len() != Some(file_bytes) {
+        return Err(container());
+    }
+    let version = dsf_u32(&header, 40);
+    let format_id = dsf_u32(&header, 44);
+    let channel_type = dsf_u32(&header, 48);
+    let channel_count = dsf_u32(&header, 52);
+    let sample_rate = dsf_u32(&header, 56);
+    let bits_per_sample = dsf_u32(&header, 60);
+    let sample_count = dsf_u64(&header, 64);
+    let block_size = dsf_u32(&header, 72);
+    let reserved = dsf_u32(&header, 76);
+    if sample_rate != DSD64_RATE {
+        return Err(dsf_failure(
+            "AB_DSD_RATE",
+            Some(sample_rate),
+            Some(channel_count),
+        ));
+    }
+    // Sony DSF channel types 1 and 2 mean mono and stereo. Multichannel and
+    // inconsistent declarations are not downmixed implicitly.
+    if version != 1
+        || format_id != 0
+        || bits_per_sample != 1
+        || reserved != 0
+        || !matches!((channel_type, channel_count), (1, 1) | (2, 2))
+        || block_size as usize != DSF_BLOCK_BYTES
+    {
+        return Err(dsf_failure(
+            "AB_DSD_FORMAT",
+            Some(sample_rate),
+            Some(channel_count),
+        ));
+    }
+    if sample_count == 0 {
+        return Err(container());
+    }
+    let channels = channel_count as usize;
+    let logical_bytes_per_channel = sample_count.checked_add(7).ok_or_else(container)? / 8;
+    let block_groups = logical_bytes_per_channel
+        .checked_add(DSF_BLOCK_BYTES as u64 - 1)
+        .ok_or_else(container)?
+        / DSF_BLOCK_BYTES as u64;
+    let data_payload = block_groups
+        .checked_mul(channels as u64)
+        .and_then(|n| n.checked_mul(DSF_BLOCK_BYTES as u64))
+        .ok_or_else(container)?;
+    let expected_data_chunk = data_payload.checked_add(12).ok_or_else(container)?;
+    let data_end = 80u64
+        .checked_add(expected_data_chunk)
+        .ok_or_else(container)?;
+    let frame_count = sample_count
+        .checked_add(DSD_BYTES_PER_FRAME as u64 * 8 - 1)
+        .ok_or_else(container)?
+        / (DSD_BYTES_PER_FRAME as u64 * 8);
+    if dsf_u64(&header, 84) != expected_data_chunk
+        || data_end > file_bytes
+        || (metadata_offset == 0 && data_end != file_bytes)
+        || (metadata_offset != 0 && (metadata_offset < data_end || metadata_offset >= file_bytes))
+    {
+        return Err(container());
+    }
+    Ok(DsfHeader {
+        sample_rate,
+        channels,
+        sample_count,
+        logical_bytes_per_channel,
+        block_groups,
+        data_offset: 92,
+        frame_count,
+    })
+}
+
+struct DsfBlockReader<'a> {
+    source: &'a mut BudgetSource,
+    header: DsfHeader,
+    check: Check,
+    cache: std::collections::VecDeque<(u64, Vec<u8>)>,
+    channel_buffers: Vec<Vec<u8>>,
+}
+
+impl<'a> DsfBlockReader<'a> {
+    fn new(source: &'a mut BudgetSource, header: DsfHeader, check: Check) -> Self {
+        Self {
+            source,
+            header,
+            check,
+            cache: std::collections::VecDeque::with_capacity(2),
+            channel_buffers: (0..header.channels)
+                .map(|_| vec![0x69; DSD_BYTES_PER_FRAME])
+                .collect(),
+        }
+    }
+
+    fn group(&mut self, index: u64) -> Result<&[u8], DecodeFailure> {
+        if let Some(position) = self.cache.iter().position(|(group, _)| *group == index) {
+            let entry = self.cache.remove(position).ok_or_else(|| {
+                dsf_failure(
+                    "AB_CONTAINER",
+                    Some(self.header.sample_rate),
+                    Some(self.header.channels as u32),
+                )
+            })?;
+            self.cache.push_back(entry);
+            return Ok(&self
+                .cache
+                .back()
+                .ok_or_else(|| {
+                    dsf_failure(
+                        "AB_CONTAINER",
+                        Some(self.header.sample_rate),
+                        Some(self.header.channels as u32),
+                    )
+                })?
+                .1);
+        }
+        if index >= self.header.block_groups {
+            return Err(dsf_failure(
+                "AB_CONTAINER",
+                Some(self.header.sample_rate),
+                Some(self.header.channels as u32),
+            ));
+        }
+        let group_bytes = self.header.channels * DSF_BLOCK_BYTES;
+        let group_start = self
+            .header
+            .data_offset
+            .checked_add(index.checked_mul(group_bytes as u64).ok_or_else(|| {
+                dsf_failure(
+                    "AB_CONTAINER",
+                    Some(self.header.sample_rate),
+                    Some(self.header.channels as u32),
+                )
+            })?)
+            .ok_or_else(|| {
+                dsf_failure(
+                    "AB_CONTAINER",
+                    Some(self.header.sample_rate),
+                    Some(self.header.channels as u32),
+                )
+            })?;
+        self.source
+            .seek(SeekFrom::Start(group_start))
+            .map_err(|e| {
+                dsf_io_failure(
+                    &e,
+                    &self.check,
+                    Some(self.header.sample_rate),
+                    Some(self.header.channels as u32),
+                )
+            })?;
+        let mut bytes = vec![0u8; group_bytes];
+        self.source.read_exact(&mut bytes).map_err(|e| {
+            dsf_io_failure(
+                &e,
+                &self.check,
+                Some(self.header.sample_rate),
+                Some(self.header.channels as u32),
+            )
+        })?;
+        if self.cache.len() == 2 {
+            self.cache.pop_front();
+        }
+        self.cache.push_back((index, bytes));
+        Ok(&self
+            .cache
+            .back()
+            .ok_or_else(|| {
+                dsf_failure(
+                    "AB_CONTAINER",
+                    Some(self.header.sample_rate),
+                    Some(self.header.channels as u32),
+                )
+            })?
+            .1)
+    }
+
+    fn read_channel(
+        &mut self,
+        channel: usize,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<(), DecodeFailure> {
+        let mut read = 0usize;
+        while read < out.len() {
+            let logical = offset.checked_add(read as u64).ok_or_else(|| {
+                dsf_failure(
+                    "AB_CONTAINER",
+                    Some(self.header.sample_rate),
+                    Some(self.header.channels as u32),
+                )
+            })?;
+            let group_index = logical / DSF_BLOCK_BYTES as u64;
+            let in_group = (logical % DSF_BLOCK_BYTES as u64) as usize;
+            let group = self.group(group_index)?;
+            let take = (DSF_BLOCK_BYTES - in_group).min(out.len() - read);
+            let start = channel * DSF_BLOCK_BYTES + in_group;
+            out[read..read + take].copy_from_slice(&group[start..start + take]);
+            read += take;
+        }
+        Ok(())
+    }
+
+    fn frame(&mut self, index: u64, interleaved: &mut Vec<u8>) -> Result<bool, DecodeFailure> {
+        if index >= self.header.frame_count {
+            return Ok(false);
+        }
+        let byte_offset = index
+            .checked_mul(DSD_BYTES_PER_FRAME as u64)
+            .ok_or_else(|| {
+                dsf_failure(
+                    "AB_CONTAINER",
+                    Some(self.header.sample_rate),
+                    Some(self.header.channels as u32),
+                )
+            })?;
+        let available = self
+            .header
+            .logical_bytes_per_channel
+            .saturating_sub(byte_offset)
+            .min(DSD_BYTES_PER_FRAME as u64) as usize;
+        for channel in 0..self.header.channels {
+            let mut channel_frame = [0x69; DSD_BYTES_PER_FRAME];
+            if available > 0 {
+                self.read_channel(channel, byte_offset, &mut channel_frame[..available])?;
+                for byte in &mut channel_frame[..available] {
+                    *byte = byte.reverse_bits();
+                }
+                let valid_bits = self
+                    .header
+                    .sample_count
+                    .saturating_sub(byte_offset * 8)
+                    .min((available * 8) as u64) as usize;
+                if valid_bits % 8 != 0 {
+                    let mask = 0xffu8 << (8 - valid_bits % 8);
+                    let last = &mut channel_frame[available - 1];
+                    *last = (*last & mask) | (0x69 & !mask);
+                }
+            }
+            self.channel_buffers[channel].copy_from_slice(&channel_frame);
+        }
+        interleaved.resize(DSD_BYTES_PER_FRAME * self.header.channels, 0x69);
+        for byte in 0..DSD_BYTES_PER_FRAME {
+            for channel in 0..self.header.channels {
+                interleaved[byte * self.header.channels + channel] =
+                    self.channel_buffers[channel][byte];
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn decode_dsf(
+    job: Arc<Job>,
+    side: Side,
+    start: f64,
+    seconds: u32,
+    sync_context: bool,
+    source: &mut BudgetSource,
+    check: Check,
+    validate: Check,
+    segment: Option<Segment>,
+) -> Result<Vec<u8>, DecodeFailure> {
+    let header = parse_dsf(source, &check)?;
+    let media_start = segment.map_or(start, |range| range.start_seconds + start);
+    let file_duration = header.sample_count as f64 / header.sample_rate as f64;
+    let file_remaining = file_duration - media_start;
+    if !media_start.is_finite() || file_remaining <= 0.0 {
+        return Err("AB_TOO_SHORT".into());
+    }
+    let cue_remaining = segment.and_then(|range| range.end_seconds.map(|end| end - media_start));
+    let sample_seconds =
+        requested_decode_seconds(seconds, sync_context, cue_remaining).min(file_remaining);
+    if sample_seconds * (RATE as f64) < MIN_FRAMES as f64 {
+        return Err("AB_TOO_SHORT".into());
+    }
+    if !(check)() || !(validate)() {
+        return Err("AB_CHANGED".into());
+    }
+    let first_frame = (media_start * 75.0).floor() as u64;
+    let crop = ((media_start - first_frame as f64 / 75.0) * DSF_PCM_RATE as f64).round() as usize;
+    let output_frames = (sample_seconds * DSF_PCM_RATE as f64).floor() as usize;
+    let frame_span = crop.checked_add(output_frames).ok_or("AB_LIMIT")?;
+    let frames_to_convert = frame_span
+        .checked_add(DSF_PCM_FRAMES_PER_DSD_FRAME - 1)
+        .ok_or("AB_LIMIT")?
+        / DSF_PCM_FRAMES_PER_DSD_FRAME;
+    if frames_to_convert == 0
+        || first_frame
+            .checked_add(frames_to_convert as u64)
+            .is_none_or(|end| end > header.frame_count)
+    {
+        return Err("AB_TOO_SHORT".into());
+    }
+    if output_frames > DSF_PCM_RATE as usize * 93 {
+        return Err("AB_LIMIT".into());
+    }
+
+    let mut reader = DsfBlockReader::new(source, header, check.clone());
+    let frame_bytes = DSD_BYTES_PER_FRAME * header.channels;
+    let mut before = vec![0x69; frame_bytes];
+    let mut current = vec![0x69; frame_bytes];
+    let mut after = vec![0x69; frame_bytes];
+    let mut has_before = first_frame > 0 && reader.frame(first_frame - 1, &mut before)?;
+    if !reader.frame(first_frame, &mut current)? {
+        return Err("AB_CONTAINER".into());
+    }
+    let mut has_after = reader.frame(first_frame + 1, &mut after)?;
+    let mut converter = scarletbook_pcm::Converter::new(scarletbook_pcm::PcmConfig::new(
+        scarletbook_pcm::PcmRate::Hz176400,
+        scarletbook_pcm::Cutoff::Default,
+        header.channels as u8,
+    ))
+    .map_err(|_| {
+        dsf_failure(
+            "AB_DSD_FORMAT",
+            Some(header.sample_rate),
+            Some(header.channels as u32),
+        )
+    })?;
+    let mut converted = vec![0i32; converter.samples_per_frame() * header.channels];
+    let mut pcm = Vec::<f32>::with_capacity(output_frames.saturating_mul(2));
+    for frame_index in 0..frames_to_convert {
+        if !job.current() || !(check)() {
+            return Err("AB_CHANGED".into());
+        }
+        if frame_index % 75 == 0 && !(validate)() {
+            return Err("AB_CHANGED".into());
+        }
+        let stats = converter
+            .convert_frame(
+                has_before.then_some(before.as_slice()),
+                &current,
+                has_after.then_some(after.as_slice()),
+                &mut converted,
+            )
+            .map_err(|_| {
+                dsf_failure(
+                    "AB_DECODE",
+                    Some(header.sample_rate),
+                    Some(header.channels as u32),
+                )
+            })?;
+        if stats.clipped_total() != 0 {
+            return Err(dsf_failure(
+                "AB_DSD_CLIPPING",
+                Some(header.sample_rate),
+                Some(header.channels as u32),
+            ));
+        }
+        let source_base = frame_index * DSF_PCM_FRAMES_PER_DSD_FRAME;
+        let take_start = crop
+            .saturating_sub(source_base)
+            .min(DSF_PCM_FRAMES_PER_DSD_FRAME);
+        let take_end = (crop + output_frames)
+            .saturating_sub(source_base)
+            .min(DSF_PCM_FRAMES_PER_DSD_FRAME);
+        for sample in take_start..take_end {
+            let at = sample * header.channels;
+            let left = converted[at] as f32 / 8_388_608.0;
+            let right = converted[at + header.channels - 1] as f32 / 8_388_608.0;
+            if !left.is_finite() || !right.is_finite() {
+                return Err("AB_DECODE".into());
+            }
+            pcm.push(left);
+            pcm.push(right);
+        }
+        if frame_index + 1 < frames_to_convert {
+            std::mem::swap(&mut before, &mut current);
+            std::mem::swap(&mut current, &mut after);
+            has_before = true;
+            has_after = reader.frame(first_frame + frame_index as u64 + 2, &mut after)?;
+        }
+        if pcm.len() / 2 > DSF_PCM_RATE as usize * 93 {
+            return Err("AB_LIMIT".into());
+        }
+    }
+    if pcm.len() / 2 != output_frames {
+        return Err("AB_TOO_SHORT".into());
+    }
+    if !(check)() || !(validate)() {
+        return Err("AB_CHANGED".into());
+    }
+    let pcm = resample(pcm, DSF_PCM_RATE).map_err(|_| {
+        dsf_failure(
+            "AB_RESAMPLE",
+            Some(header.sample_rate),
+            Some(header.channels as u32),
+        )
+    })?;
+    if pcm.len() / 2 < MIN_FRAMES || pcm.len() / 2 > RATE as usize * 93 {
+        return Err("AB_TOO_SHORT".into());
+    }
+    if !(check)() || !(validate)() {
+        return Err("AB_CHANGED".into());
+    }
+    let encoded = encode(
+        &pcm,
+        header.sample_rate,
+        header.channels as u32,
+        start,
+        true,
+    )?;
+    job.slots.lock().map_err(|_| "AB_UNAVAILABLE")?[side.index()].ready = true;
+    Ok(encoded)
+}
+#[cfg(test)]
 pub(crate) fn decode(
     job: Arc<Job>,
     side: Side,
     start: f64,
     seconds: u32,
+) -> Result<Vec<u8>, DecodeFailure> {
+    decode_with_context(job, side, start, seconds, false)
+}
+pub(crate) fn decode_with_context(
+    job: Arc<Job>,
+    side: Side,
+    start: f64,
+    seconds: u32,
+    sync_context: bool,
 ) -> Result<Vec<u8>, DecodeFailure> {
     parameters(start, seconds)?;
     if !job.current() {
@@ -366,10 +892,11 @@ pub(crate) fn decode(
     if !job.current() {
         return Err("AB_CHANGED".into());
     }
-    let input = job.slots.lock().map_err(|_| "AB_UNAVAILABLE")?[side.index()]
-        .input
-        .take()
-        .ok_or("AB_CHANGED")?;
+    let (input, segment) = {
+        let mut slots = job.slots.lock().map_err(|_| "AB_UNAVAILABLE")?;
+        let slot = &mut slots[side.index()];
+        (slot.input.take().ok_or("AB_CHANGED")?, slot.segment)
+    };
     if !(input.validate)() || !(input.alive)() {
         return Err("AB_CHANGED".into());
     }
@@ -378,13 +905,38 @@ pub(crate) fn decode(
     let check: Check = Arc::new(move || checked_job.current() && policy());
     let validate = input.validate;
     let detected = Arc::new(Mutex::new(None));
-    let source = BudgetSource {
+    let mut source = BudgetSource {
         inner: input.media,
         check: check.clone(),
         deadline: Instant::now() + DEADLINE,
         bytes: 0,
         detected: detected.clone(),
     };
+    let mut signature = [0u8; 4];
+    source
+        .read_exact(&mut signature)
+        .map_err(|_| DecodeFailure {
+            codec: signature_codec(&signature),
+            ..DecodeFailure::from(if !check() {
+                "AB_CHANGED"
+            } else {
+                "AB_CONTAINER"
+            })
+        })?;
+    if &signature == b"DSD " {
+        return decode_dsf(
+            job,
+            side,
+            start,
+            seconds,
+            sync_context,
+            &mut source,
+            check,
+            validate,
+            segment,
+        );
+    }
+    source.seek(SeekFrom::Start(0)).map_err(|_| "AB_SEEK")?;
     let mss = MediaSourceStream::new(Box::new(source), Default::default());
     let mut format = symphonia::default::get_probe()
         .format(
@@ -423,19 +975,26 @@ pub(crate) fn decode(
                 &params,
             )
         })?;
-    if start > 0. {
+    let media_start = segment.map_or(start, |range| range.start_seconds + start);
+    let cue_remaining = segment.and_then(|range| range.end_seconds.map(|end| end - media_start));
+    let sample_seconds = requested_decode_seconds(seconds, sync_context, cue_remaining);
+    let wanted_frames = (sample_seconds * rate as f64).floor() as usize;
+    if wanted_frames < MIN_FRAMES {
+        return Err("AB_TOO_SHORT".into());
+    }
+    if start > 0. || media_start > 0. {
         format
             .seek(
                 SeekMode::Accurate,
                 SeekTo::Time {
-                    time: Time::from(start),
+                    time: Time::from(media_start),
                     track_id: Some(id),
                 },
             )
             .map_err(|_| "AB_SEEK")?;
         decoder.reset();
     }
-    let wanted = seconds as usize * rate as usize;
+    let wanted = wanted_frames;
     let mut pcm = Vec::<f32>::with_capacity(wanted * 2);
     let mut previous_end: Option<f64> = None;
     while pcm.len() / 2 < wanted {
@@ -463,17 +1022,17 @@ pub(crate) fn decode(
         }
         let frames = decoded.frames();
         let end = at + frames as f64 / rate as f64;
-        if end <= start {
+        if end <= media_start {
             continue;
         }
-        if pcm.is_empty() && at > start + tolerance {
+        if pcm.is_empty() && at > media_start + tolerance {
             return Err("AB_SEEK".into());
         }
         if previous_end.is_some_and(|p| (at - p).abs() > tolerance) {
             return Err("AB_SEEK".into());
         }
         previous_end = Some(end);
-        let skip = ((start - at).max(0.) * rate as f64).round() as usize;
+        let skip = ((media_start - at).max(0.) * rate as f64).round() as usize;
         let take = frames.saturating_sub(skip).min(wanted - pcm.len() / 2);
         let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
         samples.copy_interleaved_ref(decoded);
@@ -498,7 +1057,7 @@ pub(crate) fn decode(
     if !check() || !validate() {
         return Err("AB_CHANGED".into());
     }
-    let encoded = encode(&pcm, rate, channels as u32, start)?;
+    let encoded = encode(&pcm, rate, channels as u32, start, false)?;
     job.slots.lock().map_err(|_| "AB_UNAVAILABLE")?[side.index()].ready = true;
     Ok(encoded)
 }
@@ -519,8 +1078,14 @@ fn resample(input: Vec<f32>, rate: u32) -> Result<Vec<f32>, String> {
     output.truncate(produced.min(frames.saturating_mul(RATE as usize) / rate as usize) * 2);
     Ok(output)
 }
-fn encode(samples: &[f32], rate: u32, channels: u32, start: f64) -> Result<Vec<u8>, String> {
-    if samples.len() % 2 != 0 || samples.len() > RATE as usize * 90 * 2 {
+fn encode(
+    samples: &[f32],
+    rate: u32,
+    channels: u32,
+    start: f64,
+    converted_from_dsd: bool,
+) -> Result<Vec<u8>, String> {
+    if samples.len() % 2 != 0 || samples.len() > RATE as usize * 93 * 2 {
         return Err("AB_LIMIT".into());
     }
     let mut peak = 0f32;
@@ -547,7 +1112,7 @@ fn encode(samples: &[f32], rate: u32, channels: u32, start: f64) -> Result<Vec<u
     }
     bytes.extend_from_slice(&peak.to_le_bytes());
     bytes.extend_from_slice(&rms.to_le_bytes());
-    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&u32::from(converted_from_dsd).to_le_bytes());
     for &v in samples {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
@@ -583,6 +1148,74 @@ mod tests {
         }
         v
     }
+
+    fn synthetic_dsf() -> Vec<u8> {
+        static FIXTURE: OnceLock<Vec<u8>> = OnceLock::new();
+        FIXTURE
+            .get_or_init(|| {
+                let sample_count = u64::from(DSD64_RATE) * 34 / 10;
+                let logical_bytes = (sample_count as usize).div_ceil(8);
+                let groups = logical_bytes.div_ceil(DSF_BLOCK_BYTES);
+                let channels = 2usize;
+                let mut channel_data = Vec::with_capacity(channels);
+                for channel in 0..channels {
+                    let frequency = if channel == 0 { 440.0 } else { 660.0 };
+                    let amplitude = if channel == 0 { 0.30 } else { 0.22 };
+                    let step = std::f64::consts::TAU * frequency / f64::from(DSD64_RATE);
+                    let (sin_step, cos_step) = step.sin_cos();
+                    let (mut sine, mut cosine) = (0.0f64, 1.0f64);
+                    let mut integrator = 0.0f64;
+                    let mut data = vec![0u8; logical_bytes];
+                    for index in 0..sample_count as usize {
+                        let target = amplitude * sine;
+                        integrator += target;
+                        let bit = integrator >= 0.0;
+                        integrator -= if bit { 1.0 } else { -1.0 };
+                        if bit {
+                            data[index / 8] |= 1 << (index % 8);
+                        }
+                        (sine, cosine) = (
+                            sine * cos_step + cosine * sin_step,
+                            cosine * cos_step - sine * sin_step,
+                        );
+                    }
+                    channel_data.push(data);
+                }
+                let payload_bytes = groups * channels * DSF_BLOCK_BYTES;
+                let file_bytes = 92 + payload_bytes;
+                let mut bytes = vec![0u8; 92];
+                bytes[0..4].copy_from_slice(b"DSD ");
+                bytes[4..12].copy_from_slice(&28u64.to_le_bytes());
+                bytes[12..20].copy_from_slice(&(file_bytes as u64).to_le_bytes());
+                bytes[20..28].copy_from_slice(&0u64.to_le_bytes());
+                bytes[28..32].copy_from_slice(b"fmt ");
+                bytes[32..40].copy_from_slice(&52u64.to_le_bytes());
+                bytes[40..44].copy_from_slice(&1u32.to_le_bytes());
+                bytes[44..48].copy_from_slice(&0u32.to_le_bytes());
+                bytes[48..52].copy_from_slice(&2u32.to_le_bytes());
+                bytes[52..56].copy_from_slice(&2u32.to_le_bytes());
+                bytes[56..60].copy_from_slice(&DSD64_RATE.to_le_bytes());
+                bytes[60..64].copy_from_slice(&1u32.to_le_bytes());
+                bytes[64..72].copy_from_slice(&sample_count.to_le_bytes());
+                bytes[72..76].copy_from_slice(&(DSF_BLOCK_BYTES as u32).to_le_bytes());
+                bytes[76..80].copy_from_slice(&0u32.to_le_bytes());
+                bytes[80..84].copy_from_slice(b"data");
+                bytes[84..92].copy_from_slice(&((payload_bytes + 12) as u64).to_le_bytes());
+                for group in 0..groups {
+                    for channel in channel_data.iter().take(channels) {
+                        let start = group * DSF_BLOCK_BYTES;
+                        let end = (start + DSF_BLOCK_BYTES).min(channel.len());
+                        if start < end {
+                            bytes.extend_from_slice(&channel[start..end]);
+                        }
+                        bytes.resize(bytes.len() + DSF_BLOCK_BYTES - end.saturating_sub(start), 0);
+                    }
+                }
+                bytes
+            })
+            .clone()
+    }
+
     #[test]
     fn ab_format_failures_preserve_only_known_codec_and_numeric_facts() {
         use symphonia::core::{audio::Channels, codecs::*};
@@ -675,6 +1308,21 @@ mod tests {
         }
     }
     #[test]
+    fn sync_decode_context_is_bounded_and_never_crosses_a_cue_end() {
+        for seconds in [30, 60, 90] {
+            assert_eq!(
+                requested_decode_seconds(seconds, false, None),
+                seconds as f64
+            );
+            assert_eq!(
+                requested_decode_seconds(seconds, true, None),
+                seconds as f64 + 3.0
+            );
+        }
+        assert_eq!(requested_decode_seconds(30, true, Some(2.4)), 2.4);
+        assert_eq!(requested_decode_seconds(90, true, Some(91.0)), 91.0);
+    }
+    #[test]
     fn prepared_pcm_is_bounded_stereo_48k_with_a_complete_header() {
         let _serial = SERIAL.lock().unwrap();
         let input = wav(4, 44_100, 1);
@@ -699,6 +1347,204 @@ mod tests {
         assert_eq!(frames, 4 * RATE);
         assert_eq!(bytes.len(), 40 + frames as usize * 8);
         assert!(!job.valid());
+    }
+
+    fn install_fixture(job: &Arc<Job>, side: Side, bytes: Vec<u8>, identity: &str) {
+        job.install(
+            side,
+            Input {
+                media: Box::new(Cursor::new(bytes)),
+                alive: Arc::new(|| true),
+                validate: Arc::new(|| true),
+                identity: identity.to_owned(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn synthetic_dsf_is_actually_decoded_filtered_and_marked_for_the_ui() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bytes = synthetic_dsf();
+        let job = Arc::new(Job {
+            token: "dsf-effective".into(),
+            cancel: AtomicBool::new(false),
+            slots: Mutex::new([Slot::default(), Slot::default()]),
+        });
+        install_fixture(&job, Side::A, bytes, "dsf-stereo");
+        let output = decode(job.clone(), Side::A, 0.0, 30).unwrap();
+        assert_eq!(&output[..4], b"SAB1");
+        assert_eq!(
+            u32::from_le_bytes(output[12..16].try_into().unwrap()),
+            3 * RATE + RATE * 2 / 5
+        );
+        assert_eq!(
+            u32::from_le_bytes(output[16..20].try_into().unwrap()),
+            DSD64_RATE
+        );
+        assert_eq!(u32::from_le_bytes(output[20..24].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(output[36..40].try_into().unwrap()), 1);
+        let peak = f32::from_le_bytes(output[28..32].try_into().unwrap());
+        let rms = f32::from_le_bytes(output[32..36].try_into().unwrap());
+        assert!(peak.is_finite() && peak > 0.1 && peak < 0.8, "peak={peak}");
+        assert!(rms.is_finite() && rms > 0.05 && rms < 0.4, "rms={rms}");
+        let left = f32::from_le_bytes(output[40..44].try_into().unwrap());
+        let right = f32::from_le_bytes(output[44..48].try_into().unwrap());
+        assert!(left.is_finite() && right.is_finite());
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn dsf_rejects_truncated_invalid_rate_and_unsupported_channel_layouts() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let valid = synthetic_dsf();
+        let mut invalid_rate = valid.clone();
+        invalid_rate[56..60].copy_from_slice(&5_644_800u32.to_le_bytes());
+        let mut invalid_channels = valid.clone();
+        invalid_channels[48..52].copy_from_slice(&6u32.to_le_bytes());
+        invalid_channels[52..56].copy_from_slice(&6u32.to_le_bytes());
+        for (bytes, expected) in [
+            (valid[..91].to_vec(), "AB_CONTAINER"),
+            (valid[..valid.len() - 1].to_vec(), "AB_CONTAINER"),
+            (invalid_rate, "AB_DSD_RATE"),
+            (invalid_channels, "AB_DSD_FORMAT"),
+        ] {
+            let job = Arc::new(Job {
+                token: "dsf-invalid".into(),
+                cancel: AtomicBool::new(false),
+                slots: Mutex::new([Slot::default(), Slot::default()]),
+            });
+            install_fixture(&job, Side::A, bytes, "invalid-dsf");
+            let failure = decode(job, Side::A, 0.0, 30).unwrap_err();
+            assert_eq!(failure.code, expected);
+            assert_eq!(failure.codec, Some("DSD (DSF)"));
+            assert!(!serde_json::to_string(&failure).unwrap().contains("private"));
+        }
+        let mut short = valid;
+        let short_samples = u64::from(DSD64_RATE) * 25 / 10;
+        let short_groups = (short_samples as usize)
+            .div_ceil(8)
+            .div_ceil(DSF_BLOCK_BYTES);
+        let short_payload = short_groups * 2 * DSF_BLOCK_BYTES;
+        short.truncate(92 + short_payload);
+        let short_file_bytes = short.len() as u64;
+        short[12..20].copy_from_slice(&short_file_bytes.to_le_bytes());
+        short[64..72].copy_from_slice(&short_samples.to_le_bytes());
+        short[84..92].copy_from_slice(&((short_payload + 12) as u64).to_le_bytes());
+        let short_job = Arc::new(Job {
+            token: "dsf-short".into(),
+            cancel: AtomicBool::new(false),
+            slots: Mutex::new([Slot::default(), Slot::default()]),
+        });
+        install_fixture(&short_job, Side::A, short, "short-dsf");
+        assert_eq!(
+            decode(short_job, Side::A, 0.0, 30).unwrap_err().code,
+            "AB_TOO_SHORT"
+        );
+    }
+
+    #[test]
+    fn dsf_pcm_and_dsf_dsf_prepare_in_the_same_48k_pipeline() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dsf = synthetic_dsf();
+        let job = Arc::new(Job {
+            token: "dsf-pcm-pair".into(),
+            cancel: AtomicBool::new(false),
+            slots: Mutex::new([Slot::default(), Slot::default()]),
+        });
+        install_fixture(&job, Side::A, dsf.clone(), "dsf-a");
+        install_fixture(&job, Side::B, wav(4, 48_000, 2), "pcm-b");
+        let a = decode(job.clone(), Side::A, 0.0, 30).unwrap();
+        let b = decode(job.clone(), Side::B, 0.0, 30).unwrap();
+        assert_eq!(u32::from_le_bytes(a[36..40].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(b[36..40].try_into().unwrap()), 0);
+        assert!(job.valid());
+
+        let pair = Arc::new(Job {
+            token: "dsf-pair".into(),
+            cancel: AtomicBool::new(false),
+            slots: Mutex::new([Slot::default(), Slot::default()]),
+        });
+        install_fixture(&pair, Side::A, dsf.clone(), "dsf-left");
+        install_fixture(&pair, Side::B, dsf, "dsf-right");
+        let left = decode(pair.clone(), Side::A, 0.0, 30).unwrap();
+        let right = decode(pair.clone(), Side::B, 0.0, 30).unwrap();
+        assert_eq!(&left[12..20], &right[12..20]);
+        assert_eq!(u32::from_le_bytes(left[36..40].try_into().unwrap()), 1);
+        assert!(pair.valid());
+    }
+
+    #[test]
+    fn dsf_cue_start_manual_offset_and_duration_are_applied_once() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let job = Arc::new(Job {
+            token: "dsf-cue".into(),
+            cancel: AtomicBool::new(false),
+            slots: Mutex::new([Slot::default(), Slot::default()]),
+        });
+        job.install_segment(
+            Side::B,
+            Input {
+                media: Box::new(Cursor::new(synthetic_dsf())),
+                alive: Arc::new(|| true),
+                validate: Arc::new(|| true),
+                identity: "dsf-cue".into(),
+            },
+            Some(Segment {
+                start_seconds: 0.1,
+                end_seconds: Some(3.6),
+            }),
+        )
+        .unwrap();
+        let output = decode(job, Side::B, 0.123, 30).unwrap();
+        let media_start: f64 = 0.223;
+        let expected_duration = (3.4f64 - media_start).min(3.6f64 - media_start);
+        let expected_source_frames = (expected_duration * DSF_PCM_RATE as f64).floor() as usize;
+        let expected_frames =
+            (expected_source_frames * RATE as usize / DSF_PCM_RATE as usize) as u32;
+        assert_eq!(
+            u32::from_le_bytes(output[12..16].try_into().unwrap()),
+            expected_frames
+        );
+        assert_eq!(u32::from_le_bytes(output[24..28].try_into().unwrap()), 123);
+        assert_eq!(u32::from_le_bytes(output[36..40].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn dsf_decode_observes_cancellation_between_bounded_reads() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let calls = Arc::new(AtomicU64::new(0));
+        let observed = calls.clone();
+        let job = Arc::new(Job {
+            token: "dsf-cancel".into(),
+            cancel: AtomicBool::new(false),
+            slots: Mutex::new([Slot::default(), Slot::default()]),
+        });
+        let alive: Check = Arc::new(move || observed.fetch_add(1, Ordering::AcqRel) < 12);
+        job.install(
+            Side::A,
+            Input {
+                media: Box::new(Cursor::new(synthetic_dsf())),
+                alive,
+                validate: Arc::new(|| true),
+                identity: "dsf-cancel".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            decode(job, Side::A, 0.0, 30).unwrap_err().code,
+            "AB_CHANGED"
+        );
     }
     #[test]
     fn stale_and_same_identity_inputs_are_refused_before_decode() {
@@ -748,6 +1594,39 @@ mod tests {
         assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 1000);
         let rms = f32::from_le_bytes(bytes[32..36].try_into().unwrap());
         assert!((rms - 0.1767).abs() < 0.002);
+    }
+
+    #[test]
+    fn cue_segment_decode_seeks_to_its_start_and_never_reads_past_its_end() {
+        let _serial = SERIAL.lock().unwrap();
+        let job = Arc::new(Job {
+            token: "cue-range-fixture".into(),
+            cancel: AtomicBool::new(false),
+            slots: Mutex::new([Slot::default(), Slot::default()]),
+        });
+        job.install_segment(
+            Side::A,
+            Input {
+                media: Box::new(Cursor::new(wav(8, RATE, 2))),
+                alive: Arc::new(|| true),
+                validate: Arc::new(|| true),
+                identity: "sqlite-cue-fixture".into(),
+            },
+            Some(Segment {
+                start_seconds: 2.0,
+                end_seconds: Some(6.0),
+            }),
+        )
+        .unwrap();
+
+        // The UI asks for 30 seconds, but only the four seconds in this CUE
+        // segment are eligible for comparison.
+        let bytes = decode(job, Side::A, 0.0, 30).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            4 * RATE
+        );
+        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 0);
     }
 
     #[test]

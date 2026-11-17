@@ -24,7 +24,7 @@ import { analyzerOwnerMatches } from '../src/utils/nowPlayingHosting.ts';
 import { signalPathInformation, requiresDeviceVolumeControl } from '../src/utils/signalPath.ts';
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(l=>[l,{translation:JSON.parse(readFileSync(new URL(`../src/locales/${l}.json`,import.meta.url)))}]))});
 globalThis.window={localStorage:{getItem:()=>null,setItem(){}},screen:{availWidth:1920,availHeight:1040},crypto:{randomUUID:()=> 'synthetic-session'},setTimeout,clearTimeout,addEventListener(){},removeEventListener(){}};
-const dependencies={'../utils/nowPlayingFullscreen':{NowPlayingFullscreen},'./TrackLyrics':{TrackLyrics:()=>null},'./SleepTimerControl':{SleepTimerControl:()=>null},'../utils/nowPlayingLayout':layoutHelpers,'../../utils/psychoScene':psychoScene,...passiveQueueInsertion,'../utils/queuePresentation':queuePresentationHelpers,'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useNavidromeQueueArtwork':{useNavidromeQueueArtwork:()=>item=>item},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
+const dependencies={'../utils/nowPlayingFullscreen':{NowPlayingFullscreen},'./TrackLyrics':{TrackLyrics:()=>null},'./SleepTimerControl':{SleepTimerControl:()=>null},'./playerBar.css':{},'../utils/nowPlayingLayout':layoutHelpers,'../../utils/psychoScene':psychoScene,...passiveQueueInsertion,'../utils/queuePresentation':queuePresentationHelpers,'../utils/localCoverBatch':{createLocalCoverBatch},'../utils/localSourceReadQueue':{createLocalSourceReadQueue,localSourceReadQueue:createLocalSourceReadQueue()},'../utils/sqliteExperimentalMode':{isSqliteCatalogEnabled:()=>true},'./config':{ensureDirectOutputChoice:async()=>{}},'../utils/playbackIntent':{...playbackIntents,beginPlaybackIntent:()=>({current:()=>true,confirmCurrent:async()=>true,token:Promise.resolve(null),cancel(){}}),configurePlaybackIntents(){}},'../utils/useNavidromeQueueArtwork':{useNavidromeQueueArtwork:()=>item=>item},'../utils/useLocalQueueArtwork':{useLocalQueueArtwork:()=>item=>item},'react':{...React,default:React},'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/nowPlayingHosting':{analyzerOwnerMatches},'../utils/signalPath':{...directVolumeHelpers,signalPathInformation,requiresDeviceVolumeControl},'../utils/nowPlayingPresentation':{nowPlayingWindowBounds,queueItemArtwork,queueItemIsCurrent,queueVisibleRange,QueuePreviewReader,playConfirmedQueuePosition},'./nowPlaying.css':{},'../utils/frontendDiagnostics':{logError(){}}};
 const compile=(file,extra={})=>{const js=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',js)(name=>{assert.ok(name in extra||name in dependencies,name);return extra[name]??dependencies[name];},ex);return ex;};
 dependencies['./PlexImage']={PlexImage:({alt,className})=>React.createElement('div',{'data-plex-artwork':true,'aria-label':alt,className})};
 dependencies['./TrackArtwork']=compile('components/TrackArtwork.tsx');
@@ -50,12 +50,51 @@ test('presentation renders long metadata, all controls and confirmed horizontal 
   for(const label of [i18n.t('player.previous'),i18n.t('player.pause'),i18n.t('player.next'),i18n.t('nowPlaying.seek'),i18n.t('signalPath.volume')])assert.ok(html.includes(label),label);
  }}await i18n.changeLanguage('en');
 });
+test('Simple mode keeps the selected live visualizer accessible in a compact layout without changing playback controls',()=>{
+ const simple={...props,snapshot:{...snapshot,usageMode:'simple'}};
+ const audiophile=renderToStaticMarkup(React.createElement(View,simple));
+  assert.match(audiophile,/class="np-audiophile-meta"/);
+ assert.match(audiophile,/data-usage-mode="simple"/);
+ assert.match(audiophile,/data-visualizer-density="compact"/);
+ assert.match(audiophile,/aria-label="Level meters \+ Spectrum"/);
+ assert.ok(audiophile.includes(i18n.t('nowPlaying.visualizer.previousMode')));
+ assert.ok(audiophile.includes(i18n.t('nowPlaying.visualizer.nextMode')));
+ for(const label of [i18n.t('player.previous'),i18n.t('player.pause'),i18n.t('player.next'),i18n.t('nowPlaying.seek')])assert.ok(audiophile.includes(label));
+ const simplePsycho=renderToStaticMarkup(React.createElement(View,{...simple,layout:'psycho'}));
+ assert.match(simplePsycho,/data-psycho-density="compact"/);
+ assert.match(simplePsycho,/data-usage-mode="simple"/);
+ const full=renderToStaticMarkup(React.createElement(View,{...props,layout:'audiophile'}));
+ assert.match(full,/data-visualizer-density="standard"/);
+ assert.doesNotMatch(full,/data-psycho-density="compact"/);
+ const css=readFileSync(new URL('../src/components/nowPlaying.css',import.meta.url),'utf8');
+ assert.match(css,/data-visualizer-density="compact"[\s\S]*?height: clamp\(104px,14cqh,132px\)/);
+ assert.match(css,/np-psycho-stage-compact[\s\S]*?height: clamp\(150px,22cqh,200px\)/);
+ assert.match(css,/data-usage-mode="simple"\]\.np-look-psycho \.np-media[\s\S]*?grid-template-rows: minmax\(150px,1fr\) auto/);
+});
 test('queue/fullscreen/close are distinct callbacks; only playback controls submit playback actions',()=>{
  const calls=[];const p={...props};for(const name of Object.keys(p).filter(n=>n.startsWith('on')))p[name]=(...args)=>calls.push([name,...args]);
  const tree=View(p);const byLabel=label=>nodes(tree,n=>n.type==='button'&&n.props['aria-label']===label)[0];
  byLabel(i18n.t('nowPlaying.showQueue')).props.onClick();byLabel(i18n.t('nowPlaying.enterFullscreen')).props.onClick();byLabel(i18n.t('nowPlaying.close')).props.onClick();assert.deepEqual(calls,[['onQueue'],['onFullscreen'],['onClose']]);
  byLabel(i18n.t('player.pause')).props.onClick();byLabel(i18n.t('player.next')).props.onClick();byLabel(i18n.t('player.previous')).props.onClick();assert.deepEqual(calls.slice(3),[['onTogglePlay'],['onNext'],['onPrevious']]);
  const seek=nodes(tree,n=>n.type==='input'&&n.props['aria-label']===i18n.t('nowPlaying.seek'))[0];seek.props.onChange({target:{value:'60'}});seek.props.onKeyUp({key:'ArrowRight',currentTarget:{value:'60'}});assert.deepEqual(calls.slice(-3),[['onSeekStart'],['onSeekChange',60],['onSeekCommit',60]]);
+});
+test('Now Playing progress thumb and rail share one centered control at 0, 50 and 100 percent',()=>{
+ for(const elapsed of [0,92.5,185]){
+  const tree=View({...props,snapshot:{...snapshot,playback:{...snapshot.playback,elapsed}},layout:'psycho'});
+  const control=nodes(tree,n=>n.props?.className==='np-progress-control')[0];
+  assert.ok(control,'the rail and range share a fixed-height control box');
+  const range=nodes(control,n=>n.type==='input'&&n.props['aria-label']===i18n.t('nowPlaying.seek'))[0];
+  const rail=nodes(control,n=>n.props?.className==='np-progress-track')[0];
+  const fill=nodes(rail,n=>n.props?.className==='np-progress-fill')[0];
+  assert.equal(Number(range.props.value),elapsed);
+  assert.equal(fill.props.style.width,`${elapsed/185*100}%`);
+ }
+ const css=readFileSync(new URL('../src/components/nowPlaying.css',import.meta.url),'utf8');
+ assert.match(css,/\.np-progress-control \{[^}]*height: 16px/);
+ assert.match(css,/\.np-progress-track \{[^}]*top: 50%; height: 16px/);
+ assert.match(css,/\.np-progress-control input\[type="range"\] \{[^}]*height: 16px; margin: 0/);
+ assert.match(css,/::-webkit-slider-runnable-track \{ height: 3px/);
+ assert.match(css,/::-webkit-slider-thumb \{[^}]*height: 10px; margin-top: -3\.5px/);
 });
 test('unavailable playback disables seek, transport and volume and shows neutral failure',()=>{
  const p={...props,snapshot:{...snapshot,health:{state:'unavailable',reason:'socket_unavailable'}},controlFailed:true};const tree=View(p);
@@ -458,7 +497,7 @@ test('actual App and PlayerBar callbacks retain a decoded cover across reopening
  const storage={getItem:()=>value,setItem:(_key,next)=>{value=next},removeItem:()=>{value=null}};
  const cache=new LocalPlaybackThumbnail(()=>storage,()=>{reductions++;return jpeg});
  const configFn=ts.transpileModule('exports.configure = '+configure,{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
- const configExports={};new Function('sourceEnabled','exports','localPlaybackThumbnail','localAlbumThumbnails','localAlbumCatalog','setConfigState',configFn)(sourceEnabled,configExports,cache,{setContext(){}},{setPresentationContext(){}},()=>{});
+ const configExports={};new Function('sourceEnabled','exports','localPlaybackThumbnail','localAlbumThumbnails','localAlbumCatalog','setConfigState','sqliteMode','sqliteArtworkContextRequest','setSqliteSourcesLoaded','sqliteLibrary','sqliteAlbumThumbnailContext',configFn)(sourceEnabled,configExports,cache,{setContext(){}},{setPresentationContext(){}},()=>{},false,{current:0},()=>{},{sources:async()=>[]},()=>[]);
  configExports.configure({first_run:false,local_folders:['/music']});
  const callback=name=>new Function('localPlaybackThumbnail','return ('+player.attributes.properties.find(p=>p.name?.getText(ast)===name).initializer.expression.getText(ast)+')')(cache);
  const loaded=callback('onArtworkLoaded'),failed=callback('onArtworkFailed');
@@ -654,7 +693,7 @@ test('the visible layout picker exposes four translated choices and scopes Effec
  }await i18n.changeLanguage('en');
 });
 
-test('Encarte and Poster ignore high-rate analyzer frames without changing capture ownership or player controls',async()=>{
+test('Encarte and Poster skip analyzer subscriptions while visual layouts still paint incoming frames',async()=>{
  const original=window.localStorage;
  try{
   for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
@@ -663,9 +702,11 @@ test('Encarte and Poster ignore high-rate analyzer frames without changing captu
    const hooks={...React,default:React,useState:initial=>{const at=index++;return[typeof initial==='function'?initial():initial,next=>writes.push([at,next])]},useEffect:fn=>effects.push(fn),useRef:value=>({current:value})};
    const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:()=>null},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{listen:async(name,fn)=>{listeners.set(name,fn);return()=>listeners.delete(name)}},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{AUDIO_LEVEL_EVENT:'levels',ANALYZER_STATUS_EVENT:'analyzer',startAudioAnalyzer:async()=>{},stopAudioAnalyzer:async()=>{}}});
    NowPlayingHost({snapshot,owner,embedded:true,onReady(){}});const cleanup=effects[2]();await flush();writes.length=0;
-   listeners.get('levels')({payload:{owner:{...owner,leaseId:'synthetic-session'},data:props.levels}});
-   assert.equal(writes.filter(([at])=>at===5).length,['audiophile','psycho'].includes(layout)?1:0);
-   cleanup();await flush();assert.equal(listeners.size,0);
+   const visualizersEnabled=['audiophile','psycho'].includes(layout);
+   assert.equal(listeners.has('levels'),visualizersEnabled);
+   if(visualizersEnabled)listeners.get('levels')({payload:{owner:{...owner,leaseId:'synthetic-session'},data:props.levels}});
+   assert.equal(writes.filter(([at])=>at===5).length,visualizersEnabled?1:0);
+   if(typeof cleanup==='function')cleanup();await flush();assert.equal(listeners.size,0);
   }
  }finally{window.localStorage=original;}
 });
@@ -843,36 +884,39 @@ test('Navidrome lower player and Now Playing expose artist and album links while
  for(const label of ['Nav Album','Nav Artist'])nodes(tree,n=>n.type==='button'&&text(n).trim()===label)[0].props.onClick();assert.deepEqual(navigations,['album','artist']);
 });
 
-test('Simple Now Playing acknowledges both hosts without analyzer listeners or capture; Full retains capture and cleanup', async () => {
- for (const embedded of [true,false]) for (const usageMode of ['simple','full']) {
+test('visualizer capture follows the selected layout in both modes and stops when hidden', async () => {
+ const storage=window.localStorage;
+ try { for (const embedded of [true,false]) for (const usageMode of ['simple','full']) for (const layout of layoutHelpers.NOW_PLAYING_LAYOUTS) {
+  window.localStorage={getItem:key=>key===layoutHelpers.NOW_PLAYING_LOOK_KEY?JSON.stringify({layout,psychoPlacement:'frame'}):null,setItem(){}};
   const effects=[],calls=[],ready=[];
   const hooks={...React,default:React,useEffect:effect=>effects.push(effect),useRef:value=>({current:value}),useState:initial=>[typeof initial==='function'?initial():initial,()=>{}]};
   const {NowPlayingHost}=compile('components/NowPlayingHost.tsx',{'react':hooks,'./NowPlayingPresentation':{NowPlayingPresentation:View},'./NowPlayingQueue':{NowPlayingQueue:()=>null},'@tauri-apps/api/event':{listen:async name=>{calls.push(['listen',name]);return()=>calls.push(['unlisten',name])}},'@tauri-apps/api/window':{},'../services/audio':{audioService:{}},'../services/nowPlayingWindow':{AUDIO_LEVEL_EVENT:'levels',ANALYZER_STATUS_EVENT:'status',startAudioAnalyzer:async()=>calls.push(['start']),stopAudioAnalyzer:async()=>calls.push(['stop'])}});
   const currentOwner={...owner,host:embedded?'main':'now-playing'};
   const rendered=NowPlayingHost({snapshot:{...snapshot,usageMode},owner:currentOwner,embedded,onReady:value=>ready.push(value)});
   const cleanup=effects[2]();for(let i=0;i<12;i++)await Promise.resolve();
+  const shouldCapture=layoutHelpers.nowPlayingVisualizersEnabled(layout);
   assert.deepEqual(ready,[currentOwner]);assert.equal(rendered.props.snapshot.usageMode,usageMode);
-  assert.equal(calls.filter(([kind])=>kind==='start').length,usageMode==='full'?1:0);
-  assert.equal(calls.filter(([kind])=>kind==='listen').length,usageMode==='full'?2:0);
+  assert.equal(calls.filter(([kind])=>kind==='start').length,shouldCapture?1:0);
+  assert.equal(calls.filter(([kind])=>kind==='listen').length,shouldCapture?2:0);
   cleanup?.();for(let i=0;i<12;i++)await Promise.resolve();
-  assert.equal(calls.filter(([kind])=>kind==='stop').length,usageMode==='full'?1:0);
- }
+  assert.equal(calls.filter(([kind])=>kind==='stop').length,shouldCapture?1:0);
+ } } finally {window.localStorage=storage;}
 });
-test('Simple keeps cover and playback controls in all layouts and omits audiophile VUs and spectrum', () => {
+test('Simple keeps the selected visualizer and playback controls; layouts without visuals stay off', () => {
  for(const embedded of [true,false])for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
   const tree=View({...props,embedded,layout,snapshot:{...snapshot,usageMode:'simple'}});
-  assert.equal(nodes(tree,node=>node.type===dependencies['./visualizer/VisualizerPanel'].VisualizerPanel).length,0);
+  assert.equal(nodes(tree,node=>node.type===dependencies['./visualizer/VisualizerPanel'].VisualizerPanel).length,layout==='audiophile'?1:0);
   assert.equal(nodes(tree,node=>node.props?.className==='np-cover').length,1);
   assert.equal(nodes(tree,node=>node.type==='button'&&node.props['aria-label']===i18n.t('player.pause')).length,1);
  }
 });
 
 
-test('Simple Psico animates during playback without PCM capture while Full retains analyzer availability rules', () => {
+test('Psycho uses analyzer availability in both modes and keeps its pause guidance', () => {
  for (const embedded of [true,false]) for (const usageMode of ['simple','full']) for (const analyzerAvailable of [false,true]) for (const state of ['play','pause','stop']) {
   const tree=View({...props,embedded,layout:'psycho',analyzerAvailable,snapshot:{...snapshot,usageMode,playback:{...snapshot.playback,state}}});
   const scene=nodes(tree,node=>node.type===dependencies['./visualizer/PsychoVisualizer'].PsychoVisualizer)[0];
-  assert.equal(scene.props.active,state==='play'&&(usageMode==='simple'||analyzerAvailable));
+  assert.equal(scene.props.active,state==='play'&&analyzerAvailable);
   if(usageMode==='simple'&&state==='pause')assert.equal(scene.props.inactiveLabel,i18n.t('nowPlaying.visualizer.paused'));
   const unavailable=View({...props,embedded,layout:'psycho',analyzerAvailable,snapshot:{...snapshot,usageMode,health:{state:'unavailable'},playback:{...snapshot.playback,state}}});
   assert.equal(nodes(unavailable,node=>node.type===dependencies['./visualizer/PsychoVisualizer'].PsychoVisualizer)[0].props.active,false);

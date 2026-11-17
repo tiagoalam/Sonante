@@ -1,0 +1,10 @@
+{
+  "reference_fnv64": 972956366489690586,
+  "math_fnv64": 6281711315755150480,
+  "security": "drift guard only, SHA256 still mandatory for artifacts/source",
+  "Root_changed_files": [
+    "windows_shared.rs",
+    "windows_analyzer/model.rs"
+  ],
+  "Root_pins_not_changed": true
+}

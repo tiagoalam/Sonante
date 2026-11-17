@@ -56,7 +56,7 @@ export const ArtistView: React.FC<Props> = ({
   const queueRequest = (track: PlexTrack) => ({ track: plexQueueTrack(track),
     album: track.album_rating_key ? async () => (await plexService.getAlbumTracks(track.album_rating_key!)).map(item => plexQueueTrack(item)) : undefined });
   const albums = current ? loadedAlbums : [], topTracks = current ? loadedTracks : [];
-  const selection = useTrackSelection(queueContext, topTracks.slice(0, visibleTracksCount).map(track => plexQueueTrack(track)), active && current && isPlaybackAvailable);
+  const selection = useTrackSelection(queueContext, topTracks.slice(0, visibleTracksCount).map(track => plexQueueTrack(track)), active && current && isPlaybackAvailable, false);
   const viewport = useRef<HTMLElement>(null), scroll = useRef(0), returnAlbum = useRef<HTMLButtonElement | null>(null);
   const lastContext = useRef({ key, identity: requestIdentity });
   useLayoutEffect(() => {
@@ -143,7 +143,7 @@ export const ArtistView: React.FC<Props> = ({
       onKeyDown={event => { if ((event.target as HTMLElement).closest?.("[data-artist-album]")) event.stopPropagation(); }}
       className="flex-1 flex min-h-0 flex-col overflow-y-auto bg-gradient-to-b from-[var(--theme-surface-panel,#1C1812)] via-[var(--theme-surface-base,#121212)] to-[var(--theme-surface-base,#121212)] select-none p-8">
       <PlaybackRequestNotice failure={request.failure} />
-      {queueActions.notice}{queueActions.menu}{selection.toolbar}
+      {queueActions.notice}{queueActions.menu}
       {/* Botão de Retorno */}
       <button
         onClick={onBack}

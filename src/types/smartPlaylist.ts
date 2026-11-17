@@ -41,6 +41,7 @@ export interface SmartAlbum {
 export interface SmartPreview {
     tracks: TrackMetadata[];
     matched_albums: number;
+    unknown_added_date_albums?: number;
     limit_reached: boolean;
 }
 export interface SmartSources {
@@ -49,4 +50,4 @@ export interface SmartSources {
     navidrome_account_id?: string | null;
 }
 
-export interface SmartSelection { albums: SmartAlbum[]; matched_albums: number }
+export interface SmartSelection { albums: SmartAlbum[]; matched_albums: number; unknown_added_date_albums?: number }

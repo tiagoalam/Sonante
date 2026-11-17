@@ -181,6 +181,20 @@ test('library check reports a concise failure and discards late UI work after un
  }finally{next.close();}
 });
 
+test('library check keeps an unconfirmed scan distinct from a generic failure',async()=>{
+ for(const lng of ['pt-BR','en']){
+  const h=await libraryCheckHarness(['/fixture/one'],lng);
+  audioService.checkLocalLibrary=async()=>{throw 'windows_library_check_unconfirmed';};
+  try{
+   await h.click(language.t('localBrowser.checkLibrary.button'));await h.settle();
+   const specific=language.t('windowsPort.errors.windows_library_check_unconfirmed');
+   const html=markup(h.tree);
+   assert.ok(html.includes(specific),lng);
+   assert.ok(!html.includes(language.t('localBrowser.checkLibrary.failed')),lng);
+  }finally{h.close();}
+ }
+});
+
 
 test('manual check keeps Local album playback available and a refused optional cover cannot reject music', async () => {
  language=i18next.createInstance();await language.init({lng:'pt-BR',resources:{'pt-BR':{translation:JSON.parse(readFileSync(resolve(root,'src/locales/pt-BR.json'),'utf8'))}}});

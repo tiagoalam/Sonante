@@ -5980,6 +5980,7 @@ pub(crate) mod mirror {
                 let queue = MpdQueueStructure {
                     entries: vec![MpdQueueEntry {
                         uri: old_uri.into(),
+                        range: None,
                         pos: 0,
                         id: 7,
                     }],

@@ -42,6 +42,16 @@ export function validLocalLibrarySourceSelection(
     : null;
 }
 
+/** Keep the saved scope until its asynchronous source inventory is authoritative. */
+export function reconcileLocalLibrarySourceSelection(
+  selectedSourceId: string | null,
+  options: readonly LocalLibrarySourceOption[],
+  optionsReady: boolean,
+): string | null {
+  if (selectedSourceId === null || !optionsReady) return selectedSourceId;
+  return validLocalLibrarySourceSelection(selectedSourceId, options);
+}
+
 export function filterLocalAlbumsByScope(
   albums: readonly LocalAlbum[],
   selectedSourceId: string | null,
@@ -53,6 +63,7 @@ export function filterLocalAlbumsByScope(
     && (
       album.title.toLowerCase().includes(query)
       || album.artist.toLowerCase().includes(query)
+      || (album.artist_names ?? []).some(artist => artist.toLowerCase().includes(query))
     )
   ));
 }

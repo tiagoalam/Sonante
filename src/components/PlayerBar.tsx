@@ -23,6 +23,7 @@ import { useTranslation } from "react-i18next";
 import { PlexImage } from "./PlexImage";
 import { ConfiguredSignalRoute, MpdHealth, PlaybackStatus } from "../types/audio";
 import { audioService } from "../services/audio";
+import "./playerBar.css";
 
 interface Props {
   onToggleQueue: () => void;
@@ -36,6 +37,7 @@ interface Props {
   health: MpdHealth;
   route: ConfiguredSignalRoute | null;
   sourceInfo?: PlayerSourceInfo | null;
+  interactionDisabled?: boolean;
 }
 
 export const PlayerBar: React.FC<Props> = ({
@@ -50,11 +52,14 @@ export const PlayerBar: React.FC<Props> = ({
   health,
   route,
   sourceInfo,
+  interactionDisabled = false,
 }) => {
   const { t } = useTranslation();
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekValue, setSeekValue] = useState(0.0);
   const [failedCover, setFailedCover] = useState<string | null>(null);
+  const [volumePreview, setVolumePreview] = useState<number | null>(null);
+  const volumePreviewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isSeekingRef = useRef(false);
   useEffect(() => {
@@ -80,8 +85,20 @@ export const PlayerBar: React.FC<Props> = ({
     }
   }, [isAvailable, status.elapsed]);
 
+  useEffect(() => {
+    if (volumePreview !== null && status.volume.available && status.volume.value === volumePreview) {
+      setVolumePreview(null);
+      if (volumePreviewTimer.current) clearTimeout(volumePreviewTimer.current);
+      volumePreviewTimer.current = null;
+    }
+  }, [status.volume.available, status.volume.value, volumePreview]);
+
+  useEffect(() => () => {
+    if (volumePreviewTimer.current) clearTimeout(volumePreviewTimer.current);
+  }, []);
+
   const handlePlayToggle = async () => {
-    if (!isAvailable) return;
+    if (interactionDisabled || !isAvailable) return;
     try {
       await audioService.togglePlay();
     } catch (err) {
@@ -90,7 +107,7 @@ export const PlayerBar: React.FC<Props> = ({
   };
 
   const handleNext = async () => {
-    if (!isAvailable) return;
+    if (interactionDisabled || !isAvailable) return;
     try {
       await audioService.next();
     } catch (err) {
@@ -99,7 +116,7 @@ export const PlayerBar: React.FC<Props> = ({
   };
 
   const handlePrevious = async () => {
-    if (!isAvailable) return;
+    if (interactionDisabled || !isAvailable) return;
     try {
       await audioService.previous();
     } catch (err) {
@@ -109,7 +126,7 @@ export const PlayerBar: React.FC<Props> = ({
 
   const handleSeekCommit = async (val: number) => {
     setIsSeeking(false);
-    if (!isAvailable) return;
+    if (interactionDisabled || !isAvailable) return;
     try {
       await audioService.seek(val);
       setSeekValue(val);
@@ -119,16 +136,25 @@ export const PlayerBar: React.FC<Props> = ({
   };
 
   const handleVolumeChange = async (val: number) => {
-    if (!isAvailable) return;
+    if (interactionDisabled || !isAvailable) return;
+    setVolumePreview(val);
+    if (volumePreviewTimer.current) clearTimeout(volumePreviewTimer.current);
+    volumePreviewTimer.current = setTimeout(() => {
+      setVolumePreview(null);
+      volumePreviewTimer.current = null;
+    }, 1200);
     try {
       await audioService.setVolume(val);
     } catch (err) {
+      setVolumePreview(null);
+      if (volumePreviewTimer.current) clearTimeout(volumePreviewTimer.current);
+      volumePreviewTimer.current = null;
       logError("player.volume", err);
     }
   };
 
   const handleToggleMute = async () => {
-    if (!isAvailable || !canToggleMute(status)) return;
+    if (interactionDisabled || !isAvailable || !canToggleMute(status)) return;
     if (status.volume.backend === "direct_equipment") {
       const request = directMuteRequest(status);
       if (request) try { await audioService.setDirectMute(request); } catch (error) { logError("player.volume", error); window.alert(t("player.directControlFailed")); }
@@ -157,30 +183,35 @@ export const PlayerBar: React.FC<Props> = ({
     : status.artist || (status.album ? status.album : "Sonante");
   const deviceVolume = requiresDeviceVolumeControl(route, status);
   const isVolumeAvailable =
-    isAvailable && canToggleMute(status);
+    isAvailable && status.volume.available && canToggleMute(status);
   const isMuted = status.volume.muted || status.volume.value === 0;
+  const displayedVolume = volumePreview ?? status.volume.value;
   const volumeBackendLabel = t(`player.volumeBackend.${status.volume.backend}`);
   const volumeStatusLabel =
     isAvailable && status.volume.available && status.volume.backend !== "unavailable"
       ? `${status.volume.value}% · ${volumeBackendLabel}`
       : volumeBackendLabel;
+  const compactVolumeLabel = deviceVolume
+    ? t("player.volumeOnDeviceShort")
+    : t(`player.volumeBackendCompact.${isAvailable && status.volume.available ? status.volume.backend : "unavailable"}`);
+  const compactVolumeTitle = deviceVolume
+    ? `${t("player.volumeOnDevice")} · ${t(muteLabel(status))}`
+    : `${isAvailable && status.volume.available ? volumeStatusLabel : t("player.volumeBackend.unavailable")} · ${t(muteLabel(status))}`;
 
   return (
-    <footer className="h-28 shrink-0 bg-[var(--theme-surface-base,#161616)] border-t border-[color:var(--theme-border-soft,#2A2A2A)] grid grid-cols-[minmax(0,1fr)_clamp(240px,26vw,400px)_minmax(0,1fr)] items-center gap-3 px-4 z-40 select-none shadow-[0_-8px_24px_rgba(0,0,0,0.16)]">
-      {/* Equal side tracks keep playback at the geometric window center. */}
-      <div data-player-area="left" className="flex min-w-0 items-center gap-2">
-        {/* 1. Metadados e Capa com Links Interativos */}
-        <div data-player-area="metadata" className="flex min-w-0 flex-1 items-center gap-2">
+    <footer className="player-compact-grid shrink-0 bg-[var(--theme-surface-base,#161616)] border-t border-[color:var(--theme-border-soft,#2A2A2A)] z-40 select-none shadow-[0_-8px_24px_rgba(0,0,0,0.16)]">
+        <div data-player-area="metadata" className="flex min-w-0 items-center gap-2">
           <div
+            data-player-cover
             onClick={() => {
-              if (!isNoTrack && onNavigateToAlbum && canNavigate) onNavigateToAlbum();
+              if (!interactionDisabled && !isNoTrack && onNavigateToAlbum && canNavigate) onNavigateToAlbum();
             }}
             className={`w-[76px] h-[76px] rounded-xl bg-[var(--theme-surface-raised,#202020)] border border-[color:var(--theme-border-soft,#303030)] overflow-hidden shrink-0 flex items-center justify-center shadow-lg group/cover transition-all ${
-              !isNoTrack && onNavigateToAlbum && canNavigate
+              !interactionDisabled && !isNoTrack && onNavigateToAlbum && canNavigate
                 ? "cursor-pointer hover:border-[color:var(--theme-border-accent,#E5A00D)] hover:shadow-[0_0_12px_rgba(229,160,13,0.2)]"
                 : ""
             }`}
-            title={!isNoTrack && onNavigateToAlbum && canNavigate ? (status.album || displayTitle) : undefined}
+            title={!interactionDisabled && !isNoTrack && onNavigateToAlbum && canNavigate ? (status.album || displayTitle) : undefined}
           >
             {status.plex_image && !isNoTrack ? (
               <PlexImage
@@ -207,8 +238,8 @@ export const PlayerBar: React.FC<Props> = ({
             )}
           </div>
 
-          <div className="flex flex-col min-w-0 pr-2 gap-0.5">
-            {!isNoTrack && onNavigateToAlbum && canNavigate ? (
+          <div data-player-metadata-copy className="flex flex-col min-w-0 pr-2 gap-0.5">
+            {!interactionDisabled && !isNoTrack && onNavigateToAlbum && canNavigate ? (
               <button
                 type="button"
                 onClick={onNavigateToAlbum}
@@ -223,7 +254,7 @@ export const PlayerBar: React.FC<Props> = ({
               </span>
             )}
 
-            {!isNoTrack && status.artist && onNavigateToArtist && canNavigate ? (
+            {!interactionDisabled && !isNoTrack && status.artist && onNavigateToArtist && canNavigate ? (
               <button
                 type="button"
                 onClick={onNavigateToArtist}
@@ -238,27 +269,26 @@ export const PlayerBar: React.FC<Props> = ({
               </span>
             )}
 
-            {!isNoTrack && status.album && onNavigateToAlbum && canNavigate ? (
+            {!interactionDisabled && !isNoTrack && status.album && onNavigateToAlbum && canNavigate ? (
               <button
                 type="button"
                 onClick={onNavigateToAlbum}
                 className="text-[10px] leading-tight text-[color:var(--theme-fg-muted,#777777)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate text-left cursor-pointer"
+                data-player-album
                 title={status.album}
               >
                 {status.album}
               </button>
             ) : !isNoTrack && status.album ? (
-              <span className="text-[10px] leading-tight text-[color:var(--theme-fg-muted,#777777)] truncate" title={status.album}>
+              <span data-player-album className="text-[10px] leading-tight text-[color:var(--theme-fg-muted,#777777)] truncate" title={status.album}>
                 {status.album}
               </span>
             ) : null}
-            {!isNoTrack && isAvailable && sourceInfo && currentMediaKey(sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={sourceInfo.info} />}
+            {!isNoTrack && isAvailable && sourceInfo && currentMediaKey(sourceInfo.media) === currentMediaKey(status.current_media) && <span data-player-source-badges><SourceAudioBadges info={sourceInfo.info} /></span>}
           </div>
         </div>
-      </div>
 
-      {/* 3. Controlos de Reprodução & Barra de Progresso */}
-      <div data-player-area="playback" className="flex min-w-0 flex-col items-center justify-center gap-1">
+      <div data-player-area="transport" className="flex min-w-0 flex-col items-center justify-center gap-1">
         <span
           role="status"
           aria-live="polite"
@@ -278,7 +308,7 @@ export const PlayerBar: React.FC<Props> = ({
         <div data-player-controls className="grid w-full grid-cols-[minmax(0,1fr)_18px_40px_18px_minmax(0,1fr)] items-center gap-1.5">
           <button
             onClick={handlePrevious}
-            disabled={!isAvailable}
+            disabled={interactionDisabled || !isAvailable}
             className="col-start-2 justify-self-center text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={t("player.previous")}
           >
@@ -287,7 +317,7 @@ export const PlayerBar: React.FC<Props> = ({
 
           <button
             onClick={handlePlayToggle}
-            disabled={!isAvailable}
+            disabled={interactionDisabled || !isAvailable}
             className="col-start-3 w-10 h-10 rounded-full bg-[#E5A00D] hover:bg-[#F5B01D] text-black flex items-center justify-center shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={isAvailable && status.state === "play" ? t(isRadio ? "radio.stop" : "player.pause") : t("player.play")}
           >
@@ -300,14 +330,14 @@ export const PlayerBar: React.FC<Props> = ({
 
           <button
             onClick={handleNext}
-            disabled={!isAvailable}
+            disabled={interactionDisabled || !isAvailable}
             className="col-start-4 justify-self-center text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
             title={t("player.next")}
           >
             <SkipForward size={18} />
           </button>
           <div className="col-start-5 flex min-w-0 items-center justify-start">
-            <PlaybackOptionsControls options={status.options} disabled={!isAvailable || isRadio} />
+            <PlaybackOptionsControls options={status.options} disabled={interactionDisabled || !isAvailable || isRadio} />
           </div>
         </div>
 
@@ -318,12 +348,13 @@ export const PlayerBar: React.FC<Props> = ({
           </span>
 
           <input
+            data-player-seek
             type="range"
             min={0}
             max={isAvailable && status.duration > 0 ? status.duration : 100}
             step={0.5}
             value={isAvailable ? (isSeeking ? seekValue : status.elapsed) : 0}
-            disabled={!isAvailable || isRadio || status.duration <= 0}
+            disabled={interactionDisabled || !isAvailable || isRadio || status.duration <= 0}
             onMouseDown={() => setIsSeeking(true)}
             onChange={(e) => setSeekValue(parseFloat(e.target.value))}
             onMouseUp={(e) => handleSeekCommit(parseFloat((e.target as HTMLInputElement).value))}
@@ -336,67 +367,71 @@ export const PlayerBar: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* 4. Volume e ações */}
-      <div data-player-area="actions" className="flex min-w-0 items-center justify-end gap-2">
-        <div data-player-area="signal" className="min-w-0 max-w-[190px] flex-1">
+      <div data-player-area="state-volume" className="player-compact-state-volume">
+        <div data-player-area="signal" className="min-w-0">
           <SignalPath compact route={route} status={status} health={health} />
         </div>
-        <div className="flex min-w-0 max-w-[176px] shrink-0 flex-col items-end gap-1.5">
-          <div className="flex items-center gap-2.5">
+        <div data-player-volume-controls className={`player-compact-volume-controls min-w-0 items-center justify-center ${!deviceVolume && isVolumeAvailable ? "has-slider" : "external"}`}>
             <button
               onClick={handleToggleMute}
-              disabled={!isVolumeAvailable}
-              className="text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+              disabled={interactionDisabled || !isVolumeAvailable}
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[color:var(--theme-border-soft,#2D2D2D)] text-[color:var(--theme-fg-muted,#888888)] transition-colors hover:bg-[var(--theme-surface-raised,#202020)] hover:text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--theme-border-accent,#E5A00D)] cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
               aria-label={t(muteLabel(status))}
               title={isVolumeAvailable ? t(muteLabel(status)) : undefined}
             >
               {isVolumeAvailable && isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
             </button>
 
-            {!deviceVolume && <input
-              type="range"
-              min={0}
-              max={100}
-              value={isVolumeAvailable ? status.volume.value : 0}
-              disabled={!isVolumeAvailable}
-              onChange={(e) => handleVolumeChange(parseInt(e.target.value, 10))}
-              className="w-24 h-1 bg-[var(--theme-surface-hover,#262626)] rounded-lg appearance-none cursor-pointer accent-[var(--theme-control-accent,#E5A00D)] disabled:opacity-35 disabled:cursor-not-allowed"
-            />}
-          </div>
-
-          <span title={deviceVolume ? `${t("player.volumeOnDevice")} · ${t(muteLabel(status))}` : volumeStatusLabel} className="max-w-full whitespace-normal text-right text-[10px] leading-snug text-[color:var(--theme-fg-muted,#777777)] pr-0.5">
-            {deviceVolume ? <>{t("player.volumeOnDevice")}</> : volumeStatusLabel}
-          </span>
+            {deviceVolume ? <span data-player-volume-status title={compactVolumeTitle} className="inline-flex h-6 max-w-[110px] min-w-0 items-center truncate rounded-md border border-[color:var(--theme-border-soft,#2D2D2D)] bg-[var(--theme-surface-raised,#202020)] px-1.5 text-[10px] font-medium leading-none text-[color:var(--theme-fg-secondary,#B3B3B3)]">
+              {compactVolumeLabel}
+            </span> : isVolumeAvailable ? <>
+              <input
+                data-player-volume-slider
+                type="range"
+                min={0}
+                max={100}
+                value={displayedVolume}
+                disabled={interactionDisabled}
+                onChange={(e) => handleVolumeChange(parseInt(e.target.value, 10))}
+                aria-label={t("player.volume")}
+                title={compactVolumeTitle}
+                className="player-compact-volume-slider h-1 min-w-0 bg-[var(--theme-surface-hover,#262626)] rounded-lg appearance-none cursor-pointer accent-[var(--theme-control-accent,#E5A00D)] disabled:opacity-35 disabled:cursor-not-allowed"
+              />
+              <output data-player-volume-percent aria-live="off" className="player-compact-volume-percent" aria-label={t("player.volume")}>{Math.round(displayedVolume)}%</output>
+            </> : <span data-player-volume-status title={compactVolumeTitle} className="inline-flex h-6 max-w-[110px] min-w-0 items-center truncate rounded-md border border-[color:var(--theme-border-soft,#2D2D2D)] bg-[var(--theme-surface-raised,#202020)] px-1.5 text-[10px] font-medium leading-none text-[color:var(--theme-fg-secondary,#B3B3B3)]">
+              {compactVolumeLabel}
+            </span>}
         </div>
+      </div>
 
-        <div className="flex shrink-0 flex-col items-end gap-1" data-player-timer-actions>
-        <div className="flex items-center gap-2">
-          {onOpenNowPlaying && (
-            <button
-              type="button"
-              onClick={onOpenNowPlaying}
-              className="shrink-0 p-2.5 rounded-lg border border-[color:var(--theme-border-soft,#2D2D2D)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#202020)] transition-colors cursor-pointer"
-              title={t("player.openNowPlaying")}
-            >
-              <Maximize2 size={17} />
-            </button>
-          )}
-
+      <div data-player-area="actions" data-player-timer-actions className="player-compact-actions">
+        {onOpenNowPlaying && (
           <button
+            data-player-action="expand"
             type="button"
-            onClick={onToggleQueue}
-            className={`shrink-0 p-2.5 rounded-lg border transition-colors cursor-pointer ${
-              isQueueOpen
-                ? "bg-[var(--theme-surface-accent,#252014)] border-[color:var(--theme-border-accent,#E5A00D)] text-[color:var(--theme-fg-accent,#E5A00D)]"
-                : "border-[color:var(--theme-border-soft,#262626)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#202020)]"
-            }`}
-            title={t("player.queue")}
+            onClick={onOpenNowPlaying}
+            disabled={interactionDisabled}
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[color:var(--theme-border-soft,#2D2D2D)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#202020)] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+            title={t("player.openNowPlaying")}
           >
-            <ListMusic size={17} />
+            <Maximize2 size={17} />
           </button>
-        </div>
-        <SleepTimerControl compact />
-        </div>
+        )}
+        <button
+          data-player-action="queue"
+          type="button"
+          onClick={onToggleQueue}
+          disabled={interactionDisabled}
+          className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors cursor-pointer ${
+            isQueueOpen
+              ? "bg-[var(--theme-surface-accent,#252014)] border-[color:var(--theme-border-accent,#E5A00D)] text-[color:var(--theme-fg-accent,#E5A00D)]"
+              : "border-[color:var(--theme-border-soft,#262626)] text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] hover:bg-[var(--theme-surface-raised,#202020)]"
+          }`}
+          title={t("player.queue")}
+        >
+          <ListMusic size={17} />
+        </button>
+        <SleepTimerControl compact disabled={interactionDisabled} />
       </div>
     </footer>
   );

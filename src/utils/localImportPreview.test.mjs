@@ -225,10 +225,11 @@ const expression = browser.slice(start + branchStart.length, browser.indexOf(bra
 const layoutJs = ts.transpileModule(`function Layout(props) {
   const {filteredAlbums, visibleImportPreview, emptyCatalogState, scrollContainer, catalog} = props;
   const sortedAlbums = filteredAlbums, catalogActivity = "indexing", activeSourceId = null, albumSearch = "", albumSortMode = "album-asc";
-  const importArtworkCache = undefined;
+  const importArtworkCache = undefined, sqliteBacked = false;
   const albumGridRef = null, favoriteIds = new Set(), catalogConfirmed = false, isPlaybackAvailable = true, onlineArtworkEnabled = false, artworkBlocked = true, metadataMode = false;
   const handleToggleFavoriteLocal = () => {}, handleSelectAlbum = () => {}, handlePlayEntireAlbum = () => {};
   const localAlbumNavigationResetKey = () => "existing-navigation";
+  const isLocalAlbumFavorite = () => false;
   const t = key => key;
   const Disc3 = () => null;
   const LocalAlbumCard = ({album, readEnabled, isLibraryUpdating, isPlaybackAvailable}) => React.createElement("div", {"data-confirmed": album.id, "data-read-enabled": readEnabled, "data-artwork-blocked": isLibraryUpdating, "data-playback-enabled": isPlaybackAvailable}, album.title);

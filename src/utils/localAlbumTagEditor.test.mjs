@@ -7,10 +7,17 @@ import {
   clearMixedLocalAlbumTagField,
   createLocalAlbumTagEditorDraft,
   editLocalAlbumTagField,
+  localAlbumTagApplyErrorKind,
   localAlbumTagPreviewView,
   createLocalAlbumTagRequestGuard,
   resetLocalAlbumTagField,
 } from "./localAlbumTagEditor.ts";
+
+test("disabling Early Access is reported distinctly by the album editor", () => {
+  assert.equal(localAlbumTagApplyErrorKind({ code: "experimental_features_disabled" }), "access_disabled");
+  assert.equal(localAlbumTagApplyErrorKind({ code: "revision_conflict" }), "conflict");
+  assert.equal(localAlbumTagApplyErrorKind(new Error("unknown")), "unknown");
+});
 
 const tags = (revision) => ({
   title: null,
@@ -100,6 +107,7 @@ test("expected snapshot comes only from inspection membership and revisions", ()
   const draft = createLocalAlbumTagEditorDraft(inspection());
   assert.deepEqual(buildLocalAlbumTagBatchPreflightRequest(draft), {
     album_id: "album-id",
+    catalog_generation: null,
     tracks: [
       { uri: "Music/a.flac", kind: "physical", revision: "rev-a" },
       { uri: "Music/image.cue/track0001", kind: "cue_virtual", revision: null },
@@ -510,7 +518,7 @@ test("Apply requires explicit confirmation and sends the exact immutable preflig
     f.confirm(true); applyHandler(f)(); await flush(); f.render();
     assert.equal(f.calls.apply.length, 1); assert.equal(f.calls.apply[0], request);
     assert.ok(f.confirmations[0].startsWith("albumTagEditor.applyConfirm"));
-    assert.deepEqual(Object.keys(f.calls.apply[0]), ["album_id", "tracks", "update"]);
+    assert.deepEqual(Object.keys(f.calls.apply[0]), ["album_id", "catalog_generation", "tracks", "update"]);
     assert.match(content(f.tree), /albumTagEditor.outcomes.committed/);
     assert.match(content(f.tree), /albumTagEditor.refresh.accepted\{"jobId":17\}/);
     assert.equal(f.calls.finished.length, 1);
@@ -672,11 +680,12 @@ test("existing catalog callback waits for accepted jobs and otherwise requests o
   const browser = readFileSync(new URL("../components/LocalBrowserView.tsx", import.meta.url), "utf8");
   const body = browser.match(/onBatchFinished=\{\(result\) => \{([\s\S]*?)\n          \}\}/)?.[1]; assert.ok(body);
   const calls = [], catalog = { waitForMpd() { calls.push("wait"); }, requestRefresh() { calls.push("refresh"); } };
-  const notify = new Function("localAlbumCatalog", "result", body);
-  notify(catalog, batchResult()); assert.deepEqual(calls.splice(0), ["wait"]);
+  const notify = new Function("localAlbumCatalog", "result", "sqliteBacked", body);
+  notify(catalog, batchResult(), false); assert.deepEqual(calls.splice(0), ["wait"]);
   const failed = batchResult(); failed.tracks[0].mpd_refresh = { state: "failed", job_id: null, error_code: "mpd_unavailable" };
-  notify(catalog, failed); assert.deepEqual(calls.splice(0), ["refresh"]);
-  notify(catalog, null); assert.deepEqual(calls.splice(0), ["refresh"]);
+  notify(catalog, failed, false); assert.deepEqual(calls.splice(0), ["refresh"]);
+  notify(catalog, null, false); assert.deepEqual(calls.splice(0), ["refresh"]);
+  notify(catalog, { catalog_reconciled: false }, true); assert.deepEqual(calls.splice(0), []);
   assert.doesNotMatch(body, /rescan|restart|title|artist/);
   const navigation = browser.match(/if \(!playerTarget\) return;([\s\S]*?)\n  \}, \[playerTarget, playerAlbum, tagEditorAlbum, fileInfoTrack\]\)/)?.[1]; assert.ok(navigation);
   let back = 0;
@@ -695,6 +704,7 @@ test("write states and refresh errors are localized and accepted is explicitly p
     for (const state of ["not_needed", "accepted", "failed"]) assert.equal(typeof resource.refresh[state], "string");
     assert.match(resource.refresh.accepted, locale === "en" ? /pending.*completion is not confirmed/i : /pendente.*conclusão não confirmada/i);
     assert.match(resource.applyUnknown, locale === "en" ? /may have been changed/ : /podem ter sido alterados/);
+    assert.equal(typeof resource.accessDisabled, "string");
     for (const code of ["invalid_local_path", "outside_configured_roots", "file_not_found", "cue_virtual", "unsupported_format", "read_failed", "invalid_tag_update", "revision_conflict", "permission_denied", "transaction_failed", "metadata_preservation_failed", "durability_failed"])
       assert.equal(typeof resource.writeErrors[code], "string");
     for (const code of ["invalid_uri", "mpd_unavailable", "update_command_failed", "invalid_response", "refresh_task_failed"]) assert.equal(typeof resource.refreshErrors[code], "string");

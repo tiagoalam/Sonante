@@ -15,6 +15,13 @@ impl Gate {
         b.available=true;b.direct=cfg.direct_context().is_some();
         b.owned=session.zip(cfg.direct_context()).map(|(session,context)|Owned{pid,session,context});
     }
+    /// The development null-output supervisor owns no physical endpoint. Keep
+    /// its commands on the private MPD socket even if saved preferences name
+    /// an ALSA Direct route.
+    pub(crate) fn bind_null_output_test(&self) {
+        let mut b=self.binding.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        b.available=true;b.direct=false;b.owned=None;
+    }
     pub(crate) fn set_available(&self,value:bool){self.binding.write().unwrap_or_else(std::sync::PoisonError::into_inner).available=value;}
     pub(crate) fn clear(&self) {
         let mut b=self.binding.write().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -152,6 +159,18 @@ mod tests {
   let check=g.operations.manual_check_playback.clone();let owner=g.operations.begin().unwrap();let session=check.begin_preparing(&owner,&g.operations).unwrap();
   g.send_with("play",|pid,command|{assert_eq!(pid,None);m.io(command)}).unwrap();assert_eq!(m.commands,vec!["play"]);
   session.revoke();assert!(g.send_with("next",|_,cmd|m.io(cmd)).is_err());assert_eq!(m.commands,vec!["play"]);
+ }
+ #[test]
+ fn null_output_binding_ignores_saved_direct_route_without_touching_hardware() {
+  let(g,_,mut m,mut config)=fixture(true,false);
+  config.audio_output_type="alsa".into();config.alsa_device="hw:CARD=NeverOpen,DEV=0".into();
+  g.bind_null_output_test();
+  g.send_with("command_list_begin\nclear\nadd \"file:///tmp/tone.wav\"\nplay 0\ncommand_list_end",|pid,command|{
+   assert_eq!(pid,None);m.io(command)
+  }).unwrap();
+  assert_eq!(m.commands.len(),1);
+  assert!(m.commands[0].contains("file:///tmp/tone.wav"));
+  assert!(!m.commands[0].contains("NeverOpen"));
  }
  #[test]
  fn manual_check_revocation_during_direct_gain_readback_drains_without_sending_play() {

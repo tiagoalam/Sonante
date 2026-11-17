@@ -30,6 +30,21 @@ def archive_bytes(entries):
 
 
 class CompletePackagingTests(unittest.TestCase):
+    def test_system_mpd_is_removed_from_final_installer_metadata(self):
+        text = ('Package: sonante\nDepends: mpd (>= 0.22), alsa-utils,\n'
+                ' libasound2, mpd:any | fallback-mpd, libssl3\nRecommends: webp-loader\n')
+        result = c.remove_control_dependency(text, 'Depends', 'mpd')
+        self.assertEqual(result, 'Package: sonante\nDepends: alsa-utils, libasound2, fallback-mpd, libssl3\n'
+                         'Recommends: webp-loader\n')
+        self.assertIn('mpd', text)
+
+        info = ('pkgname = sonante\narch = x86_64\ndepend = mpd\ndepend = alsa-lib\n'
+                'depend = mpdclient\ndepend = glibc>=2.35\ndepend = webkit2gtk-4.1>=2.40\n'
+                'depend = pipewire\n')
+        arch = c.arch_info(info, '0.7.0', '1', '2.35', 10, 123)
+        self.assertNotIn('depend = mpd\n', arch)
+        self.assertIn('depend = mpdclient\n', arch)
+
     def test_public_baseline_and_descriptors_match_the_published_profiles(self):
         inputs = json.loads(Path('packaging/complete-packages.json').read_text())
         self.assertEqual(set(inputs['packages']), {'ubuntu', 'fedora', 'arch'})

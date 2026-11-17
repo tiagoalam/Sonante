@@ -8,6 +8,7 @@ import * as icons from 'lucide-react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import i18next from 'i18next';
 import {audioRestartExpected,localFoldersOnlyChanged} from './audioConfigChange.ts';
+import {releasesSharedBeforeDirect} from './deviceAvailability.ts';
 
 const app=readFileSync(new URL('../App.tsx',import.meta.url),'utf8');
 const settings=readFileSync(new URL('../components/SettingsModal.tsx',import.meta.url),'utf8');
@@ -22,8 +23,8 @@ for(const lng of ['pt-BR','en'])test(`real Save handler publishes a partial warn
  for(const warning of [undefined,'position_not_restored']){
   const events=[];let visible=null;
   const config={first_run:false,audio_output_type:'alsa',alsa_device:'hw:Fixture,0',local_folders:[],dop_enabled:false,audio_buffer_size_kb:4096,replay_gain:'off'};
-  const onSaved=compile(saved,{invalidateStatusRequests:()=>events.push('invalidate'),configService:{getConfig:async()=>config},setConfig:()=>events.push('confirmedConfig'),logError:()=>assert.fail('unexpected error'),refreshPlexFavorites:()=>events.push('favorites'),setConfigSaveNotice:n=>{visible=n;events.push('notice')}});
-  const save=compile(handler,{config,connectionBusy:false,saveInProgressRef:{current:false},originalConfigRef:{current:config},availability:{results:[]},availabilityQueryRef:{current:{invalidate(){}}},newPhysicalOutputChoice:()=>false,audioRestartExpected,localFoldersOnlyChanged,onStartLocalFoldersSave:()=>assert.fail('not a library save'),onSaveStarted:()=>true,setSaving:()=>{},configService:{saveConfig:async()=>{events.push('applied');return{status:'completed',...(warning?{warning}:{})}},getConfig:async()=>config},onSaveAccepted:()=>assert.fail('not accepted'),onSaved,onClose:()=>events.push('closed'),onSaveFinished:()=>events.push('finished'),formatConfigError:()=>'',logError:()=>assert.fail('unexpected error'),setConfig:()=>{},t,alert:()=>assert.fail('partial application is not an error alert')});
+  const onSaved=compile(saved,{sqliteMode:false,invalidateStatusRequests:()=>events.push('invalidate'),configService:{getConfig:async()=>config},setConfig:()=>events.push('confirmedConfig'),logError:()=>assert.fail('unexpected error'),refreshPlexFavorites:()=>events.push('favorites'),setConfigSaveNotice:n=>{visible=n;events.push('notice')}});
+  const save=compile(handler,{config,connectionBusy:false,pendingDirect:false,saveInProgressRef:{current:false},originalConfigRef:{current:config},availability:{results:[]},availabilityQueryRef:{current:{invalidate(){}}},newPhysicalOutputChoice:()=>false,releasesSharedBeforeDirect,audioRestartExpected,localFoldersOnlyChanged,onStartLocalFoldersSave:()=>assert.fail('not a library save'),onSaveStarted:()=>true,setSaving:()=>{},configService:{saveConfig:async()=>{events.push('applied');return{status:'completed',...(warning?{warning}:{})}},getConfig:async()=>config},onSaveAccepted:()=>assert.fail('not accepted'),onSaved,onClose:()=>events.push('closed'),onSaveFinished:()=>events.push('finished'),formatConfigError:()=>'',logError:()=>assert.fail('unexpected error'),setConfig:()=>{},t,alert:()=>assert.fail('partial application is not an error alert')});
   await save();
   assert.equal(visible?.positionNotRestored===true,!!warning);
   if(warning){assert.ok(events.indexOf('notice')>events.indexOf('applied'));const element=compile(notice,{configSavePhase:null,configSaveNotice:visible,localSavePhase:null,t,setConfigSaveNotice:()=>{},RefreshCw:icons.RefreshCw,CheckCircle2:icons.CheckCircle2,CircleAlert:icons.CircleAlert,X:icons.X});const html=renderToStaticMarkup(element);assert.match(html,/role="alert"/);assert.ok(html.includes(t('settings.outputPositionNotRestored')));assert.doesNotMatch(html,/settings\.|SECRET|ACK/);}

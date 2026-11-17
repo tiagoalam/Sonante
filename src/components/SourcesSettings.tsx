@@ -17,7 +17,7 @@ export function SourcesSettings({ config, onChange, initialSource, disabled, loc
    {MUSIC_SOURCES.map(source=><button type="button" key={source} aria-pressed={selected===source} onClick={()=>setSelected(source)} className={`rounded-lg border px-3 py-2 ${selected===source?'border-[#E5A00D] text-[color:var(--theme-fg-accent,#E5A00D)]':'border-[color:var(--theme-border-soft,#333)]'}`}>{t(`sources.names.${source}`)}</button>)}
   </div>
   <div ref={section} className="rounded-xl border border-[color:var(--theme-border-soft,#333)] p-4">
-   <h4 className="mb-3 text-sm font-bold">{t(`sources.names.${selected}`)}</h4>
+   <h4 className="settings-subsection-title mb-3">{t(`sources.names.${selected}`)}</h4>
    {!sourceEnabled(config,selected)?<p>{t('sources.disabledHint')}</p>:<>
     <div hidden={selected!=='local'}>{selected==='local'&&(localCommitted ? local : <p>{t('sources.saveBeforeFolders')}</p>)}</div>
     <div hidden={selected!=='plex'}>{selected==='plex'&&plex}</div>

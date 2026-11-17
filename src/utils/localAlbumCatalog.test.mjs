@@ -196,6 +196,71 @@ test("initial load failure is an error state rather than an empty library", asyn
   assert.equal(emptyLocalAlbumCatalogState(catalog.getSnapshot(), false), "error");
 });
 
+test("SQLite catalog loads with no configured MPD folders and ignores MPD busy state", async () => {
+  let calls = 0;
+  const catalog = new LocalAlbumCatalog(async () => {
+    calls += 1;
+    return [album("sqlite-source")];
+  });
+
+  catalog.setSqliteBacked();
+  catalog.setPresentationContext([]);
+  catalog.setUpdating(true, true);
+  await tick();
+  await tick();
+
+  assert.equal(calls, 1);
+  assert.equal(catalog.getSnapshot().loaded, true);
+  assert.deepEqual(catalog.getSnapshot().albums.map((item) => item.id), ["sqlite-source"]);
+  assert.equal(catalog.getSnapshot().error, null);
+  assert.equal(catalog.getSnapshot().mpdBusy, false);
+  assert.equal(emptyLocalAlbumCatalogState(catalog.getSnapshot(), false), null);
+});
+
+test("SQLite refresh after a completed add remains available with the legacy folder list empty", async () => {
+  const pending = [];
+  const catalog = new LocalAlbumCatalog(() => new Promise((resolve) => pending.push(resolve)));
+  catalog.setSqliteBacked();
+  catalog.setPresentationContext([]);
+
+  catalog.requestRefresh();
+  await tick();
+  assert.equal(pending.length, 1);
+  pending[0]([album("first")]);
+  await tick();
+  assert.equal(catalog.getSnapshot().loaded, true);
+
+  catalog.requestRefresh();
+  await tick();
+  assert.equal(pending.length, 2);
+  pending[1]([album("first"), album("new")]);
+  await tick();
+  assert.deepEqual(catalog.getSnapshot().albums.map((item) => item.id), ["first", "new"]);
+  assert.equal(localCatalogActivity(false, catalog.getSnapshot()), null);
+});
+
+test("SQLite read failure exits organizing state and remains retryable", async () => {
+  let calls = 0;
+  const catalog = new LocalAlbumCatalog(async () => {
+    calls += 1;
+    if (calls === 1) throw new Error("synthetic scanner failure");
+    return [album("recovered")];
+  });
+  catalog.setSqliteBacked();
+  catalog.requestRefresh();
+  await tick();
+  await tick();
+  assert.equal(catalog.getSnapshot().loading, false);
+  assert.equal(catalog.getSnapshot().error, "synthetic scanner failure");
+  assert.equal(emptyLocalAlbumCatalogState(catalog.getSnapshot(), false), "error");
+
+  catalog.requestRefresh();
+  await tick();
+  assert.equal(catalog.getSnapshot().loading, false);
+  assert.equal(catalog.getSnapshot().error, null);
+  assert.deepEqual(catalog.getSnapshot().albums.map((item) => item.id), ["recovered"]);
+});
+
 test("successful rescan notifies once and failed rescan never notifies", async () => {
   let notifications = 0;
   await refreshCatalogAfterSuccessfulRescan(

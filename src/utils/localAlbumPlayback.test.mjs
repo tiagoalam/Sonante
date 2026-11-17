@@ -20,6 +20,18 @@ test("Local album playback uses the exact source album ID, backend disc/CUE orde
   assert.ok(plays[0][0].every(t=>t.thumb==="fixture-cover"));assert.equal(plays[0][0][0].duration,12);
 });
 
+test("SQLite album playback passes opaque locators to the native resolver instead of raw URI strings", async () => {
+  const sqliteGroups = [{ disc: { number: 1 }, tracks: [
+    { path: "sqlite-track://9/c291cmNlL2FsYnVtL3RyYWNrLndhdg", name: "Track", duration: 3 },
+  ] }];
+  let submitted;
+  const p = createLocalAlbumPlayback(async () => sqliteGroups, async () => "fixture-cover", async tracks => { submitted = tracks; });
+  await p.play(album, () => true);
+  assert.equal(submitted.length, 1);
+  assert.deepEqual(submitted[0].media_locator, { kind: "local", uri: sqliteGroups[0].tracks[0].path });
+  assert.equal(submitted[0].uri, undefined);
+});
+
 test("a newer Local album intent supersedes a slow old preparation",async()=>{
   const first=deferred(),second=deferred(),played=[];let reads=0;
   const p=createLocalAlbumPlayback(()=>++reads===1?first.promise:second.promise,async()=>null,async tracks=>played.push(tracks[0].title));

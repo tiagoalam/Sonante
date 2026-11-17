@@ -25,7 +25,9 @@ export function createLocalAlbumPlayback(
         // Same ordering, URI and metadata fallbacks as LocalBrowser's album action.
         await play(files.map(file => ({ title: file.title || file.name,
           artist: file.artist || album.artist, album: file.album || album.title,
-          thumb, uri: file.path, duration: file.duration })), 0, intent);
+          thumb, ...(file.path.startsWith("sqlite-track://") || file.path.startsWith("sqlite-cue://")
+            ? { media_locator: { kind: "local" as const, uri: file.path } }
+            : { uri: file.path }), duration: file.duration })), 0, intent);
       } catch (error) { if (valid() && !isPlaybackSuperseded(error) && await intent.confirmCurrent()) throw error; }
     },
   };

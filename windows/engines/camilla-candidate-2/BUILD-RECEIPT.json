@@ -1,0 +1,74 @@
+{
+  "entries": [
+    {
+      "path": "src/audiodevice.rs",
+      "before": "0028aff443b376170775eaa4f0fe6f56a97512f6887dd78406f713df3355c116",
+      "after": "31cd0cca0dd0bbe75b4b1999deefe4c27fb570c69a91f557d625a8dcf37fde1a"
+    },
+    {
+      "path": "src/config/mod.rs",
+      "before": "95197b91438c6db2a88a1f5ef882d6a38fc547d659e0ea96d37f90f324ee0bad",
+      "after": "d6ea213d2579d7fcab22d1e807a721969eb90df39607b3a2d3ada88c4e4cc7f7"
+    },
+    {
+      "path": "src/file_backend/device.rs",
+      "before": "f91d587998875baa082ac763f42f596f9d9c8b626b305460bf605e95f95dab4e",
+      "after": "5866ff2865a2c88fef25fce7d51e0071194c590a9fdb1fa30ade11aeeb278328"
+    },
+    {
+      "path": "src/file_backend/mod.rs",
+      "before": "8b219ecb826b70d019f04e073efdea350d514d301237d3e45f2c7031701eed67",
+      "after": "9dd3585cbcc93ee9f6e8b5fed4165c7bdefa6a18d7378ff7f151dd423c42b45b"
+    },
+    {
+      "path": "src/file_backend/pcm_core.rs",
+      "before": null,
+      "after": "590a468bea9457c2ad239b936c35edbab1e6a499e663e2b01146aef1eeacc97b"
+    },
+    {
+      "path": "src/file_backend/private_pcm.rs",
+      "before": null,
+      "after": "82928548670bc4b55b5acb98318f57954b85d905b661b81ca429b627d313a045"
+    },
+    {
+      "path": "src/wasapi_backend/device.rs",
+      "before": "dc38ba981e6d3f6f9765fc075cc79b93773b74acbbdae98e25356f2ba58b35ad",
+      "after": "0938eb1702ea3add6f1ab4c6d4ac15523dc173ce66300bb17ce52e8bc1cd03d1"
+    },
+    {
+      "path": "src/wasapi_backend/mod.rs",
+      "before": "cc624bc84706102c5be24d27c32e9ceb8422df485a446fecafb9ad2f52adbf06",
+      "after": "c5b354963730068c433eb3ed0ebe20f32b960cf17b9e628882ec95521ff4abf6"
+    },
+    {
+      "path": "src/wasapi_backend/playback_core.rs",
+      "before": null,
+      "after": "4cadeb07d5f9d87a939ca523a20a6e226022ccd78d8c089dbabbe3cce324690d"
+    }
+  ],
+  "unchanged_files": 140,
+  "patch_sha256": "698f93495e9ff58a50ea9fd4dd745154fe69089bc3972e651923c5c24476d33d",
+  "exact_reapply": true,
+  "vendor_packages": 358,
+  "vendor_checksum_files": 21561,
+  "vendor_matches_audited_base": true,
+  "cargo_lock_sha256": "f837935533b60e348a19c4dc2afe7365d8f438794cbb9d745b3a0315339c7029",
+  "capture_tail_byte_exact": true,
+  "dsp_manifest_licenses_unchanged": true,
+  "sha256": "9c0d7f242cbc33836c9bdff95e8e4dba0d07d7e1d20516a82fa4251a26d20093",
+  "bytes": 7675392,
+  "imports": [
+    "KERNEL32.dll",
+    "api-ms-win-core-synch-l1-2-0.dll",
+    "ws2_32.dll",
+    "bcryptprimitives.dll",
+    "ole32.dll",
+    "propsys.dll",
+    "combase.dll",
+    "ntdll.dll",
+    "oleaut32.dll"
+  ],
+  "native_executed": false,
+  "source_patch_matches_build_tree": true,
+  "imports_need_review": []
+}

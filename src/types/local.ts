@@ -17,6 +17,8 @@ export interface LocalAlbum {
   id: string;
   title: string;
   artist: string;
+  /** All artists represented by the catalog entry; MPD albums may omit this. */
+  artist_names?: string[];
   year?: string;
   added_at?: string | null;
   genres?: string[];
@@ -26,6 +28,8 @@ export interface LocalAlbum {
   track_count: number;
   discs: LocalAlbumDisc[];
   tag_presence?: LocalAlbumTagPresence | null;
+  /** Why SQLite grouped this release according to the legacy Local rules. */
+  grouping_notes?: string[];
 }
 
 export interface LocalAlbumDisc {

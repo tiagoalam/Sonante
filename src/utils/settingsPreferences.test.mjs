@@ -10,7 +10,8 @@ import * as jsx from "react/jsx-runtime";
 import * as icons from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { audioRestartExpected, localFoldersOnlyChanged } from "./audioConfigChange.ts";
-import { createDeviceAvailabilityQuery, newPhysicalOutputChoice, shouldCheckContextualDevice } from "./deviceAvailability.ts";
+import { createDeviceAvailabilityQuery, newPhysicalOutputChoice, releasesSharedBeforeDirect, shouldCheckContextualDevice } from "./deviceAvailability.ts";
+import * as audioRoute from "./audioRoute.ts";
 
 const source = name => readFileSync(new URL(`../components/${name}.tsx`, import.meta.url), "utf8");
 const t = key => key;
@@ -42,7 +43,10 @@ function component(name, dependencies = {}) {
     "../utils/frontendDiagnostics": frontendDiagnostics,
     "lucide-react": icons,
     "../utils/musicSources": musicSources,
+    "../utils/audioRoute.ts": audioRoute,
+    "./settings.css": {},
     "./SourcesSettings": { SourcesSettings: function SourcesSettings() {} },
+    "./SqliteSourcesSettings": { SqliteSourcesSettings: function SqliteSourcesSettings() {} },
     "react-i18next": { useTranslation: () => ({ t, i18n: { language: "en", changeLanguage() {} } }) },
   };
   const js = ts.transpileModule(source(name), { compilerOptions: {
@@ -64,13 +68,17 @@ function component(name, dependencies = {}) {
 function nodes(tree) {
   if (!React.isValidElement(tree)) return Array.isArray(tree) ? tree.flatMap(nodes) : [];
   const children = tree.type?.name === "SettingsPages"
-    ? [tree.props.sources, tree.props.general, tree.props.audio] : tree.type?.name === "SourcesSettings" ? [tree.props.local, tree.props.plex] : tree.props.children;
-  return [tree, ...nodes(children)];
+    ? [tree.props.interfacePage, tree.props.appearance, tree.props.audio, tree.props.sources, tree.props.network, tree.props.experimental]
+    : tree.type?.name === "SourcesSettings" ? [tree.props.local, tree.props.plex] : tree.props.children;
+  const rendered = ["AudioModeSelector", "AudioRouteStatus", "EqualizerToggle"].includes(tree.type?.name) ? tree.type(tree.props) : children;
+  return [tree, ...nodes(rendered)];
 }
 const find = (tree, predicate) => { const result = nodes(tree).find(predicate); assert.ok(result, "Expected control exists"); return result; };
 const text = tree => React.isValidElement(tree) ? text(tree.props.children) : Array.isArray(tree) ? tree.map(text).join("") : typeof tree === "string" || typeof tree === "number" ? String(tree) : "";
+const renderedText = tree => nodes(tree).map(text).join("");
 const button = (tree, key) => find(tree, node => node.type === "button" && text(node) === key);
 const select = (tree, suffix) => find(tree, node => node.type === "select" && node.props.id?.endsWith(suffix));
+const pageKey = id => `settings.pages.${["local", "plex", "navidrome"].includes(id) ? "sources" : id}`;
 const pageProps = tree => find(tree, node => node.type?.name === "SettingsPages").props;
 const base = {
   first_run: false, audio_output_type: "alsa", alsa_device: "hw:Fixture,0", local_folders: ["/fixture"],
@@ -78,18 +86,28 @@ const base = {
   local_mount_path: "", remote_share_path: "", dop_enabled: false, audio_buffer_size_kb: 8192, replay_gain: "off",
 };
 async function modal(overrides = {}) {
-  const calls = { config: 0, devices: 0, save: [], started: [], saved: [], accepted: [], local: [], closed: 0, finished: 0, availability: 0, scans: 0, pins: 0 };
+  const calls = { config: 0, devices: 0, save: [], started: [], saved: [], accepted: [], local: [], closed: 0, finished: 0, availability: 0, scans: 0, pins: 0, servers: 0 };
   const query = { resolve: null, requests: [] };
   const configService = {
     async getConfig() { calls.config++; return structuredClone(overrides.config ?? base); },
     async getAudioDevices() { calls.devices++; return overrides.devices ?? [{ id: base.alsa_device, name: "Fixture DAC" }]; },
+    async getNullOutputTestMode() { return overrides.nullOutputTestMode ?? false; },
     async checkDirectDeviceAvailability(id) { calls.availability++; return new Promise((resolve, reject) => { query.resolve = resolve; query.requests.push({ id, resolve, reject }); }); },
     async saveConfig(config) { calls.save.push(config); return overrides.save ? overrides.save(config) : overrides.response ?? { status: "completed" }; },
   };
   const audioService = { async pickDirectory() { return "/new-fixture"; }, async checkLocalLibrary() { calls.scans++; return false; }, async rescanLibrary() { calls.scans++; } };
-  const plexService = { async getServers() { return []; }, async createPin() { calls.pins++; return { id: 7, code: "fixture", auth_url: "https://example.invalid" }; }, async openExternalUrl() {} };
+  const plexService = { async getServers() { calls.servers++; return []; }, async createPin() { calls.pins++; return { id: 7, code: "fixture", auth_url: "https://example.invalid" }; }, async openExternalUrl() {} };
   const h = component("SettingsModal", {
     "./SettingsPages": { SettingsPages: function SettingsPages() {} },
+    "./AudioModeSelector": { AudioModeSelector: function AudioModeSelector({ selected, onSelect, disabled = false, pendingSave = false }) {
+      return React.createElement("div", { role: "group", "data-audio-mode-selector": true }, [
+        ["shared", selected !== "direct"], ["direct", selected === "direct"],
+      ].map(([mode, active]) => React.createElement("button", { key: mode, type: "button", "data-audio-mode": mode,
+        "aria-pressed": active, "data-pending-save": active && pendingSave ? "true" : undefined,
+        disabled, onClick: () => onSelect(mode) }, `audioExperience.mode.${mode}`)));
+    } },
+    "./AudioRouteStatus": { AudioRouteStatus: function AudioRouteStatus({ pendingSave }) { return pendingSave ? React.createElement("p", { "data-audio-route-status": true }, "audioExperience.status.pendingSave") : null; } },
+    "./EqualizerToggle": { EqualizerToggle: function EqualizerToggle(props) { return React.createElement("div", { "data-equalizer-toggle": true, "data-shared": props.shared }, React.createElement("input", { type: "checkbox", role: "switch", disabled: props.disabled })); } },
     "./ScrobblingSetting": { ScrobblingSetting: () => null },
     "./AppearanceSetting": { AppearanceSetting: function AppearanceSetting() {} },
     "../utils/usageMode": usageMode,
@@ -99,9 +117,10 @@ async function modal(overrides = {}) {
     "./RemoteControlSetting": { RemoteControlSetting: function RemoteControlSetting() {} },
     "./LocalIndexCoverage": { LocalIndexCoverageStatus: function LocalIndexCoverageStatus() {} },
     "./AudioSignalDiagram": { AudioSignalDiagram: function AudioSignalDiagram() {} },
+    "../utils/platform": { isWindowsPreview: () => Boolean(overrides.windowsPreview) },
     "../services/config": { configService }, "../services/audio": { audioService }, "../services/plex": { plexService },
     "../utils/audioConfigChange": { audioRestartExpected, localFoldersOnlyChanged },
-    "../utils/deviceAvailability": { createDeviceAvailabilityQuery, newPhysicalOutputChoice, shouldCheckContextualDevice },
+    "../utils/deviceAvailability": { createDeviceAvailabilityQuery, newPhysicalOutputChoice, releasesSharedBeforeDirect, shouldCheckContextualDevice },
     "../utils/localAlbumCatalog": {
       async refreshCatalogAfterSuccessfulCheck(read, notify) { const changed = await read(); if (changed) notify(); return changed; },
       async refreshCatalogAfterSuccessfulRescan(read, notify) { await read(); notify(); },
@@ -128,36 +147,84 @@ globalThis.document = { activeElement: null };
 globalThis.HTMLElement = class {};
 test.after(() => { globalThis.document = previousDocument; globalThis.HTMLElement = previousHTMLElement; });
 
-test("three mounted pages share one scroll panel and support keyboard navigation", () => {
+test("six settings categories stay mounted and support keyboard navigation", () => {
   const h = component("SettingsPages");
-  const contents = Object.fromEntries(["sources", "general", "audio"].map(id => [id, React.createElement("input", { defaultValue: id })]));
-  let tree = h.render(contents);
+  const pageIds = ["interface", "appearance", "audio", "sources", "network", "experimental"];
+  const contentProps = Object.fromEntries(pageIds.map(id => [id === "interface" ? "interfacePage" : id, React.createElement("input", { defaultValue: id })]));
+  let tree = h.render(contentProps);
   const panels = () => nodes(tree).filter(node => node.props.role === "tabpanel");
   const tabs = () => nodes(tree).filter(node => node.props.role === "tab");
-  assert.equal(panels().length, 3);
-  assert.deepEqual(panels().map(node => node.props.hidden), [false, true, true]);
+  assert.equal(panels().length, 6);
+  assert.deepEqual(tabs().map(node => node.props.id.match(/tab-(.+)$/)?.[1]), pageIds);
+  assert.deepEqual(panels().map(node => node.props.hidden), pageIds.map((_, index) => index !== 0));
   const retained = panels().map(node => node.props.children[1]);
-  for (let i = 0; i < 3; i++) {
-    tabs()[i].props.onClick(); tree = h.render(contents);
-    assert.deepEqual(panels().map(node => node.props.hidden), [0, 1, 2].map(n => n !== i));
+  for (let i = 0; i < pageIds.length; i++) {
+    tabs()[i].props.onClick(); tree = h.render(contentProps);
+    assert.deepEqual(panels().map(node => node.props.hidden), pageIds.map((_, index) => index !== i));
     assert.deepEqual(panels().map(node => node.props.children[1]), retained);
     assert.equal(tabs()[i].props.tabIndex, 0);
     assert.equal(panels()[i].props["aria-labelledby"], tabs()[i].props.id);
   }
   let focused = false, prevented = false;
   tabs()[0].props.ref({ focus() { focused = true; } });
-  tabs()[2].props.onKeyDown({ key: "ArrowDown", preventDefault() { prevented = true; } });
-  tree = h.render(contents);
+  tabs()[5].props.onKeyDown({ key: "ArrowDown", preventDefault() { prevented = true; } });
+  tree = h.render(contentProps);
   assert.equal(panels()[0].props.hidden, false);
   assert.equal(focused && prevented, true);
-  tabs()[0].props.onKeyDown({ key: "End", preventDefault() {} }); tree = h.render(contents);
-  assert.equal(panels()[2].props.hidden, false);
-  tabs()[2].props.onKeyDown({ key: "Home", preventDefault() {} }); tree = h.render(contents);
+  tabs()[0].props.onKeyDown({ key: "End", preventDefault() {} }); tree = h.render(contentProps);
+  assert.equal(panels()[5].props.hidden, false);
+  tabs()[5].props.onKeyDown({ key: "Home", preventDefault() {} }); tree = h.render(contentProps);
   assert.equal(panels()[0].props.hidden, false);
   const scroll = find(tree, node => node.props.className?.includes("overflow-y-auto"));
   scroll.props.ref.current = { scrollTop: 200 };
   tabs()[2].props.onClick(); assert.equal(scroll.props.ref.current.scrollTop, 0);
   assert.equal(nodes(tree).filter(node => node.props.className?.includes("overflow-y-auto")).length, 1);
+  h.dispose();
+});
+
+test("SQLite Settings opens on audio and keeps isolated pages inaccessible", () => {
+  const h = component("SettingsPages");
+  const tree = h.render({
+    initialPage: "sources",
+    interfacePage: React.createElement("input", { defaultValue: "interface" }),
+    appearance: React.createElement("input", { defaultValue: "appearance" }),
+    audio: React.createElement("input", { defaultValue: "audio" }),
+    sources: React.createElement("input", { defaultValue: "sources" }),
+    network: React.createElement("input", { defaultValue: "network" }),
+    experimental: React.createElement("input", { defaultValue: "experimental" }),
+    disabledPages: ["interface", "appearance", "sources", "network", "experimental"],
+  });
+  const tabs = nodes(tree).filter(node => node.props.role === "tab");
+  const panels = nodes(tree).filter(node => node.props.role === "tabpanel");
+  assert.deepEqual(tabs.map(tab => tab.props.disabled === true), [true, true, false, true, true, true]);
+  assert.deepEqual(panels.map(panel => panel.props.hidden), [true, true, false, true, true, true]);
+  assert.equal(panels[3].props.children[1].props.inert, true);
+  tabs[0].props.onClick();
+  assert.deepEqual(nodes(h.render({
+    initialPage: "sources", interfacePage: null, appearance: null, audio: null, sources: null, network: null, experimental: null,
+    disabledPages: ["interface", "appearance", "sources", "network", "experimental"],
+  })).filter(node => node.props.role === "tabpanel").map(panel => panel.props.hidden), [true, true, false, true, true, true]);
+  h.dispose();
+});
+
+test("changing to Simple while Experimental is selected moves focusable navigation to an enabled page", () => {
+  const h = component("SettingsPages");
+  const props = {
+    interfacePage: null, appearance: null, audio: null, sources: null, network: null, experimental: null,
+    disabledPages: [],
+  };
+  let tree = h.render(props); h.effects();
+  const tabs = () => nodes(tree).filter(node => node.props.role === "tab");
+  const panels = () => nodes(tree).filter(node => node.props.role === "tabpanel");
+  tabs()[5].props.onClick(); tree = h.render(props); h.effects();
+  assert.equal(tabs()[5].props["aria-selected"], true);
+
+  tree = h.render({ ...props, disabledPages: ["experimental"] });
+  assert.equal(tabs()[0].props["aria-selected"], true);
+  assert.equal(tabs()[5].props.disabled, true);
+  assert.equal(panels()[0].props.hidden, false);
+  h.effects(); tree = h.render({ ...props, disabledPages: [] });
+  assert.equal(tabs()[0].props["aria-selected"], true, "reenabling Full mode does not unexpectedly reopen Experimental");
   h.dispose();
 });
 
@@ -171,9 +238,9 @@ test("audio draft survives page changes and saving retains existing controls and
   select(tree, "-buffer").props.onChange({ target: { value: "32768" } }); tree = f.render();
   select(tree, "-replaygain").props.onChange({ target: { value: "album" } }); tree = f.render();
   find(tree, node => node.type === "input" && node.props["aria-label"] === "settings.dop").props.onChange({ target: { checked: true } }); tree = f.render();
-  for (const id of ["plex", "local", "general", "audio"]) {
+  for (const id of ["plex", "local", "interface", "network", "audio"]) {
     const p = pages.render(pageProps(tree));
-    button(p, id === "local" || id === "plex" ? "sources.title" : `settings.pages.${id}`).props.onClick();
+    button(p, pageKey(id)).props.onClick();
     tree = f.render();
   }
   assert.equal(select(tree, "-buffer").props.value, 32768);
@@ -188,20 +255,56 @@ test("audio draft survives page changes and saving retains existing controls and
   pages.dispose(); f.h.dispose();
 });
 
-test("mode controls update the planned diagram immediately and keep DoP semantics", async () => {
+test("the two output cards stay a saved draft until the existing configuration command runs", async () => {
   const f = await modal();
   let tree = f.tree();
-  const diagram = () => find(tree, node => node.type?.name === "AudioSignalDiagram").props;
-  assert.equal(diagram().mode, "direct");
-  find(tree, node => node.type === "button" && text(node).includes("settings.pipewireMode")).props.onClick(); tree = f.render();
-  assert.equal(diagram().mode, "shared");
+  assert.deepEqual(nodes(tree).filter(node => node.props["data-audio-mode"]).map(node => node.props["data-audio-mode"]), ["shared", "direct"]);
+  assert.equal(modeButton(tree, "direct").props["aria-pressed"], true);
+  modeButton(tree, "shared").props.onClick(); tree = f.render();
+  assert.equal(modeButton(tree, "shared").props["aria-pressed"], true);
+  assert.equal(modeButton(tree, "shared").props["data-pending-save"], "true");
+  assert.ok(find(tree, node => node.props["data-audio-route-status"]));
+  assert.equal(nodes(tree).some(node => node.type?.name === "AudioSignalDiagram"), false);
   assert.equal(find(tree, node => node.type === "input" && node.props["aria-label"] === "settings.dop").props.disabled, true);
-  find(tree, node => node.type === "button" && text(node).includes("settings.alsaMode")).props.onClick(); tree = f.render();
-  select(tree, "-device").props.onChange({ target: { value: "default" } }); tree = f.render();
-  assert.equal(diagram().mode, "shared", "matches supervisor's default endpoint classification");
+  modeButton(tree, "direct").props.onClick(); tree = f.render();
   select(tree, "-device").props.onChange({ target: { value: "hw:Another,0" } }); tree = f.render();
-  assert.equal(diagram().mode, "direct"); assert.equal(diagram().device, "hw:Another,0");
+  assert.equal(select(tree, "-device").props.value, "hw:Another,0");
   assert.equal(f.calls.availability, 0, "no automatic device probes on page/mode changes");
+  f.h.dispose();
+});
+
+test("legacy ALSA default remains Shared until the user chooses a physical Direct endpoint", async () => {
+  const f = await modal({ config: { ...base, audio_output_type: "alsa", alsa_device: "default" }, devices: availableDevices });
+  const modes = () => nodes(f.tree()).filter(node => node.props["data-audio-mode"]);
+  assert.deepEqual(modes().map(node => node.props["data-audio-mode"]), ["shared", "direct"]);
+  assert.equal(modeButton(f.tree(), "shared").props["aria-pressed"], true);
+  assert.equal(nodes(f.tree()).some(node => node.type === "select" && node.props.id?.endsWith("-device")), false);
+  assert.match(renderedText(f.tree()), /audioExperience\.systemDefault/);
+
+  modeButton(f.tree(), "direct").props.onClick(); f.render();
+  assert.equal(modeButton(f.tree(), "direct").props["aria-pressed"], true);
+  assert.equal(button(f.tree(), "settings.save").props.disabled, true);
+  const endpoint = select(f.tree(), "-device");
+  assert.equal(endpoint.props.value, "default");
+  assert.equal(nodes(endpoint).find(node => node.type === "option" && node.props.value === "default").props.disabled, true);
+  choose(f, availableDevices[0].id);
+  assert.equal(select(f.tree(), "-device").props.value, availableDevices[0].id);
+  if (f.query.requests.length) {
+    f.query.requests.at(-1).resolve([{ id: availableDevices[0].id, state: "available" }]);
+    await flush(); f.render();
+  }
+  assert.equal(button(f.tree(), "settings.save").props.disabled, false);
+  f.h.dispose();
+});
+
+test("Windows Audio keeps the two output cards and Direct endpoint without Linux controls", async () => {
+  const f = await modal({ windowsPreview: true, devices: availableDevices });
+  const selectorModes = nodes(f.tree()).filter(node => node.props["data-audio-mode"]).map(node => node.props["data-audio-mode"]);
+  assert.deepEqual(selectorModes, ["shared", "direct"]);
+  assert.equal(nodes(f.tree()).some(node => node.type?.name === "AudioSignalDiagram"), false);
+  assert.equal(nodes(f.tree()).some(node => node.props["data-equalizer-toggle"]), true);
+  assert.ok(nodes(f.tree()).some(node => node.type === "input" && node.props["aria-label"] === "settings.dop"));
+  assert.ok(select(f.tree(), "-device"));
   f.h.dispose();
 });
 
@@ -235,7 +338,7 @@ test("explicit availability request survives page changes without another reques
   const request = button(f.tree(), "settings.deviceAvailability.check").props.onClick();
   f.render();
   for (const id of ["local", "plex", "audio"]) {
-    button(pages.render(pageProps(f.tree())), id === "local" || id === "plex" ? "sources.title" : `settings.pages.${id}`).props.onClick(); f.render();
+    button(pages.render(pageProps(f.tree())), pageKey(id)).props.onClick(); f.render();
   }
   assert.equal(f.calls.availability, 1);
   f.query.resolve([{ id: base.alsa_device, state: "available" }]); await request; await flush();
@@ -272,8 +375,8 @@ test("Plex PIN polling stays mounted across page changes and is cleaned up once"
     f = await modal(); pages = component("SettingsPages");
     await button(f.tree(), "settings.connectPlex").props.onClick(); f.render();
     assert.equal(started.length, 1);
-    for (const id of ["general", "audio", "local", "plex", "audio", "plex"]) {
-      button(pages.render(pageProps(f.tree())), id === "local" || id === "plex" ? "sources.title" : `settings.pages.${id}`).props.onClick(); f.render();
+    for (const id of ["interface", "audio", "local", "plex", "audio", "plex"]) {
+      button(pages.render(pageProps(f.tree())), pageKey(id)).props.onClick(); f.render();
     }
     assert.equal(f.calls.pins, 1); assert.equal(started.length, 1); assert.equal(cleared.length, 0);
     assert.ok(nodes(f.tree()).some(node => text(node).includes("settings.waitingBrowser")));
@@ -367,10 +470,10 @@ test("rapid physical selection ignores stale results and requests only the lates
 test("Shared selection and closing discard pending checks; selecting the current device preserves ownership status", async () => {
   const f = await modal({ devices: availableDevices });
   choose(f, "hw:Other,0");
-  find(f.tree(), node => node.type === "button" && text(node).includes("settings.pipewireMode")).props.onClick(); f.render();
+  modeButton(f.tree(), "shared").props.onClick(); f.render();
   f.query.requests[0].resolve([{ id: "hw:Other,0", state: "busy" }]); await flush(); f.render();
   assert.ok(!nodes(f.tree()).some(node => node.props.role === "alert" && text(node).includes("settings.deviceAvailability.busyAction")));
-  find(f.tree(), node => node.type === "button" && text(node).includes("settings.alsaMode")).props.onClick(); f.render();
+  modeButton(f.tree(), "direct").props.onClick(); f.render();
   assert.equal(f.query.requests[1].id, "hw:Other,0");
   choose(f, base.alsa_device);
   f.query.requests[1].resolve([{ id: "hw:Other,0", state: "busy" }]); await flush(); f.render();
@@ -397,6 +500,23 @@ test("busy selection retries on Save and refuses only a freshly confirmed confli
   f.query.requests[2].resolve([{ id: "hw:Other,0", state: "available" }]); await retry; await flush(); f.render();
   assert.equal(f.calls.save.length, 1); assert.equal(f.calls.save[0].alsa_device, "hw:Other,0");
   assert.deepEqual(f.calls.started, [true]); f.h.dispose();
+});
+
+test("Shared to Direct does not reject the current shared owner before Sonante releases its route", async () => {
+  const sharedConfig = { ...base, audio_output_type: "pipewire" };
+  const f = await modal({ config: sharedConfig, devices: availableDevices });
+  modeButton(f.tree(), "direct").props.onClick();
+  f.render();
+  assert.equal(f.query.requests.length, 1, "the UI may show a momentary availability observation");
+  f.query.requests[0].resolve([{ id: base.alsa_device, state: "busy" }]); await flush(); f.render();
+  assert.ok(nodes(f.tree()).some(node => node.props.role === "alert" && text(node).includes("settings.deviceAvailability.busyAfterRelease")));
+  const save = button(f.tree(), "settings.save").props.onClick();
+  await save; await flush(); f.render();
+  assert.equal(f.calls.availability, 1, "Save does not repeat the pre-release open probe");
+  assert.equal(f.calls.save.length, 1, "the backend owns the serialized release-then-acquire attempt");
+  assert.equal(f.calls.save[0].audio_output_type, "alsa");
+  assert.deepEqual(f.calls.started, [true]);
+  f.h.dispose();
 });
 
 test("stale busy recheck during Save cannot authorize an outdated device choice", async () => {
@@ -454,7 +574,7 @@ test("long processing/buffer explanations are collapsed while controls and urgen
   for (const details of nodes(audio).filter(node => node.type === "details")) assert.equal(details.props.open, undefined);
   assert.ok(nodes(audio).filter(node => node.type === "details").some(node => text(node).includes("settings.processingNotice")));
   assert.ok(nodes(audio).filter(node => node.type === "details").some(node => text(node).includes("settings.bufferNotice")));
-  find(f.tree(), node => node.type === "button" && text(node).includes("settings.pipewireMode")).props.onClick(); f.render();
+  modeButton(f.tree(), "shared").props.onClick(); f.render();
   assert.ok(text(pageProps(f.tree()).audio).includes("settings.dopOnlyDirect"));
   assert.equal(find(f.tree(), node => node.type === "input" && node.props["aria-label"] === "settings.dop").props.disabled, true);
   assert.ok(nodes(f.tree()).some(node => node.props.role === "status" && text(node).includes("settings.audioChangeNotice")));
@@ -491,16 +611,16 @@ test("Sonante names the first interactive diagram stage in both languages", () =
   }
 });
 
-const modeButton = (tree, mode) => find(tree, node => node.type === "button" && text(node).includes(`settings.${mode}Mode`));
+const modeButton = (tree, mode) => find(tree, node => node.type === "button" && node.props["data-audio-mode"] === ({ pipewire: "shared", alsa: "direct" }[mode] ?? mode));
 
 test("only an explicit Shared to Direct transition checks the previously selected enumerated DAC once", async () => {
   const f = await modal({ config: { ...base, audio_output_type: "pipewire" }, devices: availableDevices });
   assert.equal(f.calls.availability, 0, "opening Preferences never queries availability");
-  modeButton(f.tree(), "pipewire").props.onClick(); f.render();
+  modeButton(f.tree(), "shared").props.onClick(); f.render();
   assert.equal(f.calls.availability, 0);
-  modeButton(f.tree(), "alsa").props.onClick(); f.render();
+  modeButton(f.tree(), "direct").props.onClick(); f.render();
   assert.deepEqual(f.query.requests.map(request => request.id), [base.alsa_device]);
-  modeButton(f.tree(), "alsa").props.onClick(); f.render();
+  modeButton(f.tree(), "direct").props.onClick(); f.render();
   assert.equal(f.calls.availability, 1, "clicking the already selected mode is not another transition");
   f.query.requests[0].resolve([{ id: base.alsa_device, state: "available" }]); await flush(); f.render();
   assert.ok(statusText(f).includes("settings.deviceAvailability.available"));
@@ -511,8 +631,8 @@ test("returning to Direct never contextually queries Sonante's current DAC or un
   for (const config of [base, { ...base, audio_output_type: "pipewire", alsa_device: "null" },
     { ...base, audio_output_type: "pipewire", alsa_device: "hw:NotEnumerated,0" }]) {
     const f = await modal({ config, devices: availableDevices });
-    modeButton(f.tree(), "pipewire").props.onClick(); f.render();
-    modeButton(f.tree(), "alsa").props.onClick(); f.render();
+    modeButton(f.tree(), "shared").props.onClick(); f.render();
+    modeButton(f.tree(), "direct").props.onClick(); f.render();
     select(f.tree(), "-device").props.onFocus(); f.render();
     assert.equal(f.calls.availability, 0); f.h.dispose();
   }
@@ -545,9 +665,9 @@ test("a fresh selector focus refreshes a busy observation once for mouse or keyb
 
 test("mode/focus contextual requests remain serialized, discard late results, and cannot interfere with Save", async () => {
   const f = await modal({ config: { ...base, audio_output_type: "pipewire" }, devices: availableDevices });
-  modeButton(f.tree(), "alsa").props.onClick(); f.render();
-  modeButton(f.tree(), "pipewire").props.onClick(); f.render();
-  modeButton(f.tree(), "alsa").props.onClick(); f.render();
+  modeButton(f.tree(), "direct").props.onClick(); f.render();
+  modeButton(f.tree(), "shared").props.onClick(); f.render();
+  modeButton(f.tree(), "direct").props.onClick(); f.render();
   choose(f, "hw:Other,0");
   assert.equal(f.calls.availability, 1);
   f.query.requests[0].resolve([{ id: base.alsa_device, state: "busy" }]); await flush(); f.render();
@@ -555,9 +675,9 @@ test("mode/focus contextual requests remain serialized, discard late results, an
   f.query.requests[1].resolve([{ id: "hw:Other,0", state: "busy" }]); await flush(); f.render();
   const save = button(f.tree(), "settings.save").props.onClick(); f.render();
   select(f.tree(), "-device").props.onFocus();
-  modeButton(f.tree(), "alsa").props.onClick(); f.render();
-  assert.equal(f.calls.availability, 3, "only the existing Save revalidation is in flight");
-  f.query.requests[2].resolve([{ id: "hw:Other,0", state: "available" }]); await save; await flush(); f.render();
+  modeButton(f.tree(), "direct").props.onClick(); f.render();
+  assert.equal(f.calls.availability, 2, "a Shared to Direct transition never opens a second PCM before releasing Shared");
+  await save; await flush(); f.render();
   assert.equal(f.calls.save.length, 1); f.h.dispose();
 });
 
@@ -609,16 +729,16 @@ test("inconclusive reads and configured ownership cannot claim that MPD is using
   assert.ok(!text(f.tree()).includes("private raw ALSA diagnostic"));
   const pages = component("SettingsPages");
   for (const id of ["local", "plex", "audio"]) {
-    button(pages.render(pageProps(f.tree())), id === "local" || id === "plex" ? "sources.title" : `settings.pages.${id}`).props.onClick(); f.render();
+    button(pages.render(pageProps(f.tree())), pageKey(id)).props.onClick(); f.render();
   }
   assert.equal(f.calls.availability, 1); pages.dispose(); f.h.dispose();
 });
 
-test("busy conflict stays visible with collapsed help and Save refuses it only after a fresh retry", async () => {
+test("busy Shared owner stays visible with collapsed help while Save delegates release and acquisition to the backend", async () => {
   const f = await modal({ config: { ...base, audio_output_type: "pipewire" }, devices: availableDevices });
-  modeButton(f.tree(), "alsa").props.onClick(); f.render();
+  modeButton(f.tree(), "direct").props.onClick(); f.render();
   f.query.requests[0].resolve([{ id: base.alsa_device, state: "busy" }]); await flush(); f.render();
-  const conflict = () => find(f.tree(), node => node.props.role === "alert" && text(node) === "settings.deviceAvailability.busyAction");
+  const conflict = () => find(f.tree(), node => node.props.role === "alert" && text(node) === "settings.deviceAvailability.busyAfterRelease");
   assert.equal(conflict().props.hidden, undefined);
   assert.equal(select(f.tree(), "-device").props.value, base.alsa_device);
   const help = find(f.tree(), node => node.type === "button" && node.props["aria-label"] === "settings.deviceAvailability.helpLabel");
@@ -627,14 +747,11 @@ test("busy conflict stays visible with collapsed help and Save refuses it only a
   assert.equal(f.calls.availability, 2);
   f.query.requests[1].resolve([{ id: base.alsa_device, state: "busy" }]); await flush(); f.render();
   const save = button(f.tree(), "settings.save").props.onClick(); f.render();
-  assert.equal(f.calls.save.length, 0);
-  f.query.requests[2].resolve([{ id: base.alsa_device, state: "busy" }]); await save; await flush(); f.render();
-  conflict(); assert.equal(f.calls.save.length, 0); assert.equal(f.calls.started.length, 0);
-  modeButton(f.tree(), "pipewire").props.onClick(); f.render();
-  select(f.tree(), "-buffer").props.onChange({ target: { value: "32768" } }); f.render();
-  await button(f.tree(), "settings.save").props.onClick();
-  assert.equal(f.calls.availability, 3); assert.equal(f.calls.save.length, 1);
-  assert.equal(f.calls.save[0].audio_output_type, "pipewire"); f.h.dispose();
+  await save; await flush(); f.render();
+  assert.equal(f.calls.save.length, 1); assert.equal(f.calls.availability, 2);
+  assert.deepEqual(f.calls.started, [true]);
+  assert.equal(f.calls.save[0].audio_output_type, "alsa");
+  f.h.dispose();
 });
 
 test("overlap refusal in Settings retains the proposal and shows translated feedback", async () => {
@@ -658,7 +775,7 @@ test("overlap refusal in Settings retains the proposal and shows translated feed
 });
 
 test("initial page survives config loading, tab selection survives rerenders, and all panels remain mounted", async () => {
-  for (const initialPage of [undefined, "general", "local", "plex"]) {
+  for (const initialPage of [undefined, "interface", "local", "plex"]) {
     const f = await modal({ props: { initialPage } });
     assert.equal(pageProps(f.tree()).initialPage, initialPage, "forwarded after async config load");
     const pages = component("SettingsPages");
@@ -666,7 +783,7 @@ test("initial page survives config loading, tab selection survives rerenders, an
     const check = expected => {
       const tabs = nodes(tree).filter(node => node.props.role === "tab");
       const panels = nodes(tree).filter(node => node.props.role === "tabpanel");
-      assert.equal(tabs.length, 3); assert.equal(panels.length, 3);
+      assert.equal(tabs.length, 6); assert.equal(panels.length, 6);
       for (let i = 0; i < tabs.length; i++) {
         const active = tabs[i].props.id.endsWith(`-tab-${expected}`);
         assert.equal(tabs[i].props["aria-selected"], active);
@@ -676,7 +793,7 @@ test("initial page survives config loading, tab selection survives rerenders, an
         assert.equal(panels[i].props["aria-labelledby"], tabs[i].props.id);
       }
     };
-    check(!initialPage ? "general" : ["local", "plex", "navidrome"].includes(initialPage) ? "sources" : initialPage);
+    check(!initialPage ? "interface" : ["local", "plex", "navidrome"].includes(initialPage) ? "sources" : initialPage);
     const retained = nodes(tree).filter(node => node.props.role === "tabpanel").map(node => node.props.children[1]);
     button(tree, "settings.pages.audio").props.onClick();
     tree = pages.render(pageProps(f.tree())); check("audio");
@@ -730,11 +847,11 @@ test("refusing to disable a queued source preserves its complete settings draft 
 });
 
 
-test("experimental tools opt in and out through General Save without restarting audio, scanning or altering sources", async () => {
+test("experimental tools opt in and out through their category without restarting audio, scanning or altering sources", async () => {
   for (const enabled of [true, false]) {
     const config={...base, experimental_features: !enabled, plex_token:'fixture-token'};
     const f=await modal({config});
-    const option=find(pageProps(f.tree()).general,node=>node.type?.name==='ExperimentalFeaturesSetting');
+    const option=find(pageProps(f.tree()).experimental,node=>node.type?.name==='ExperimentalFeaturesSetting');
     assert.equal(option.props.enabled,!enabled); option.props.onChange(enabled); f.render();
     await button(f.tree(),'settings.save').props.onClick();
     assert.equal(f.calls.save.length,1);assert.equal(f.calls.save[0].experimental_features,enabled);
@@ -743,7 +860,99 @@ test("experimental tools opt in and out through General Save without restarting 
   }
 });
 test("legacy settings leave experimental tools disabled until explicitly enabled",async()=>{
- const f=await modal();const option=find(pageProps(f.tree()).general,node=>node.type?.name==='ExperimentalFeaturesSetting');assert.equal(option.props.enabled,false);f.h.dispose();
+ const f=await modal();const option=find(pageProps(f.tree()).experimental,node=>node.type?.name==='ExperimentalFeaturesSetting');assert.equal(option.props.enabled,false);f.h.dispose();
+});
+
+test("SQLite experimental settings expose writable audio without triggering provider discovery", async () => {
+  const config = { ...base, audio_output_type: "pipewire", alsa_device: "hw:CARD=K17,DEV=0" };
+  const sqliteCalls = [];
+  const sqliteSources = [{ id: 11, displayName: "Fixture NAS", generation: 8, trackCount: 26 }];
+  const f = await modal({ config, devices: [], props: { sqliteExperimental: true, sqliteSources, sqliteIndexing: false,
+    onSqliteAddFolder: () => sqliteCalls.push("add"), onSqliteVerifySource: async id => { sqliteCalls.push(["verify", id]); return false; },
+    onSqliteReindexSource: async id => sqliteCalls.push(["reindex", id]), onSqliteRemoveSource: async id => sqliteCalls.push(["remove", id]) } });
+  const pages = pageProps(f.tree());
+  assert.equal(pages.readOnly, false);
+  assert.deepEqual(pages.disabledPages, []);
+  const sourceSettings = find(f.tree(), node => node.type?.name === "SqliteSourcesSettings");
+  assert.deepEqual(sourceSettings.props.sources, sqliteSources);
+  sourceSettings.props.onAddFolder();
+  await sourceSettings.props.onVerify("sqlite-11");
+  await sourceSettings.props.onReindex("sqlite-11");
+  await sourceSettings.props.onRemove("sqlite-11");
+  assert.deepEqual(sqliteCalls, ["add", ["verify", "sqlite-11"], ["reindex", "sqlite-11"], ["remove", "sqlite-11"]]);
+  const earlyAccess = find(pages.experimental, node => node.type?.name === "ExperimentalFeaturesSetting");
+  assert.equal(earlyAccess.props.enabled, false);
+  earlyAccess.props.onChange(true); f.render();
+  assert.doesNotMatch(text(f.tree()), /sqliteLibrary\.profileAudioSettings/);
+  assert.doesNotMatch(source("SettingsModal"), /profileAudioSettings/);
+  assert.equal(f.calls.devices, 1);
+  const direct = find(f.tree(), node => node.type === "button" && node.props["aria-pressed"] === false);
+  assert.equal(direct.props.disabled, false);
+  direct.props.onClick(); f.render();
+  button(f.tree(), "settings.save").props.onClick(); await flush(); f.render();
+  assert.equal(f.calls.save.length, 1);
+  assert.equal(f.calls.save[0].audio_output_type, "alsa");
+  assert.equal(f.calls.save[0].experimental_features, true);
+  assert.equal(f.calls.pins, 0);
+  assert.equal(f.calls.servers, 0);
+  assert.equal(f.calls.availability, 0);
+  f.h.dispose();
+});
+
+test("SQLite profile exposes original service controls only after saved Full and beta preferences", async () => {
+  const config = { ...base, usage_mode: "full", experimental_features: true };
+  const f = await modal({ config, props: { sqliteExperimental: true } });
+  const network = pageProps(f.tree()).network;
+  assert.ok(find(network, node => node.type?.name === "UpnpSetting"));
+  assert.ok(find(network, node => node.type?.name === "RemoteControlSetting"));
+  assert.ok(find(network, node => node.type?.name === "ScrobblingSetting"));
+  assert.equal(f.calls.servers, 0, "mounting service settings must not discover providers or talk to the network");
+  f.h.dispose();
+});
+
+test("SQLite null-output profile keeps network restrictions in the Network category", async () => {
+  const config = { ...base, usage_mode: "full", experimental_features: true };
+  const f = await modal({ config, nullOutputTestMode: true, props: { sqliteExperimental: true } });
+  const network = pageProps(f.tree()).network;
+  assert.equal(nodes(network).some(node => ["UpnpSetting", "RemoteControlSetting", "ScrobblingSetting"].includes(node.type?.name)), false);
+  assert.match(text(network), /sqliteLibrary\.nullOutputServicesUnavailable/);
+  assert.equal(f.calls.servers, 0);
+  f.h.dispose();
+});
+
+test("interface language and usage mode are the Interface settings; appearance has its own category", async () => {
+  const f = await modal();
+  const pages = pageProps(f.tree());
+  const primarySettings = React.Children.toArray(pages.interfacePage.props.children)[0];
+  assert.equal(primarySettings.props["data-settings-interface-primary"], true);
+  assert.match(primarySettings.props.className, /settings-section-list/);
+  const sections = React.Children.toArray(primarySettings.props.children);
+  assert.deepEqual(sections.map(section => section.type === "fieldset" ? "language" : section.type.name), ["language", "UsageModeSetting"]);
+  assert.equal(pages.appearance.type.name, "AppearanceSetting");
+  assert.match(sections[0].props.className, /settings-section/);
+  const languageBlock = sections[0];
+  assert.equal(text(languageBlock), "settings.languagePortuguês (Brasil)English (US)");
+  assert.equal(languageBlock.props.children[0].props.className, "settings-section-title");
+  const choices = nodes(languageBlock).filter(node => node.type === "button");
+  assert.deepEqual(choices.map(text), ["Português (Brasil)", "English (US)"]);
+  assert.ok(choices.every(choice => /min-h-10/.test(choice.props.className)));
+  assert.match(languageBlock.props.children[1].props.className, /grid-cols-1.*sm:grid-cols-2/);
+  assert.equal(nodes(pages.interfacePage).filter(node => node.type === "legend" && text(node) === "settings.language").length, 1);
+  assert.equal([...nodes(pages.appearance), ...nodes(pages.audio), ...nodes(pages.sources), ...nodes(pages.network), ...nodes(pages.experimental)].some(node => node.type === "legend" && text(node) === "settings.language"), false);
+  assert.equal(Object.hasOwn(pages, "general"), false);
+  f.h.dispose();
+});
+
+test("null-output test mode disables physical route and device actions", async () => {
+  const f = await modal({ nullOutputTestMode: true, props: { sqliteExperimental: true } });
+  assert.match(text(f.tree()), /sqliteLibrary\.nullOutputTestSettings/);
+  const routes = nodes(f.tree()).filter(node => node.type === "button" && Object.hasOwn(node.props, "aria-pressed"));
+  assert.equal(routes.length, 2);
+  assert.ok(routes.every(route => route.props.disabled === true));
+  assert.equal(find(f.tree(), node => node.props.role === "switch").props.disabled, true);
+  assert.equal(select(f.tree(), "device").props.disabled, true);
+  assert.equal(f.calls.availability, 0);
+  f.h.dispose();
 });
 
 
