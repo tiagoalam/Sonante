@@ -23,7 +23,7 @@ optdepends=(
     'xdg-desktop-portal-gtk: GTK file chooser when no desktop portal backend is installed'
 )
 conflicts=('sonante-bin')
-options=('!debug')
+options=('!debug' '!lto')
 _source_tag="v${pkgver}"
 # RELEASE-CI-01 must publish this tag before the recipe can fetch the source.
 if (( pkgrel > 1 )); then

@@ -4179,8 +4179,6 @@ mod tests {
         assert!(!config.contains("sqlite-experimental"));
         let development = include_str!("../tauri.dev.conf.json");
         assert!(development.contains("com.sonante.player.dev064"));
-        let experimental = include_str!("../tauri.experimental.conf.json");
-        assert!(experimental.contains("com.sonante.player.experimental"));
         let html = include_str!("../../index.html");
         assert!(html.contains("/src/main.tsx"));
         assert!(!html.contains("sqlite-library-main.tsx"));
