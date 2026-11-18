@@ -18,6 +18,7 @@ cat >"$config" <<EOF
 Architecture = x86_64
 SigLevel = Required DatabaseOptional
 LocalFileSigLevel = Optional
+DisableDownloadTimeout
 GPGDir = /etc/pacman.d/gnupg
 DBPath = /var/lib/pacman/
 CacheDir = /var/cache/pacman/pkg/

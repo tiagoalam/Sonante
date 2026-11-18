@@ -151,6 +151,7 @@ class CompletePackagingTests(unittest.TestCase):
         build = Path('scripts/prepare-arch-abi-build.sh').read_text()
         self.assertIn("snapshot='2026/07/24'", build)
         self.assertIn('--ignore=archlinux-keyring', build)
+        self.assertIn('DisableDownloadTimeout', build)
         self.assertIn("'no foreign packages found'", build)
         self.assertIn('Could not verify packages outside the pinned Arch snapshot', build)
         self.assertIn("[[ \"$libc\" == 'glibc 2.43' ]]", build)
