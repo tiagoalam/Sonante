@@ -1879,6 +1879,26 @@ mod tests {
         (root, library)
     }
 
+    fn reconcile_library_symlinks_for_test(
+        library: &Path,
+        folders: &[String],
+    ) -> Result<LibrarySyncResult, String> {
+        // Source identity reservations deliberately refuse a busy lock. Test
+        // fixtures may briefly contend while parallel tests exercise the same
+        // filesystem; retry only that coded transient result, never other errors.
+        const BUSY: &str =
+            "LOCAL_SOURCE_IDENTITY_UNCONFIRMED: registro de identidades ocupado; tente novamente";
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match MpdSupervisor::reconcile_library_symlinks(library, folders) {
+                Err(error) if error == BUSY && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                result => return result,
+            }
+        }
+    }
+
     #[test]
     fn mpd_config_private_writer_repairs_664_and_preserves_inode_and_exact_rendering() {
         let (root, _, _) = test_runtime_paths("mpd-config-legacy-permissions");
@@ -2402,7 +2422,7 @@ mod tests {
         fs::create_dir_all(&second).unwrap();
         let folders = [configured_folder(&first), configured_folder(&second)];
         assert!(
-            MpdSupervisor::reconcile_library_symlinks(&library, &folders)
+            reconcile_library_symlinks_for_test(&library, &folders)
                 .unwrap()
                 .changed
         );
@@ -2412,7 +2432,7 @@ mod tests {
             .unwrap()
             .ino();
 
-        let reordered = MpdSupervisor::reconcile_library_symlinks(
+        let reordered = reconcile_library_symlinks_for_test(
             &library,
             &[configured_folder(&second), configured_folder(&first)],
         )
@@ -2425,9 +2445,11 @@ mod tests {
             second_inode
         );
 
-        let removed =
-            MpdSupervisor::reconcile_library_symlinks(&library, &[configured_folder(&second)])
-                .unwrap();
+        let removed = reconcile_library_symlinks_for_test(
+            &library,
+            &[configured_folder(&second)],
+        )
+        .unwrap();
         assert!(removed.changed);
         assert!(!library.join("Music").exists());
         assert_eq!(fs::canonicalize(library.join("Music (2)")).unwrap(), second);
