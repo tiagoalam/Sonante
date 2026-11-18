@@ -60,8 +60,12 @@ class PackagingTests(unittest.TestCase):
     def test_arch_container_trust_is_scoped_to_workspace_before_source_gate(self):
         ci = Path('.github/workflows/ci.yml').read_text()
         arch = ci.split('\n  arch:\n', 1)[1]
+        bootstrap = 'run: pacman -Sy --noconfirm git'
+        checkout = 'uses: actions/checkout@v4'
         trust = 'run: git config --global --add safe.directory "$GITHUB_WORKSPACE"'
         gate = 'run: python3 scripts/verify-candidate-source.py'
+        self.assertEqual(arch.count(bootstrap), 1)
+        self.assertLess(arch.index(bootstrap), arch.index(checkout))
         self.assertEqual(arch.count(trust), 1)
         self.assertLess(arch.index(trust), arch.index(gate))
         self.assertNotIn('safe.directory=*', arch)

@@ -177,6 +177,8 @@ jobs:
     runs-on: ubuntu-22.04
     container: archlinux:base-devel
     steps:
+      - name: Bootstrap Git for full-history checkout
+        run: pacman -Sy --noconfirm git
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.candidate_sha || github.sha }}
