@@ -10,7 +10,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-snapshot='2026/07/26'
+snapshot='2026/07/24'
 config="$(mktemp /tmp/sonante-pacman-snapshot.XXXXXXXX)"
 trap 'rm -f -- "$config"' EXIT
 cat >"$config" <<EOF
@@ -31,7 +31,7 @@ Server = https://archive.archlinux.org/repos/${snapshot}/extra/os/\$arch
 EOF
 
 echo "Installing signed Arch Archive snapshot ${snapshot} in the disposable CI container."
-pacman --config "$config" -Syyuu --noconfirm --needed \
+pacman --config "$config" -Syyuu --noconfirm --needed --ignore=archlinux-keyring \
   git nodejs npm rust python file binutils gtk3 webkit2gtk-4.1 \
   alsa-lib alsa-utils openssl xdg-utils xdg-desktop-portal desktop-file-utils
 
@@ -44,14 +44,14 @@ fi
 libc="$(getconf GNU_LIBC_VERSION)"
 openssl_version="$(openssl version)"
 printf 'Pinned Arch build snapshot: %s\n%s\n%s\n' \
-  "$snapshot" "$(pacman -Q glibc openssl rust nodejs npm)" "$libc / $openssl_version"
+  "$snapshot" "$(pacman -Q glibc openssl rust nodejs npm archlinux-keyring)" "$libc / $openssl_version"
 
 [[ "$libc" == 'glibc 2.43' ]] || {
   echo "Pinned Arch snapshot does not provide the required GLIBC 2.43 build floor: $libc" >&2
   exit 1
 }
-[[ "$openssl_version" =~ ^OpenSSL\ 3\.5\. ]] || {
-  echo "Pinned Arch snapshot must link against OpenSSL 3.5 for the current OpenSSL-3 compatibility ABI: $openssl_version" >&2
+[[ "$openssl_version" =~ ^OpenSSL\ 3\.6\. ]] || {
+  echo "Pinned Arch snapshot must use the pinned OpenSSL 3.6 build line: $openssl_version" >&2
   exit 1
 }
 

@@ -149,9 +149,10 @@ class CompletePackagingTests(unittest.TestCase):
         self.assertIn("options=('!debug' '!lto')", recipe)
         self.assertNotIn('openssl>=4.0.0', recipe)
         build = Path('scripts/prepare-arch-abi-build.sh').read_text()
-        self.assertIn("snapshot='2026/07/26'", build)
+        self.assertIn("snapshot='2026/07/24'", build)
+        self.assertIn('--ignore=archlinux-keyring', build)
         self.assertIn("[[ \"$libc\" == 'glibc 2.43' ]]", build)
-        self.assertIn('OpenSSL\\ 3\\.5\\.', build)
+        self.assertIn('OpenSSL\\ 3\\.6\\.', build)
 
     def test_arch_openssl3_gate_requires_complete_soname_and_symbol_pair(self):
         needed = {'libssl.so.3', 'libcrypto.so.3', 'libc.so.6'}
