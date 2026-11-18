@@ -25,12 +25,11 @@ RUNTIME = 'usr/lib/sonante/runtimes/v1/'
 MAX_FILE = 128 * 1024 * 1024
 MAX_PAYLOAD = 400 * 1024 * 1024
 VARIANTS = ('ubuntu', 'fedora', 'arch')
-# OpenSSL 4 is the Arch runner's current ABI. Keep this allowlist variant-scoped:
-# Ubuntu and Fedora candidates must continue matching their reviewed baselines.
+# No new application SONAME is implicitly approved for any distribution.
 REVIEWED_NEW_NEEDED = {
     'ubuntu': frozenset(),
     'fedora': frozenset(),
-    'arch': frozenset({'libcrypto.so.4', 'libssl.so.4'}),
+    'arch': frozenset(),
 }
 
 
@@ -42,13 +41,6 @@ def require(ok, message):
 def verify_application_needed(variant, needed, previous_needed):
     require(variant in REVIEWED_NEW_NEEDED, 'Unknown package variant: ' + str(variant))
     new = set(needed) - set(previous_needed)
-    reviewed_openssl4 = {'libcrypto.so.4', 'libssl.so.4'}
-    openssl4_added = new & reviewed_openssl4
-    require(not openssl4_added or openssl4_added == reviewed_openssl4,
-            'Incomplete reviewed OpenSSL 4 ABI dependency pair for ' + variant
-            + '; candidate=' + ','.join(sorted(needed))
-            + '; baseline=' + ','.join(sorted(previous_needed))
-            + '; new=' + ','.join(sorted(new)))
     unreviewed = new - REVIEWED_NEW_NEEDED[variant]
     require(not unreviewed,
             'Unreviewed application ELF dependencies for ' + variant
@@ -57,6 +49,23 @@ def verify_application_needed(variant, needed, previous_needed):
             + '; new=' + ','.join(sorted(new))
             + '; rejected=' + ','.join(sorted(unreviewed))
             + '; reviewed=' + ','.join(sorted(REVIEWED_NEW_NEEDED[variant])))
+
+
+def verify_openssl3(needed, version_info):
+    required = {'libcrypto.so.3', 'libssl.so.3'}
+    require(required <= set(needed),
+            'Application must require both OpenSSL 3 SONAMEs; needed=' + ','.join(sorted(needed)))
+    require(not ({'libcrypto.so.4', 'libssl.so.4'} & set(needed)),
+            'Application must not require OpenSSL 4')
+    versions = set(re.findall(r'\bOPENSSL_[A-Za-z0-9_.]+', version_info))
+    parsed = []
+    for value in versions:
+        match = re.fullmatch(r'OPENSSL_(\d+(?:\.\d+)+)', value)
+        require(match is not None, 'Unclassified OpenSSL symbol ABI: ' + value)
+        parsed.append(tuple(map(int, match.group(1).split('.'))))
+    require(bool(parsed) and max(parsed) <= (3, 5, 9),
+            'Application exceeds the OpenSSL 3.5.9 compatibility ABI; found='
+            + ','.join(sorted(versions)))
 
 
 def digest(path, algorithm='sha256'):
@@ -237,7 +246,8 @@ def elf_info(path, arch_application=False):
         values = [tuple(map(int, value.split('_', 1)[1].split('.'))) for value in names]
         if values:
             highest = max(values)
-            require(arch_application and namespace == 'GLIBC' or highest <= limit, 'ELF exceeds ABI ceiling')
+            ceiling = (2, 43) if arch_application and namespace == 'GLIBC' else limit
+            require(highest <= ceiling, 'ELF exceeds ABI ceiling: ' + namespace + '_' + '.'.join(map(str, highest)))
             result[namespace] = '.'.join(map(str, highest))
     return result, set(re.findall(r'\(NEEDED\).*?\[([^\]]+)\]', dynamic))
 
@@ -421,16 +431,17 @@ def arch_info(previous, version, revision, glibc, size, epoch):
             if key == 'depend' and value.startswith('glibc>='):
                 value = 'glibc>=' + glibc
             if key == 'depend' and value == 'openssl':
-                # The reviewed Arch candidate links to OpenSSL 4 SONAMEs.
-                # Prevent package managers from treating OpenSSL 3 as enough.
-                value = 'openssl>=4.0.0'
+                lines.extend(['depend = libcrypto.so=3-64', 'depend = libssl.so=3-64'])
+                continue
             lines.append(key + ' = ' + value)
     require({'pkgname = sonante', 'arch = x86_64', 'depend = glibc>=' + glibc,
              'depend = webkit2gtk-4.1>=2.40', 'depend = pipewire'} <= set(lines), 'Arch required metadata')
     require('depend = mpd' not in lines, 'System MPD must not be required; Sonante owns a pinned private runtime')
     require('depend = wireplumber' not in lines, 'Required WirePlumber is not supported')
-    require('depend = openssl>=4.0.0' in lines and 'depend = openssl' not in lines,
-            'Arch package must declare the reviewed OpenSSL 4 runtime requirement')
+    require({'depend = libcrypto.so=3-64', 'depend = libssl.so=3-64'} <= set(lines),
+            'Arch package must declare both OpenSSL 3 SONAME runtime requirements')
+    require(not any(line.startswith('depend = openssl') for line in lines),
+            'Arch package must depend on OpenSSL SONAMEs, not a version-specific package')
     lines += ['pkgver = ' + version + '-' + revision, 'pkgdesc = Local and Plex music player with pinned audio runtimes',
               'builddate = ' + str(epoch), 'packager = Tiago Alam', 'size = ' + str(size)]
     return '\n'.join(lines) + '\n'
@@ -520,6 +531,7 @@ def assemble(variant, inputs, candidates, work, output, identity, revision):
     for source in sidecars:
         require(any(all(value[key] == source[key] for key in ['filename', 'sha256', 'bytes']) for value in inputs['sources']), 'Runtime corresponding-source identity missing')
     _, previous_needed = elf_info(stage / 'usr/bin/sonante', variant == 'arch')
+    verify_openssl3(previous_needed, run('readelf', '--version-info', stage / 'usr/bin/sonante'))
     directory = candidates / variant
     app = task / 'sonante'
     if variant == 'fedora':
@@ -541,6 +553,7 @@ def assemble(variant, inputs, candidates, work, output, identity, revision):
     require(descriptor in checked_file(app).read_bytes(), 'Application compiled descriptor mismatch')
     _, needed = elf_info(app, variant == 'arch')
     require(bool(needed), 'Application has no dynamic library requirements')
+    verify_openssl3(needed, run('readelf', '--version-info', app))
     verify_application_needed(variant, needed, previous_needed)
     shutil.copyfile(app, stage / 'usr/bin/sonante')
     (stage / 'usr/bin/sonante').chmod(0o755)

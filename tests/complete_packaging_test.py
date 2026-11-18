@@ -116,42 +116,62 @@ class CompletePackagingTests(unittest.TestCase):
         self.assertIn('depend = glibc>=2.43\n', result)
         self.assertNotIn('glibc>=2.35', result)
         self.assertIn('optdepend = wireplumber: Shared volume\n', result)
-        self.assertIn('depend = openssl>=4.0.0\n', result)
+        self.assertIn('depend = libcrypto.so=3-64\n', result)
+        self.assertIn('depend = libssl.so=3-64\n', result)
         self.assertNotIn('depend = openssl\n', result)
+        self.assertNotIn('depend = openssl>=4.0.0\n', result)
         for missing in ['depend = pipewire\n', 'depend = webkit2gtk-4.1>=2.40\n', 'depend = openssl\n']:
             with self.subTest(missing=missing), self.assertRaises(ValueError):
                 c.arch_info(original.replace(missing, ''), '0.5.6', '1', '2.43', 123, 10)
 
-    def test_application_needed_gate_allows_only_reviewed_arch_openssl4_sonames(self):
+    def test_application_needed_gate_rejects_unreviewed_openssl4_sonames(self):
         baseline = {'libc.so.6', 'libssl.so.3', 'libcrypto.so.3', 'libwayland-client.so.0'}
         candidate = {'libc.so.6', 'libssl.so.4', 'libcrypto.so.4', 'libwayland-client.so.0'}
 
-        # No change remains valid for every target; the reviewed OpenSSL ABI
-        # transition is valid only for Arch and only as the exact pair.
+        # No change remains valid for every target. OpenSSL 4 is not approved
+        # for any candidate; the Arch pipeline must stay on the SONAME-3 pair.
         for variant in ('ubuntu', 'fedora', 'arch'):
             c.verify_application_needed(variant, baseline, baseline)
-        c.verify_application_needed('arch', candidate, baseline)
-        with self.assertRaisesRegex(ValueError, 'Unreviewed application ELF dependencies for ubuntu'):
-            c.verify_application_needed('ubuntu', candidate, baseline)
-        with self.assertRaisesRegex(ValueError, 'Unreviewed application ELF dependencies for fedora'):
-            c.verify_application_needed('fedora', candidate, baseline)
-
-        with self.assertRaisesRegex(ValueError, 'Incomplete reviewed OpenSSL 4 ABI dependency pair for arch'):
+        for variant in ('ubuntu', 'fedora', 'arch'):
+            with self.subTest(variant=variant), self.assertRaisesRegex(ValueError, 'Unreviewed application ELF dependencies'):
+                c.verify_application_needed(variant, candidate, baseline)
+        with self.assertRaisesRegex(ValueError, 'Unreviewed application ELF dependencies for arch'):
             c.verify_application_needed('arch', baseline | {'libssl.so.4'}, baseline)
         for extra in ({'libunexpected.so.1'}, {'libcrypto.so.4', 'libunexpected.so.1'}):
             with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, 'candidate=.*baseline=.*new='):
                 c.verify_application_needed('arch', baseline | extra, baseline)
 
-    def test_arch_recipe_requires_openssl4_for_the_candidate_abi(self):
+    def test_arch_recipe_declares_openssl3_sonames_and_pinned_abi_build(self):
         recipe = Path('sonante-arch/PKGBUILD').read_text()
-        self.assertIn("'openssl>=4.0.0'", recipe)
-        self.assertNotRegex(recipe, r"(?m)^\s*'openssl'\s*$")
+        self.assertIn("'libcrypto.so=3-64'", recipe)
+        self.assertIn("'libssl.so=3-64'", recipe)
+        self.assertIn("makedepends=('git' 'npm' 'openssl' 'rust')", recipe)
+        self.assertIn("options=('!debug' '!lto')", recipe)
+        self.assertNotIn('openssl>=4.0.0', recipe)
+        build = Path('scripts/prepare-arch-abi-build.sh').read_text()
+        self.assertIn("snapshot='2026/07/26'", build)
+        self.assertIn("[[ \"$libc\" == 'glibc 2.43' ]]", build)
+        self.assertIn('OpenSSL\\ 3\\.5\\.', build)
+
+    def test_arch_openssl3_gate_requires_complete_soname_and_symbol_pair(self):
+        needed = {'libssl.so.3', 'libcrypto.so.3', 'libc.so.6'}
+        c.verify_openssl3(needed, 'Version needs: Name: OPENSSL_3.0.0')
+        for invalid_needed, versions in [
+            ({'libssl.so.4', 'libcrypto.so.4'}, 'Name: OPENSSL_4.0.0'),
+            ({'libssl.so.3'}, 'Name: OPENSSL_3.0.0'),
+            (needed, 'Name: OPENSSL_3.6.0'),
+            (needed, 'Name: OPENSSL_4.0.0'),
+            (needed, 'no versioned OpenSSL requirement'),
+        ]:
+            with self.subTest(needed=invalid_needed, versions=versions), self.assertRaises(ValueError):
+                c.verify_openssl3(invalid_needed, versions)
 
     def test_elf_baseline_rejects_unknown_abi_and_does_not_apply_ubuntu_floor_to_arch_app(self):
         for symbol, arch, accepted in [('GLIBC_2.35', False, True), ('GLIBC_2.43', False, False),
                                        ('GLIBC_2.43', True, True), ('GLIBC_ABI_DT_RELR', False, False),
                                        ('GLIBC_ABI_DT_RELR', True, True), ('GLIBC_PRIVATE', True, False),
-                                       ('GLIBC_UNKNOWN', True, False), ('GLIBCXX_3.4.31', True, False)]:
+                                       ('GLIBC_2.44', True, False), ('GLIBC_UNKNOWN', True, False),
+                                       ('GLIBCXX_3.4.31', True, False)]:
             def output(*args):
                 return {'-h': 'ELF64 X86-64', '-d': '(NEEDED) [libc.so.6]', '--version-info': symbol}[args[1]]
             with self.subTest(symbol=symbol, arch=arch), patch.object(c, 'run', side_effect=output):
@@ -200,9 +220,29 @@ class CompletePackagingTests(unittest.TestCase):
             (source / 'packaging').mkdir()
             (source / 'packaging/runtime.json').write_bytes(descriptor)
             program = root / 'fixture.c'
-            program.write_text('int main(void) { return 0; }\n')
+            # Build tiny versioned SONAME fixtures rather than linking to the
+            # host's OpenSSL (which may be ABI 4). This validates package gates
+            # deterministically without executing the ELF.
+            library_dir = root / 'openssl-fixtures'
+            library_dir.mkdir()
+            version_map = root / 'openssl.map'
+            version_map.write_text('OPENSSL_3.0.0 { global: *; };\n')
+            (root / 'crypto.c').write_text('int crypto_fixture(void) { return 7; }\n')
+            (root / 'ssl.c').write_text('extern int crypto_fixture(void); int ssl_fixture(void) { return crypto_fixture(); }\n')
+            subprocess.run(['cc', '-fPIC', '-shared', str(root / 'crypto.c'), '-Wl,-soname,libcrypto.so.3',
+                            '-Wl,--version-script=' + str(version_map), '-o', str(library_dir / 'libcrypto.so.3')],
+                           check=True, capture_output=True)
+            subprocess.run(['cc', '-fPIC', '-shared', str(root / 'ssl.c'), '-L' + str(library_dir), '-l:libcrypto.so.3',
+                            '-Wl,-soname,libssl.so.3', '-Wl,--version-script=' + str(version_map),
+                            '-o', str(library_dir / 'libssl.so.3')], check=True, capture_output=True)
+            (library_dir / 'libcrypto.so').symlink_to('libcrypto.so.3')
+            (library_dir / 'libssl.so').symlink_to('libssl.so.3')
+            program.write_text('extern int ssl_fixture(void); extern int crypto_fixture(void);\n'
+                               'int main(void) { return ssl_fixture() + crypto_fixture(); }\n')
             binary = root / 'fixture-elf'
-            subprocess.run(['cc', str(program), '-Wl,-z,nopack-relative-relocs', '-o', str(binary)], check=True, capture_output=True)
+            subprocess.run(['cc', str(program), '-L' + str(library_dir), '-lssl', '-lcrypto',
+                            '-Wl,-z,nopack-relative-relocs', '-Wl,-rpath,' + str(library_dir), '-o', str(binary)],
+                           check=True, capture_output=True)
             application = binary.read_bytes() + descriptor
             sources = {'LICENSE': b'fixture license', 'AUTHORS': b'fixture authors', 'THIRD_PARTY_NOTICES': b'fixture notices',
                        'sonante-arch/sonante.desktop': b'fixture desktop',
@@ -291,7 +331,10 @@ class CompletePackagingTests(unittest.TestCase):
             self.assertEqual(payload[c.RUNTIME + 'mpd-direct']['sha256'], pin)
             self.assertEqual(set(metadata), {'.PKGINFO', '.MTREE'})
             self.assertIn('depend = glibc>=' + result['minimum_glibc'] + '\n', metadata['.PKGINFO']['data'].decode())
-            self.assertIn('depend = openssl>=4.0.0\n', metadata['.PKGINFO']['data'].decode())
+            arch_metadata = metadata['.PKGINFO']['data'].decode()
+            self.assertIn('depend = libcrypto.so=3-64\n', arch_metadata)
+            self.assertIn('depend = libssl.so=3-64\n', arch_metadata)
+            self.assertNotIn('depend = openssl>=4.0.0\n', arch_metadata)
             with c.archive_stream(c.package_command(final_arch, 'arch')) as stream:
                 with tarfile.open(fileobj=stream, mode='r|') as archive:
                     self.assertTrue(any(item.isdir() and item.name == 'usr/bin' for item in archive))

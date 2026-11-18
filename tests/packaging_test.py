@@ -37,7 +37,9 @@ class PackagingTests(unittest.TestCase):
         required = [value for kind, _, value in entries if kind == 'required']
         optional = [value.split(':', 1)[0] for kind, _, value in entries if kind == 'optional']
         self.assertNotIn('mpd', required)
-        self.assertIn('openssl>=4.0.0', required)
+        self.assertIn('libcrypto.so=3-64', required)
+        self.assertIn('libssl.so=3-64', required)
+        self.assertIn('openssl', required)
         self.assertNotIn('libappindicator', required)
         self.assertEqual(optional.count('libappindicator'), 1)
 
@@ -68,11 +70,19 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('runuser -u builder -- git -C .. rev-parse HEAD', arch)
         self.assertLess(arch.index('chown -R builder:builder'), arch.index('runuser -u builder -- makepkg'))
 
-    def test_arch_ci_checks_the_reviewed_openssl4_dependency(self):
+    def test_arch_ci_pins_glibc_floor_and_tests_openssl3_installability(self):
         ci = Path('.github/workflows/ci.yml').read_text()
         arch = ci.split('\n  arch:\n', 1)[1].split('\n  complete:\n', 1)[0]
-        self.assertIn("'openssl>=4.0.0'", arch)
+        self.assertIn('prepare-arch-abi-build.sh', arch)
+        self.assertIn("'libcrypto.so=3-64'", arch)
+        self.assertIn("'libssl.so=3-64'", arch)
+        self.assertIn('inspect-elf.sh src/sonante/src-tauri/target/release/sonante 2.43 openssl3', arch)
         self.assertIn('grep -Fx "depend = $dep" package-info.txt', arch)
+        self.assertIn('compatibility-ubuntu-2204:', ci)
+        self.assertIn('compatibility-fedora:', ci)
+        self.assertIn('compatibility-arch-current:', ci)
+        self.assertIn('openssl-3', ci)
+        self.assertIn('openssl-3.6.5-1-x86_64.pkg.tar.zst', ci)
 
     def test_candidate_source_gate_accepts_only_exact_safe_directory_in_container(self):
         script = Path('scripts/verify-candidate-source.py').resolve()
@@ -499,6 +509,30 @@ else: raise SystemExit(2)
                 result = subprocess.run(['bash', 'scripts/inspect-elf.sh', str(binary), '2.35'],
                                         env={**os.environ, 'PATH': f'{root}:{os.environ["PATH"]}'}, capture_output=True)
                 self.assertEqual(result.returncode == 0, success, symbol)
+
+    def test_inspect_elf_requires_openssl3_only_when_the_profile_requests_it(self):
+        with tempfile.TemporaryDirectory(prefix='sn-openssl-elf-') as directory:
+            root = Path(directory)
+            binary = root / 'unexecuted-binary'
+            binary.touch()
+            fake_readelf = root / 'readelf'
+            fake_readelf.write_text(
+                '#!/bin/sh\n'
+                'if [ "$1" = "-d" ]; then printf "%s\\n" "$FAKE_NEEDED"; '
+                'else printf "%s\\n" "$FAKE_VERSIONS"; fi\n')
+            fake_readelf.chmod(0o700)
+            environment = {**os.environ, 'PATH': f'{root}:{os.environ["PATH"]}',
+                           'FAKE_VERSIONS': 'GLIBC_2.35 OPENSSL_3.0.0',
+                           'FAKE_NEEDED': '(NEEDED) [libssl.so.3] (NEEDED) [libcrypto.so.3]'}
+            accepted = subprocess.run(['bash', 'scripts/inspect-elf.sh', str(binary), '2.35', 'openssl3'],
+                                      env=environment, capture_output=True, text=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+            environment['FAKE_NEEDED'] = '(NEEDED) [libssl.so.4] (NEEDED) [libcrypto.so.4]'
+            rejected = subprocess.run(['bash', 'scripts/inspect-elf.sh', str(binary), '2.35', 'openssl3'],
+                                      env=environment, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('Expected OpenSSL 3 SONAME pair', rejected.stderr)
 
     def test_release_manual_dispatch_has_no_upload(self):
         release = Path('.github/workflows/release.yml').read_text()

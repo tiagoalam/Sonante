@@ -116,7 +116,7 @@ jobs:
         run: npm run tauri -- build --no-bundle -- --locked
 
       - name: Inspect native dependencies and GLIBC symbols
-        run: bash scripts/inspect-elf.sh src-tauri/target/release/sonante 2.35 | tee native-abi.txt
+        run: bash scripts/inspect-elf.sh src-tauri/target/release/sonante 2.35 openssl3 | tee native-abi.txt
 
       - name: Prepare RPM requirements from the built executable
         run: python3 scripts/rpm-elf-deps.py src-tauri/target/release/sonante "$RUNNER_TEMP/sonante-rpm.json"
@@ -157,7 +157,7 @@ jobs:
           mkdir fedora-native
           cp src-tauri/target/release/sonante fedora-native/sonante
           cp packaging/private-runtimes.json fedora-native/manifest.json
-          bash scripts/inspect-elf.sh fedora-native/sonante 2.35 | tee fedora-native/native-abi.txt
+          bash scripts/inspect-elf.sh fedora-native/sonante 2.35 openssl3 | tee fedora-native/native-abi.txt
           python3 -c 'from pathlib import Path; p = Path("fedora-native"); assert (p / "manifest.json").read_bytes() in (p / "sonante").read_bytes()'
           git rev-parse HEAD > fedora-native/source-commit.txt
           cd fedora-native
@@ -177,15 +177,12 @@ jobs:
     runs-on: ubuntu-22.04
     container: archlinux:base-devel
     steps:
-      - name: Install Arch build dependencies
-        run: |
-          pacman -Syu --noconfirm --needed git nodejs npm rust python file binutils \
-            gtk3 webkit2gtk-4.1 alsa-lib alsa-utils \
-            openssl xdg-utils xdg-desktop-portal desktop-file-utils
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.candidate_sha || github.sha }}
           fetch-depth: 0
+      - name: Install pinned Arch ABI build environment
+        run: bash scripts/prepare-arch-abi-build.sh
       - name: Trust exact checkout for container source verification
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Verify immutable candidate source
@@ -214,10 +211,14 @@ jobs:
           VERSION="$(node -p "require('../package.json').version")"
           REVISION="$(sed -n 's/^pkgrel=//p' ../sonante-arch/PKGBUILD)"
           grep -Fx "pkgver = $VERSION-$REVISION" package-info.txt
-          for dep in alsa-utils xdg-utils webkit2gtk-4.1 'openssl>=4.0.0'; do grep -Fx "depend = $dep" package-info.txt; done
+          for dep in alsa-utils xdg-utils webkit2gtk-4.1 'libcrypto.so=3-64' 'libssl.so=3-64'; do grep -Fx "depend = $dep" package-info.txt; done
+          if grep -E '^depend = openssl(=|>=|$)|^depend = lib(crypto|ssl)\.so=[4-9]-64$' package-info.txt; then
+            echo 'Arch package must depend on OpenSSL 3 SONAMEs, never OpenSSL 4' >&2
+            exit 1
+          fi
           bsdtar -tf ./*.pkg.tar.zst | grep -Fx usr/bin/sonante
           desktop-file-validate src/sonante.desktop
-          bash ../scripts/inspect-elf.sh src/sonante/src-tauri/target/release/sonante | tee native-abi-arch.txt
+          bash ../scripts/inspect-elf.sh src/sonante/src-tauri/target/release/sonante 2.43 openssl3 | tee native-abi-arch.txt
           runuser -u builder -- git -C .. rev-parse HEAD > source-commit.txt
           sha256sum *.pkg.tar.zst source-commit.txt > SHA256SUMS-arch.txt
           sha256sum -c SHA256SUMS-arch.txt
@@ -281,3 +282,77 @@ jobs:
           compression-level: 0
           retention-days: 14
           if-no-files-found: error
+
+  compatibility-ubuntu-2204:
+    name: Install candidate on Ubuntu 22.04
+    needs: complete
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sonante-0.7.0-candidate-${{ inputs.candidate_sha || github.sha }}
+          path: ${{ runner.temp }}/sonante-candidate
+      - name: Install and load the final DEB
+        run: |
+          deb="$RUNNER_TEMP/sonante-candidate/sonante_0.7.0-1_amd64.deb"
+          test -f "$deb"
+          sudo apt-get update
+          sudo apt-get install -y "$deb"
+          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.35'
+          ldd -r /usr/bin/sonante | tee "$RUNNER_TEMP/sonante-ubuntu-loader.txt"
+          ! grep -E 'not found|undefined symbol' "$RUNNER_TEMP/sonante-ubuntu-loader.txt"
+
+  compatibility-fedora:
+    name: Install candidate on Fedora 44
+    needs: complete
+    runs-on: ubuntu-22.04
+    container: fedora:44
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sonante-0.7.0-candidate-${{ inputs.candidate_sha || github.sha }}
+          path: /tmp/sonante-candidate
+      - name: Install and load the final RPM
+        run: |
+          rpm_file="/tmp/sonante-candidate/sonante-0.7.0-1.x86_64.rpm"
+          test -f "$rpm_file"
+          dnf install -y "$rpm_file"
+          ldd -r /usr/bin/sonante | tee /tmp/sonante-fedora-loader.txt
+          ! grep -E 'not found|undefined symbol' /tmp/sonante-fedora-loader.txt
+          rpm -q sonante
+
+  compatibility-arch-current:
+    name: Install candidate on current Arch with OpenSSL 3 compatibility
+    needs: complete
+    runs-on: ubuntu-22.04
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sonante-0.7.0-candidate-${{ inputs.candidate_sha || github.sha }}
+          path: /tmp/sonante-candidate
+      - name: Resolve and load package on current Arch
+        run: |
+          pacman -Syu --noconfirm --needed curl openssl-3 alsa-lib alsa-utils gtk3 webkit2gtk-4.1 xdg-utils xdg-desktop-portal desktop-file-utils
+          pacman -T libcrypto.so=3-64 libssl.so=3-64
+          pkg="/tmp/sonante-candidate/sonante-0.7.0-1-x86_64.pkg.tar.zst"
+          test -f "$pkg"
+          pacman -U --noconfirm "$pkg"
+          pacman -Q sonante openssl openssl-3
+          ldd -r /usr/bin/sonante | tee /tmp/sonante-arch-loader.txt
+          ! grep -E 'not found|undefined symbol|lib(crypto|ssl)\.so\.4' /tmp/sonante-arch-loader.txt
+
+          # Check the exact OpenSSL 3.6.5 runtime version used by Manjaro Stable.
+          base='https://archive.archlinux.org/packages/o/openssl'
+          pkg365='openssl-3.6.5-1-x86_64.pkg.tar.zst'
+          curl --fail --location --output "/tmp/$pkg365" "$base/$pkg365"
+          curl --fail --location --output "/tmp/$pkg365.sig" "$base/$pkg365.sig"
+          pacman-key --verify "/tmp/$pkg365.sig" "/tmp/$pkg365"
+          mkdir -m 700 /tmp/sonante-openssl-365
+          bsdtar -xf "/tmp/$pkg365" -C /tmp/sonante-openssl-365 usr/lib/libssl.so.3 usr/lib/libcrypto.so.3
+          readelf -d /tmp/sonante-openssl-365/usr/lib/libssl.so.3 | grep -F '[libssl.so.3]'
+          readelf -d /tmp/sonante-openssl-365/usr/lib/libcrypto.so.3 | grep -F '[libcrypto.so.3]'
+          LD_LIBRARY_PATH=/tmp/sonante-openssl-365/usr/lib ldd -r /usr/bin/sonante | tee /tmp/sonante-manjaro-365-loader.txt
+          ! grep -E 'not found|undefined symbol|lib(crypto|ssl)\.so\.4' /tmp/sonante-manjaro-365-loader.txt
+          grep -F '/tmp/sonante-openssl-365/usr/lib/libssl.so.3' /tmp/sonante-manjaro-365-loader.txt
+          grep -F '/tmp/sonante-openssl-365/usr/lib/libcrypto.so.3' /tmp/sonante-manjaro-365-loader.txt

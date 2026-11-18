@@ -10,12 +10,13 @@ depends=(
     'alsa-lib'
     'alsa-utils'
     'gtk3'
-    'openssl>=4.0.0'
+    'libcrypto.so=3-64'
+    'libssl.so=3-64'
     'webkit2gtk-4.1'
     'xdg-utils'
     'xdg-desktop-portal'
 )
-makedepends=('git' 'npm' 'rust')
+makedepends=('git' 'npm' 'openssl' 'rust')
 optdepends=(
     'libappindicator: optional system tray indicator'
     'webp-pixbuf-loader: display WebP sidecar album covers'
