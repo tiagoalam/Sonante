@@ -40,7 +40,9 @@ if foreign="$(pacman --config "$config" -Qm 2>&1)"; then
   :
 else
   foreign_status=$?
-  if ((foreign_status == 1)) && [[ "$foreign" == *'no foreign packages found'* ]]; then
+  # pacman 7.1 may represent an empty -Qm result as status 1 with no output;
+  # other releases print the explicit "no foreign packages found" message.
+  if ((foreign_status == 1)) && { [[ -z "$foreign" ]] || [[ "$foreign" == *'no foreign packages found'* ]]; }; then
     foreign=''
   else
     printf 'Could not verify packages outside the pinned Arch snapshot (pacman status %s):\n%s\n' \
