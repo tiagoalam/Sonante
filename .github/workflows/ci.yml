@@ -214,7 +214,7 @@ jobs:
           VERSION="$(node -p "require('../package.json').version")"
           REVISION="$(sed -n 's/^pkgrel=//p' ../sonante-arch/PKGBUILD)"
           grep -Fx "pkgver = $VERSION-$REVISION" package-info.txt
-          for dep in alsa-utils xdg-utils webkit2gtk-4.1; do grep -Fx "depend = $dep" package-info.txt; done
+          for dep in alsa-utils xdg-utils webkit2gtk-4.1 'openssl>=4.0.0'; do grep -Fx "depend = $dep" package-info.txt; done
           bsdtar -tf ./*.pkg.tar.zst | grep -Fx usr/bin/sonante
           desktop-file-validate src/sonante.desktop
           bash ../scripts/inspect-elf.sh src/sonante/src-tauri/target/release/sonante | tee native-abi-arch.txt

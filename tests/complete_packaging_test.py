@@ -40,7 +40,7 @@ class CompletePackagingTests(unittest.TestCase):
 
         info = ('pkgname = sonante\narch = x86_64\ndepend = mpd\ndepend = alsa-lib\n'
                 'depend = mpdclient\ndepend = glibc>=2.35\ndepend = webkit2gtk-4.1>=2.40\n'
-                'depend = pipewire\n')
+                'depend = pipewire\ndepend = openssl\n')
         arch = c.arch_info(info, '0.7.0', '1', '2.35', 10, 123)
         self.assertNotIn('depend = mpd\n', arch)
         self.assertIn('depend = mpdclient\n', arch)
@@ -110,15 +110,42 @@ class CompletePackagingTests(unittest.TestCase):
                 c.verify_checksums(root, 'checksums')
 
     def test_arch_declares_the_native_application_floor_and_keeps_runtime_dependencies(self):
-        original = 'pkgname = sonante\narch = x86_64\npkgver = 0.5.5-10\ndepend = glibc>=2.35\ndepend = pipewire\ndepend = webkit2gtk-4.1>=2.40\noptdepend = wireplumber: Shared volume\n'
+        original = 'pkgname = sonante\narch = x86_64\npkgver = 0.5.5-10\ndepend = glibc>=2.35\ndepend = pipewire\ndepend = webkit2gtk-4.1>=2.40\ndepend = openssl\noptdepend = wireplumber: Shared volume\n'
         result = c.arch_info(original, '0.5.6', '1', '2.43', 123, 10)
         self.assertIn('pkgver = 0.5.6-1\n', result)
         self.assertIn('depend = glibc>=2.43\n', result)
         self.assertNotIn('glibc>=2.35', result)
         self.assertIn('optdepend = wireplumber: Shared volume\n', result)
-        for missing in ['depend = pipewire\n', 'depend = webkit2gtk-4.1>=2.40\n']:
+        self.assertIn('depend = openssl>=4.0.0\n', result)
+        self.assertNotIn('depend = openssl\n', result)
+        for missing in ['depend = pipewire\n', 'depend = webkit2gtk-4.1>=2.40\n', 'depend = openssl\n']:
             with self.subTest(missing=missing), self.assertRaises(ValueError):
                 c.arch_info(original.replace(missing, ''), '0.5.6', '1', '2.43', 123, 10)
+
+    def test_application_needed_gate_allows_only_reviewed_arch_openssl4_sonames(self):
+        baseline = {'libc.so.6', 'libssl.so.3', 'libcrypto.so.3', 'libwayland-client.so.0'}
+        candidate = {'libc.so.6', 'libssl.so.4', 'libcrypto.so.4', 'libwayland-client.so.0'}
+
+        # No change remains valid for every target; the reviewed OpenSSL ABI
+        # transition is valid only for Arch and only as the exact pair.
+        for variant in ('ubuntu', 'fedora', 'arch'):
+            c.verify_application_needed(variant, baseline, baseline)
+        c.verify_application_needed('arch', candidate, baseline)
+        with self.assertRaisesRegex(ValueError, 'Unreviewed application ELF dependencies for ubuntu'):
+            c.verify_application_needed('ubuntu', candidate, baseline)
+        with self.assertRaisesRegex(ValueError, 'Unreviewed application ELF dependencies for fedora'):
+            c.verify_application_needed('fedora', candidate, baseline)
+
+        with self.assertRaisesRegex(ValueError, 'Incomplete reviewed OpenSSL 4 ABI dependency pair for arch'):
+            c.verify_application_needed('arch', baseline | {'libssl.so.4'}, baseline)
+        for extra in ({'libunexpected.so.1'}, {'libcrypto.so.4', 'libunexpected.so.1'}):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, 'candidate=.*baseline=.*new='):
+                c.verify_application_needed('arch', baseline | extra, baseline)
+
+    def test_arch_recipe_requires_openssl4_for_the_candidate_abi(self):
+        recipe = Path('sonante-arch/PKGBUILD').read_text()
+        self.assertIn("'openssl>=4.0.0'", recipe)
+        self.assertNotRegex(recipe, r"(?m)^\s*'openssl'\s*$")
 
     def test_elf_baseline_rejects_unknown_abi_and_does_not_apply_ubuntu_floor_to_arch_app(self):
         for symbol, arch, accepted in [('GLIBC_2.35', False, True), ('GLIBC_2.43', False, False),
@@ -235,7 +262,7 @@ class CompletePackagingTests(unittest.TestCase):
             c.verify_deb_controls(package)
 
             # The Arch result is also encoded and reread, including directory entries and its actual glibc floor.
-            previous = 'pkgname = sonante\narch = x86_64\ndepend = glibc>=2.35\ndepend = pipewire\ndepend = webkit2gtk-4.1>=2.40\n'
+            previous = 'pkgname = sonante\narch = x86_64\ndepend = glibc>=2.35\ndepend = pipewire\ndepend = webkit2gtk-4.1>=2.40\ndepend = openssl\n'
             arch_base_stage = root / 'arch-base-stage'
             arch_base_stage.mkdir()
             c.inspect_package(base, 'ubuntu', arch_base_stage)
@@ -264,6 +291,7 @@ class CompletePackagingTests(unittest.TestCase):
             self.assertEqual(payload[c.RUNTIME + 'mpd-direct']['sha256'], pin)
             self.assertEqual(set(metadata), {'.PKGINFO', '.MTREE'})
             self.assertIn('depend = glibc>=' + result['minimum_glibc'] + '\n', metadata['.PKGINFO']['data'].decode())
+            self.assertIn('depend = openssl>=4.0.0\n', metadata['.PKGINFO']['data'].decode())
             with c.archive_stream(c.package_command(final_arch, 'arch')) as stream:
                 with tarfile.open(fileobj=stream, mode='r|') as archive:
                     self.assertTrue(any(item.isdir() and item.name == 'usr/bin' for item in archive))

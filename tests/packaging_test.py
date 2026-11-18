@@ -37,6 +37,7 @@ class PackagingTests(unittest.TestCase):
         required = [value for kind, _, value in entries if kind == 'required']
         optional = [value.split(':', 1)[0] for kind, _, value in entries if kind == 'optional']
         self.assertNotIn('mpd', required)
+        self.assertIn('openssl>=4.0.0', required)
         self.assertNotIn('libappindicator', required)
         self.assertEqual(optional.count('libappindicator'), 1)
 
@@ -66,6 +67,12 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('runuser -u builder -- makepkg', arch)
         self.assertIn('runuser -u builder -- git -C .. rev-parse HEAD', arch)
         self.assertLess(arch.index('chown -R builder:builder'), arch.index('runuser -u builder -- makepkg'))
+
+    def test_arch_ci_checks_the_reviewed_openssl4_dependency(self):
+        ci = Path('.github/workflows/ci.yml').read_text()
+        arch = ci.split('\n  arch:\n', 1)[1].split('\n  complete:\n', 1)[0]
+        self.assertIn("'openssl>=4.0.0'", arch)
+        self.assertIn('grep -Fx "depend = $dep" package-info.txt', arch)
 
     def test_candidate_source_gate_accepts_only_exact_safe_directory_in_container(self):
         script = Path('scripts/verify-candidate-source.py').resolve()

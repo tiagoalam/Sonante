@@ -25,11 +25,38 @@ RUNTIME = 'usr/lib/sonante/runtimes/v1/'
 MAX_FILE = 128 * 1024 * 1024
 MAX_PAYLOAD = 400 * 1024 * 1024
 VARIANTS = ('ubuntu', 'fedora', 'arch')
+# OpenSSL 4 is the Arch runner's current ABI. Keep this allowlist variant-scoped:
+# Ubuntu and Fedora candidates must continue matching their reviewed baselines.
+REVIEWED_NEW_NEEDED = {
+    'ubuntu': frozenset(),
+    'fedora': frozenset(),
+    'arch': frozenset({'libcrypto.so.4', 'libssl.so.4'}),
+}
 
 
 def require(ok, message):
     if not ok:
         raise ValueError(message)
+
+
+def verify_application_needed(variant, needed, previous_needed):
+    require(variant in REVIEWED_NEW_NEEDED, 'Unknown package variant: ' + str(variant))
+    new = set(needed) - set(previous_needed)
+    reviewed_openssl4 = {'libcrypto.so.4', 'libssl.so.4'}
+    openssl4_added = new & reviewed_openssl4
+    require(not openssl4_added or openssl4_added == reviewed_openssl4,
+            'Incomplete reviewed OpenSSL 4 ABI dependency pair for ' + variant
+            + '; candidate=' + ','.join(sorted(needed))
+            + '; baseline=' + ','.join(sorted(previous_needed))
+            + '; new=' + ','.join(sorted(new)))
+    unreviewed = new - REVIEWED_NEW_NEEDED[variant]
+    require(not unreviewed,
+            'Unreviewed application ELF dependencies for ' + variant
+            + '; candidate=' + ','.join(sorted(needed))
+            + '; baseline=' + ','.join(sorted(previous_needed))
+            + '; new=' + ','.join(sorted(new))
+            + '; rejected=' + ','.join(sorted(unreviewed))
+            + '; reviewed=' + ','.join(sorted(REVIEWED_NEW_NEEDED[variant])))
 
 
 def digest(path, algorithm='sha256'):
@@ -393,11 +420,17 @@ def arch_info(previous, version, revision, glibc, size, epoch):
                 continue
             if key == 'depend' and value.startswith('glibc>='):
                 value = 'glibc>=' + glibc
+            if key == 'depend' and value == 'openssl':
+                # The reviewed Arch candidate links to OpenSSL 4 SONAMEs.
+                # Prevent package managers from treating OpenSSL 3 as enough.
+                value = 'openssl>=4.0.0'
             lines.append(key + ' = ' + value)
     require({'pkgname = sonante', 'arch = x86_64', 'depend = glibc>=' + glibc,
              'depend = webkit2gtk-4.1>=2.40', 'depend = pipewire'} <= set(lines), 'Arch required metadata')
     require('depend = mpd' not in lines, 'System MPD must not be required; Sonante owns a pinned private runtime')
     require('depend = wireplumber' not in lines, 'Required WirePlumber is not supported')
+    require('depend = openssl>=4.0.0' in lines and 'depend = openssl' not in lines,
+            'Arch package must declare the reviewed OpenSSL 4 runtime requirement')
     lines += ['pkgver = ' + version + '-' + revision, 'pkgdesc = Local and Plex music player with pinned audio runtimes',
               'builddate = ' + str(epoch), 'packager = Tiago Alam', 'size = ' + str(size)]
     return '\n'.join(lines) + '\n'
@@ -508,7 +541,7 @@ def assemble(variant, inputs, candidates, work, output, identity, revision):
     require(descriptor in checked_file(app).read_bytes(), 'Application compiled descriptor mismatch')
     _, needed = elf_info(app, variant == 'arch')
     require(bool(needed), 'Application has no dynamic library requirements')
-    require(needed <= previous_needed, 'New application library requires explicit dependency review')
+    verify_application_needed(variant, needed, previous_needed)
     shutil.copyfile(app, stage / 'usr/bin/sonante')
     (stage / 'usr/bin/sonante').chmod(0o755)
     updates = {'usr/share/licenses/sonante/LICENSE': 'LICENSE', 'usr/share/doc/sonante/AUTHORS': 'AUTHORS',
