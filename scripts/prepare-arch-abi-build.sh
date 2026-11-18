@@ -35,7 +35,18 @@ pacman --config "$config" -Syyuu --noconfirm --needed --ignore=archlinux-keyring
   git nodejs npm rust python file binutils gtk3 webkit2gtk-4.1 \
   alsa-lib alsa-utils openssl xdg-utils xdg-desktop-portal desktop-file-utils
 
-foreign="$(pacman --config "$config" -Qm)"
+if foreign="$(pacman --config "$config" -Qm 2>&1)"; then
+  :
+else
+  foreign_status=$?
+  if ((foreign_status == 1)) && [[ "$foreign" == *'no foreign packages found'* ]]; then
+    foreign=''
+  else
+    printf 'Could not verify packages outside the pinned Arch snapshot (pacman status %s):\n%s\n' \
+      "$foreign_status" "$foreign" >&2
+    exit "$foreign_status"
+  fi
+fi
 if [[ -n "$foreign" ]]; then
   printf 'Packages outside the pinned Arch snapshot remain installed:\n%s\n' "$foreign" >&2
   exit 1
