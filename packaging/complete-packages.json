@@ -10,7 +10,9 @@
       "bytes": 83413924,
       "payload_files": 171,
       "descriptor": "packaging/private-runtimes.json",
-      "descriptor_sha256": "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769"
+      "descriptor_sha256": "13368d6e4e114964f9a80e481ae02e6a2fb1289747ded6232c7562bf675872a4",
+      "baseline_descriptor": "packaging/qualified-0.5.4/ubuntu-arch.runtime.json",
+      "baseline_descriptor_sha256": "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769"
     },
     "fedora": {
       "filename": "sonante-0.5.5-10.x86_64.rpm",
@@ -19,7 +21,9 @@
       "bytes": 82896717,
       "payload_files": 174,
       "descriptor": "packaging/qualified-0.5.4/fedora.runtime.json",
-      "descriptor_sha256": "c93f1ac2dc06a8dcee5101858381efc265c3907e50dc2a334a11d293a21cf02f"
+      "descriptor_sha256": "c93f1ac2dc06a8dcee5101858381efc265c3907e50dc2a334a11d293a21cf02f",
+      "baseline_descriptor": "packaging/qualified-0.5.4/fedora.runtime.json",
+      "baseline_descriptor_sha256": "c93f1ac2dc06a8dcee5101858381efc265c3907e50dc2a334a11d293a21cf02f"
     },
     "arch": {
       "filename": "sonante-0.5.5-10-x86_64.pkg.tar.zst",
@@ -27,8 +31,10 @@
       "sha256": "c00bb1acc2a4a2f0d126501e1407773e90cbd48ae36d051519f1272c3a0aabc4",
       "bytes": 102845158,
       "payload_files": 171,
-      "descriptor": "packaging/private-runtimes.json",
-      "descriptor_sha256": "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769"
+      "descriptor": "packaging/qualified-0.5.4/ubuntu-arch.runtime.json",
+      "descriptor_sha256": "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769",
+      "baseline_descriptor": "packaging/qualified-0.5.4/ubuntu-arch.runtime.json",
+      "baseline_descriptor_sha256": "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769"
     }
   },
   "sources": [
@@ -44,5 +50,17 @@
       "sha256": "b6ed25e1c11614ab5e07c3112710f9309a1ad211a321d05220dc18c187880533",
       "bytes": 1071301
     }
-  ]
+  ],
+  "sources_by_variant": {
+    "ubuntu": [
+      "runtime-source-materials-consumer-clock.tar.zst"
+    ],
+    "fedora": [
+      "runtime-source-materials-consumer-clock.tar.zst",
+      "fedora-compat-source-materials-20261020.3.tar.zst"
+    ],
+    "arch": [
+      "runtime-source-materials-consumer-clock.tar.zst"
+    ]
+  }
 }

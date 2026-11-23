@@ -32,6 +32,62 @@ test('reader handles empty/failure and continues updates, with no reads while hi
  await new Promise(r=>setTimeout(r,8));reader.setActive(false);assert.ok(states.some(s=>s.items[0]===plex));const last=calls;
  await new Promise(r=>setTimeout(r,12));assert.equal(calls,last);
 });
+test('uncertain read retains the last snapshot as unknown until an authoritative response arrives',async()=>{
+ let calls=0;const states=[];
+ const reader=new QueuePreviewReader(async()=>{
+  calls++;
+  if(calls===1)return [local];
+  if(calls===2)throw 'PLAYBACK_QUEUE_UNCERTAIN';
+  return [];
+ },state=>states.push(state),5);
+ reader.setActive(true);await flush();assert.deepEqual(states.at(-1),{items:[local],phase:'ready'});
+ await new Promise(resolve=>setTimeout(resolve,8));
+ assert.deepEqual(states.at(-1),{items:[local],phase:'uncertain'});
+ reader.setActive(false);reader.setActive(true);
+ assert.deepEqual(states.at(-1),{items:[local],phase:'uncertain'},'reopening must not present the old snapshot as current');
+ await flush();assert.deepEqual(states.at(-1),{items:[],phase:'ready'},'a confirmed empty queue replaces the old snapshot');
+ reader.setActive(false);
+});
+test('older queue responses cannot overwrite a newer confirmed snapshot',async()=>{
+ const first=deferred(),second=deferred(),states=[];let calls=0;
+ const reader=new QueuePreviewReader(()=>++calls===1?first.promise:second.promise,state=>states.push(state),10000);
+ reader.setActive(true);reader.refresh();
+ second.resolve([plex]);await flush();first.resolve([local]);await flush();
+ assert.deepEqual(states.at(-1),{items:[plex],phase:'ready'});
+ reader.setActive(false);
+});
+test('backend uncertainty invalidates an in-flight snapshot until a fresh read confirms recovery',async()=>{
+ const pending=deferred(),states=[];let calls=0;
+ const reader=new QueuePreviewReader(()=>{
+  calls++;
+  if(calls===1)return Promise.resolve([local]);
+  if(calls===2)return pending.promise;
+  return Promise.resolve([]);
+ },state=>states.push(state),10000);
+ reader.setActive(true);await flush();reader.refresh();assert.equal(calls,2);
+ reader.setActive(false);reader.markUncertain();pending.resolve([plex]);await flush();
+ assert.deepEqual(states.at(-1),{items:[local],phase:'uncertain'});
+ reader.setActive(true);await flush();
+ assert.deepEqual(states.at(-1),{items:[],phase:'ready'});
+ reader.setActive(false);
+});
+test('a transport failure after uncertainty cannot make the old snapshot current again',async()=>{
+ const states=[];let calls=0;
+ const reader=new QueuePreviewReader(async()=>{
+  calls++;
+  if(calls===1)return [local];
+  if(calls===2)throw 'PLAYBACK_QUEUE_UNCERTAIN';
+  if(calls===3)throw new Error('transient socket failure');
+  return [plex];
+ },state=>states.push(state),5);
+ reader.setActive(true);await flush();await new Promise(resolve=>setTimeout(resolve,8));
+ assert.equal(states.at(-1).phase,'uncertain');
+ reader.setActive(false);reader.setActive(true);await flush();
+ assert.deepEqual(states.at(-1),{items:[local],phase:'uncertain'});
+ await new Promise(resolve=>setTimeout(resolve,8));
+ assert.deepEqual(states.at(-1),{items:[plex],phase:'ready'});
+ reader.setActive(false);
+});
 test('unavailable/closed queue discards failures as well as stale success',async()=>{
  const pending=deferred(),states=[];const reader=new QueuePreviewReader(()=>pending.promise,s=>states.push(s));
  reader.setActive(true);reader.setActive(false);pending.reject(Error('offline'));await flush();assert.deepEqual(states.map(s=>s.phase),['loading']);

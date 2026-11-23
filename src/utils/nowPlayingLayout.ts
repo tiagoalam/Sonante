@@ -1,4 +1,4 @@
-export const NOW_PLAYING_LAYOUTS = ["audiophile", "psycho", "sleeve", "poster"] as const;
+export const NOW_PLAYING_LAYOUTS = ["audiophile", "psycho", "sleeve", "poster", "lyrics"] as const;
 export type NowPlayingLayout = typeof NOW_PLAYING_LAYOUTS[number];
 export type PsychoPlacement = "frame" | "background";
 export interface NowPlayingLook { layout: NowPlayingLayout; psychoPlacement: PsychoPlacement; }
@@ -37,7 +37,8 @@ export function normalizeQueuePanels(value: unknown): NowPlayingQueuePanels {
   return { audiophile: typeof data.audiophile === "boolean" ? data.audiophile : true,
     psycho: typeof data.psycho === "boolean" ? data.psycho : true,
     sleeve: typeof data.sleeve === "boolean" ? data.sleeve : true,
-    poster: typeof data.poster === "boolean" ? data.poster : true };
+    poster: typeof data.poster === "boolean" ? data.poster : true,
+    lyrics: typeof data.lyrics === "boolean" ? data.lyrics : true };
 }
 export function parseQueuePanels(value: string | null): NowPlayingQueuePanels {
   try { return normalizeQueuePanels(value ? JSON.parse(value) : null); }

@@ -980,23 +980,60 @@ fn is_pcm_format(value: &str) -> bool {
         && fields[2].parse::<u8>().is_ok_and(|channels| channels > 0)
 }
 
-// Only the two supervisor-owned outputs are accepted. Unknown, disabled,
-// duplicate or extra outputs cannot grant permission to analyze DSD.
+// Only a supervisor-owned shared PCM route plus the analyzer FIFO is accepted.
+// Shared without EQ uses the named ALSA output; Shared with EQ uses the
+// supervisor's private CamillaDSP FIFO. Unknown, disabled, duplicate or extra
+// outputs cannot grant permission to analyze DSD.
 fn shared_pcm_outputs(lines: &[String]) -> bool {
     let auxiliary = crate::supervisor::MpdSupervisor::ANALYZER_OUTPUT_NAME;
-    let Ok((shared_id, true)) = auxiliary_output_state(lines, "Sonante Shared") else { return false; };
-    let Ok((aux_id, _)) = auxiliary_output_state(lines, auxiliary) else { return false; };
-    if shared_id == aux_id || lines.iter().filter(|line| line.starts_with("outputid: ")).count() != 2 {
+    let blocks: Vec<_> = lines
+        .split(|line| line.starts_with("outputid: "))
+        .skip(1)
+        .collect();
+    if blocks.len() != 2 || lines.iter().filter(|line| line.starts_with("outputid: ")).count() != 2 {
         return false;
     }
-    for block in lines.split(|line| line.starts_with("outputid: ")).skip(1) {
-        match unique_value(block, "outputname: ") {
-            Some("Sonante Shared") if unique_value(block, "plugin: ") == Some("alsa") => {},
-            Some(name) if name == auxiliary && unique_value(block, "plugin: ") == Some("fifo") => {},
-            _ => return false,
-        }
+    // MPD's outputid line is the separator passed to `split`, so collect IDs
+    // from the original response and pair them with their corresponding blocks.
+    let Some(ids) = lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("outputid: "))
+        .map(|id| id.parse::<u32>().ok())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    if ids[0] == ids[1] {
+        return false;
     }
-    true
+    let Ok((aux_id, _)) = auxiliary_output_state(lines, auxiliary) else { return false; };
+    let Some(aux_index) = blocks.iter().position(|block| unique_value(block, "outputname: ") == Some(auxiliary)) else {
+        return false;
+    };
+    if ids[aux_index] != aux_id { return false; }
+    let aux_block = blocks[aux_index];
+    if unique_value(aux_block, "outputname: ") != Some(auxiliary)
+        || unique_value(aux_block, "plugin: ") != Some("fifo")
+    {
+        return false;
+    }
+
+    let Some(primary_index) = (0..blocks.len()).find(|index| *index != aux_index) else {
+        return false;
+    };
+    let primary = blocks[primary_index];
+    let primary_name = unique_value(primary, "outputname: ");
+    let expected_plugin = match primary_name {
+        Some("Sonante Shared") => "alsa",
+        // This output is generated only for the Shared route and feeds the
+        // private CamillaDSP runtime. Its fixed PCM FIFO is a valid source for
+        // the separate analyzer output even though no ALSA output is active.
+        Some(name) if name == crate::supervisor::MpdSupervisor::SHARED_EQ_OUTPUT_NAME => "fifo",
+        _ => return false,
+    };
+    unique_value(primary, "plugin: ") == Some(expected_plugin)
+        && unique_value(primary, "outputenabled: ") == Some("1")
+        && ids[primary_index] != aux_id
 }
 
 fn is_dsd_format(value: &str) -> bool {
@@ -1209,6 +1246,7 @@ mod tests {
         fail: Option<&'static str>,
         ignore_enable: bool,
         primary_shared: bool,
+        primary_shared_eq: bool,
     }
 
     impl ReconcileIo {
@@ -1228,6 +1266,7 @@ mod tests {
                 fail: None,
                 ignore_enable: false,
                 primary_shared: false,
+                primary_shared_eq: false,
             }
         }
 
@@ -1242,8 +1281,8 @@ mod tests {
                 "currentsong" => Ok(self.song.clone()),
                 "outputs" => Ok(vec![
                     "outputid: 7".into(),
-                    format!("outputname: {}", if self.primary_shared { "Sonante Shared" } else { "Sonante Output" }),
-                    "plugin: alsa".into(),
+                    format!("outputname: {}", if self.primary_shared_eq { "Sonante Shared EQ" } else if self.primary_shared { "Sonante Shared" } else { "Sonante Output" }),
+                    if self.primary_shared_eq { "plugin: fifo".into() } else { "plugin: alsa".into() },
                     "outputenabled: 1".into(),
                     "outputid: 12".into(),
                     "outputname: Sonante Analyzer".into(),
@@ -1297,6 +1336,29 @@ mod tests {
     }
 
     #[test]
+    fn shared_eq_dsd_with_pcm_output_enables_only_analyzer_fifo() {
+        let stop = AtomicBool::new(false);
+        let mut io = ReconcileIo::pcm(false);
+        io.primary_shared_eq = true;
+        io.status[3] = "audio: 48000:24:2".into();
+        io.song[0] = "file: fixture/tone.dsf".into();
+        let outputs = io.send("outputs").unwrap();
+        assert!(shared_pcm_outputs(&outputs), "{outputs:?}");
+
+        assert_eq!(io.reconcile(&stop).unwrap(), None);
+        assert!(io.enabled);
+        assert_eq!(io.transitions(), ["enableoutput 12"]);
+
+        // The same DSF over an unselected, wrong, or ambiguous primary route
+        // remains rejected; only the supervisor's recognized Shared/EQ FIFO
+        // paired with the analyzer output can authorize PCM observation.
+        io.primary_shared_eq = false;
+        assert_eq!(io.reconcile(&stop).unwrap(), Some("current_file_is_dsd"));
+        assert!(!io.enabled);
+        assert_eq!(io.transitions(), ["enableoutput 12", "disableoutput 12"]);
+    }
+
+    #[test]
     fn shared_dsd_still_requires_consistent_track_and_valid_audio_metadata() {
         let stop=AtomicBool::new(false);
         for format in ["", "dsdsecret:2", "dsd64:0", "dsd64:2:1", "0:dsd:2", "352800:dsd:0"] {
@@ -1320,6 +1382,16 @@ mod tests {
         let mut bad=outputs.clone();bad.push("outputenabled: 1".into());assert!(!shared_pcm_outputs(&bad));
         let mut bad=outputs.clone();bad.push("plugin: fifo".into());assert!(!shared_pcm_outputs(&bad));
         assert!(!shared_pcm_outputs(&[]));
+
+        let mut eq=ReconcileIo::pcm(false);eq.primary_shared_eq=true;
+        let eq_outputs=eq.send("outputs").unwrap();assert!(shared_pcm_outputs(&eq_outputs));
+        for (old,new) in [("Sonante Shared EQ","Sonante Output"),("outputenabled: 1","outputenabled: 0"),
+            ("plugin: fifo","plugin: alsa")] {
+            let bad:Vec<_>=eq_outputs.iter().map(|line|line.replacen(old,new,1)).collect();
+            assert!(!shared_pcm_outputs(&bad),"EQ topology {old} -> {new}");
+        }
+        let mut bad=eq_outputs.clone();bad.extend(eq_outputs[..4].iter().cloned());
+        assert!(!shared_pcm_outputs(&bad));
     }
 
     #[test]

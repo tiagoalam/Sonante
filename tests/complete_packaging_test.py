@@ -52,8 +52,84 @@ class CompletePackagingTests(unittest.TestCase):
         for variant, entry in inputs['packages'].items():
             self.assertEqual(entry['url'], 'https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/' + entry['filename'])
             self.assertEqual(hashlib.sha256(Path(entry['descriptor']).read_bytes()).hexdigest(), entry['descriptor_sha256'])
+            self.assertEqual(hashlib.sha256(Path(entry['baseline_descriptor']).read_bytes()).hexdigest(), entry['baseline_descriptor_sha256'])
             self.assertEqual(entry['payload_files'], 174 if variant == 'fedora' else 171)
+        ubuntu = inputs['packages']['ubuntu']
+        baseline = json.loads(Path(ubuntu['baseline_descriptor']).read_text())
+        target = json.loads(Path(ubuntu['descriptor']).read_text())
+        self.assertEqual(baseline['binaries'], target['binaries'])
+        self.assertEqual(set(baseline['resources']['mpd-direct']) - set(target['resources']['mpd-direct']), {'lib/libnettle.so.8'})
+        self.assertEqual(set(baseline['resources']['mpd-eq']) - set(target['resources']['mpd-eq']), {'lib/libnettle.so.8'})
+        for variant in ['fedora', 'arch']:
+            entry = inputs['packages'][variant]
+            self.assertEqual(Path(entry['descriptor']).read_bytes(), Path(entry['baseline_descriptor']).read_bytes())
         self.assertEqual(len(inputs['sources']), 2)
+        self.assertEqual(inputs['sources_by_variant'], {
+            'ubuntu': ['runtime-source-materials-consumer-clock.tar.zst'],
+            'fedora': ['runtime-source-materials-consumer-clock.tar.zst',
+                       'fedora-compat-source-materials-20261020.3.tar.zst'],
+            'arch': ['runtime-source-materials-consumer-clock.tar.zst'],
+        })
+
+    def test_variant_selection_defaults_to_all_and_rejects_duplicates_or_unknowns(self):
+        self.assertEqual(c.selected_variants(None), ['ubuntu', 'fedora', 'arch'])
+        self.assertEqual(c.selected_variants(['arch', 'ubuntu']), ['ubuntu', 'arch'])
+        for request in (['ubuntu', 'ubuntu'], ['unknown']):
+            with self.subTest(request=request), self.assertRaises(ValueError):
+                c.selected_variants(request)
+
+    def test_platform_inputs_are_independent_and_keep_only_required_source_materials(self):
+        runtime = {'filename': 'runtime.tar.zst'}
+        fedora = {'filename': 'fedora.tar.zst'}
+        inputs = {'schema': 1, 'packages': {name: {'filename': name} for name in c.VARIANTS},
+                  'sources': [runtime, fedora],
+                  'sources_by_variant': {'ubuntu': ['runtime.tar.zst'],
+                                         'fedora': ['runtime.tar.zst', 'fedora.tar.zst'],
+                                         'arch': ['runtime.tar.zst']}}
+        packages, sources = c.inputs_for_variants(inputs, ['ubuntu'])
+        self.assertEqual(set(packages), {'ubuntu'})
+        self.assertEqual(sources, [runtime])
+        packages, sources = c.inputs_for_variants(inputs, ['arch'])
+        self.assertEqual(set(packages), {'arch'})
+        self.assertEqual(sources, [runtime])
+        packages, sources = c.inputs_for_variants(inputs, ['fedora'])
+        self.assertEqual(set(packages), {'fedora'})
+        self.assertEqual(sources, [runtime, fedora])
+        invalid = {**inputs, 'sources_by_variant': {**inputs['sources_by_variant'], 'arch': ['missing.tar.zst']}}
+        with self.assertRaisesRegex(ValueError, 'unknown source material'):
+            c.inputs_for_variants(invalid, ['arch'])
+
+    def test_existing_candidate_source_requires_exact_unchanged_installer_assets(self):
+        with tempfile.TemporaryDirectory(prefix='sn-complete-candidate-source-') as directory:
+            root = Path(directory)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            subprocess.run(['git', '-C', str(root), 'config', 'user.name', 'Sonante test'], check=True)
+            subprocess.run(['git', '-C', str(root), 'config', 'user.email', 'test@example.invalid'], check=True)
+            paths = ['package.json', 'src-tauri/Cargo.toml', 'src-tauri/tauri.conf.json',
+                     'sonante-arch/PKGBUILD', 'packaging/private-runtimes.json',
+                     'packaging/qualified-0.5.4/ubuntu-arch.runtime.json',
+                     'packaging/qualified-0.5.4/fedora.runtime.json', 'LICENSE', 'AUTHORS',
+                     'THIRD_PARTY_NOTICES', 'sonante-arch/sonante.desktop',
+                     'src-tauri/icons/32x32.png', 'src-tauri/icons/128x128.png',
+                     'src-tauri/icons/128x128@2x.png', 'src-tauri/icons/icon.png']
+            for name in paths:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{"version":"0.7.1"}\n' if name == 'package.json' else 'fixture\n')
+            subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(root), 'commit', '-qm', 'candidate source'], check=True)
+            candidate = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            (root / 'packaging-tool.txt').write_text('new assembly tool\n')
+            subprocess.run(['git', '-C', str(root), 'add', 'packaging-tool.txt'], check=True)
+            subprocess.run(['git', '-C', str(root), 'commit', '-qm', 'packaging tools'], check=True)
+            with patch.object(c, 'ROOT', root):
+                selected = c.source_identity(candidate)
+                self.assertEqual(selected['commit'], candidate)
+                self.assertNotEqual(selected['assembler_commit'], candidate)
+                (root / 'src-tauri/icons/icon.png').write_text('changed icon\n')
+                subprocess.run(['git', '-C', str(root), 'commit', '-qam', 'changed package asset'], check=True)
+                with self.assertRaisesRegex(ValueError, 'assets changed'):
+                    c.source_identity(candidate)
 
     def test_payload_hashes_and_modes_are_measured_from_the_archive(self):
         files, meta = c.read_payload(archive_bytes([('usr/bin/sonante', b'application', {'mode': 0o755})]))
@@ -151,7 +227,12 @@ class CompletePackagingTests(unittest.TestCase):
         build = Path('scripts/prepare-arch-abi-build.sh').read_text()
         self.assertIn("snapshot='2026/07/24'", build)
         self.assertIn('--ignore=archlinux-keyring', build)
-        self.assertIn('DisableDownloadTimeout', build)
+        self.assertIn('SigLevel = Required DatabaseOptional', build)
+        self.assertIn('curl git nodejs npm rust', build)
+        self.assertIn('--retry 4 --retry-connrefused --retry-delay 5', build)
+        self.assertIn('--connect-timeout 45 --max-time 900', build)
+        self.assertIn('--retry-max-time 1200', build)
+        self.assertNotIn('DisableDownloadTimeout', build)
         self.assertIn('[[ -z "$foreign" ]]', build)
         self.assertIn("'no foreign packages found'", build)
         self.assertIn('Could not verify packages outside the pinned Arch snapshot', build)
@@ -211,6 +292,47 @@ class CompletePackagingTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Private source'):
                     c.source_archive(root, identity, '2')
 
+    def test_source_material_manifest_keeps_pinned_provenance_without_copying_archives(self):
+        with tempfile.TemporaryDirectory(prefix='sn-source-manifest-') as directory:
+            root = Path(directory)
+            output, inputs = root / 'output', root / 'inputs'
+            output.mkdir()
+            inputs.mkdir()
+            content = b'synthetic corresponding source material'
+            name = 'runtime-source-fixture.tar.zst'
+            (inputs / name).write_bytes(content)
+            entry = {'filename': name,
+                     'url': 'https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/' + name,
+                     'sha256': hashlib.sha256(content).hexdigest(), 'bytes': len(content)}
+            manifest_name = c.write_source_materials_manifest(output, [entry], inputs)
+            manifest = json.loads((output / manifest_name).read_text())
+            self.assertEqual(manifest['sources'], [{key: entry[key] for key in ['filename', 'url', 'sha256', 'bytes']}])
+            self.assertFalse((output / name).exists())
+            (inputs / name).write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'Pinned input size/SHA256 mismatch'):
+                c.write_source_materials_manifest(output, [entry], inputs)
+
+    def test_source_material_manifest_rejects_unapproved_origin(self):
+        with tempfile.TemporaryDirectory(prefix='sn-source-manifest-origin-') as directory:
+            root = Path(directory)
+            output, inputs = root / 'output', root / 'inputs'
+            output.mkdir()
+            inputs.mkdir()
+            name = 'runtime-source-fixture.tar.zst'
+            entry = {'filename': name, 'url': 'http://example.invalid/' + name,
+                     'sha256': 'a' * 64, 'bytes': 10}
+            with self.assertRaisesRegex(ValueError, 'Unapproved corresponding source origin'):
+                c.write_source_materials_manifest(output, [entry], inputs)
+
+    def test_source_material_contract_rejects_each_missing_required_field(self):
+        entry = {'filename': 'fixture-sources.tar.zst',
+                 'url': 'https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/fixture-sources.tar.zst',
+                 'sha256': 'a' * 64, 'bytes': 1}
+        self.assertEqual(c.source_material_records([entry]), [entry])
+        for field in ['filename', 'url', 'sha256', 'bytes']:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                c.source_material_records([{key: value for key, value in entry.items() if key != field}])
+
     @unittest.skipUnless(all(shutil.which(tool) for tool in ['dpkg-deb', 'readelf', 'cc', 'bsdtar', 'zstd']), 'Packaging/readelf/C compiler tools required')
     def test_complete_deb_and_arch_replace_the_application_and_preserve_pinned_runtimes(self):
         # Compile a minimal ELF for its headers/symbols; never launch it or any audio engine.
@@ -220,10 +342,16 @@ class CompletePackagingTests(unittest.TestCase):
             for path in [source, inputs_dir, tasks, output]:
                 path.mkdir()
             pin = hashlib.sha256(b'fixture runtime').hexdigest()
+            nettle_pin = hashlib.sha256(b'fixture nettle').hexdigest()
+            baseline_descriptor = json.dumps({'schema': 2, 'install_root': '/' + c.RUNTIME.rstrip('/'),
+                                     'binaries': {name: pin for name in ['mpd-direct', 'mpd-eq', 'camilladsp']},
+                                     'resources': {'mpd-direct': {'lib/libnettle.so.8': nettle_pin},
+                                                   'mpd-eq': {'lib/libnettle.so.8': nettle_pin}}}).encode()
             descriptor = json.dumps({'schema': 2, 'install_root': '/' + c.RUNTIME.rstrip('/'),
                                      'binaries': {name: pin for name in ['mpd-direct', 'mpd-eq', 'camilladsp']}, 'resources': {}}).encode()
             (source / 'packaging').mkdir()
             (source / 'packaging/runtime.json').write_bytes(descriptor)
+            (source / 'packaging/runtime-baseline.json').write_bytes(baseline_descriptor)
             program = root / 'fixture.c'
             # Build tiny versioned SONAME fixtures rather than linking to the
             # host's OpenSSL (which may be ABI 4). This validates package gates
@@ -249,6 +377,7 @@ class CompletePackagingTests(unittest.TestCase):
                             '-Wl,-z,nopack-relative-relocs', '-Wl,-rpath,' + str(library_dir), '-o', str(binary)],
                            check=True, capture_output=True)
             application = binary.read_bytes() + descriptor
+            arch_application = binary.read_bytes() + baseline_descriptor
             sources = {'LICENSE': b'fixture license', 'AUTHORS': b'fixture authors', 'THIRD_PARTY_NOTICES': b'fixture notices',
                        'sonante-arch/sonante.desktop': b'fixture desktop',
                        **{'src-tauri/icons/' + name: b'fixture icon' for name in ['32x32.png', '128x128.png', '128x128@2x.png', 'icon.png']}}
@@ -256,14 +385,18 @@ class CompletePackagingTests(unittest.TestCase):
                 path = source / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
-            sidecar = {'filename': 'fixture-sources', 'sha256': 'a' * 64, 'bytes': 1}
+            sidecar = {'filename': 'fixture-sources',
+                       'url': 'https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/fixture-sources',
+                       'sha256': 'a' * 64, 'bytes': 1}
             files = {'usr/bin/sonante': application,
-                     c.RUNTIME + 'manifest.json': descriptor,
+                     c.RUNTIME + 'manifest.json': baseline_descriptor,
+                     c.RUNTIME + 'lib/libnettle.so.8': b'fixture nettle',
                      **{c.RUNTIME + name: b'fixture runtime' for name in ['mpd-direct', 'mpd-eq', 'camilladsp']},
                      'usr/share/licenses/sonante/LICENSE': b'old fixture license',
                      'usr/share/doc/sonante/AUTHORS': b'old authors', 'usr/share/doc/sonante/THIRD_PARTY_NOTICES': b'old notices',
                      'usr/share/doc/sonante/RELEASE-BUILD.json': b'{}',
-                     'usr/share/doc/sonante/runtime-inventory.json': json.dumps({'distribution_ready': True, 'source_trees_installed': False, 'source_sidecar': sidecar}).encode(),
+                     'usr/share/doc/sonante/runtime-inventory.json': json.dumps({'distribution_ready': True, 'source_trees_installed': False, 'source_sidecar': sidecar,
+                         'system_libraries': [], 'arch_packages': []}).encode(),
                      'usr/share/applications/sonante.desktop': b'old desktop',
                      **{'usr/share/icons/hicolor/' + size + '/apps/sonante.png': b'old icon'
                         for size in ['32x32', '128x128', '256x256', '512x512']}}
@@ -291,7 +424,9 @@ class CompletePackagingTests(unittest.TestCase):
             sums = native / 'SHA256SUMS-ubuntu.txt'
             sums.write_text(''.join(c.digest(p) + '  ' + p.name + '\n' for p in [candidate, native / 'source-commit.txt']))
             entry = {'filename': base.name, 'bytes': base.stat().st_size, 'sha256': c.digest(base), 'payload_files': len(files),
-                     'descriptor': 'packaging/runtime.json', 'descriptor_sha256': hashlib.sha256(descriptor).hexdigest()}
+                     'descriptor': 'packaging/runtime.json', 'descriptor_sha256': hashlib.sha256(descriptor).hexdigest(),
+                     'baseline_descriptor': 'packaging/runtime-baseline.json',
+                     'baseline_descriptor_sha256': hashlib.sha256(baseline_descriptor).hexdigest()}
             identity = {'version': '0.5.6', 'commit': 'b' * 40, 'tree': 'c' * 40, 'epoch': 1}
             with patch.object(c, 'ROOT', source):
                 receipt = c.assemble('ubuntu', {'packages': {'ubuntu': entry}, 'sources': [sidecar]}, candidates, tasks, output, identity, '1')
@@ -300,10 +435,19 @@ class CompletePackagingTests(unittest.TestCase):
             self.assertEqual(receipt['version'], '0.5.6')
             self.assertEqual(receipt['revision'], '1')
             self.assertEqual(receipt['application_sha256'], hashlib.sha256(application).hexdigest())
-            self.assertEqual(set(payload), set(files))
+            self.assertEqual(set(payload), set(files) - {c.RUNTIME + 'lib/libnettle.so.8'})
             self.assertEqual(payload[c.RUNTIME + 'mpd-direct']['sha256'], pin)
+            self.assertEqual(payload[c.RUNTIME + 'manifest.json']['sha256'], hashlib.sha256(descriptor).hexdigest())
             self.assertEqual(payload['usr/share/licenses/sonante/LICENSE']['sha256'], hashlib.sha256(sources['LICENSE']).hexdigest())
             self.assertEqual(c.run('dpkg-deb', '-f', package, 'Version').strip(), '0.5.6-1')
+            self.assertIn('libnettle8 | libnettle8t64', c.run('dpkg-deb', '-f', package, 'Depends'))
+            extracted = root / 'deb-extracted'
+            subprocess.run(['dpkg-deb', '-x', str(package), str(extracted)], check=True, capture_output=True)
+            self.assertFalse((extracted / c.RUNTIME / 'lib/libnettle.so.8').exists())
+            self.assertEqual(hashlib.sha256((extracted / c.RUNTIME / 'mpd-direct').read_bytes()).hexdigest(), pin)
+            inventory = json.loads((extracted / 'usr/share/doc/sonante/runtime-inventory.json').read_text())
+            self.assertIn('libnettle.so.8', inventory['system_libraries'])
+            self.assertIn('nettle', inventory['arch_packages'])
             c.verify_deb_controls(package)
 
             # The Arch result is also encoded and reread, including directory entries and its actual glibc floor.
@@ -315,11 +459,12 @@ class CompletePackagingTests(unittest.TestCase):
             arch_work = root / 'arch-work'
             arch_work.mkdir()
             c.build_arch(previous, arch_base_stage, arch_base, arch_work, '0.5.5', '10', '2.35', 1)
-            native_arch = candidates / 'arch'
-            native_arch.mkdir()
+            arch_candidates = root / 'arch-candidates'
+            native_arch = arch_candidates / 'arch'
+            native_arch.mkdir(parents=True)
             native_stage = root / 'native-arch-stage'
             (native_stage / 'usr/bin').mkdir(parents=True)
-            (native_stage / 'usr/bin/sonante').write_bytes(application)
+            (native_stage / 'usr/bin/sonante').write_bytes(arch_application)
             (native_stage / 'usr/bin/sonante').chmod(0o755)
             candidate_work = root / 'candidate-arch-work'
             candidate_work.mkdir()
@@ -327,10 +472,15 @@ class CompletePackagingTests(unittest.TestCase):
             c.build_arch(previous, native_stage, arch_candidate, candidate_work, '0.5.6', '1', '2.35', 1)
             (native_arch / 'source-commit.txt').write_text(identity['commit'] + '\n')
             (native_arch / 'SHA256SUMS-arch.txt').write_text(''.join(c.digest(p) + '  ' + p.name + '\n' for p in [arch_candidate, native_arch / 'source-commit.txt']))
-            arch_entry = {**entry, 'filename': arch_base.name, 'bytes': arch_base.stat().st_size, 'sha256': c.digest(arch_base)}
+            arch_entry = {**entry, 'filename': arch_base.name, 'bytes': arch_base.stat().st_size, 'sha256': c.digest(arch_base),
+                          'descriptor': 'packaging/runtime-baseline.json',
+                          'descriptor_sha256': hashlib.sha256(baseline_descriptor).hexdigest()}
             with patch.object(c, 'ROOT', source):
-                result = c.assemble('arch', {'packages': {'arch': arch_entry}, 'sources': [sidecar]}, candidates, tasks, output, identity, '1')
-            final_arch = output / result['package']
+                arch_tasks, arch_output = root / 'arch-build', root / 'arch-output'
+                arch_tasks.mkdir()
+                arch_output.mkdir()
+                result = c.assemble('arch', {'packages': {'arch': arch_entry}, 'sources': [sidecar]}, arch_candidates, arch_tasks, arch_output, identity, '1')
+            final_arch = arch_output / result['package']
             payload, metadata = c.inspect_package(final_arch, 'arch')
             self.assertEqual(set(payload), set(files))
             self.assertEqual(payload[c.RUNTIME + 'mpd-direct']['sha256'], pin)

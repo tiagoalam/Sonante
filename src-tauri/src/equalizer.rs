@@ -8,7 +8,7 @@ use std::sync::{atomic::{AtomicU64, Ordering}, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const FILE_NAME: &str = "equalizer-shared-v1.json";
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 3;
 const FLAT_ID: &str = "flat";
 const MAX_USER_PRESETS: usize = 64;
 pub(crate) const MAX_BANDS: usize = 10; // Shared V1: bounded ten-band product UI.
@@ -47,6 +47,8 @@ pub enum EqError {
     InvalidBandCount,
     TooManyPresets,
     InvalidEquipment,
+    TooManyEquipmentPresets,
+    EquipmentPresetMissing,
     PresetInUse,
     FileTooLarge,
     IdGenerationFailed,
@@ -55,7 +57,7 @@ pub enum EqError {
     UnsafeOverwrite(Box<EqError>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PresetRef {
     BuiltIn { id: String },
@@ -96,12 +98,34 @@ pub struct EqPreset {
     pub bands: Vec<EqBand>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EquipmentCategory {
+    #[default]
+    Headphones,
+    Speakers,
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EquipmentProfile {
     pub id: String,
     pub name: String,
-    pub preset: PresetRef,
+    #[serde(default)]
+    pub category: EquipmentCategory,
+    #[serde(default)]
+    pub manufacturer: Option<String>,
+    #[serde(default)]
+    pub opra_vendor_id: Option<String>,
+    #[serde(default)]
+    pub opra_product_id: Option<String>,
+    #[serde(default)]
+    pub presets: Vec<PresetRef>,
+    // `preset` is the schema-v1 field. Read it as the preferred preset while
+    // migrating old files; schema-v2 and later write explicit associations.
+    #[serde(default, alias = "preset")]
+    pub preferred_preset: Option<PresetRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -500,9 +524,11 @@ pub(crate) fn catalog_built_ins(config: &EqualizerConfig) -> Vec<EqPreset> {
     if let PresetRef::BuiltIn { id } = &config.active_preset {
         referenced.push(id.as_str());
     }
-    referenced.extend(config.equipment_profiles.iter().filter_map(|profile| match &profile.preset {
-        PresetRef::BuiltIn { id } => Some(id.as_str()),
-        PresetRef::User { .. } => None,
+    referenced.extend(config.equipment_profiles.iter().flat_map(|profile| {
+        profile.presets.iter().filter_map(|reference| match reference {
+            PresetRef::BuiltIn { id } => Some(id.as_str()),
+            PresetRef::User { .. } => None,
+        })
     }));
     for id in referenced {
         if presets.iter().any(|preset| preset.id == id) {
@@ -557,13 +583,15 @@ pub(crate) fn builtin_groups(config: &EqualizerConfig) -> Vec<BuiltinGroup> {
             }
         }
         for profile in &config.equipment_profiles {
-            if let PresetRef::BuiltIn { id } = &profile.preset {
+            for reference in &profile.presets {
+            if let PresetRef::BuiltIn { id } = reference {
                 if id != FLAT_ID
                     && (legacy_builtin_presets().iter().any(|preset| preset.id == *id) || legacy_tone_preset(id).is_some() || retired_generic_tone_preset(id).is_some())
                     && !preset_ids.contains(id)
                 {
                     preset_ids.push(id.clone());
                 }
+            }
             }
         }
         BuiltinGroup { id: "legacy", preset_ids }
@@ -603,7 +631,7 @@ mod collection_tests {
 
         for old in legacy.iter().filter(|p| p.id != FLAT_ID) {
             let raw = serde_json::json!({
-                "schema_version":1,"enabled":false,
+                "schema_version":3,"enabled":false,
                 "active_preset":{"kind":"built_in","id":old.id},
                 "user_presets":[]
             });
@@ -803,6 +831,12 @@ pub(crate) fn valid_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
+fn valid_external_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+}
+
 fn normalized_name(name: &str) -> Result<String, EqError> {
     let trimmed = name.trim();
     if trimmed.is_empty()
@@ -891,12 +925,28 @@ impl EqualizerConfig {
         }
         if self.equipment_profiles.len() > 32 { return Err(EqError::InvalidEquipment); }
         let (mut equipment_ids, mut equipment_names) = (HashSet::new(), HashSet::new());
+        let mut total_associations = 0usize;
         for e in &self.equipment_profiles {
             if !valid_id(&e.id) || normalized_name(&e.name)? != e.name ||
                 !equipment_ids.insert(&e.id) || !equipment_names.insert(e.name.to_lowercase()) {
                 return Err(EqError::InvalidEquipment);
             }
-            self.preset(&e.preset)?;
+            if e.manufacturer.as_deref().is_some_and(|name| normalized_name(name).as_deref() != Ok(name))
+                || e.opra_vendor_id.as_deref().is_some_and(|id| !valid_external_id(id))
+                || e.opra_product_id.as_deref().is_some_and(|id| !valid_external_id(id))
+                || e.category != EquipmentCategory::Headphones && (e.opra_vendor_id.is_some() || e.opra_product_id.is_some())
+            {
+                return Err(EqError::InvalidEquipment);
+            }
+            if e.presets.len() > MAX_USER_PRESETS || e.presets.iter().collect::<HashSet<_>>().len() != e.presets.len() {
+                return Err(EqError::InvalidEquipment);
+            }
+            total_associations = total_associations.saturating_add(e.presets.len());
+            if total_associations > 256 { return Err(EqError::TooManyEquipmentPresets); }
+            for reference in &e.presets { self.preset(reference)?; }
+            if let Some(preferred) = &e.preferred_preset {
+                if !e.presets.contains(preferred) { return Err(EqError::InvalidEquipment); }
+            }
         }
         match &self.active_preset {
             PresetRef::BuiltIn { id } if builtin_preset(id).is_some() => Ok(()),
@@ -1024,18 +1074,99 @@ impl EqualizerConfig {
         self.create_user_preset(name, Some(source))
     }
 
-    /// Explicit saved selection only. Equipment is a user label, not inferred hardware identity.
-    pub fn link_equipment(&mut self, id: Option<String>, name: &str, preset: PresetRef) -> Result<(), EqError> {
+    /// Adds or updates a user-managed device label. This never changes the active preset or DSP.
+    pub fn add_equipment(
+        &mut self,
+        id: Option<String>,
+        name: &str,
+        category: EquipmentCategory,
+        manufacturer: Option<String>,
+        opra_vendor_id: Option<String>,
+        opra_product_id: Option<String>,
+    ) -> Result<String, EqError> {
         let name = normalized_name(name)?;
-        let supplied = id.is_some();
-        let id = match id { Some(id)=>id, None=>new_preset_id()? };
+        if category != EquipmentCategory::Headphones
+            && (opra_vendor_id.is_some() || opra_product_id.is_some()
+                || id.as_ref().and_then(|id| self.equipment_profiles.iter().find(|item| &item.id == id))
+                    .is_some_and(|item| item.opra_vendor_id.is_some() || item.opra_product_id.is_some()))
+        {
+            return Err(EqError::InvalidEquipment);
+        }
+        let update_existing = id.is_some();
+        let id = match id { Some(id) => id, None => new_preset_id()? };
         self.edit(|config| {
-            config.preset(&preset)?;
-            let e = EquipmentProfile { id: id.clone(), name, preset };
-            if supplied {
-                let old = config.equipment_profiles.iter_mut().find(|e|e.id == id).ok_or(EqError::InvalidEquipment)?;
-                *old = e;
-            } else { config.equipment_profiles.push(e); }
+            if let Some(existing) = config.equipment_profiles.iter_mut().find(|e| e.id == id) {
+                existing.name = name;
+                existing.category = category;
+                if manufacturer.is_some() { existing.manufacturer = manufacturer; }
+                if opra_vendor_id.is_some() { existing.opra_vendor_id = opra_vendor_id; }
+                if opra_product_id.is_some() { existing.opra_product_id = opra_product_id; }
+            } else {
+                if update_existing { return Err(EqError::InvalidEquipment); }
+                config.equipment_profiles.push(EquipmentProfile {
+                    id: id.clone(), name, category, manufacturer, opra_vendor_id, opra_product_id,
+                    presets: Vec::new(), preferred_preset: None,
+                });
+            }
+            Ok(id.clone())
+        })
+    }
+
+    /// Compatibility entry point for the former one-preset association operation.
+    pub fn link_equipment(&mut self, id: Option<String>, name: &str, preset: PresetRef) -> Result<(), EqError> {
+        self.preset(&preset)?;
+        let name = normalized_name(name)?;
+        let supplied_id = id.is_some();
+        let id = match id { Some(id) => id, None => new_preset_id()? };
+        self.edit(|config| {
+            if let Some(equipment) = config.equipment_profiles.iter_mut().find(|item| item.id == id) {
+                equipment.name = name;
+                if !equipment.presets.contains(&preset) {
+                    if equipment.presets.len() >= MAX_USER_PRESETS { return Err(EqError::TooManyEquipmentPresets); }
+                    equipment.presets.push(preset.clone());
+                }
+                equipment.preferred_preset = Some(preset);
+            } else {
+                if supplied_id { return Err(EqError::InvalidEquipment); }
+                config.equipment_profiles.push(EquipmentProfile {
+                    id, name, category: EquipmentCategory::Headphones, manufacturer: None, opra_vendor_id: None, opra_product_id: None,
+                    presets: vec![preset.clone()], preferred_preset: Some(preset),
+                });
+            }
+            Ok(())
+        })
+    }
+
+    pub fn add_equipment_preset(&mut self, id: &str, reference: PresetRef, preferred: bool) -> Result<(), EqError> {
+        self.edit(|config| {
+            config.preset(&reference)?;
+            let equipment = config.equipment_profiles.iter_mut().find(|e| e.id == id).ok_or(EqError::InvalidEquipment)?;
+            if !equipment.presets.contains(&reference) {
+                if equipment.presets.len() >= MAX_USER_PRESETS { return Err(EqError::TooManyEquipmentPresets); }
+                equipment.presets.push(reference.clone());
+            }
+            if preferred || equipment.preferred_preset.is_none() { equipment.preferred_preset = Some(reference); }
+            Ok(())
+        })
+    }
+
+    pub fn remove_equipment_preset(&mut self, id: &str, reference: &PresetRef) -> Result<(), EqError> {
+        self.edit(|config| {
+            let equipment = config.equipment_profiles.iter_mut().find(|e| e.id == id).ok_or(EqError::InvalidEquipment)?;
+            let index = equipment.presets.iter().position(|item| item == reference).ok_or(EqError::EquipmentPresetMissing)?;
+            equipment.presets.remove(index);
+            if equipment.preferred_preset.as_ref() == Some(reference) {
+                equipment.preferred_preset = equipment.presets.first().cloned();
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_preferred_equipment_preset(&mut self, id: &str, reference: Option<PresetRef>) -> Result<(), EqError> {
+        self.edit(|config| {
+            let equipment = config.equipment_profiles.iter_mut().find(|e| e.id == id).ok_or(EqError::InvalidEquipment)?;
+            if reference.as_ref().is_some_and(|item| !equipment.presets.contains(item)) { return Err(EqError::EquipmentPresetMissing); }
+            equipment.preferred_preset = reference;
             Ok(())
         })
     }
@@ -1052,7 +1183,7 @@ impl EqualizerConfig {
             PresetRef::User { id } => id,
         };
         self.edit(|config| {
-            if config.equipment_profiles.iter().any(|e| &e.preset == reference) { return Err(EqError::PresetInUse); }
+            if config.equipment_profiles.iter().any(|e| e.presets.contains(reference)) { return Err(EqError::PresetInUse); }
             let index = config
                 .user_presets
                 .iter()
@@ -1102,6 +1233,7 @@ impl EqualizerStore {
         }
         let config: EqualizerConfig =
             serde_json::from_slice(&bytes).map_err(|_| EqError::InvalidJson)?;
+        let config = migrate_config(config)?;
         config.validate()?;
         for p in &config.user_presets {
             validate_v1(p)?;
@@ -1124,6 +1256,29 @@ impl EqualizerStore {
         }
         crate::persistence::atomic_write_private(&self.path, &bytes, FILE_NAME)
             .map_err(EqError::WriteFailed)
+    }
+}
+
+/// Upgrade only the in-memory representation while loading. The next normal
+/// successful save writes the current schema atomically; a read never rewrites user data.
+fn migrate_config(mut config: EqualizerConfig) -> Result<EqualizerConfig, EqError> {
+    match config.schema_version {
+        1 | 2 => {
+            let legacy_single_preset = config.schema_version == 1;
+            for equipment in &mut config.equipment_profiles {
+                if legacy_single_preset {
+                    if let Some(legacy_preferred) = equipment.preferred_preset.clone() {
+                        if !equipment.presets.contains(&legacy_preferred) {
+                            equipment.presets.push(legacy_preferred);
+                        }
+                    }
+                }
+            }
+            config.schema_version = SCHEMA_VERSION;
+            Ok(config)
+        }
+        SCHEMA_VERSION => Ok(config),
+        version => Err(EqError::UnsupportedSchemaVersion(version)),
     }
 }
 
@@ -1193,7 +1348,7 @@ mod tests {
         fixture.store.save(&EqualizerConfig::default()).unwrap();
         let json: serde_json::Value =
             serde_json::from_slice(&fs::read(&fixture.store.path).unwrap()).unwrap();
-        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["schema_version"], 3);
         assert_eq!(
             json["active_preset"],
             serde_json::json!({"kind":"built_in","id":"flat"})
@@ -1241,6 +1396,103 @@ mod tests {
             updated.bands
         );
         assert_eq!(config.list_presets().len(), 3);
+    }
+
+    #[test]
+    fn schema_v1_equipment_association_migrates_in_memory_and_writes_v3_on_next_save() {
+        let fixture = TestStore::new();
+        let mut config = EqualizerConfig::default();
+        let saved = user(&mut config, "Measured correction");
+        let reference = PresetRef::User { id: saved.id.clone() };
+        config.link_equipment(None, "Studio headphones", reference.clone()).unwrap();
+        let mut legacy = serde_json::to_value(&config).unwrap();
+        legacy["schema_version"] = serde_json::json!(1);
+        let equipment = &mut legacy["equipment_profiles"][0];
+        equipment["preset"] = equipment["preferred_preset"].clone();
+        for key in ["preferred_preset", "presets", "manufacturer", "opra_vendor_id", "opra_product_id"] {
+            equipment.as_object_mut().unwrap().remove(key);
+        }
+        fs::write(&fixture.store.path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let migrated = fixture.store.load().unwrap();
+        assert_eq!(migrated.schema_version, 3);
+        assert_eq!(migrated.equipment_profiles[0].category, EquipmentCategory::Headphones);
+        assert_eq!(migrated.equipment_profiles[0].presets, vec![reference.clone()]);
+        assert_eq!(migrated.equipment_profiles[0].preferred_preset, Some(reference));
+        assert_eq!(migrated.user_presets[0], saved);
+        assert_eq!(fs::read(&fixture.store.path).unwrap(), serde_json::to_vec(&legacy).unwrap(), "read migration must not rewrite the old file");
+
+        fixture.store.save(&migrated).unwrap();
+        let reopened = fixture.store.load().unwrap();
+        assert_eq!(reopened, migrated);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(&fixture.store.path).unwrap()).unwrap()["schema_version"], 3);
+    }
+
+    #[test]
+    fn schema_v2_equipment_migrates_to_headphones_without_rewriting_until_save() {
+        let fixture = TestStore::new();
+        let mut config = EqualizerConfig::default();
+        let saved = user(&mut config, "Monitor correction");
+        let reference = PresetRef::User { id: saved.id.clone() };
+        config.link_equipment(None, "Legacy monitors", reference.clone()).unwrap();
+        let mut legacy = serde_json::to_value(&config).unwrap();
+        legacy["schema_version"] = serde_json::json!(2);
+        let equipment = &mut legacy["equipment_profiles"][0];
+        equipment.as_object_mut().unwrap().remove("category");
+        fs::write(&fixture.store.path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let migrated = fixture.store.load().unwrap();
+        assert_eq!(migrated.schema_version, 3);
+        assert_eq!(migrated.equipment_profiles[0].category, EquipmentCategory::Headphones);
+        assert_eq!(migrated.equipment_profiles[0].presets, vec![reference.clone()]);
+        assert_eq!(migrated.equipment_profiles[0].preferred_preset, Some(reference));
+        assert_eq!(migrated.user_presets, vec![saved]);
+        assert_eq!(fs::read(&fixture.store.path).unwrap(), serde_json::to_vec(&legacy).unwrap());
+
+        fixture.store.save(&migrated).unwrap();
+        assert_eq!(fixture.store.load().unwrap(), migrated);
+    }
+
+    #[test]
+    fn opra_identity_is_rejected_for_non_headphone_equipment() {
+        let fixture = TestStore::new();
+        let mut config = EqualizerConfig::default();
+        assert_eq!(
+            config.add_equipment(None, "Studio monitors", EquipmentCategory::Speakers, None, Some("vendor".into()), Some("product".into())),
+            Err(EqError::InvalidEquipment)
+        );
+        config.add_equipment(None, "Studio monitors", EquipmentCategory::Speakers, Some("Maker".into()), None, None).unwrap();
+        config.add_equipment(None, "Other device", EquipmentCategory::Other, None, None, None).unwrap();
+        config.add_equipment(None, "Headphones", EquipmentCategory::Headphones, None, None, None).unwrap();
+        config.validate().unwrap();
+        fixture.store.save(&config).unwrap();
+        let reopened = fixture.store.load().unwrap();
+        assert_eq!(reopened.equipment_profiles.iter().map(|item| item.category).collect::<Vec<_>>(), vec![EquipmentCategory::Speakers, EquipmentCategory::Other, EquipmentCategory::Headphones]);
+        assert!(reopened.equipment_profiles.iter().all(|item| item.opra_product_id.is_none()));
+    }
+
+    #[test]
+    fn equipment_can_reference_multiple_shared_presets_and_removal_never_deletes_them() {
+        let mut config = EqualizerConfig::default();
+        let first = user(&mut config, "Warm");
+        let second = user(&mut config, "Neutral");
+        let id = config.add_equipment(None, "Planar headphones", EquipmentCategory::Headphones, Some("Maker".into()), Some("maker".into()), Some("maker::planar".into())).unwrap();
+        let first_ref = PresetRef::User { id: first.id.clone() };
+        let second_ref = PresetRef::User { id: second.id.clone() };
+        config.add_equipment_preset(&id, first_ref.clone(), true).unwrap();
+        config.add_equipment_preset(&id, second_ref.clone(), false).unwrap();
+        assert_eq!(config.equipment_profiles[0].presets, vec![first_ref.clone(), second_ref.clone()]);
+        assert_eq!(config.equipment_profiles[0].preferred_preset, Some(first_ref.clone()));
+        assert_eq!(config.user_presets.len(), 2);
+        assert!(!config.enabled);
+
+        config.set_preferred_equipment_preset(&id, Some(second_ref.clone())).unwrap();
+        config.remove_equipment_preset(&id, &second_ref).unwrap();
+        assert_eq!(config.equipment_profiles[0].preferred_preset, Some(first_ref.clone()));
+        assert_eq!(config.user_presets.len(), 2);
+        assert_eq!(config.delete_preset(&first_ref), Err(EqError::PresetInUse));
+        config.unlink_equipment(&id).unwrap();
+        assert_eq!(config.user_presets.len(), 2, "removing equipment preserves shared presets");
     }
 
     #[test]
@@ -1528,11 +1780,11 @@ mod tests {
         fs::write(&fixture.store.path, serde_json::to_vec(&json).unwrap()).unwrap();
         assert_eq!(fixture.store.load(), Err(EqError::InvalidJson));
         json.as_object_mut().unwrap().remove("future_optional");
-        json["schema_version"] = serde_json::json!(2);
+        json["schema_version"] = serde_json::json!(4);
         fs::write(&fixture.store.path, serde_json::to_vec(&json).unwrap()).unwrap();
         assert_eq!(
             fixture.store.load(),
-            Err(EqError::UnsupportedSchemaVersion(2))
+            Err(EqError::UnsupportedSchemaVersion(4))
         );
         fs::write(&fixture.store.path, vec![b' '; MAX_FILE_BYTES as usize + 1]).unwrap();
         assert_eq!(fixture.store.load(), Err(EqError::FileTooLarge));

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import ts from 'typescript';
-import {createMainSectionPreference, initialMediaSource} from '../src/utils/appBootstrap.ts';
+import {createMainSectionPreference, disabledAutoEqFallback, initialMediaSource} from '../src/utils/appBootstrap.ts';
 
 const source=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
 const ast=ts.createSourceFile('App.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
@@ -20,6 +20,7 @@ test('sidebar utilities put Equalizer before Preferences without changing route 
  assert.ok(start>=0&&end>start);
  const utilities=source.slice(start,end);
  assert.ok(utilities.indexOf('equalizer.title')<utilities.indexOf('<KeyboardShortcutsHelp />'));
+ assert.equal(utilities.includes('autoeq.title'),false,'AutoEQ is an internal Equalizer tab, not a sidebar entry');
  assert.ok(utilities.indexOf('<KeyboardShortcutsHelp />')<utilities.indexOf('sidebar.preferences'));
  const item=navItem('equalizer.title');assert.ok(item);
  assert.match(item.attributes.properties.map(p=>p.getText(ast)).join(' '),/sourceEnabled=\{equalizerActive\}/);
@@ -33,6 +34,33 @@ test('Equalizer remains an independent sidebar route and legacy stored route res
  preference.restore({first_run:false,plex_token:'fixture',usage_mode:'full'});
  assert.equal(published.at(-1),'equalizer');assert.deepEqual(saved,[]);
  preference.navigate('equalizer');assert.equal(published.at(-1),'equalizer');assert.deepEqual(saved,['equalizer']);
+});
+
+test('Equalizer shows one manual page and legacy AutoEQ navigation falls back to it',()=>{
+ assert.equal(navItem('autoeq.title'),undefined);
+ assert.doesNotMatch(source,/role="tablist"|autoeq-tab|AutoEqView|OpraCatalogBrowser|data-autoeq-page/);
+ assert.doesNotMatch(readFileSync(new URL('../src/components/deferredViews.tsx',import.meta.url),'utf8'),/AutoEqView|OpraCatalogBrowser/);
+ assert.match(source,/const showManualEqualizer = mediaSource === "equalizer" \|\| mediaSource === "autoeq"/);
+ const saved=[],published=[];
+ const preference=createMainSectionPreference(section=>published.push(section),()=>({getItem:()=>"autoeq",setItem:(_key,value)=>saved.push(value)}),undefined,initialMediaSource);
+ preference.restore({first_run:false,plex_token:'fixture',usage_mode:'full'});
+ assert.equal(published.at(-1),'autoeq');assert.deepEqual(saved,[]);
+ preference.navigate('autoeq');assert.equal(published.at(-1),'autoeq');assert.deepEqual(saved,['autoeq']);
+ assert.match(source,/mediaSource === "equalizer" \|\| mediaSource === "autoeq"/);
+ assert.match(source,/disabledAutoEqFallback\(mediaSource, experimental\)/);
+ assert.match(source,/disabledAutoEqFallback\(playerReturnSection, experimental\)/);
+ assert.match(source,/!showManualEqualizer \? "hidden"/);
+});
+
+test('Beta settings remain available but never expose or mount AutoEQ',()=>{
+ assert.equal(disabledAutoEqFallback('autoeq',false),'equalizer');
+ assert.equal(disabledAutoEqFallback('autoeq',true),null);
+ assert.equal(disabledAutoEqFallback('equalizer',false),null);
+ assert.match(source,/const experimental = experimentalFeaturesEnabled\(config\) && !config\?\.first_run/);
+ assert.doesNotMatch(source,/AutoEqView|OpraCatalogBrowser|opra_catalog/);
+ const settings=readFileSync(new URL('../src/components/SettingsModal.tsx',import.meta.url),'utf8');
+ assert.match(settings,/ExperimentalFeaturesSetting enabled=\{config\.experimental_features === true\}/);
+ assert.doesNotMatch(source,/setConfig\([^)]*autoeq|experimental_features[^;]*autoeq/);
 });
 
 test('Equalizer navigation remembers the source page and stays clickable while EQ is off',()=>{
@@ -54,8 +82,8 @@ test('inactive Equalizer page links directly to Audio settings; editor renders o
  const button=Array.from(source.matchAll(/setSettingsInitialPage\("audio"\); setShowSettings\(true\)/g));
  assert.ok(button.length>=1);
  assert.doesNotMatch(source,/label=\{t\("settings\.pages\.audio"\)\}/);
- assert.match(source,/active=\{mediaSource === "equalizer"\} sourceEnabled=\{equalizerActive\}/);
- assert.match(source,/className=\{nowPlayingEmbedded \|\| mediaSource === "equalizer" \? "hidden"/);
+ assert.match(source,/active=\{mediaSource === "equalizer" \|\| mediaSource === "autoeq"\} sourceEnabled=\{equalizerActive\}/);
+ assert.match(source,/mediaSource === "equalizer" \|\| mediaSource === "autoeq" \? "hidden"/);
  assert.equal(expression('equalizerActive'),'fullMode && equalizerIsActive(playbackStatus.shared_dsp, playbackStatus.audio_route)');
 });
 
@@ -73,19 +101,24 @@ test('Equalizer goes directly to Local even when Local is the hidden return sect
  assert.doesNotMatch(handler,/audioService|configService|saveConfig/);
 });
 
-test('Local can open Equalizer and its return action restores Local',()=>{
+test('Equalizer can return to the previous section after opening from navigation',()=>{
  const item=navItem('equalizer.title');assert.ok(item);
  const click=item.attributes.properties.find(p=>p.name?.getText(ast)==='onClick').initializer.expression.getText(ast);
  const code=ts.transpileModule(`const open=${click}; open();`,{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText;
  const events=[],ref={current:'radio'};
  new Function('mediaSource','eqReturnSectionRef','resetAllNavigation','mainSectionPreference',code)('local',ref,()=>events.push('reset'),{navigate:section=>events.push(section)});
  assert.equal(ref.current,'local');assert.deepEqual(events,['reset','equalizer']);
- let returnExpression;
- walk(node=>{if(ts.isJsxSelfClosingElement(node)&&node.tagName.getText(ast)==='EqualizerView'){
-  returnExpression=node.attributes.properties.find(property=>property.name?.getText(ast)==='onReturn')?.initializer?.expression?.getText(ast);
- }});
- assert.ok(returnExpression);
- const returnCode=ts.transpileModule(`const leave=${returnExpression}; leave();`,{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText;
- new Function('mainSectionPreference','eqReturnSectionRef',returnCode)({navigate:section=>events.push(section)},ref);
- assert.equal(events.at(-1),'local');
+ assert.match(source,/onReturn=\{\(\) => mainSectionPreference\.navigate\(eqReturnSectionRef\.current\)\}/);
+ const equalizer=readFileSync(new URL('../src/components/EqualizerView.tsx',import.meta.url),'utf8');
+ assert.match(equalizer,/onReturn\&&<button[^>]+className="eq-return/);
+ assert.match(equalizer,/t\('equalizer\.return'\)/);
+});
+
+test('legacy AutoEQ route only exposes the existing manual page and does not load catalog UI',()=>{
+ assert.match(source,/fullMode && \(mediaSource === "equalizer" \|\| mediaSource === "autoeq"\)/);
+ assert.match(source,/data-equalizer-page/);
+ assert.doesNotMatch(source,/data-autoeq-page|AutoEqView|OpraCatalogBrowser/);
+ assert.match(source,/active=\{mediaSource === "equalizer" \|\| mediaSource === "autoeq"\} sourceEnabled=\{equalizerActive\}/);
+ const equalizer=readFileSync(new URL('../src/components/EqualizerView.tsx',import.meta.url),'utf8');
+ assert.doesNotMatch(equalizer,/OpraCatalogBrowser|apply_equalizer/);
 });

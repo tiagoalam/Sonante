@@ -7,6 +7,8 @@ import { AnalogVu } from "./AnalogVu";
 import { SpectrumNeon } from "./SpectrumNeon";
 import { SpectrumSegmented } from "./SpectrumSegmented";
 import { InstrumentCanvas } from "./InstrumentCanvas";
+import { AnalyzerUnavailableNotice } from "./AnalyzerUnavailableNotice";
+import type { TrackMetadata } from "../../types/audio";
 
 const STORAGE_KEY = "sonante.nowPlaying.visualizerMode";
 const MODES = ["combo", "spectrum-neon", "spectrum-segmented", "vu-amber", "vu-blue", "vu-radial"] as const;
@@ -31,6 +33,7 @@ interface VisualizerPanelProps {
   active: boolean;
   inactiveLabel?: string;
   inactiveHelp?: string;
+  artworkTrack?: Pick<TrackMetadata, "thumb" | "plex_image">;
   fullscreen: boolean;
   compact?: boolean;
 }
@@ -40,6 +43,7 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
   active,
   inactiveLabel,
   inactiveHelp,
+  artworkTrack,
   fullscreen,
   compact = false,
 }) => {
@@ -114,10 +118,8 @@ export const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
       </div>
 
       <div className="np-visualizer-graphs flex min-h-0 flex-1 flex-col justify-center">
-        {!active ? <div role="status" aria-live="polite" data-visualizer-inactive className="mx-auto max-h-full w-full max-w-xl overflow-y-auto px-1 py-3 text-center">
-          <p className="text-sm font-semibold leading-relaxed text-white/90">{inactiveLabel || t("nowPlaying.vuUnavailable")}</p>
-          <p className="mt-2 text-xs leading-relaxed text-white/65">{inactiveHelp || t("nowPlaying.visualizer.helpRetry")}</p>
-        </div> : <>
+        {!active ? <AnalyzerUnavailableNotice label={inactiveLabel || t("nowPlaying.vuUnavailable")}
+          help={inactiveHelp || t("nowPlaying.visualizer.helpRetry")} artworkTrack={artworkTrack} className="px-1" /> : <>
         {mode === "combo" && <InstrumentCanvas levels={levels} active={active} mode="combo" label={modeLabel} fullscreen={fullscreen} compact={compact} />}
         {mode === "spectrum-neon" && (
           <SpectrumNeon

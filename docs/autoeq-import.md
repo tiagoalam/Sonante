@@ -1,0 +1,9 @@
+# AutoEQ import and online profile browser
+
+Sonante accepts a user-selected Equalizer APO `ParametricEQ` text file. The importer recognizes `Preamp` and numbered `PK`, `LSC` or `HSC` filters. It preserves supported filter order and preamp values, rejects malformed or out-of-range input, and saves an unselected copy in the local preset library. Importing a file does not enable EQ or change the current audio route. The selected file remains user supplied; its full path is not saved.
+
+The optional OPRA browser retrieves the public catalog on first use or when you explicitly refresh it. Search runs against the locally cached snapshot, and your typed model query is not sent to the catalog host. Sonante displays the catalog license declaration, profile author and source details. It does not bundle OPRA records with the installer.
+
+OPRA declares its dataset under [CC BY-SA 4.0](https://github.com/opra-project/OPRA/blob/main/LICENSE.md) and its code under MIT. The browser is read-only: Sonante does not convert catalog profiles into EQ presets or apply them to playback. Profile measurements can have separate sources and rights, and the catalog's dataset-level license does not establish the rights for every individual measurement. Follow the attribution and terms shown for each source. See the [OPRA project](https://github.com/opra-project/OPRA) and its [catalog consumption guide](https://github.com/opra-project/OPRA/blob/main/docs/CONSUMING.md).
+
+No AutoEQ or OPRA measurement database is bundled. AutoEQ's `ParametricEQ` format reference is [write_eqapo_parametric_eq](https://github.com/jaakkopasanen/AutoEq/blob/master/autoeq/frequency_response.py). The AutoEQ project's code license does not automatically determine the rights for every measurement or profile in its repository; users should follow the terms supplied with the particular file they import.

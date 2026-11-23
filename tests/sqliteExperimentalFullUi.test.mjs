@@ -20,7 +20,8 @@ test("production launches the original Sonante UI with SQLite Local catalog read
 
   assert.match(entry, /<App\s*\/>/);
   assert.doesNotMatch(entry, /SqliteLibraryApp|sqlite-library\.html/);
-  assert.match(app, /<LocalBrowserView[\s\S]*?sqliteBacked=\{sqliteMode\}/);
+  assert.match(app, /const localBrowserCatalogContext: LocalBrowserCatalogContext = \{[\s\S]*?sqliteBacked: sqliteMode/);
+  assert.match(app, /<LocalBrowserEntry catalogContext=\{localBrowserCatalogContext\}/);
   assert.match(app, /<ExploreView[\s\S]*?sqliteBacked=\{sqliteMode\}/);
   assert.match(app, /<SidebarNavItem diagnosticAction="local"/);
   assert.match(app, /<SidebarNavItem icon=\{Radio\}/);
@@ -47,13 +48,13 @@ test("production launches the original Sonante UI with SQLite Local catalog read
   assert.match(app, /createLibraryActivityVisibility/);
   assert.match(app, /sqliteActivityVisibilityRef\.current\?\.update\(sqliteProgress\)/);
   assert.match(app, /sqliteActivityVisibilityRef\.current\?\.begin\(operationId\)/);
-  assert.match(app, /onSqliteActivityDismiss=\{operationId => sqliteActivityVisibilityRef\.current\?\.dismiss\(operationId\)\}/);
+  assert.match(app, /onSqliteActivityDismiss: operationId => sqliteActivityVisibilityRef\.current\?\.dismiss\(operationId\)/);
   assert.match(browser, /<LibraryActivityPanel activity=\{sqliteProgress\} hidden=\{sqliteActivityHidden\}/);
   assert.match(browser, /readSqliteLocalSourcePreference/);
   assert.match(browser, /saveSqliteLocalSourcePreference\(activeSourceId\)/);
   assert.match(browser, /reconcileLocalLibrarySourceSelection\(\s*selectedSourceId, sourceOptions, !sqliteBacked \|\| sqliteSourcesLoaded,/);
   assert.match(browser, /if \(!sqliteBacked \|\| !sqliteSourcesLoaded \|\| !catalog\.loaded \|\| catalog\.loading\) return/);
-  assert.match(app, /sqliteSourcesLoaded=\{sqliteSourcesLoaded\}/);
+  assert.match(app, /sqliteSourcesLoaded,[\s\S]*?sqliteActivityHidden:/);
   assert.match(browser, /grid h-\[84px\] min-h-\[84px\] shrink-0 grid-cols-\[minmax\(0,0\.4fr\)_minmax\(0,2\.6fr\)_auto\]/);
   assert.match(browser, /<div className="h-14 min-w-0 sm:h-16">[\s\S]*?<LibraryActivityPanel activity=\{sqliteProgress\}/);
   assert.match(browser, /className="w-32 shrink-0 rounded-lg/);

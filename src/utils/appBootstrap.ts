@@ -15,7 +15,10 @@ export function initialSqliteMediaSource(config: Pick<AppConfig, "plex_token" | 
   return initialMediaSource(config);
 }
 
-export type MainSection = "editions" | "sessions" | "navidrome" | "radio" | "history" | "search" | "local" | "plex" | "favorites" | "playlists" | "explore" | "equalizer";
+export type MainSection = "editions" | "sessions" | "navidrome" | "radio" | "history" | "search" | "local" | "plex" | "favorites" | "playlists" | "explore" | "equalizer" | "autoeq";
+export function disabledAutoEqFallback(section: MainSection | null, betaEnabled: boolean): MainSection | null {
+  return section === "autoeq" && !betaEnabled ? "equalizer" : null;
+}
 export const MAIN_SECTION_STORAGE_KEY = "sonante.lastMainSection";
 // This key remains backward compatible inside the dev064 WebView profile. The
 // Tauri application identifier isolates it from the stable player's storage.
@@ -25,7 +28,7 @@ export const SQLITE_EXPERIMENTAL_LOCAL_SOURCE_STORAGE_KEY = "sonante.0.6.4-sqlit
 type SectionStorage = Pick<Storage, "getItem" | "setItem">;
 
 function isMainSection(value: unknown): value is MainSection {
-  return value === "editions" || value === "sessions" || value === "navidrome" || value === "radio" || value === "history" || value === "search" || value === "local" || value === "plex" || value === "favorites" || value === "playlists" || value === "explore" || value === "equalizer";
+  return value === "editions" || value === "sessions" || value === "navidrome" || value === "radio" || value === "history" || value === "search" || value === "local" || value === "plex" || value === "favorites" || value === "playlists" || value === "explore" || value === "equalizer" || value === "autoeq";
 }
 
 function browserStorage(): SectionStorage | null {
@@ -57,7 +60,7 @@ export function createMainSectionPreference(
         || preferred === "plex" && (!sourceEnabled(config, "plex") || !config?.plex_token?.trim())
         || preferred === "navidrome" && !sourceEnabled(config, "navidrome");
       const section = navigationEnabled && isMainSection(preferred)
-        ? config?.usage_mode === "simple" && preferred === "equalizer" ? initial : preferred === "editions" || preferred === "sessions" ? initial : preferred === "explore" ? (sourceEnabled(config, 'local') ? 'local' : initial) :
+        ? config?.usage_mode === "simple" && (preferred === "equalizer" || preferred === "autoeq") ? initial : preferred === "editions" || preferred === "sessions" ? initial : preferred === "explore" ? (sourceEnabled(config, 'local') ? 'local' : initial) :
           preferredSourceUnavailable ? initial : preferred
         : initial;
       restoringPlex = navigationEnabled && preferred === "plex" && section === "plex";

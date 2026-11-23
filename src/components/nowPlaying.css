@@ -165,8 +165,12 @@
 /* Layout is a presentation preference shared by the embedded and detached hosts. */
 .np-look-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
 .np-look-picker { display: inline-flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px solid var(--theme-border-soft,#ffffff20); border-radius: 10px; background: var(--theme-surface-panel,#151515); color: var(--theme-fg-secondary,#ddd); font-size: 12px; }
+.np-look-picker-control { position: relative; cursor: pointer; }
 .np-look-picker > span { font-size: 10px; color: var(--theme-fg-muted,#999); }
+.np-look-picker > .np-look-picker-current { color: var(--theme-fg-primary,#eee); font-size: 12px; font-weight: 650; white-space: nowrap; }
 .np-look-picker select { appearance: none; border: 0; outline: none; background: transparent; color: var(--theme-fg-primary,#eee); font: inherit; font-weight: 650; cursor: pointer; max-width: 130px; }
+.np-look-picker-control > .np-look-picker-select { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; max-width: none; opacity: 0; cursor: pointer; }
+.np-look-picker-control > svg { pointer-events: none; }
 .np-look-picker select option { background: var(--theme-surface-panel,#151515); color: var(--theme-fg-primary,#eee); }
 .np-look-picker:focus-within { outline: 2px solid var(--theme-border-accent,#e5a00d); outline-offset: 3px; }
 .np-shell select:focus-visible { outline: none; }
@@ -211,8 +215,8 @@
 .np-psycho-caption > span { font: 10px ui-monospace,monospace; text-transform: uppercase; letter-spacing: .24em; }
 .np-psycho-caption button { display: flex; align-items: center; gap: 6px; font-size: 10px; padding: 6px 9px; border-radius: 8px; background: #080b1980; border: 1px solid #ffffff25; }
 .np-psycho-caption button:hover { background: #303048; }
-.np-psycho-inactive { position: absolute; inset: 65px 20px 20px; display: flex; align-items: center; justify-content: center; flex-direction: column; text-align: center; gap: 8px; color: #e4e5f9; padding: 20px; background: #080b1990; border-radius: 12px; }
-.np-psycho-inactive strong { font-size: 14px; font-weight: 500; }.np-psycho-inactive p { max-width: 520px; font-size: 12px; line-height: 1.6; color: #b7bad4; }
+.np-psycho-inactive { position: absolute; inset: 65px 20px 20px; display: flex; align-items: center; justify-content: center; color: #e4e5f9; padding: 0; background: transparent; border-radius: 12px; }
+.np-psycho-inactive p { max-width: 520px; font-size: 12px; line-height: 1.6; color: #b7bad4; }
 .np-look-psycho .np-cover { grid-column: 1; grid-row: 2; width: 100%; border-radius: 12px; align-self: center; }
 .np-look-psycho .np-details { grid-column: 2; grid-row: 2; display: grid; grid-template-columns: minmax(0,1fr) minmax(210px,.65fr); gap: 12px 24px; align-items: center; padding: 8px 0; }
 .np-look-psycho .np-track-heading { grid-column: 1; grid-row: 1; }
@@ -319,18 +323,35 @@
  .np-shell .np-visualizer button, .np-shell .np-visualizer details, .np-shell .np-psycho-caption, .np-shell .np-signal button { transition: none; }
 }
 
-/* Optional lyrics stay in the Sleeve details; the bounded text scrolls independently. */
+/* Local LRC lyrics are presented in their own layout with an independently bounded reading area. */
 .np-look-sleeve .np-details { justify-content: safe center; }
-.np-lyrics { padding-top: 12px; border-top: 1px solid var(--theme-border-soft,#ffffff20); display: flex; flex-direction: column; gap: 9px; min-width: 0; }
-.np-lyrics[data-enabled=true] { height: clamp(170px,28cqh,280px); flex: none; }
-.np-lyrics-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
-.np-lyrics-heading label { display: flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer; color: var(--theme-fg-secondary,#ddd); }
-.np-lyrics-heading input { accent-color: var(--theme-control-accent,#e5a00d); }
+.np-lyrics { min-width: 0; min-height: 0; height: clamp(150px,34cqh,520px); flex: 1 1 auto; display: flex; flex-direction: column; gap: 9px; border: 1px solid var(--theme-border-soft,#ffffff18); border-radius: 12px; background: var(--theme-surface-subtle,#ffffff06); padding: 12px 14px; }
+.np-lyrics-heading { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; }
+.np-lyrics-heading button { color: var(--theme-fg-accent,#e5a00d); font-size: 11px; }
+.np-lyrics-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.np-lyrics-candidates { display: grid; gap: 5px; max-height: 150px; overflow: auto; flex: none; }
+.np-lyrics-candidates button { display: grid; gap: 2px; text-align: left; border: 1px solid var(--theme-border-soft,#ffffff18); border-radius: 8px; padding: 7px 9px; color: var(--theme-fg-secondary,#ddd); }
+.np-lyrics-candidates button[aria-pressed="true"] { border-color: var(--theme-fg-accent,#e5a00d); }
+.np-lyrics-candidates span,.np-lyrics-candidates small { color: var(--theme-fg-muted,#999); font-size: 10px; }
 .np-lyrics-hint { font-size: 11px; line-height: 1.6; color: var(--theme-fg-muted,#999); }
-.np-lyrics-text { min-height: 0; overflow: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; font-family: Georgia,serif; font-size: clamp(15px,1.25cqw,20px); line-height: 1.8; color: var(--theme-fg-secondary,#ddd); padding-right: 10px; }
+.np-lyrics-credit { flex: none; color: var(--theme-fg-muted,#999); font-size: 10px; letter-spacing: .02em; }
+.np-lyrics-text { min-height: 0; overflow: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; font-family: Georgia,serif; font-size: clamp(15px,1.25cqw,20px); line-height: 1.8; color: var(--theme-fg-secondary,#ddd); padding: 2px 10px 2px 2px; }
+.np-lyrics-synchronized { display: flex; flex-direction: column; align-items: center; justify-content: safe center; gap: 10px; text-align: center; scrollbar-gutter: stable; }
+.np-lyrics-line { width: min(100%,54ch); color: var(--theme-fg-muted,#ffffff80); opacity: .68; overflow-wrap: anywhere; transition: color .2s ease, opacity .2s ease, transform .2s ease; }
+.np-lyrics-line.is-active { color: var(--theme-fg-primary,#fff); opacity: 1; font-size: clamp(18px,1.65cqw,27px); font-weight: 700; transform: scale(1.015); text-decoration: underline; text-decoration-color: var(--theme-fg-accent,#e5a00d); text-decoration-thickness: 2px; text-underline-offset: 5px; }
 .np-lyrics-text:focus-visible { outline: 2px solid var(--theme-fg-accent,#e5a00d); outline-offset: 3px; }
-.np-lyrics small { font-size: 9px; color: var(--theme-fg-muted,#999); }
-.np-lyrics button { font-size: 11px; color: var(--theme-fg-accent,#e5a00d); cursor: pointer; padding: 6px 0; }
+.np-look-lyrics .np-media { grid-template-columns: minmax(130px,.38fr) minmax(0,1fr); align-items: stretch; gap: clamp(18px,3cqw,44px); }
+.np-look-lyrics .np-cover { width: min(100%,44cqh,420px); align-self: center; }
+.np-look-lyrics .np-details { min-height: 0; align-self: stretch; justify-content: center; }
+@container (max-height: 700px) { .np-look-lyrics .np-lyrics { height: clamp(130px,29cqh,300px); } }
+@container (max-width: 900px) { .np-look-lyrics .np-media { grid-template-columns: minmax(120px,.32fr) minmax(0,1fr); gap: 16px; } }
+@container (max-width: 760px) {
+ .np-look-lyrics .np-media { display: flex; flex-direction: column; align-items: stretch; overflow: visible; }
+ .np-look-lyrics .np-cover { width: min(62cqw,240px); }
+ .np-look-lyrics .np-details { flex: none; }
+ .np-look-lyrics .np-lyrics { height: clamp(170px,38cqh,420px); flex: none; }
+}
+@media (prefers-reduced-motion: reduce) { .np-lyrics-line { transition: none; transform: none !important; } }
 
 .np-cover[data-fullscreen-action=true] { cursor: zoom-in; }
 .np-cover[data-fullscreen-action=true][data-fullscreen=true] { cursor: zoom-out; }

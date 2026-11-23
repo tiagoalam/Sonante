@@ -19,7 +19,7 @@ export function queueItemArtwork(item: TrackMetadata, index: number, status?: Pl
 
 export interface QueuePreviewState {
   items: TrackMetadata[];
-  phase: "idle" | "loading" | "ready" | "error";
+  phase: "idle" | "loading" | "ready" | "error" | "uncertain";
 }
 
 // Read-only presentation of the existing logical queue. One request at a time;
@@ -44,10 +44,19 @@ export class QueuePreviewReader {
     this.epoch++;
     clearTimeout(this.timer);
     if (active) {
-      this.state = { ...this.state, phase: "loading" };
+      // Do not make the last uncertain snapshot look usable while checking
+      // whether the MPD session has become coherent again.
+      this.state = { ...this.state, phase: this.state.phase === "uncertain" ? "uncertain" : "loading" };
       this.publish(this.state);
       void this.read();
     }
+  }
+  markUncertain() {
+    if (this.state.phase === "uncertain") return;
+    this.epoch++;
+    clearTimeout(this.timer);
+    this.state = { ...this.state, phase: "uncertain" };
+    this.publish(this.state);
   }
   refresh(items?: TrackMetadata[]) {
     if (!this.active) return;
@@ -69,7 +78,10 @@ export class QueuePreviewReader {
       }
     } catch (error) {
       if (this.active && epoch === this.epoch) {
-        this.state = { items: error === "PLAYBACK_QUEUE_UNCERTAIN" ? [] : this.state.items, phase: "error" };
+        // A failed read is not evidence that the queue is empty. Keep the
+        // last snapshot, but distinguish an untrusted queue from a generic
+        // read error so the UI will not present it as current.
+        this.state = { items: this.state.items, phase: this.state.phase === "uncertain" || error === "PLAYBACK_QUEUE_UNCERTAIN" ? "uncertain" : "error" };
         this.publish(this.state);
       }
     } finally {

@@ -29,14 +29,14 @@ test("cover progress uses the reserved Local header slot and does not compete wi
 });
 
 test("cover progress labels are translated in both locales", () => {
-  assert.equal(portuguese.artwork.progressLabel, "Capas online");
-  assert.equal(english.artwork.progressLabel, "Online covers");
-  assert.equal(portuguese.artwork.progressCount, "{{processed}} de {{total}} capas");
-  assert.equal(english.artwork.progressCount, "{{processed}} of {{total}} covers");
+  assert.equal(portuguese.artwork.progressLabel, "Busca de capas");
+  assert.equal(english.artwork.progressLabel, "Cover lookup");
+  assert.equal(portuguese.artwork.progressCount, "{{processed}} de {{total}} álbuns verificados");
+  assert.equal(english.artwork.progressCount, "{{processed}} of {{total}} albums checked");
   assert.ok(portuguese.artwork.progressCompleted && portuguese.artwork.progressPartial && portuguese.artwork.progressCancelled);
   assert.ok(english.artwork.progressCompleted && english.artwork.progressPartial && english.artwork.progressCancelled);
-  assert.equal(portuguese.artwork.progressOnline, "Encontradas {{count}}");
-  assert.equal(english.artwork.progressOnline, "Found {{count}}");
+  assert.equal(portuguese.artwork.progressOnline, "{{count}} capas encontradas");
+  assert.equal(english.artwork.progressOnline, "Found {{count}} covers");
   assert.ok(portuguese.artwork.progressBarLabel);
   assert.ok(english.artwork.progressBarLabel);
   assert.equal("searchingOnline" in portuguese.artwork, false);

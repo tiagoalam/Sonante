@@ -40,11 +40,8 @@ test("track actions preserve CUE URI, mapped Plex locator and millisecond durati
 });
 test("SQLite album detail opened from Search keeps the SQLite playback and maintenance contracts", () => {
   const search = readFileSync(new URL("../components/UnifiedSearchView.tsx", import.meta.url), "utf8");
-  const detail = search.slice(search.indexOf("{currentDetail.source === \"local\" ? <LocalBrowserView"), search.indexOf(": currentDetail.source === \"navidrome\""));
-  assert.match(detail, /sqliteBacked=\{sqliteBacked\}/);
-  assert.match(detail, /sqliteIndexing=\{sqliteIndexing\}/);
-  assert.match(detail, /sqliteSources=\{sqliteSources\}/);
-  assert.match(detail, /sqliteTagEditorEarlyAccessEnabled=\{sqliteTagEditorEarlyAccessEnabled\}/);
+  const detail = search.slice(search.indexOf("{currentDetail.source === \"local\" ? <LocalBrowserEntry"), search.indexOf(": currentDetail.source === \"navidrome\""));
+  assert.match(detail, /catalogContext=\{\{[\s\S]*?sqliteBacked,[\s\S]*?sqliteIndexing,[\s\S]*?sqliteSources,[\s\S]*?sqliteTagEditorEarlyAccessEnabled/);
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const route = app.slice(app.indexOf("<UnifiedSearchView config="), app.indexOf("/>", app.indexOf("<UnifiedSearchView config=")));
   assert.match(route, /sqliteBacked=\{sqliteMode\}/);

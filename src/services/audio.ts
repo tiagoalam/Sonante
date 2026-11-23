@@ -4,14 +4,27 @@ import { localSourceReadQueue as runLocalSourceRead } from "../utils/localSource
 import { beginPlaybackIntent, configurePlaybackIntents, playbackIntentToken, type PlaybackIntent } from "../utils/playbackIntent";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { MpdStatusSnapshot, PlaybackStatus, PlaybackOptions, PlaybackOptionAction, TrackMetadata } from "../types/audio";
+import type { CurrentMedia } from "../types/audio";
 import { LocalItem, LocalAlbum, LocalAlbumDiscTracks } from "../types/local";
 import type { LocalSourceAvailabilityObservation, LocalSourceAvailabilityRow } from "../types/local";
 import type { OnlineCacheStatus } from "../utils/localArtwork";
+import type { LyricsQuery, LegacyLyricsCacheEntry, PersistedLyricsChoice } from "../utils/trackLyrics";
 
 import { diagnosticInvoke } from "../utils/frontendDiagnostics";
 import { isSqliteCatalogEnabled } from "../utils/sqliteExperimentalMode";
 const invoke = <T>(command: string, args?: Record<string, unknown>): Promise<T> =>
   diagnosticInvoke<T>(nativeInvoke<T>, command, args);
+
+export type LocalLyricsLookup =
+  | { kind: "found"; content: string }
+  | { kind: "not_found" }
+  | { kind: "not_eligible"; reason: string }
+  | { kind: "read_failed"; reason: string }
+  | { kind: "invalid_content"; reason: string };
+export interface OnlineLyricsQuery extends LyricsQuery { cacheKey?: string }
+export type OnlineLyricsLookup =
+  | { kind: "records"; records: import("../utils/trackLyrics").LyricsRecord[]; persisted?: boolean }
+  | { kind: "not_found" | "offline" | "timeout" | "rate_limited" | "service_unavailable" | "invalid_response" };
 const rejectUnresolvedSqliteLocators = (uris: readonly string[]): void => {
   if (uris.some(uri => typeof uri === "string" && (uri.startsWith("sqlite-track://") || uri.startsWith("sqlite-cue://")))) {
     throw new Error("SQLITE_LOCAL_PLAYBACK_NOT_CONNECTED");
@@ -82,6 +95,18 @@ function decodeLocalSourceAvailability(value: unknown): LocalSourceAvailabilityO
 
 export const audioService = {
   getStatus: (): Promise<PlaybackStatus> => invoke<PlaybackStatus>("get_playback_status"),
+  getCurrentLocalLyrics: (media: CurrentMedia): Promise<LocalLyricsLookup> =>
+    invoke<LocalLyricsLookup>("get_current_local_lyrics", { media }),
+  getLyricsChoice: (media: CurrentMedia): Promise<PersistedLyricsChoice | null> =>
+    invoke<PersistedLyricsChoice | null>("get_lyrics_choice", { media }),
+  setLyricsChoice: (media: CurrentMedia, choice: PersistedLyricsChoice): Promise<void> =>
+    invoke<void>("set_lyrics_choice", { media, choice }),
+  migrateLegacyLyricsCache: async (entries: LegacyLyricsCacheEntry[]): Promise<boolean> => {
+    try { await invoke<void>("migrate_legacy_lyrics_cache", { entries }); return true; } catch { return false; }
+  },
+  searchOnlineLyrics: (query: OnlineLyricsQuery, refresh = false): Promise<OnlineLyricsLookup> =>
+    // Track metadata is intentionally excluded from generic IPC diagnostics.
+    nativeInvoke<OnlineLyricsLookup>("search_lrclib", { query, refresh }),
   getMpdStatusSnapshot: (): Promise<MpdStatusSnapshot> =>
     invoke<MpdStatusSnapshot>("get_mpd_status_snapshot"),
   changePlaybackOption: (action: PlaybackOptionAction, expected: PlaybackOptions): Promise<PlaybackOptions> =>

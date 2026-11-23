@@ -7,12 +7,25 @@ import re
 import stat
 import sys
 
+SOURCE = Path(__file__).resolve().parent.parent
+APPROVED_MANIFESTS = [
+    SOURCE/'packaging/private-runtimes.json',
+    SOURCE/'packaging/qualified-0.5.4/ubuntu-arch.runtime.json',
+    SOURCE/'packaging/qualified-0.5.4/fedora.runtime.json',
+]
+
 def digest(path):
     checksum = hashlib.sha256()
     with path.open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             checksum.update(block)
     return checksum.hexdigest()
+
+def approved_profile(data):
+    for path in APPROVED_MANIFESTS:
+        if path.is_file() and path.read_bytes() == data:
+            return path
+    raise ValueError('Installed manifest is not an approved runtime profile')
 
 def verify(root):
     if (root/'DISTRIBUTION_BLOCKED').exists():
@@ -38,10 +51,13 @@ def verify(root):
             raise ValueError('Unsafe staging file')
         if digest(path)!=expected:
             raise ValueError('Staging file changed: '+name)
-    manifest=json.loads((Path(__file__).resolve().parent.parent/'packaging/private-runtimes.json').read_text())
+    runtime_manifest=root/'usr/lib/sonante/runtimes/v1/manifest.json'
+    installed=runtime_manifest.read_bytes()
+    approved=approved_profile(installed)
+    manifest=json.loads(approved.read_text())
     runtime=root/manifest['install_root'].lstrip('/')
-    if (runtime/'manifest.json').read_bytes()!=(Path(__file__).resolve().parent.parent/'packaging/private-runtimes.json').read_bytes():
-        raise ValueError('Installed manifest differs from the compiled manifest')
+    if (runtime/'manifest.json').read_bytes()!=approved.read_bytes():
+        raise ValueError('Installed manifest differs from the approved profile')
     expected_files=dict(manifest['binaries'])
     for resources in manifest['resources'].values():expected_files.update(resources)
     runtime_files={str(p.relative_to(runtime)) for p in runtime.rglob('*') if p.is_file()}

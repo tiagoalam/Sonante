@@ -12,18 +12,20 @@ interface Props {
 export const NowPlayingLayoutPicker: React.FC<Props> = ({ layout, placement, onLayout, onPlacement }) => {
   const { t } = useTranslation();
   return <div className="np-look-tools">
-    <label className="np-look-picker">
+    <label className="np-look-picker np-look-picker-control">
       <PanelsTopLeft size={16} aria-hidden="true" /><span>{t("nowPlaying.look.label")}</span>
-      <select value={layout} aria-label={t("nowPlaying.look.label")} aria-keyshortcuts="1 2 3 4" title={t("nowPlaying.look.shortcuts")} onChange={event => {
+      <span className="np-look-picker-current">{t(`nowPlaying.layouts.${layout}`)}</span>
+      <select className="np-look-picker-select" value={layout} aria-label={t("nowPlaying.look.label")} aria-keyshortcuts="1 2 3 4 5" title={t("nowPlaying.look.shortcuts")} onChange={event => {
         const next = NOW_PLAYING_LAYOUTS.find(value => value === event.target.value);
         if (next) onLayout?.(next);
       }}>
         {NOW_PLAYING_LAYOUTS.map(value => <option key={value} value={value}>{t(`nowPlaying.layouts.${value}`)}</option>)}
       </select><ChevronDown size={13} aria-hidden="true" />
     </label>
-    {layout === "psycho" && <label className="np-look-picker np-placement-picker">
+    {layout === "psycho" && <label className="np-look-picker np-placement-picker np-look-picker-control">
       <span>{t("nowPlaying.look.placement")}</span>
-      <select value={placement} aria-label={t("nowPlaying.look.placement")} onChange={event => {
+      <span className="np-look-picker-current">{t(`nowPlaying.look.${placement}`)}</span>
+      <select className="np-look-picker-select" value={placement} aria-label={t("nowPlaying.look.placement")} onChange={event => {
         if (event.target.value === "frame" || event.target.value === "background") onPlacement?.(event.target.value);
       }}>
         <option value="frame">{t("nowPlaying.look.frame")}</option>

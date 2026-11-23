@@ -21,9 +21,14 @@ class RuntimePreparation(unittest.TestCase):
   self.out=TASK/'outputs/sonante-runtime-remap';self.stage=TASK/'work/ubuntu-runtime-stage'
   self.record=self.out/'validated-runtime-build-inputs.json';self.sidecar=self.out/'runtime-source-materials-v2.tar.zst'
  def test_exact_stage_inventory_is_verified(self):
-  receipt=module('verify-private-runtime-stage.py').verify(self.stage)
+  verifier=module('verify-private-runtime-stage.py')
+  receipt=verifier.verify(self.stage)
   self.assertFalse(any('/runtime-sources/' in p for p in receipt))
-  self.assertEqual(sum(p.startswith('usr/lib/sonante/runtimes/v1/') for p in receipt),115)
+  installed=(self.stage/'usr/lib/sonante/runtimes/v1/manifest.json').read_bytes()
+  profile=json.loads(verifier.approved_profile(installed).read_text())
+  expected=set(profile['binaries'])
+  for resources in profile['resources'].values():expected.update(resources)
+  self.assertEqual(sum(p.startswith('usr/lib/sonante/runtimes/v1/') for p in receipt),len(expected)+1)
  def test_nonadmitted_and_changed_resource_are_rejected_before_output(self):
   original=json.loads(self.record.read_text());stage=module('stage-private-runtimes.py')
   for kind in ['nonadmitted','resource']:

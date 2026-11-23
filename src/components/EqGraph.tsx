@@ -6,7 +6,7 @@ import {EqHelp} from './EqHelp';
 import {BAND_COLORS,frequencyX,xFrequency,movePoint,graphPoint} from '../utils/equalizer';
 import {equalizerGraphFrequencyLabels,equalizerGraphGain,equalizerGraphPath,equalizerGraphRange,equalizerGraphTicks,equalizerGraphY,sampleEqualizerGraph} from '../utils/equalizerGraph';
 const X=48,Y=28,H=268;
-export function EqGraph({preset,budget,selected,onSelect,onChange,onAdd,showGain=false,onToggleGain,disabled=false}:{preset:EqPreset;budget:Protection|null;selected:string|null;onSelect:(id:string|null)=>void;onChange:(id:string,patch:Partial<EqBand>)=>void;onAdd:(hz:number,gain:number)=>void;showGain?:boolean;onToggleGain?:()=>void;disabled?:boolean}){
+export function EqGraph({preset,budget,selected,onSelect,onChange,onAdd,showGain=false,onToggleGain,disabled=false,caption}:{preset:EqPreset;budget:Protection|null;selected:string|null;onSelect:(id:string|null)=>void;onChange:(id:string,patch:Partial<EqBand>)=>void;onAdd:(hz:number,gain:number)=>void;showGain?:boolean;onToggleGain?:()=>void;disabled?:boolean;caption?:string}){
  const{t,i18n}=useTranslation();const language=i18n?.resolvedLanguage??i18n?.language??'en';const graph=useRef<SVGSVGElement>(null),[viewWidth,setViewWidth]=useState(1000);
  useEffect(()=>{const svg=graph.current;if(!svg||typeof ResizeObserver==='undefined')return;const observer=new ResizeObserver(([entry])=>{const {width,height}=entry.contentRect;if(width>0&&height>0)setViewWidth(Math.max(320,350*width/height))});observer.observe(svg);return()=>observer.disconnect()},[]);
  const W=viewWidth-96;const drag=useRef<{id:string;before:EqBand}|null>(null);
@@ -40,7 +40,7 @@ export function EqGraph({preset,budget,selected,onSelect,onChange,onAdd,showGain
   </svg>
   <figcaption className="eq-graph-caption">
    <div className="eq-graph-options"><label className="flex items-center gap-2 text-xs text-white/65"><input type="checkbox" aria-label={t('equalizer.showGlobalGain')} checked={showGain} disabled={disabled||!onToggleGain} onChange={onToggleGain}/>{t('equalizer.showGlobalGain')}</label><p>{t('equalizer.graphScale',{range})}{range>15?' · '+t('equalizer.graphExpanded'):''}</p><EqHelp title={t('equalizer.graphHelpTitle')}><p>{t('equalizer.graphLegend')}</p><p>{t('equalizer.graphHelp')}</p><p>{t('equalizer.removeHelp')}</p></EqHelp></div>
-   <p className="eq-curve-label">{t('equalizer.draftCurve')}</p>
+   <p className="eq-curve-label">{caption??t('equalizer.draftCurve')}</p>
   </figcaption>
  </figure>;
 }

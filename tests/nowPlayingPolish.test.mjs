@@ -83,7 +83,7 @@ test('actual layout keys respect native fields, queue filters, dialogs, menus, m
    ...['input','textarea','select'].map(tag=>({target:f.element(tag)})),{target:f.element('div',true,true)},
    ...['textbox','combobox','slider','spinbutton'].map(role=>({target:f.element('div',true,false,role)})),{target:f.element('button',false)}];
   for(const extra of ignored){f.key('2',extra);assert.equal(f.render().props.layout,'audiophile')}
-  for(const key of ['0','5','a']){assert.equal(f.key(key).defaultPrevented,false);assert.equal(f.render().props.layout,'audiophile')}
+  for(const key of ['0','6','a']){assert.equal(f.key(key).defaultPrevented,false);assert.equal(f.render().props.layout,'audiophile')}
   f.setModal(true);assert.equal(f.key('3').defaultPrevented,false);assert.equal(f.render().props.layout,'audiophile');f.setModal(false);
   tree=f.render();tree.props.onSeekStart();tree=f.render();assert.equal(f.key('2').defaultPrevented,false);assert.equal(f.render().props.layout,'audiophile');
   // Leave the in-progress gesture intact; the handoff checks use a fresh host.

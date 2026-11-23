@@ -9,15 +9,16 @@ import { localAlbumForMedia } from "../utils/playerNavigation";
 import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
 import { useQueueInsertion } from "./QueueInsertionMenu";
-import { LocalBrowserView } from "./LocalBrowserView";
+import { LocalBrowserEntry, type LocalBrowserCatalogContext } from "./LocalBrowserView";
 import { NavidromeView } from "./NavidromeView";
 import { navidromeService } from "../services/navidrome";
 import { AlbumView } from "./AlbumView";
 import type { AppConfig } from "../types/config";
 import type { PlexAlbum } from "../types/plex";
 import type { PlaybackStatus } from "../types/audio";
-export function HistoryView({ config, plexIdentity, status, active, isPlaybackAvailable, catalogRefreshRevision }: {
+export function HistoryView({ config, plexIdentity, status, active, isPlaybackAvailable, catalogRefreshRevision, localBrowserCatalogContext }: {
   config: AppConfig; plexIdentity: object; status: PlaybackStatus; active: boolean; isPlaybackAvailable: boolean; catalogRefreshRevision: number;
+  localBrowserCatalogContext: LocalBrowserCatalogContext;
 }) {
   const { t, i18n } = useTranslation();
   const [data, setData] = useState<HistoryFile | null>(null), [error, setError] = useState(false), [busy, setBusy] = useState(false);
@@ -73,7 +74,7 @@ export function HistoryView({ config, plexIdentity, status, active, isPlaybackAv
   const currentDetail = detail?.context === context ? detail : null;
   if (currentDetail) return <div className="flex flex-1 min-w-0 min-h-0 flex-col">
     {currentDetail.local ? <><button type="button" className="px-8 py-3 text-left text-sm" onClick={() => setDetail(null)}><ArrowLeft className="inline mr-2" size={16} />{t("history.title")}</button>
-      <LocalBrowserView initialAlbumId={currentDetail.local} onAlbumNavigationBack={() => setDetail(null)} catalogRefreshRevision={catalogRefreshRevision}
+      <LocalBrowserEntry catalogContext={localBrowserCatalogContext} initialAlbumId={currentDetail.local} onAlbumNavigationBack={() => setDetail(null)} catalogRefreshRevision={catalogRefreshRevision}
         isPlaybackAvailable={isPlaybackAvailable && active} isLibraryUpdating={status.is_updating} onlineArtworkEnabled={config.online_artwork_enabled} configuredLocalFolders={config.local_folders} /></>
       : currentDetail.navidrome ? <NavidromeView available={isPlaybackAvailable && active} embedded initialAlbum={currentDetail.navidrome} onAlbumBack={() => setDetail(null)} />
       : currentDetail.plex && <AlbumView album={currentDetail.plex} active={active} onBack={() => setDetail(null)} isPlaybackAvailable={isPlaybackAvailable} />}

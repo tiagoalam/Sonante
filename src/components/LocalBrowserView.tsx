@@ -342,6 +342,31 @@ export interface LocalBrowserViewProps {
   onSqliteReindexSource?: (sourceId: string) => Promise<void>;
 }
 
+/** SQLite catalog state that must accompany every Local album entry point. */
+export type LocalBrowserCatalogContext = Required<Pick<LocalBrowserViewProps, "sqliteBacked">>
+  & Pick<LocalBrowserViewProps,
+    | "sqliteTagEditorEarlyAccessEnabled"
+    | "sqliteIndexing"
+    | "sqliteProgress"
+    | "sqliteSources"
+    | "sqliteSourcesLoaded"
+    | "sqliteActivityHidden"
+    | "onSqliteActivityDismiss"
+    | "onSqliteAddFolder"
+    | "legacySqliteSourcesPending"
+    | "onImportLegacySqliteSources"
+    | "onSqliteVerifySource"
+    | "onSqliteReindexSource"
+  >;
+
+export interface LocalBrowserEntryProps extends Omit<LocalBrowserViewProps, keyof LocalBrowserCatalogContext> {
+  catalogContext: LocalBrowserCatalogContext;
+}
+
+/** Keeps route callers from silently falling back to the legacy MPD catalog. */
+export const LocalBrowserEntry: React.FC<LocalBrowserEntryProps> = ({ catalogContext, ...props }) =>
+  <LocalBrowserView {...props} {...catalogContext} />;
+
 export const LocalBrowserView: React.FC<LocalBrowserViewProps> = ({
   subview = "browser",
   onSubviewChange,

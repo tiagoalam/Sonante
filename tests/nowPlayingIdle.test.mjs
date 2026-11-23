@@ -44,7 +44,7 @@ test('actual immersive frame survives telemetry rerenders and protects pointer, 
 });
 
 test('queue panel defaults preserve prior behavior and malformed/blocked storage cannot prevent opening',()=>{
- const defaults={audiophile:true,psycho:true,sleeve:true,poster:true};
+ const defaults={audiophile:true,psycho:true,sleeve:true,poster:true,lyrics:true};
  for(const value of [null,'broken','[]','null','{"psycho":"false","audiophile":3}'])assert.deepEqual(parseQueuePanels(value),defaults);
  assert.deepEqual(parseQueuePanels('{"psycho":false,"poster":false}'),{...defaults,psycho:false,poster:false});
  const oldWindow=globalThis.window,stored=new Map();

@@ -209,6 +209,38 @@ def verify_checksums(directory, filename):
     return names
 
 
+def source_material_records(sources):
+    """Validate and normalize the required provenance contract for external sources."""
+    require(isinstance(sources, list) and sources, 'Missing corresponding source materials')
+    rows = []
+    for entry in sources:
+        require(isinstance(entry, dict), 'Invalid corresponding source record')
+        name = safe_name(entry.get('filename'))
+        require(PurePosixPath(name).name == name, 'Source material filename must be a basename')
+        expected_url = 'https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/' + name
+        require(entry.get('url') == expected_url, 'Unapproved corresponding source origin')
+        require(re.fullmatch('[a-f0-9]{64}', str(entry.get('sha256', ''))) is not None,
+                'Malformed corresponding source checksum')
+        require(type(entry.get('bytes')) is int and 0 < entry['bytes'] <= MAX_FILE * 8,
+                'Invalid corresponding source size')
+        rows.append({'filename': name, 'url': expected_url, 'sha256': entry['sha256'],
+                     'bytes': entry['bytes']})
+    return rows
+
+
+def write_source_materials_manifest(output, sources, verified_inputs):
+    """Record pinned public source inputs without duplicating large downloads."""
+    rows = source_material_records(sources)
+    for entry in rows:
+        checked_file(verified_inputs / entry['filename'], entry)
+    manifest = {'schema': 1,
+                'delivery': 'Pinned public release download; SHA256 and byte length verified during assembly.',
+                'sources': rows}
+    path = output / 'SOURCE-MATERIALS.json'
+    path.write_text(json.dumps(manifest, indent=2) + '\n')
+    return path.name
+
+
 def extract_application(package, variant, output):
     found = False
     with archive_stream(package_command(package, variant)) as stream:
@@ -270,11 +302,69 @@ def verify_runtime(stage, descriptor):
         require(path.stat().st_mode & 0o7777 == (0o755 if name in pins['binaries'] else 0o644), 'Runtime mode mismatch')
 
 
+def descriptor_files(descriptor):
+    pins = json.loads(descriptor)
+    files = dict(pins['binaries'])
+    for resources in pins['resources'].values():
+        for name, sha in resources.items():
+            require(name not in files or files[name] == sha, 'Conflicting runtime resource hashes')
+            files[name] = sha
+    files['manifest.json'] = hashlib.sha256(descriptor).hexdigest()
+    return files
+
+
+def reconcile_runtime_profile(stage, files, variant, baseline_descriptor, target_descriptor):
+    """Apply only the reviewed DEB Nettle removal to the pinned baseline runtime."""
+    verify_runtime(stage, baseline_descriptor)
+    baseline = descriptor_files(baseline_descriptor)
+    target = descriptor_files(target_descriptor)
+    removed = set(baseline) - set(target)
+    added = set(target) - set(baseline)
+    changed = {name for name in set(baseline) & set(target) if baseline[name] != target[name]}
+    if variant == 'ubuntu':
+        require(removed == {'lib/libnettle.so.8'} and not added
+                and changed == {'manifest.json'},
+                'DEB runtime profile differs beyond the reviewed system-Nettle change')
+    else:
+        require(not removed and not added and not changed,
+                variant + ' runtime profile must remain byte-identical to its baseline')
+    runtime = stage / RUNTIME
+    for name in removed:
+        checked_file(runtime / safe_name(name)).unlink()
+        files.pop(RUNTIME + name, None)
+    if baseline_descriptor != target_descriptor:
+        path = runtime / 'manifest.json'
+        path.write_bytes(target_descriptor)
+        path.chmod(0o644)
+        files[RUNTIME + 'manifest.json'] = {
+            'sha256': hashlib.sha256(target_descriptor).hexdigest(),
+            'bytes': len(target_descriptor), 'mode': 0o644,
+        }
+    verify_runtime(stage, target_descriptor)
+
+
+def update_ubuntu_runtime_inventory(stage, files):
+    path = stage / 'usr/share/doc/sonante/runtime-inventory.json'
+    inventory = json.loads(path.read_text())
+    require(isinstance(inventory.get('system_libraries'), list)
+            and isinstance(inventory.get('arch_packages'), list),
+            'Runtime inventory lacks system dependency fields')
+    inventory['system_libraries'] = sorted(set(inventory['system_libraries']) | {'libnettle.so.8'})
+    inventory['arch_packages'] = sorted(set(inventory['arch_packages']) | {'nettle'})
+    data = (json.dumps(inventory, indent=2) + '\n').encode()
+    path.write_bytes(data)
+    path.chmod(0o644)
+    files['usr/share/doc/sonante/runtime-inventory.json'] = {
+        'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data), 'mode': 0o644,
+    }
+
+
 def deb_control(base, version, revision, stage):
     text = run('dpkg-deb', '-f', base)
     require(re.search(r'^Package: sonante$', text, re.M) and re.search(r'^Architecture: amd64$', text, re.M), 'DEB identity')
     require('libc6 (>= 2.35)' in text and 'libwebkit2gtk-4.1-0 (>= 2.40)' in text, 'DEB ABI requirements')
     text = remove_control_dependency(text, 'Depends', 'mpd')
+    text = ensure_control_dependency(text, 'Depends', 'libnettle8 | libnettle8t64')
     require(not re.search(r'(?m)^(?:Depends|Recommends):.*\bwireplumber\b', text), 'Required WirePlumber is not supported')
     require(not re.search(r'(?m)^Depends:.*(?:^|[,| ])mpd(?::[a-z0-9-]+)?(?:\s|,|$)', text),
             'System MPD must not be required; Sonante owns a pinned private runtime')
@@ -306,6 +396,32 @@ def remove_control_dependency(control, field, package):
                 alternatives.append(alternative.strip())
         if alternatives:
             groups.append(' | '.join(alternatives))
+    lines[start:end] = [field + ': ' + ', '.join(groups)]
+    return '\n'.join(lines) + ('\n' if control.endswith('\n') else '')
+
+
+def ensure_control_dependency(control, field, dependency):
+    """Add a complete Debian dependency group, retaining existing alternatives."""
+    lines = control.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.startswith(field + ':')]
+    require(len(starts) == 1, 'Expected one ' + field + ' control field')
+    start = starts[0]
+    end = start + 1
+    while end < len(lines) and lines[end][:1].isspace():
+        end += 1
+    value = lines[start].split(':', 1)[1]
+    value += ' ' + ' '.join(line.strip() for line in lines[start + 1:end])
+    groups = [group.strip() for group in value.split(',') if group.strip()]
+    wanted = {part.strip().split(' ', 1)[0].split(':', 1)[0].lower()
+              for part in dependency.split('|')}
+    for group in groups:
+        names = {part.strip().split(' ', 1)[0].split(':', 1)[0].lower()
+                 for part in group.split('|')}
+        require(not names & wanted or names == wanted,
+                'Incomplete existing dependency alternative group')
+        if names == wanted:
+            return control
+    groups.append(dependency)
     lines[start:end] = [field + ': ' + ', '.join(groups)]
     return '\n'.join(lines) + ('\n' if control.endswith('\n') else '')
 
@@ -465,14 +581,37 @@ def build_arch(previous, stage, output, work, version, revision, glibc, epoch):
         subprocess.run(['zstd', '-q', '-T2', '-10', '-c', str(payload)], stdout=stream, check=True)
 
 
-def source_identity():
+def source_identity(candidate_commit=None):
     def git(*args):
         return subprocess.check_output(['git', *args], cwd=ROOT, text=True).strip()
     require(not git('status', '--porcelain=v1', '--untracked-files=normal'), 'Complete packages require a clean source checkout')
-    version = json.loads((ROOT / 'package.json').read_text())['version']
+    tool_commit = git('rev-parse', 'HEAD')
+    commit = tool_commit if candidate_commit is None else candidate_commit
+    require(re.fullmatch(r'[0-9a-f]{40}', commit) is not None, 'Candidate source must be a full Git SHA')
+    require(git('cat-file', '-t', commit) == 'commit', 'Candidate source commit is unavailable')
+    if candidate_commit is not None:
+        require(subprocess.run(['git', 'merge-base', '--is-ancestor', commit, tool_commit], cwd=ROOT).returncode == 0,
+                'Candidate source must be an ancestor of the clean packaging checkout')
+        # The packaging revision may advance after candidate binaries were built. Files
+        # copied into the installer must still be byte-identical to that binary's source.
+        unchanged = ['package.json', 'src-tauri/Cargo.toml', 'src-tauri/tauri.conf.json',
+                     'sonante-arch/PKGBUILD', 'packaging/private-runtimes.json',
+                     'packaging/qualified-0.5.4/ubuntu-arch.runtime.json',
+                     'packaging/qualified-0.5.4/fedora.runtime.json', 'LICENSE', 'AUTHORS',
+                     'THIRD_PARTY_NOTICES', 'sonante-arch/sonante.desktop',
+                     'src-tauri/icons/32x32.png', 'src-tauri/icons/128x128.png',
+                     'src-tauri/icons/128x128@2x.png', 'src-tauri/icons/icon.png']
+        result = subprocess.run(['git', 'diff', '--quiet', commit, tool_commit, '--', *unchanged], cwd=ROOT)
+        require(result.returncode == 0, 'Installer source assets changed since the candidate was compiled')
+        version = json.loads(git('show', commit + ':package.json'))['version']
+        epoch = int(git('show', '-s', '--format=%ct', commit))
+        tree = git('rev-parse', commit + '^{tree}')
+    else:
+        version = json.loads((ROOT / 'package.json').read_text())['version']
+        epoch = int(git('show', '-s', '--format=%ct', commit))
+        tree = git('rev-parse', commit + '^{tree}')
     require(re.fullmatch(r'\d+\.\d+\.\d+', version), 'Unsupported package version')
-    return {'commit': git('rev-parse', 'HEAD'), 'tree': git('rev-parse', 'HEAD^{tree}'),
-            'epoch': int(git('show', '-s', '--format=%ct', 'HEAD')), 'version': version}
+    return {'commit': commit, 'tree': tree, 'epoch': epoch, 'version': version, 'assembler_commit': tool_commit}
 
 
 def source_archive(output, identity, revision, descriptor=None):
@@ -524,7 +663,14 @@ def assemble(variant, inputs, candidates, work, output, identity, revision):
     require(descriptor_path.startswith('packaging/'), 'Invalid descriptor source path')
     descriptor = checked_file(ROOT / descriptor_path).read_bytes()
     require(hashlib.sha256(descriptor).hexdigest() == entry['descriptor_sha256'], 'Runtime descriptor pin changed')
-    verify_runtime(stage, descriptor)
+    baseline_path = safe_name(entry['baseline_descriptor'])
+    require(baseline_path.startswith('packaging/'), 'Invalid baseline descriptor source path')
+    baseline_descriptor = checked_file(ROOT / baseline_path).read_bytes()
+    require(hashlib.sha256(baseline_descriptor).hexdigest() == entry['baseline_descriptor_sha256'],
+            'Baseline runtime descriptor pin changed')
+    reconcile_runtime_profile(stage, files, variant, baseline_descriptor, descriptor)
+    if variant == 'ubuntu':
+        update_ubuntu_runtime_inventory(stage, files)
     inventory = json.loads((stage / 'usr/share/doc/sonante/runtime-inventory.json').read_text())
     require(inventory['distribution_ready'] and not inventory['source_trees_installed'], 'Runtime distribution record is incomplete')
     sidecars = [inventory['source_sidecar'], *inventory.get('additional_source_sidecars', [])]
@@ -574,11 +720,13 @@ def assemble(variant, inputs, candidates, work, output, identity, revision):
         if magic == b'\x7fELF':
             elf[name] = elf_info(path, variant == 'arch' and name == 'usr/bin/sonante')[0]
     glibc = max((value.get('GLIBC', '0') for value in elf.values()), key=lambda s: tuple(map(int, s.split('.'))))
+    source_materials = source_material_records(inputs['sources'])
     receipt = {'schema': 1, 'version': identity['version'], 'revision': revision, 'variant': variant,
                'source_commit': identity['commit'], 'source_tree': identity['tree'],
                'base_installer_sha256': entry['sha256'], 'application_sha256': digest(app),
                'compiled_descriptor_sha256': entry['descriptor_sha256'], 'runtime_pins_unchanged': True,
                'minimum_glibc': glibc, 'ELF_files_checked': len(elf),
+               'source_materials': source_materials,
                'sources': ['sonante-' + identity['version'] + '-' + revision + ('-fedora' if variant == 'fedora' else '') + '-sources.tar.gz']
                           + [v['filename'] for v in inputs['sources']],
                'validation': 'Encoded payload, dependency, descriptor, runtime hash and ELF ABI checks; no installation or hardware execution.'}
@@ -586,6 +734,8 @@ def assemble(variant, inputs, candidates, work, output, identity, revision):
     (stage / 'usr/share/doc/sonante/RELEASE-BUILD.json').chmod(0o644)
     # Every immutable runtime/license must survive byte-for-byte, with no extras.
     mutable = set(updates) | {'usr/bin/sonante', 'usr/share/doc/sonante/RELEASE-BUILD.json'}
+    if variant == 'ubuntu':
+        mutable.add('usr/share/doc/sonante/runtime-inventory.json')
     expected = {}
     require({str(p.relative_to(stage)) for p in stage.rglob('*') if p.is_file()} == files.keys(), 'Unexpected staged payload')
     for name, previous in files.items():
@@ -614,42 +764,78 @@ def assemble(variant, inputs, candidates, work, output, identity, revision):
     return receipt
 
 
+def selected_variants(requested):
+    """Return unique requested package formats, defaulting to the historical full set."""
+    values = list(VARIANTS if not requested else requested)
+    require(bool(values) and len(values) == len(set(values)), 'Package variants must be selected once each')
+    require(set(values) <= set(VARIANTS), 'Unknown package variant')
+    # Keep deterministic receipt and source archive ordering, regardless of CLI order.
+    return [variant for variant in VARIANTS if variant in values]
+
+
+def inputs_for_variants(inputs, variants):
+    require(inputs['schema'] == 1 and set(inputs['packages']) == set(VARIANTS)
+            and set(inputs['sources_by_variant']) == set(VARIANTS), 'Unknown complete-package inputs')
+    require(isinstance(inputs['sources'], list) and all(
+        isinstance(inputs['sources_by_variant'][variant], list) and inputs['sources_by_variant'][variant]
+        for variant in VARIANTS), 'Every complete-package variant must declare corresponding source materials')
+    sources = {entry.get('filename'): entry for entry in inputs['sources'] if isinstance(entry, dict)}
+    require(len(sources) == len(inputs['sources']), 'Duplicate or invalid source material identity')
+    require(all(len(inputs['sources_by_variant'][variant]) == len(set(inputs['sources_by_variant'][variant]))
+                for variant in VARIANTS), 'A package variant repeats a source material')
+    require(all(set(inputs['sources_by_variant'][variant]) <= set(sources) for variant in VARIANTS),
+            'A package variant references an unknown source material')
+    names = {name for variant in variants for name in inputs['sources_by_variant'][variant]}
+    return ({variant: inputs['packages'][variant] for variant in variants},
+            [entry for entry in inputs['sources'] if entry['filename'] in names])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--candidates', type=Path, required=True)
     parser.add_argument('--work-dir', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--revision', default='1')
+    parser.add_argument('--variant', action='append', choices=VARIANTS,
+                        help='Assemble only this complete installer; repeat to select several. Default: all.')
+    parser.add_argument('--source-commit',
+                        help='Use an existing built candidate commit (must be an ancestor of this clean checkout; copied application assets must match it).')
     args = parser.parse_args()
+    variants = selected_variants(args.variant)
     require(re.fullmatch('[1-9][0-9]{0,3}', args.revision), 'Invalid package revision')
-    identity = source_identity()
+    identity = source_identity(args.source_commit)
     work, output = args.work_dir.resolve(), args.output.resolve()
     require(not work.exists() and not output.exists(), 'Use fresh work/output directories; prior attempts are preserved')
     require(not work.is_relative_to(ROOT) and not output.is_relative_to(ROOT), 'Build outside the source checkout')
     work.mkdir(parents=True, mode=0o755)
     output.mkdir(parents=True, mode=0o755)
     inputs = json.loads((ROOT / 'packaging/complete-packages.json').read_text())
-    require(inputs['schema'] == 1 and set(inputs['packages']) == set(VARIANTS), 'Unknown complete-package inputs')
+    selected_packages, selected_source_rows = inputs_for_variants(inputs, variants)
     directory = work / 'inputs'
     directory.mkdir(mode=0o755)
-    for entry in [*inputs['packages'].values(), *inputs['sources']]:
+    selected_sources = {entry['filename']: entry for entry in selected_source_rows}
+    fetch_entries = list(selected_packages.values()) + list(selected_sources.values())
+    for entry in fetch_entries:
         fetch_input(entry, directory)
     receipts = []
     tasks = work / 'build'
     tasks.mkdir(mode=0o755)
-    for variant in VARIANTS:
-        receipts.append(assemble(variant, inputs, args.candidates.resolve(), tasks, output, identity, args.revision))
-    source_archive(output, identity, args.revision)
-    source_archive(output, identity, args.revision, (ROOT / inputs['packages']['fedora']['descriptor']).read_bytes())
-    for entry in inputs['sources']:
-        shutil.copyfile(directory / entry['filename'], output / entry['filename'])
-        checked_file(output / entry['filename'], entry)
-    require(source_identity() == identity, 'Source checkout changed during assembly')
+    variant_inputs = {'packages': selected_packages, 'sources': list(selected_sources.values())}
+    for variant in variants:
+        receipts.append(assemble(variant, variant_inputs, args.candidates.resolve(), tasks, output, identity, args.revision))
+    if any(variant != 'fedora' for variant in variants):
+        source_archive(output, identity, args.revision)
+    if 'fedora' in variants:
+        source_archive(output, identity, args.revision,
+                       (ROOT / inputs['packages']['fedora']['descriptor']).read_bytes())
+    source_materials_manifest = write_source_materials_manifest(output, list(selected_sources.values()), directory)
+    require(source_identity(args.source_commit) == identity, 'Source checkout changed during assembly')
     (output / 'BUILD-RECEIPT.json').write_text(json.dumps({'source': identity, 'packages': receipts,
+                                                       'source_materials_manifest': source_materials_manifest,
                                                        'installed_or_executed': False}, indent=2) + '\n')
     checks = ''.join(digest(path) + '  ' + path.name + '\n' for path in sorted(output.iterdir()) if path.is_file())
     (output / 'SHA256SUMS.txt').write_text(checks)
-    print('Complete DEB, Fedora RPM and Arch packages verified, with corresponding sources and checksums.')
+    print('Complete ' + ', '.join(variants) + ' installer(s) verified, with corresponding sources and checksums.')
 
 
 if __name__ == '__main__':

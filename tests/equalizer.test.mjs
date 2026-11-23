@@ -1,12 +1,13 @@
 import * as numbers from '../src/components/eqNumbers.ts';
 import * as equalizerError from '../src/utils/equalizerError.ts';
+import * as equalizerAvailability from '../src/utils/equalizerAvailability.ts';
 import * as audioExperience from '../src/utils/audioExperience.ts';
 import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync,writeFileSync,readdirSync} from 'node:fs';import ts from 'typescript';import React from 'react';import * as jsx from 'react/jsx-runtime';import * as icons from 'lucide-react';import i18next from 'i18next';import {renderToStaticMarkup} from 'react-dom/server';import * as math from '../src/utils/equalizer.ts';import * as graphMath from '../src/utils/equalizerGraph.ts';
 const i18n=i18next.createInstance();await i18n.init({lng:'en',resources:Object.fromEntries(['en','pt-BR'].map(l=>[l,{translation:JSON.parse(readFileSync(new URL(`../src/locales/${l}.json`,import.meta.url)))}]))});
-const compile=(file,deps)=>{const code=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',code)(n=>{if(n==='./eqNumbers')return numbers;if(n==='../utils/equalizerGraph')return graphMath;if(n==='./EqHelp')return {EqHelp:({title})=>React.createElement('button',{'aria-label':title},'?')};if(n==='./EqNumberInput')return compile('components/EqNumberInput.tsx',{'react':React,'react/jsx-runtime':jsx,'./eqNumbers':numbers});if(n==='./AudioModeSelector')return compile('components/AudioModeSelector.tsx',{'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,'react/jsx-runtime':jsx});if(n==='../utils/audioExperience')return audioExperience;assert.ok(n in deps,n);return deps[n]},ex);return ex;};
+const compile=(file,deps)=>{const code=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',code)(n=>{if(n==='./eqNumbers')return numbers;if(n==='../utils/equalizerGraph')return graphMath;if(n==='../utils/equalizerAvailability')return equalizerAvailability;if(n==='./EqHelp')return {EqHelp:({title})=>React.createElement('button',{'aria-label':title},'?')};if(n==='./OpraCatalogBrowser')return {OpraCatalogBrowser:()=>null};if(n==='./EqNumberInput')return compile('components/EqNumberInput.tsx',{'react':React,'react/jsx-runtime':jsx,'./eqNumbers':numbers});if(n==='./AudioModeSelector')return compile('components/AudioModeSelector.tsx',{'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'lucide-react':icons,'react/jsx-runtime':jsx});if(n==='../utils/audioExperience')return audioExperience;assert.ok(n in deps,n);return deps[n]},ex);return ex;};
 const off={in_path:false,revision:0,phase:'off',applied:null,error:null,pcm_rate:48000,pcm_channels:2,verified:false};const catalog=()=>({config:{schema_version:1,enabled:false,active_preset:{kind:'built_in',id:'flat'},user_presets:[]},revision:'fixture',built_ins:[math.flatPreset()],runtime:off,shared:true,runtime_available:true});
 const nodes=(tree,p)=>Array.isArray(tree)?tree.flatMap(n=>nodes(n,p)):!tree||typeof tree!=='object'?[]:[...(p(tree)?[tree]:[]),...nodes(tree.props?.children,p)];
-function host(service,props={}){let states=[],refs=[],effects=[],si=0,ri=0;const cleanups=[];const hooks={...React,default:React,useState:v=>{const i=si++;if(!(i in states))states[i]=typeof v==='function'?v():v;return[states[i],n=>states[i]=typeof n==='function'?n(states[i]):n]},useRef:v=>refs[ri++]??={current:v},useMemo:f=>f(),useCallback:f=>f,useEffect:f=>effects.push(f)};const graph=compile('components/EqGraph.tsx',{'react':{...React,useMemo:f=>f(),useRef:v=>({current:v})},'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/equalizer':math});const {EqualizerView}=compile('components/EqualizerView.tsx',{'react':hooks,'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../services/equalizer':{equalizerService:service},'../utils/equalizer':math,'../utils/equalizerError':equalizerError,'./equalizer.css':{},'./EqGraph':graph,'./EqComparison':compile('components/EqComparison.tsx',{'react':React,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../services/equalizer':{equalizerService:service}}),'./EqLibrary':compile('components/EqLibrary.tsx',{'react':React,'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../services/equalizer':{equalizerService:service}})});let mounted=false;return{render(extra={}){si=ri=0;effects=[];const tree=EqualizerView({shared:true,runtime:off,onConfigure(){},...props,...extra});if(!mounted){mounted=true;for(const f of effects){const cleanup=f();if(typeof cleanup==='function')cleanups.push(cleanup)}}return tree},unmount(){for(const f of cleanups)f()},states};}
+function host(service,props={}){let states=[],refs=[],effects=[],si=0,ri=0;const cleanups=[];const hooks={...React,default:React,useState:v=>{const i=si++;if(!(i in states))states[i]=typeof v==='function'?v():v;return[states[i],n=>states[i]=typeof n==='function'?n(states[i]):n]},useRef:v=>refs[ri++]??={current:v},useMemo:f=>f(),useCallback:f=>f,useEffect:f=>effects.push(f)};const graph=compile('components/EqGraph.tsx',{'react':{...React,useMemo:f=>f(),useRef:v=>({current:v})},'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/equalizer':math});const {EqualizerView}=compile('components/EqualizerView.tsx',{'react':hooks,'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../services/equalizer':{equalizerService:service},'../utils/equalizer':math,'../utils/equalizerError':equalizerError,'./equalizer.css':{},'./EqGraph':graph,'./EqComparison':compile('components/EqComparison.tsx',{'react':React,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../services/equalizer':{equalizerService:service}}),'./EqLibrary':compile('components/EqLibrary.tsx',{'react':React,'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../services/equalizer':{equalizerService:service},'../utils/equalizer':math,'./EqGraph':graph})});let mounted=false;return{render(extra={}){si=ri=0;effects=[];const tree=EqualizerView({shared:true,available:true,runtime:off,onConfigure(){},...props,...extra});if(!mounted){mounted=true;for(const f of effects){const cleanup=f();if(typeof cleanup==='function')cleanups.push(cleanup)}}return tree},unmount(){for(const f of cleanups)f()},states};}
 const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve()};const by=(tree,text)=>nodes(tree,n=>n.type==='button'&&n.props.children===text)[0];
 test('graph uses an adaptive dB scale, shares pointer and point coordinates, and honestly expands protected gain',()=>{
  const ref={current:null},changes=[],added=[];const {EqGraph}=compile('components/EqGraph.tsx',{'react':{useRef:()=>ref,useMemo:f=>f(),useState:v=>[v,()=>{}],useEffect:()=>{}},'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n)})},'../utils/equalizer':math});
@@ -47,9 +48,10 @@ test('Style and Mood choices render translated groups, retain homonymous users a
  const data=catalog();data.built_ins=[...legacy,...fresh];data.config.user_presets=[{...math.flatPreset(),id:'user_rock',name:'Rock'}];
  data.builtin_groups=[{id:'reference',preset_ids:['flat']},{id:'styles',preset_ids:fresh.filter(p=>p.id.startsWith('style_')).map(p=>p.id)},{id:'moods',preset_ids:[...fresh.filter(p=>p.id.startsWith('mood_')).map(p=>p.id),'voices_v2']},{id:'tonal',preset_ids:['gentle_bass_v2','smooth_v2','light_loudness_v2']},{id:'legacy',preset_ids:['style_rock']}];
  const calls=[];const h=host({get:async()=>data,edit:async(revision,edit)=>{calls.push(edit);assert.equal(edit.action,'select');data.config.active_preset=edit.reference;return data},apply:async()=>{throw Error('Selection must not apply')}});h.render();await flush();
- for(const lang of ['en','pt-BR']){await i18n.changeLanguage(lang);let tree=h.render();const groups=nodes(tree,n=>n.type==='optgroup');assert.deepEqual(groups.map(g=>g.props.label),['reference','styles','moods','tonal','legacy','user'].map(id=>i18n.t('equalizer.groups.'+id)));const options=nodes(tree,n=>n.type==='option'&&n.props.value?.startsWith('{'));assert.equal(options.length,17);assert.equal(new Set(options.map(o=>o.props.value)).size,17);assert.equal(options.filter(o=>o.props.children==='Rock').length,3);assert.doesNotMatch(renderToStaticMarkup(tree),/equalizer\.[a-z]/);
- for(const reference of [{kind:'built_in',id:'style_rock_v2'},{kind:'built_in',id:'mood_cozy_v2'},{kind:'built_in',id:'style_rock'},{kind:'user',id:'user_rock'}]){const select=nodes(h.render(),n=>n.type==='select'&&n.props['aria-label']===i18n.t('equalizer.preset'))[0];select.props.onChange({target:{value:JSON.stringify(reference)}});await flush();tree=h.render();assert.deepEqual(data.config.active_preset,reference);assert.equal(h.states[1].id,reference.id);assert.equal(h.states[5],null);assert.equal(nodes(tree,n=>n.props['data-eq-preset-description']!==undefined).length,reference.kind==='built_in'?1:0);}
- }assert.equal(calls.length,8);assert.ok(calls.every(c=>c.action==='select'));h.unmount();await i18n.changeLanguage('en');
+ for(const lang of ['en','pt-BR']){await i18n.changeLanguage(lang);let tree=h.render();let library=nodes(tree,n=>n.type?.name==='EqLibrary')[0];assert.ok(library,'the single editor keeps its library at the bottom');assert.equal(library.props.catalog,data);assert.equal(library.props.draft,h.states[1]);const select=nodes(tree,n=>n.type==='select'&&n.props['aria-label']===i18n.t('equalizer.preset'))[0];assert.ok(select,'preset selection remains beside the editor controls');const groups=nodes(tree,n=>n.type==='optgroup');assert.deepEqual(groups.map(g=>g.props.label),['reference','styles','moods','tonal','legacy','user'].map(id=>i18n.t('equalizer.groups.'+id)));const options=nodes(tree,n=>n.type==='option'&&n.props.value?.startsWith('{'));assert.equal(options.length,17);assert.equal(new Set(options.map(o=>o.props.value)).size,17);assert.equal(options.filter(o=>o.props.children==='Rock').length,3);
+  for(const reference of [{kind:'built_in',id:'style_rock_v2'},{kind:'built_in',id:'mood_cozy_v2'},{kind:'built_in',id:'style_rock'},{kind:'user',id:'user_rock'}]){select.props.onChange({target:{value:JSON.stringify(reference)}});await flush();tree=h.render();assert.deepEqual(data.config.active_preset,reference);assert.equal(h.states[1].id,reference.id);assert.equal(h.states[5],null);assert.equal(nodes(tree,n=>n.props?.['data-eq-preset-description']!==undefined).length,reference.kind==='built_in'?1:0);}
+ }
+ assert.equal(calls.length,8);assert.ok(calls.every(c=>c.action==='select'));h.unmount();await i18n.changeLanguage('en');
 });
 test('natural factory collection preserves identities and moderate shapes with the exact Rust budget',()=>{
  const cases=JSON.parse(readFileSync(new URL('fixtures/equalizer-collection.json',import.meta.url),'utf8'));assert.equal(cases.length,14);const signatures=[];
@@ -78,9 +80,9 @@ test('EqualizerView exposes ±15 dB, associates inline gain errors outside the s
  }
  h.unmount();await i18n.changeLanguage('en');
 });
-test('load and draft edits do not activate; explicit Apply sends one complete draft',async()=>{const calls=[];const data=catalog();const h=host({get:async()=>{calls.push('get');return data},apply:async(...v)=>{calls.push(['apply',...v]);return{...off,revision:2,phase:'ready',applied:v[1],verified:true}}});h.render();await flush();let tree=h.render();assert.deepEqual(calls,['get']);nodes(tree,n=>n.type==='button'&&Array.isArray(n.props.children)&&n.props.children.includes(i18n.t('equalizer.addBand')))[0].props.onClick();tree=h.render();nodes(tree,n=>n.props.min===-15&&n.props.max===15&&n.props.onValueChange)[0].props.onValueChange(3);tree=h.render();assert.deepEqual(calls,['get']);by(tree,i18n.t('equalizer.apply')).props.onClick();await flush();assert.deepEqual(calls.map(v=>Array.isArray(v)?v[0]:v),['get','apply','get']);assert.equal(calls[1][1],true);assert.equal(calls[1][2].bands[0].gain_db,3);h.render({runtime:off});assert.equal(h.states[5].revision,2);h.unmount();});
+test('load and draft edits do not activate; explicit Apply sends one complete draft',async()=>{const calls=[];const data=catalog();const h=host({get:async()=>{calls.push('get');return data},apply:async(...v)=>{calls.push(['apply',...v]);return{runtime:{...off,revision:2,phase:'ready',applied:v[1],verified:true},audioRoute:null}}});h.render();await flush();let tree=h.render();assert.deepEqual(calls,['get']);nodes(tree,n=>n.type==='button'&&Array.isArray(n.props.children)&&n.props.children.includes(i18n.t('equalizer.addBand')))[0].props.onClick();tree=h.render();nodes(tree,n=>n.props.min===-15&&n.props.max===15&&n.props.onValueChange)[0].props.onValueChange(3);tree=h.render();assert.deepEqual(calls,['get']);by(tree,i18n.t('equalizer.apply')).props.onClick();await flush();assert.deepEqual(calls.map(v=>Array.isArray(v)?v[0]:v),['get','apply','get']);assert.equal(calls[1][1],true);assert.equal(calls[1][2].bands[0].gain_db,3);h.render({runtime:off});assert.equal(h.states[6].revision,2);h.unmount();});
 test('Direct disables activation; ten accessible bands and translated UI in both languages',async()=>{const calls=[];const h=host({get:async()=>catalog(),apply:async()=>calls.push('apply')},{shared:false});h.render();await flush();for(const lang of ['en','pt-BR']){await i18n.changeLanguage(lang);const tree=h.render();assert.equal(by(tree,i18n.t('equalizer.apply')).props.disabled,true);assert.equal(nodes(tree,n=>n.type==='input'&&n.props.type==='checkbox'&&n.props['aria-label']!==i18n.t('equalizer.showGlobalGain')).length,0);assert.ok(nodes(tree,n=>n.type==='select'&&n.props['aria-label']===i18n.t('equalizer.selectBand')).length);const html=renderToStaticMarkup(tree);assert.doesNotMatch(html,/equalizer\.[a-z]/);assert.match(html,/aria-label/);}assert.deepEqual(calls,[]);h.unmount();await i18n.changeLanguage('en');});
-test('unmount ignores late catalog; corrupt store never defaults into writable catalog',async()=>{let done;const h=host({get:()=>new Promise(r=>done=r)});h.render();h.unmount();done(catalog());await flush();assert.equal(h.states[0],null);const broken=host({get:async()=>{throw Error('broken')}});broken.render();await flush();assert.equal(broken.states[0],null);assert.equal(broken.states[4],'EQ_UNCONFIRMED');assert.equal(nodes(broken.render(),n=>n.type==='select').length,0);broken.unmount();});
+test('unmount ignores late catalog; corrupt store never defaults into writable catalog',async()=>{let done;const h=host({get:()=>new Promise(r=>done=r)});h.render();h.unmount();done(catalog());await flush();assert.equal(h.states[0],null);const broken=host({get:async()=>{throw Error('broken')}});broken.render();await flush();assert.equal(broken.states[0],null);assert.equal(broken.states[5],'EQ_UNCONFIRMED');assert.equal(nodes(broken.render(),n=>n.type==='select').length,0);broken.unmount();});
 test('IPC service uses explicit payloads without reads or transport commands',async()=>{const calls=[];const {equalizerService:s}=compile('services/equalizer.ts',{'@tauri-apps/api/core':{invoke:async(...args)=>calls.push(args)}});await s.apply(true,math.flatPreset());await s.edit('rev',{action:'select',reference:{kind:'built_in',id:'flat'}});assert.deepEqual(calls.map(c=>c[0]),['apply_equalizer','edit_equalizer']);assert.equal(calls[1][1].expectedRevision,'rev');});
 
 if(process.env.SONANTE_EQ_PREVIEW_DIR)test('render private fixture preview',async()=>{const dir=process.env.SONANTE_EQ_PREVIEW_DIR;assert.ok(dir.endsWith('/outputs/sonante-eq-interaction'));const css=readdirSync(new URL('../dist/assets/',import.meta.url)).find(f=>f.endsWith('.css'));for(const lang of ['pt-BR','en']){await i18n.changeLanguage(lang);const h=host({get:async()=>catalog()});h.render();await flush();const html=renderToStaticMarkup(h.render());writeFileSync(`${dir}/preview-${lang}.html`,`<!doctype html><html lang="${lang}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${readFileSync(new URL(`../dist/assets/${css}`,import.meta.url),'utf8')}body{margin:0;background:#131313;color:white;font-family:Arial,sans-serif}main{height:100vh}</style><body>${html}</body></html>`);h.unmount();}await i18n.changeLanguage('en');});
@@ -132,7 +134,12 @@ test('native PulseAudio explains and blocks both activation controls, but preset
  h.render();await flush();
  for(const lang of ['en','pt-BR']){
   await i18n.changeLanguage(lang);const tree=h.render();const html=renderToStaticMarkup(tree);
-  assert.ok(html.includes(i18n.t('equalizer.pulseAudioNotice')));
+  assert.equal(i18n.t('equalizer.pulseAudioTitle'),lang==='en'?'Equalizer unavailable':'Equalizador indisponível');
+  assert.equal(i18n.t('equalizer.pulseAudioNotice'),lang==='en'
+   ?"Sonante's equalizer currently requires PipeWire. Your system is using native PulseAudio. Normal playback in Shared mode remains available, but EQ cannot be activated in this environment."
+   :'O equalizador do Sonante atualmente requer PipeWire. Seu sistema está utilizando PulseAudio nativo. A reprodução normal no modo Compartilhado continua disponível, mas o EQ não pode ser ativado neste ambiente.');
+  assert.ok(html.includes(i18n.t('equalizer.pulseAudioTitle')));
+  assert.equal(nodes(tree,n=>n.props.id==='eq-pulseaudio-notice')[0].props.children[1].props.children,i18n.t('equalizer.pulseAudioNotice'));
   assert.ok(html.includes(i18n.t('equalizer.pulseAudioState')));
   assert.equal(nodes(tree,n=>n.props.id==='eq-pulseaudio-notice').length,1);
   const enable=nodes(tree,n=>n.type==='button'&&n.props.children?.includes?.(i18n.t('equalizer.enable')))[0];
@@ -141,7 +148,7 @@ test('native PulseAudio explains and blocks both activation controls, but preset
    assert.equal(button.props.disabled,true);assert.equal(button.props['aria-describedby'],'eq-pulseaudio-notice');
    button.props.onClick();await flush();
   }
-  assert.equal(nodes(tree,n=>n.type==='select'&&n.props['aria-label']===i18n.t('equalizer.preset'))[0].props.disabled,false);
+  const library=nodes(tree,n=>n.type?.name==='EqLibrary')[0];assert.ok(library);assert.equal(library.props.disabled,false);
   assert.equal(nodes(tree,n=>n.props.role==='alert').length,0);assert.deepEqual(calls,[]);
  }
  h.unmount();await i18n.changeLanguage('en');
@@ -154,10 +161,23 @@ test('a server changed after loading is refused by backend and becomes an explic
  let tree=h.render();assert.equal(calls.length,1);assert.equal(by(tree,i18n.t('equalizer.apply')).props.disabled,true);
  assert.equal(nodes(tree,n=>n.props.id==='eq-pulseaudio-notice').length,1);
  assert.equal(nodes(tree,n=>n.props.role==='alert').length,0);
- // An explicit reload removes the block after a compatible server is observed.
- data={...catalog(),pulse_audio:false};by(tree,i18n.t('equalizer.reload')).props.onClick();await flush();tree=h.render();
+ // An explicit availability check removes the block after a compatible server is observed.
+ data={...catalog(),pulse_audio:false};by(tree,i18n.t('equalizer.recheckAvailability')).props.onClick();await flush();tree=h.render();
  assert.equal(by(tree,i18n.t('equalizer.apply')).props.disabled,false);
  assert.equal(nodes(tree,n=>n.props.id==='eq-pulseaudio-notice').length,0);h.unmount();
+});
+
+test('availability recheck in the editor preserves draft changes and never activates EQ',async()=>{
+ let reads=0,applyCalls=0;const service={async get(){reads++;return{...catalog(),pulse_audio:reads===1}},async apply(){applyCalls++}};
+ const h=host(service);h.render();await flush();let tree=h.render();
+ assert.ok(nodes(tree,n=>n.props.id==='eq-pulseaudio-notice').length);
+ nodes(tree,n=>n.type==='button'&&Array.isArray(n.props.children)&&n.props.children.includes(i18n.t('equalizer.addBand')))[0].props.onClick();tree=h.render();
+ assert.ok(h.states[1].bands.some(band=>band.enabled),'the editor has a local unsaved draft before rechecking');
+ by(tree,i18n.t('equalizer.recheckAvailability')).props.onClick();await flush();tree=h.render();
+ assert.equal(reads,2);assert.equal(nodes(tree,n=>n.props.id==='eq-pulseaudio-notice').length,0);
+ assert.ok(h.states[1].bands.some(band=>band.enabled),'availability refresh must not replace the draft');
+ assert.equal(by(tree,i18n.t('equalizer.apply')).props.disabled,false);assert.equal(applyCalls,0);
+ h.unmount();
 });
 
 test('PulseAudio activation restriction preserves routed bypass and unrelated preset errors',async()=>{
@@ -168,7 +188,51 @@ test('PulseAudio activation restriction preserves routed bypass and unrelated pr
  const bypass=nodes(tree,n=>n.type==='button'&&n.props.children?.includes?.(i18n.t('equalizer.bypass')))[0];
  assert.equal(bypass.props.disabled,false);bypass.props.onClick();tree=h.render();
  by(tree,i18n.t('equalizer.confirmBypass')).props.onClick();await flush();assert.equal(calls.length,1);assert.equal(calls[0][0],false);
- tree=h.render();const select=nodes(tree,n=>n.type==='select'&&n.props['aria-label']===i18n.t('equalizer.preset'))[0];
- select.props.onChange({target:{value:JSON.stringify({kind:'built_in',id:'flat'})}});await flush();
+ tree=h.render();const library=nodes(tree,n=>n.type?.name==='EqLibrary')[0];
+ await library.props.onEdit({action:'select',reference:{kind:'built_in',id:'flat'}});await flush();
  assert.equal(nodes(h.render(),n=>n.props.role==='alert').length,1);h.unmount();
+});
+
+test('Equalizer presents preset management in the single editor page and keeps drafts without applying DSP',async()=>{
+ const applied=[],edits=[];const data=catalog();const userPreset={...math.flatPreset(),id:'user-1',name:'Existing'};const userReference={kind:'user',id:userPreset.id};data.config.active_preset=userReference;data.config.user_presets=[userPreset];const service={get:async()=>data,edit:async(_revision,action)=>{edits.push(action);return data},apply:async(...args)=>{applied.push(args);return{runtime:off}}};let returned=0;
+ const h=host(service,{onReturn:()=>returned++});h.render();await flush();let tree=h.render();
+ assert.equal(nodes(tree,n=>n.props?.role==='tab').length,0);
+ const returnButton=nodes(tree,n=>n.type==='button'&&n.props.className?.includes('eq-return'))[0];assert.ok(returnButton);returnButton.props.onClick();assert.equal(returned,1);
+ const editor=nodes(tree,n=>n.props?.['data-eq-area']==='editor')[0];assert.ok(editor);assert.equal(editor.props.hidden,undefined);
+ const preamp=nodes(tree,n=>n.type==='input'&&n.props?.type==='range'&&n.props?.['aria-label']===i18n.t('equalizer.preamp'))[0];
+ assert.ok(preamp);preamp.props.onChange({target:{value:'-4.5'}});tree=h.render();
+ const library=nodes(tree,n=>n.type?.name==='EqLibrary')[0];assert.ok(library);
+ assert.equal(library.props.draft.preamp_db,-4.5);
+ assert.equal(library.props.draft, h.states[1]);
+ const equalizerSource=readFileSync(new URL('../src/components/EqualizerView.tsx',import.meta.url),'utf8');
+ assert.doesNotMatch(equalizerSource,/eq-library-tab|OpraCatalogBrowser|AutoEqView/);
+ const order=[
+  nodes(tree,n=>n.type==='header'&&n.props.className==='eq-header')[0],
+  nodes(tree,n=>n.props?.className==='eq-route-actions')[0],
+  nodes(tree,n=>n.props?.className==='eq-route-summary')[0],
+  nodes(tree,n=>n.props?.className==='eq-toolbar')[0],
+  nodes(tree,n=>n.type?.name==='EqComparison')[0],
+  nodes(tree,n=>n.type?.name==='EqGraph')[0],
+  nodes(tree,n=>n.type==='button'&&Array.isArray(n.props.children)&&n.props.children.includes(i18n.t('equalizer.addBand')))[0],
+  nodes(tree,n=>n.props?.className?.includes('eq-preamp-section'))[0],
+  nodes(tree,n=>n.type==='input'&&n.props?.['aria-label']===i18n.t('equalizer.name'))[0],
+  nodes(tree,n=>n.type?.name==='EqLibrary')[0],
+ ];
+ assert.ok(order.every(Boolean),'all requested equalizer sections are rendered');
+ const positions=order.map(node=>nodes(tree,n=>true).indexOf(node));assert.deepEqual(positions,[...positions].sort((a,b)=>a-b),'equalizer sections follow the requested top-to-bottom order');
+ const librarySource=readFileSync(new URL('../src/components/EqLibrary.tsx',import.meta.url),'utf8');
+ assert.match(librarySource,/equalizerService\.pickImport/);
+ assert.match(librarySource,/equalizerService\.exportPreset/);
+ assert.doesNotMatch(librarySource,/equalizer\.preset|equalizer\.saveAs/);
+ assert.doesNotMatch(librarySource,/AutoEq|OPRA|pickAutoEq|import_autoeq/);
+ const nameField=nodes(tree,n=>n.type==='input'&&n.props?.['aria-label']===i18n.t('equalizer.name'))[0];nameField.props.onChange({target:{value:'Copy'}});tree=h.render();
+ by(tree,i18n.t('equalizer.saveAs')).props.onClick();await flush();
+ tree=h.render();by(tree,i18n.t('equalizer.save')).props.onClick();await flush();
+ tree=h.render();nodes(tree,n=>n.type==='input'&&n.props?.['aria-label']===i18n.t('equalizer.name'))[0].props.onChange({target:{value:'Renamed'}});tree=h.render();by(tree,i18n.t('equalizer.rename')).props.onClick();await flush();
+ tree=h.render();nodes(tree,n=>n.type==='button'&&n.props?.['aria-label']===i18n.t('equalizer.delete'))[0].props.onClick();await flush();
+ assert.deepEqual(edits.map(action=>action.action),['create','update','rename','delete']);
+ assert.equal(applied.length,0);
+ const restored=nodes(tree,n=>n.type==='input'&&n.props?.type==='range'&&n.props?.['aria-label']===i18n.t('equalizer.preamp'))[0];
+ assert.equal(restored.props.value,0);assert.equal(applied.length,0);
+ h.unmount();
 });

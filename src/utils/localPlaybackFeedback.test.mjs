@@ -36,7 +36,7 @@ const replacements={...passiveQueueInsertion,
  '../services/audio':{audioService},'../services/favorites':{favoritesService:{getFavorites:async()=>[]}},
  '../utils/frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})}, './frontendDiagnostics':{logError:(op,error)=>logs.push({op,error})},
  '../utils/localAlbumCatalogSession':{localAlbumCatalog:catalog},
- '../utils/localArtworkSession':{localAlbumThumbnails:{setOpeningOrder(){}},localArtworkResolver:artwork,localArtworkEnrichment:{subscribe:()=>()=>{},getOnlineActivitySnapshot:()=>undefined,getSnapshot:()=>({active:0,queued:0,inFlight:0,blocked:false}),setCatalog(){}}},
+ '../utils/localArtworkSession':{localAlbumThumbnails:{setOpeningOrder(){},get:()=>null},localArtworkResolver:artwork,localArtworkEnrichment:{subscribe:()=>()=>{},getOnlineActivitySnapshot:()=>undefined,getSnapshot:()=>({active:0,queued:0,inFlight:0,blocked:false}),setCatalog(){}}},
 };
 const cache=new Map();
 function load(path){
@@ -54,13 +54,13 @@ function load(path){
  };
  new Function('require','exports',js)(localRequire,module);return module;
 }
-const {LocalBrowserView}=load(resolve(root,'src/components/LocalBrowserView.tsx'));
+const {LocalBrowserView,LocalBrowserEntry}=load(resolve(root,'src/components/LocalBrowserView.tsx'));
 const nodes=(tree,p)=>Array.isArray(tree)?tree.flatMap(n=>nodes(n,p)):!tree||typeof tree!=='object'?[]:[...(p(tree)?[tree]:[]),...nodes(tree.props?.children,p)];
 const markup=tree=>renderToStaticMarkup(tree);
 class Harness{
  slots=[];cursor=0;writes=0;effects=[];
- constructor(props){this.props=props;}
- render(props=this.props){this.props=props;this.cursor=0;this.effects=[];host=this;const tree=LocalBrowserView(props);host=null;this.tree=tree;this.effects.splice(0).forEach(fn=>fn());return tree;}
+ constructor(props,component=LocalBrowserView){this.props=props;this.component=component;}
+ render(props=this.props){this.props=props;this.cursor=0;this.effects=[];host=this;let tree=this.component(props);if(tree?.type===LocalBrowserView)tree=LocalBrowserView(tree.props);host=null;this.tree=tree;this.effects.splice(0).forEach(fn=>fn());return tree;}
  async settle(){for(let i=0;i<3;i++){this.render();await flush();}return this.render();}
  close(){this.slots.forEach(s=>s?.cleanup?.());}
  click(label){const button=nodes(this.tree,n=>n.type==='button'&&markup(n).includes(label))[0];assert.ok(button,`button ${label}`);return button.props.onClick();}
@@ -68,6 +68,82 @@ class Harness{
  async folders(){this.render({...this.props,initialAlbumId:undefined});this.click(language.t('localBrowser.back'));await this.settle();this.click(language.t('localBrowser.tabFolders'));await this.settle();}
  folderClick(){const row=nodes(this.tree,n=>n.type==='div'&&n.props?.onClick&&n.props?.className?.includes('justify-between')&&markup(n).includes('Fixture track'))[0];assert.ok(row,'folder file row');return row.props.onClick();}
 }
+
+test('SQLite Local album entry keeps opaque track identity through full-album and selected-track playback',async()=>{
+ language=i18next.createInstance();await language.init({lng:'pt-BR',resources:{'pt-BR':{translation:JSON.parse(readFileSync(resolve(root,'src/locales/pt-BR.json'),'utf8'))}}});
+ const original={album:{...album},groups:[...groups],snapshot};
+ const first={...album,id:'sqlite:source-a:album-a',source_id:'source-a',source_label:'Source A',title:'Homonymous release',artist:'Artist A'};
+ const homonym={...album,id:'sqlite:source-b:album-a',source_id:'source-b',source_label:'Source B',title:'Homonymous release',artist:'Artist B'};
+ const cue='sqlite-cue://source-a/QWxidW0vZmlsZS5jdWU/track-';
+ const tracks=[0,1,2].map(index=>({...track,name:`track-${index+1}.flac`,title:`Track ${index+1}`,artist:'Artist A',path:`${cue}${index+1}`,duration:30}));
+ const trackGroups=[{disc:first.discs[0],tracks}];
+ album.id=first.id;album.source_id=first.source_id;album.source_label=first.source_label;album.title=first.title;album.artist=first.artist;
+ groups.splice(0,groups.length,...trackGroups);
+ snapshot={albums:[first,homonym],loaded:true,loading:false,saveBlocked:false,mpdBusy:false,error:null};
+ const playerTarget={kind:'local',view:'album',albumId:first.id,verified:{groups:trackGroups,catalog:snapshot.albums}};
+ const catalogContext={sqliteBacked:true,sqliteIndexing:false,sqliteSources:[
+  {id:'source-a',displayName:'Source A',trackCount:3},{id:'source-b',displayName:'Source B',trackCount:3}],sqliteSourcesLoaded:true};
+ const h=new Harness({playerTarget,isPlaybackAvailable:true,isLibraryUpdating:false,onlineArtworkEnabled:false,configuredLocalFolders:[],catalogRefreshRevision:0,catalogContext},LocalBrowserEntry);
+ try{
+  requests=[];logs=[];coverRead=async()=>null;confirmedRevision=1;await h.settle();
+  const fullAlbumPending=h.click(language.t('localBrowser.playAlbum'));assert.ok(fullAlbumPending instanceof Promise);await flush();
+  assert.equal(requests.length,1);assert.equal(requests[0].args[1],0);
+  assert.deepEqual(requests[0].args[0].map(item=>item.media_locator),tracks.map(item=>({kind:'local',uri:item.path})));
+  assert.ok(requests[0].args[0].every(item=>item.uri===undefined));
+  requests[0].resolve();await flush();
+
+  const selected=nodes(h.tree,n=>n.type==='div'&&n.props?.onClick&&markup(n).includes('Track 3'))[0];assert.ok(selected,'third track row');
+  selected.props.onClick({shiftKey:false,ctrlKey:false,metaKey:false,button:0,preventDefault(){},stopPropagation(){}});await flush();
+  assert.equal(requests.length,2);assert.equal(requests[1].args[1],2);
+  assert.deepEqual(requests[1].args[0].map(item=>item.media_locator),tracks.map(item=>({kind:'local',uri:item.path})));
+  assert.equal(requests[1].args[0][2].title,'Track 3');
+  assert.equal(requests[1].args[0][2].artist,'Artist A');
+  requests[1].resolve();await flush();h.close();
+
+  // Explore, History and Editions open the same album by its canonical ID.
+  // This is the same LocalBrowserEntry composition used by those callers.
+  const detail=new Harness({initialAlbumId:first.id,isPlaybackAvailable:true,isLibraryUpdating:false,onlineArtworkEnabled:false,
+   configuredLocalFolders:[],catalogRefreshRevision:0,catalogContext},LocalBrowserEntry);
+  try{
+   await detail.settle();const pending=detail.click(language.t('localBrowser.playAlbum'));await flush();
+   assert.equal(requests.length,3);assert.equal(requests[2].args[1],0);
+   assert.deepEqual(requests[2].args[0].map(item=>item.media_locator),tracks.map(item=>({kind:'local',uri:item.path})));
+   assert.equal(requests[2].args[0][0].artist,'Artist A');requests[2].resolve();await pending;
+  }finally{detail.close();}
+
+  for(const route of ['grid','artist-navigation']){
+   const target=route==='artist-navigation'?{kind:'local',view:'artist',albumId:first.id,verified:{groups:trackGroups,catalog:snapshot.albums}}:undefined;
+   const entry=new Harness({playerTarget:target,catalogContext,isPlaybackAvailable:true,isLibraryUpdating:false,onlineArtworkEnabled:false,
+    configuredLocalFolders:[],catalogRefreshRevision:0},LocalBrowserEntry);
+   try{
+    await entry.settle();
+    const collection=nodes(entry.tree,node=>typeof node.props?.renderItem==='function'&&node.props.items?.some(item=>item.id===first.id))[0];assert.ok(collection,`${route} album collection`);
+    const card=collection.props.renderItem(first);assert.equal(card.props.album.id,first.id);card.props.onClick();await entry.settle();
+    const requestIndex=requests.length,pending=entry.click(language.t('localBrowser.playAlbum'));await flush();
+    assert.equal(requests.length,requestIndex+1);assert.equal(requests[requestIndex].args[1],0);
+    assert.deepEqual(requests[requestIndex].args[0].map(item=>item.media_locator),tracks.map(item=>({kind:'local',uri:item.path})));
+    assert.equal(requests[requestIndex].args[0][0].artist,'Artist A');requests[requestIndex].resolve();await pending;
+   }finally{entry.close();}
+  }
+ }finally{
+  h.close();Object.assign(album,original.album);groups.splice(0,groups.length,...original.groups);snapshot=original.snapshot;
+ }
+});
+
+test('Local entry with SQLite disabled preserves legacy path playback',async()=>{
+ language=i18next.createInstance();await language.init({lng:'pt-BR',resources:{'pt-BR':{translation:JSON.parse(readFileSync(resolve(root,'src/locales/pt-BR.json'),'utf8'))}}});
+ const previous={...album},legacyPath='Legacy Library/Album/01.flac';
+ album.id='legacy-album';album.source_id=null;album.title='Legacy album';album.artist='Legacy artist';
+ const legacyTrack={...track,path:legacyPath,title:'Legacy track',artist:'Legacy artist'};groups.splice(0,groups.length,{disc:album.discs[0],tracks:[legacyTrack]});
+ snapshot={albums:[album],loaded:true,loading:false,saveBlocked:false,mpdBusy:false,error:null};requests=[];logs=[];confirmedRevision=1;
+ const target={kind:'local',view:'album',albumId:album.id,verified:{groups:[{disc:album.discs[0],tracks:[legacyTrack]}],catalog:snapshot.albums}};
+ const h=new Harness({playerTarget:target,catalogContext:{sqliteBacked:false},isPlaybackAvailable:true,isLibraryUpdating:false,onlineArtworkEnabled:false,configuredLocalFolders:[],catalogRefreshRevision:0},LocalBrowserEntry);
+ try{
+  await h.settle();const pending=h.click(language.t('localBrowser.playAlbum'));await flush();
+  assert.equal(requests.length,1);assert.equal(requests[0].args[0][0].uri,legacyPath);assert.equal(requests[0].args[0][0].media_locator,undefined);
+  requests[0].resolve();await pending;
+ }finally{h.close();Object.assign(album,previous);groups.splice(0,groups.length,{disc:album.discs[0],tracks:[track]});snapshot={albums:[album],loaded:true,loading:false,saveBlocked:false,mpdBusy:false,error:null};}
+});
 function setup(){
  requests=[];logs=[];coverRead=async()=>null;confirmedRevision=1;snapshot={albums:[album],loaded:true,loading:false,saveBlocked:false,mpdBusy:false,error:null};
  return new Harness({initialAlbumId:'album-a',isPlaybackAvailable:true,isLibraryUpdating:false,onlineArtworkEnabled:false,configuredLocalFolders:[],catalogRefreshRevision:0});

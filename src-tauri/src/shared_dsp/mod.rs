@@ -1053,7 +1053,9 @@ impl Session {
             diagnostics::event("camilla.rendered_config_confirmation", "error", Some(control_started.elapsed().as_millis()), json!({"controller_health": format!("{:?}", self.controller.health())}));
             return Err(Error::ControlFailed);
         }
-        diagnostics::event("camilla.rendered_config_confirmation", "ok", Some(control_started.elapsed().as_millis()), json!({"preset_identity_confirmed": true}));
+        // This is a periodic health check (every two seconds while committed),
+        // not a route transition. Recording every success grows the opt-in log
+        // without adding useful evidence; failures remain recorded above.
         self.env
             .graph_for_session_sink(&self.sink)?
             .validate(&self.stream, &self.sink)

@@ -11,6 +11,11 @@ import stat
 
 SOURCE = Path(__file__).resolve().parent.parent
 MANIFEST = SOURCE / 'packaging/private-runtimes.json'
+APPROVED_MANIFESTS = {
+    MANIFEST.resolve(),
+    (SOURCE / 'packaging/qualified-0.5.4/ubuntu-arch.runtime.json').resolve(),
+    (SOURCE / 'packaging/qualified-0.5.4/fedora.runtime.json').resolve(),
+}
 
 def digest(path):
     checksum = hashlib.sha256()
@@ -31,8 +36,15 @@ def checked(entry):
         raise ValueError('Input identity mismatch: ' + p.name)
     return p
 
-def prepare(record, sidecar, output):
-    pins = json.loads(MANIFEST.read_text())
+def approved_manifest(path):
+    path = Path(path).resolve()
+    if path not in APPROVED_MANIFESTS or not path.is_file():
+        raise ValueError('Runtime manifest is not an approved platform profile')
+    return path
+
+def prepare(record, sidecar, output, manifest=MANIFEST):
+    manifest = approved_manifest(manifest)
+    pins = json.loads(manifest.read_text())
     build = json.loads(record.read_text())
     if output.exists():
         raise ValueError('Use a fresh staging directory')
@@ -68,7 +80,7 @@ def prepare(record, sidecar, output):
             raise ValueError('Copy verification failed')
     for name, entry in build['files'].items():
         copy(entry, runtime / name, entry['mode'])
-    runtime.joinpath('manifest.json').write_bytes(MANIFEST.read_bytes())
+    runtime.joinpath('manifest.json').write_bytes(manifest.read_bytes())
     for name, entry in build['notices'].items():
         copy(entry, output / 'usr/share/licenses/sonante/runtimes' / name)
     docs = output / 'usr/share/doc/sonante'
@@ -90,5 +102,7 @@ if __name__ == '__main__':
     p.add_argument('--build-inputs', type=Path, required=True)
     p.add_argument('--source-sidecar', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
-    a = p.parse_args(); prepare(a.build_inputs.resolve(), a.source_sidecar.resolve(), a.output.resolve())
+    p.add_argument('--manifest', type=Path, default=MANIFEST,
+                   help='Approved Debian/Ubuntu, Arch, or Fedora runtime profile (default: Debian/Ubuntu)')
+    a = p.parse_args(); prepare(a.build_inputs.resolve(), a.source_sidecar.resolve(), a.output.resolve(), a.manifest)
     print('Verified resources/notices staged; corresponding sources remain separate. Nothing installed or packaged.')

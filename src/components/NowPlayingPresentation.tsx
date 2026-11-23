@@ -13,6 +13,7 @@ import { PsychoVisualizer } from "./visualizer/PsychoVisualizer";
 import { nowPlayingLayout, type NowPlayingLayout, type PsychoPlacement } from "../utils/nowPlayingLayout";
 import { NowPlayingImmersive } from "./NowPlayingImmersive";
 import { SleepTimerControl } from "./SleepTimerControl";
+import { TrackLyrics } from "./TrackLyrics";
 import "./nowPlaying.css";
 
 export interface NowPlayingPresentationProps {
@@ -120,6 +121,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
           {layout === "psycho" && <PsychoVisualizer levels={props.levels} active={Boolean(props.analyzerAvailable && available && status?.state === "play")}
             inactiveLabel={simpleMode && available && status?.state === "pause" ? t("nowPlaying.visualizer.paused") : visualizerMessage.label}
             inactiveHelp={simpleMode && available && status?.state === "pause" ? t("nowPlaying.visualizer.helpPaused") : visualizerMessage.help}
+            artworkTrack={status}
             compact={simpleMode} />}
           {layout === "sleeve" && <div className="np-sleeve-caption" aria-hidden="true"><span>{t("nowPlaying.layouts.sleeve")}</span><span>SONANTE</span></div>}
           {layout === "poster" && <div className="np-poster-caption" aria-hidden="true"><span>{t("nowPlaying.look.posterCaption")}</span><span>{hasTrack && status ? status.artist : "SONANTE"}</span></div>}
@@ -130,7 +132,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
             }}>{status && hasTrack ? <TrackArtwork track={status} alt={status.album || status.title} /> : <TrackArtwork track={{}} />}</div>
           <div className="np-details">
             {props.hostingError && <p role="alert" className="np-error">{t("nowPlaying.transitionFailed")}</p>}
-            {!status ? <p role="status">{t("nowPlaying.waitingForStatus")}</p> : <>
+            {!status ? <>{layout === "lyrics" && <TrackLyrics track={null} />}<p role="status">{t("nowPlaying.waitingForStatus")}</p></> : <>
               <div className={layout === "audiophile" ? "np-audiophile-meta" : undefined}>
                 <div className="np-track-heading">
                   {layout !== "audiophile" && <div className="np-track-eyebrow">{t(`nowPlaying.look.${layout}Eyebrow`)}</div>}
@@ -140,6 +142,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
                 </div>
                 {layout === "audiophile" && hasTrack && available && props.snapshot?.sourceInfo && currentMediaKey(props.snapshot.sourceInfo.media) === currentMediaKey(status.current_media) && <SourceAudioBadges info={props.snapshot.sourceInfo.info} />}
               </div>
+              {layout === "lyrics" && <TrackLyrics track={status} />}
               {!available && <p role="status" className="np-notice">{t(health?.state === "unavailable" ? "player.engineUnavailable" : "player.engineTransitioning")}{hasTrack && ` · ${t("player.lastKnown")}`}</p>}
               {playbackNotice && <p role="alert" className="np-error">{t(status.current_media?.kind === "navidrome" && playbackNotice.code === "format_unsupported" ? "navidrome.streamError" : isRadio && playbackNotice.code === "format_unsupported" ? "radio.directError" : `player.playbackError.${playbackNotice.code}`)}</p>}
               {props.controlFailed && <p role="alert" className="np-error">{t("nowPlaying.controlFailed")}</p>}
@@ -153,7 +156,7 @@ export const NowPlayingPresentation: React.FC<NowPlayingPresentationProps> = pro
                 </dl>
               </div>}
               {layout === "audiophile" && <VisualizerPanel levels={props.levels} active={Boolean(props.analyzerAvailable && available && status.state === "play")}
-                inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} fullscreen={props.fullscreen} compact={simpleMode} />}
+                inactiveLabel={visualizerMessage.label} inactiveHelp={visualizerMessage.help} artworkTrack={status} fullscreen={props.fullscreen} compact={simpleMode} />}
               <div className="np-progress">
                 <div className="np-progress-control">
                   <div className="np-progress-track" aria-hidden="true">

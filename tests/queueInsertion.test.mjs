@@ -233,6 +233,7 @@ async function historyFixture(f, initial) {
   plexNavigation:async id=>{calls.push(['navigate',id]);return {album:{rating_key:'album-1',server_id:'server',title:'Album',artist:'Artist'}};},
   subscribe:async callback=>{service.changed=callback;return()=>calls.push(['unlisten']);},
  };
+ const LocalEntry=()=>null,localBrowserCatalogContext={sqliteBacked:false};
  const album={id:'album-local',title:'Album',artist:'Artist',folder_path:'Source/Album',discs:[],track_count:1};
  const audio={playTracks:async(...args)=>calls.push(['play',...args]),getLocalAlbums:async()=>{calls.push(['albums']);return[album];}};
  const playback=compile('utils/usePlaybackAttempt.ts',{react:f.react,'./playbackIntent':intents,'./frontendDiagnostics':{logError(){}}});
@@ -240,17 +241,17 @@ async function historyFixture(f, initial) {
   react:f.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:f.t,i18n:{language:'en'}})},'lucide-react':icons,
   '../services/history':{historyService:service},'../services/audio':{audioService:audio},'../utils/localAlbumCatalogSession':{localAlbumCatalog:{getSnapshot:()=>({loaded:true,albums:[album]})}},
   '../utils/playerNavigation':{localAlbumForMedia},'../utils/usePlaybackAttempt':playback,'./PlaybackRequestNotice':{PlaybackRequestNotice:()=>null},'./QueueInsertionMenu':{useQueueInsertion:f.useQueueInsertion},
-  './LocalBrowserView':{LocalBrowserView:()=>null},'./AlbumView':{AlbumView:()=>null},'./NavidromeView':{NavidromeView:()=>null},'../services/navidrome':{navidromeService:{songNavigation:async locator=>{calls.push(['navNavigate',locator]);return{account_id:'a'.repeat(64),album_id:'nav-album'};}}},
+  './LocalBrowserView':{LocalBrowserEntry:LocalEntry,LocalBrowserView:()=>null},'./AlbumView':{AlbumView:()=>null},'./NavidromeView':{NavidromeView:()=>null},'../services/navidrome':{navidromeService:{songNavigation:async locator=>{calls.push(['navNavigate',locator]);return{account_id:'a'.repeat(64),album_id:'nav-album'};}}},
  });
- const props={config:{local_folders:['synthetic'],plex_token:'configured',online_artwork_enabled:false},plexIdentity:{},status:{state:'stop',is_updating:false},active:true,isPlaybackAvailable:true,catalogRefreshRevision:0};
- const host=new f.Harness(()=>HistoryView(props));host.paint();await flush();host.paint();return{host,service,calls,props,paint:()=>host.paint()};
+ const props={config:{local_folders:['synthetic'],plex_token:'configured',online_artwork_enabled:false},plexIdentity:{},status:{state:'stop',is_updating:false},active:true,isPlaybackAvailable:true,catalogRefreshRevision:0,localBrowserCatalogContext};
+ const host=new f.Harness(()=>HistoryView(props));host.paint();await flush();host.paint();return{host,service,calls,props,LocalEntry,paint:()=>host.paint()};
 }
 
 test('Recent history is source-filtered, plays only on explicit request and opens exact Local/Plex albums without touching transport',async()=>{
  const f=await fixture();f.host.close();
  const entries=[{id:'local-id',played_at:1720000000000,track:local()},{id:'plex-id',played_at:1720000001000,track:{...local('Plex track'),media_locator:{kind:'plex',server_id:'server',part_key:'/library/parts/2/file.flac',rating_key:'2'}}}];
  const h=await historyFixture(f,{version:1,enabled:true,entries});let tree=h.paint();assert.equal(nodes(tree,n=>n.type==='li').length,2);assert.deepEqual(h.calls,[['list']]);
- let rows=nodes(tree,n=>n.type==='li');nodes(rows[0],n=>n.type==='button'&&n.props['aria-label']===f.t('history.openAlbum'))[0].props.onClick();await flush();tree=h.paint();assert.ok(nodes(tree,n=>n.props?.initialAlbumId==='album-local').length);assert.deepEqual(h.calls,[['list']]);
+ let rows=nodes(tree,n=>n.type==='li');nodes(rows[0],n=>n.type==='button'&&n.props['aria-label']===f.t('history.openAlbum'))[0].props.onClick();await flush();tree=h.paint();const localDetail=nodes(tree,n=>n.type===h.LocalEntry&&n.props.initialAlbumId==='album-local')[0];assert.ok(localDetail);assert.equal(localDetail.props.catalogContext,h.props.localBrowserCatalogContext);assert.deepEqual(h.calls,[['list']]);
  nodes(tree,n=>n.type==='button')[0].props.onClick();tree=h.paint();rows=nodes(tree,n=>n.type==='li');nodes(rows[1],n=>n.type==='button'&&n.props['aria-label']===f.t('history.openAlbum'))[0].props.onClick();await flush();tree=h.paint();assert.ok(nodes(tree,n=>n.props?.album?.rating_key==='album-1').length);assert.equal(h.calls.at(-1)[0],'navigate');
  nodes(tree,n=>n.props?.album?.rating_key==='album-1')[0].props.onBack();tree=h.paint();nodes(tree,n=>n.type==='button'&&n.props.children===f.t('history.plex'))[0].props.onClick();tree=h.paint();rows=nodes(tree,n=>n.type==='li');assert.equal(rows.length,1);
  nodes(rows[0],n=>n.type==='button'&&n.props['aria-label']===f.t('history.play',{title:'Plex track'}))[0].props.onClick();await flush();const play=h.calls.find(call=>call[0]==='play');assert.deepEqual(play[1],[entries[1].track]);assert.equal(play[2],0);h.host.close();

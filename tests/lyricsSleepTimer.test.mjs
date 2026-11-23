@@ -11,91 +11,112 @@ import { SleepTimerStore, decodeSleepTimer, remainingSleepMinutes } from '../src
 const flush = async () => { for(let i=0;i<50;i++) await Promise.resolve(); };
 const deferred = () => { let resolve,reject; const promise=new Promise((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject}; };
 const query = (title='Synthetic Song') => ({title,artist:'Synthetic Artist',album:'Synthetic Album',duration:120});
-const record = (q=query(),extra={}) => ({trackName:q.title,artistName:q.artist,albumName:q.album,duration:120,plainLyrics:'Synthetic first line\nSynthetic second line',...extra});
-const response = (value,status=200,headers={}) => new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json',...headers}});
-const storage = () => {const data=new Map();return{data,getItem:key=>data.get(key)??null,setItem:(key,value)=>data.set(key,value)}};
+const record = (q=query(),extra={}) => ({id:1,trackName:q.title,artistName:q.artist,albumName:q.album,duration:q.duration??120,instrumental:false,hasWordSync:false,plainLyrics:'Synthetic first line\nSynthetic second line',syncedLyrics:null,...extra});
+const records = (...values) => ({kind:'records',records:values});
+const storage = () => {const data=new Map();return{data,getItem:key=>data.get(key)??null,setItem:(key,value)=>data.set(key,value),removeItem:key=>data.delete(key)}};
 function compile(file,deps) { const result={};new Function('require','exports',ts.transpileModule(readFileSync(new URL('../src/'+file,import.meta.url),'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText)(name=>{assert.ok(name in deps,name);return deps[name]},result);return result; }
 function hooks() { let cursor=0;const slots=[],effects=[];return {react:{...React,default:React,useState(initial){const n=cursor++;if(!(n in slots))slots[n]=typeof initial==='function'?initial():initial;return [slots[n],value=>{slots[n]=typeof value==='function'?value(slots[n]):value}]},useRef(initial){return slots[cursor++]??={current:initial}},useEffect(fn,deps){const n=cursor++,previous=slots[n];if(!previous||deps.some((value,i)=>!Object.is(value,previous.deps[i])))effects.push(()=>{previous?.cleanup?.();slots[n]={deps,cleanup:fn()}})}},render(fn){cursor=0;const result=fn();effects.splice(0).forEach(fn=>fn());return result},dispose(){slots.forEach(slot=>slot?.cleanup?.())}}; }
 function nodes(tree,predicate,result=[]) {if(!tree||typeof tree!=='object')return result;if(Array.isArray(tree)){tree.forEach(child=>nodes(child,predicate,result));return result}if(predicate(tree))result.push(tree);nodes(tree.props?.children,predicate,result);return result;}
 function text(tree) { if(tree===null||tree===undefined||typeof tree==='boolean')return '';if(typeof tree==='string'||typeof tree==='number')return String(tree);if(Array.isArray(tree))return tree.map(text).join(' ');return text(tree.props?.children); }
 
-test('lyrics query transmits whitelisted metadata only, excludes radio/paths, and checks version identity',()=>{
- assert.equal(lyrics.lyricsQuery({title:'Live',artist:'Station',current_media:{kind:'radio'}}),null);
- for(const title of ['/personal/file.flac','https://private.invalid/?token=SECRET','file:///path','bad\nname'])assert.equal(lyrics.lyricsQuery({...query(),title}),null);
- const value=lyrics.lyricsQuery({...query(),uri:'/personal/path',token:'SECRET',elapsed:50,current_media:{kind:'plex',part_key:'/private'}});
+test('lyrics queries accept identified Local/Plex media without exporting source identifiers and rank recordings',()=>{
+ assert.equal(lyrics.lyricsQuery({title:'Live',artist:'Station',current_media:{kind:'radio',station_id:'x',queue_index:0}}),null);
+ assert.deepEqual(lyrics.lyricsQuery({...query(),current_media:{kind:'plex',server_id:'private-server',part_key:'private-part',queue_index:1}}),query());
+ assert.equal(lyrics.lyricsQuery({...query(),current_media:{kind:'plex',server_id:'private-server',part_key:'private-part'}}),null);
+ assert.deepEqual(lyrics.lyricsQuery({...query(),current_media:{kind:'local',uri:'sqlite-cue://private',queue_index:1}}),query());
+ for(const title of ['/personal/file.flac','https://private.invalid/?token=SECRET','file:///path','sqlite-track://source/secret','C:\\Private\\file.flac','\\\\server\\share\\track.flac','sensitive token=SECRET','bad\nname'])assert.equal(lyrics.lyricsQuery({...query(),title}),null);
+ const value=lyrics.lyricsQuery({...query(),uri:'/personal/path',token:'SECRET',elapsed:50,current_media:{kind:'local',uri:'sqlite-track://private',queue_index:0}});
  assert.deepEqual(value,query());assert.deepEqual(Object.keys(value),['title','artist','album','duration']);
- assert.deepEqual(lyrics.parseLyrics(record(),query()),{kind:'found',text:'Synthetic first line\nSynthetic second line'});
- for(const changes of [{artistName:'Other'},{trackName:'Other'},{duration:123},{duration:NaN}])assert.deepEqual(lyrics.parseLyrics(record(query(),changes),query()),{kind:'not_found'});
- assert.deepEqual(lyrics.parseLyrics(record(query(),{instrumental:true}),query()),{kind:'instrumental'});
- assert.deepEqual(lyrics.parseLyrics(record(query(),{plainLyrics:null,syncedLyrics:'[ar:Synthetic]\n[00:01.20]First\n[00:02.00]Second'}),query()),{kind:'found',text:'First\nSecond'});
- assert.throws(()=>lyrics.parseLyrics(record(query(),{plainLyrics:'x'.repeat(32001)}),query()));
+ const exact=record(query(),{syncedLyrics:'[00:01.00]Live first'});
+ assert.deepEqual(lyrics.automaticLyricsMatches([exact],query()),[exact]);
+ const editorial=record(query(),{id:5,albumName:'Synthetic Album (Super Deluxe Edition) (Remastered)',duration:120.7,syncedLyrics:'[00:01.00]Editorial release'});
+ assert.deepEqual(lyrics.automaticLyricsMatches([editorial],query()),[editorial]);
+ const duplicateA=record(query(),{id:6,syncedLyrics:'[00:01.00]same'}), duplicateB={...duplicateA,id:7};
+ assert.deepEqual(lyrics.automaticLyricsMatches([duplicateA,duplicateB],query()),[duplicateA]);
+ const close=record(query(),{id:8,duration:120.5,syncedLyrics:'[00:01.00]different'});
+ assert.deepEqual(lyrics.automaticLyricsMatches([close,exact],query()),[exact,close], 'near-tied eligible results are deterministically ranked for immediate adoption');
+ const clearlyCloser=record(query(),{id:9,duration:122,syncedLyrics:'[00:01.00]other duration'});
+ assert.deepEqual(lyrics.automaticLyricsMatches([clearlyCloser,exact],query()),[exact,clearlyCloser]);
+ for(const changed of [record(query(),{artistName:'Other'}),record(query(),{trackName:'Synthetic Song (Live)'}),record(query(),{albumName:'Live Album'}),record(query(),{duration:123})])
+  assert.deepEqual(lyrics.automaticLyricsMatches([changed],query()),[]);
+ assert.deepEqual(lyrics.automaticLyricsMatches([record(query(),{syncedLyrics:'[00:01.00]x'})],{...query(),duration:null}),[]);
+ const noAlbum={...query(),album:''};
+ const plainA=record(noAlbum,{id:10,albumName:'Z Album',syncedLyrics:null,plainLyrics:'plain'});
+ const syncedA=record(noAlbum,{id:11,albumName:'A Album',plainLyrics:null,syncedLyrics:'[00:01.00]sync'});
+ assert.deepEqual(lyrics.automaticLyricsMatches([plainA,syncedA],noAlbum),[syncedA,plainA], 'without album information, synchronized content wins a compatible tie');
+ assert.deepEqual(lyrics.automaticLyricsMatches([record(query(),{id:12,albumName:'Live at Venue'})],query()),[], 'live/recording qualifier conflicts are rejected');
+ assert.deepEqual(lyrics.automaticLyricsMatches([record(query(),{albumName:'Synthetic Album (Live)'})],query()),[]);
  assert.equal(lyrics.lyricsKey({...query(),title:' SYNTHETIC   Song '}),lyrics.lyricsKey(query()));
+ assert.notEqual(lyrics.lyricsKey(query()),lyrics.lyricsKey({...query(),duration:121}));
 });
 
-test('lyrics request is independent, bounded and cached across sessions without refetching or leaking locators',async()=>{
- let now=1_000_000,calls=0;const saved=storage();const client=new lyrics.LyricsClient(async(url,options)=>{
-  calls++;const parsed=new URL(url);assert.equal(parsed.origin,'https://lrclib.net');assert.equal(parsed.pathname,'/api/get');assert.deepEqual([...parsed.searchParams.keys()],['track_name','artist_name','album_name','duration']);
-  assert.equal(options.credentials,'omit');assert.equal(options.redirect,'error');assert.match(options.headers['X-User-Agent'],/Sonante/);return response(record());
- },()=>saved,()=>now);
- const result=await client.lookup(query(),new AbortController().signal);assert.equal(result.kind,'found');
- assert.deepEqual(await client.lookup(query(),new AbortController().signal),result);assert.equal(calls,1);
- const reopened=new lyrics.LyricsClient(()=>assert.fail('cache must survive a new reader'),()=>saved,()=>now);
- assert.deepEqual(await reopened.lookup(query(),new AbortController().signal),result);
- now+=31*86400_000;const expired=new lyrics.LyricsClient(async()=>{calls++;return response(record())},()=>saved,()=>now);
- await expired.lookup(query(),new AbortController().signal);assert.equal(calls,2);
- assert.doesNotMatch(saved.data.get(lyrics.LYRICS_CACHE_KEY),/private|token|uri/);
+test('backend-shaped records are validated and preserve lyric availability distinctions',async()=>{
+ const client=new lyrics.LyricsClient(async()=>records(record(),record(query('Plain'),{id:2,syncedLyrics:null}),record(query('Instrumental'),{id:3,instrumental:true,plainLyrics:null})),()=>null);
+ const result=await client.lookup(query(),new AbortController().signal);assert.equal(result.kind,'records');assert.equal(result.records.length,3);
+ for(const invalid of [records({...record(),id:0}),records(record(),record(query(),{id:1})),records(...Array.from({length:21},(_,i)=>record(query(`S${i}`),{id:i+1})))]){
+  const malformed=new lyrics.LyricsClient(async()=>invalid,()=>null);
+  await assert.rejects(malformed.lookup(query(),new AbortController().signal),error=>error.reason==='invalid_response');
+ }
 });
 
-test('lyrics deduplicates live consumers, cancels abandoned/queued work and never lets aborted requests populate cache',async()=>{
- let now=1000;const jobs=[];const saved=storage();const client=new lyrics.LyricsClient((url,{signal})=>{
-  const job={...deferred(),url,signal};jobs.push(job);signal.addEventListener('abort',()=>job.reject(new DOMException('Canceled','AbortError')),{once:true});return job.promise;
- },()=>saved,()=>now);
+test('new lyric results are delegated to durable backend storage, not accumulated or expired in localStorage',async()=>{
+ let now=1_000_000,calls=0;const saved=storage();const client=new lyrics.LyricsClient(async q=>{calls++;assert.deepEqual(Object.keys(q),['title','artist','album','duration']);return {...records(record(q)),persisted:true}},()=>saved,()=>now);
+ const result=await client.lookup(query(),new AbortController().signal);assert.equal(result.kind,'records');
+ assert.equal(saved.data.has(lyrics.LYRICS_CACHE_KEY),false,'the WebView does not accumulate new lyric content');
+ now+=31*86400_000;
+ const later=await client.lookup(query(),new AbortController().signal);assert.deepEqual(later,result);assert.equal(calls,2,'durable result reuse and age policy belong to the backend');
+ assert.equal(saved.data.has(lyrics.LYRICS_CACHE_KEY),false);
+});
+
+test('legacy positive cache migrates before its copy is removed and remains usable offline when migration fails',async()=>{
+ const saved=storage(),oldPositive={key:lyrics.lyricsKey(query()),at:1,result:records(record())};
+ saved.setItem(lyrics.LYRICS_CACHE_KEY,JSON.stringify([oldPositive]));let imported=[];
+ const migrated=new lyrics.LyricsClient(async()=>{throw Error('network must not be needed')},()=>saved,()=>100_000_000,async entries=>{imported=entries;return true});
+ assert.deepEqual(await migrated.lookup(query(),new AbortController().signal),oldPositive.result);
+ await flush();assert.equal(imported.length,1);assert.equal(saved.getItem(lyrics.LYRICS_CACHE_KEY),null,'old storage is removed only after backend confirms migration');
+
+ const failedStorage=storage();failedStorage.setItem(lyrics.LYRICS_CACHE_KEY,JSON.stringify([oldPositive]));let requests=0;
+ const retained=new lyrics.LyricsClient(async()=>{requests++;throw Error('offline')},()=>failedStorage,()=>100_000_000,async()=>false);
+ assert.deepEqual(await retained.lookup(query(),new AbortController().signal),oldPositive.result);
+ await flush();assert.ok(failedStorage.getItem(lyrics.LYRICS_CACHE_KEY),'failed migration retains the recoverable old copy');
+ assert.equal(requests,0,'valid legacy positive content remains available offline');
+
+ const manyStorage=storage(),many=Array.from({length:25},(_,index)=>{const q=query(`Legacy ${index}`);return{key:lyrics.lyricsKey(q),at:1,result:records(record(q,{id:index+1}))}});
+ manyStorage.setItem(lyrics.LYRICS_CACHE_KEY,JSON.stringify(many));let importedCount=0;
+ const manyClient=new lyrics.LyricsClient(async()=>{throw Error('legacy positive should remain available')},()=>manyStorage,()=>100_000_000,async entries=>{importedCount=entries.length;return true});
+ await manyClient.lookup(query('Legacy 24'),new AbortController().signal);await flush();
+ assert.equal(importedCount,25,'migration no longer applies the former twenty-entry cache ceiling');
+ assert.equal(manyStorage.getItem(lyrics.LYRICS_CACHE_KEY),null);
+});
+
+test('explicit refresh bypasses a legacy hit without deleting it before a successful update',async()=>{
+ const saved=storage(),oldPositive={key:lyrics.lyricsKey(query()),at:1,result:records(record(query(),{plainLyrics:'old valid lyric'}))};
+ saved.setItem(lyrics.LYRICS_CACHE_KEY,JSON.stringify([oldPositive]));const refreshes=[];
+ const client=new lyrics.LyricsClient(async(_q,_signal,refresh)=>{refreshes.push(refresh);return {kind:'offline'}},()=>saved,()=>100_000_000,async()=>false);
+ await assert.rejects(client.lookup(query(),new AbortController().signal,true),error=>error.reason==='offline');
+ assert.deepEqual(refreshes,[true]);assert.ok(saved.getItem(lyrics.LYRICS_CACHE_KEY),'failed refresh preserves the prior valid copy');
+});
+
+test('lyrics deduplicates consumers and honors cancellation of abandoned requests',async()=>{
+ const jobs=[];const saved=storage();const client=new lyrics.LyricsClient((q,signal)=>{
+  const job={...deferred(),q,signal};jobs.push(job);signal.addEventListener('abort',()=>job.reject(new DOMException('Canceled','AbortError')),{once:true});return job.promise;
+ },()=>saved);
  const first=new AbortController(),second=new AbortController(),queued=new AbortController();
  const p1=client.lookup(query(),first.signal),p2=client.lookup(query(),second.signal);await flush();assert.equal(jobs.length,1);
  first.abort();await assert.rejects(p1,{name:'AbortError'});assert.equal(jobs[0].signal.aborted,false,'another consumer retains the in-flight request');
  const abandoned=client.lookup(query('Abandoned'),queued.signal);queued.abort();await assert.rejects(abandoned,{name:'AbortError'});
- jobs[0].resolve(response(record()));assert.equal((await p2).kind,'found');now+=500;await flush();assert.equal(jobs.length,1,'aborted queued metadata never goes online');
+ jobs[0].resolve(records(record()));assert.equal((await p2).kind,'records');await flush();assert.equal(jobs.length,1,'aborted queued metadata never goes online');
  const last=new AbortController(),p3=client.lookup(query('New Song'),last.signal);await flush();assert.equal(jobs.length,2);last.abort();await assert.rejects(p3,{name:'AbortError'});assert.ok(jobs[1].signal.aborted);await flush();
- assert.doesNotMatch(saved.data.get(lyrics.LYRICS_CACHE_KEY),/New Song|Abandoned/);
+ assert.equal(saved.data.has(lyrics.LYRICS_CACHE_KEY),false,'in-flight request metadata is never persisted by the WebView client');
 });
 
-test('provider failures are not cached as missing; miss TTL, body bounds and Retry-After are respected',async()=>{
- let now=1_000_000,calls=0;const saved=storage();let mode='missing';
- const client=new lyrics.LyricsClient(async()=>{calls++;if(mode==='missing')return response({},404);if(mode==='error')return response({},500);if(mode==='limited')return response({},429,{'Retry-After':'180'});if(mode==='large')return response(record(),200,{'Content-Length':String(300*1024)});return response(record())},()=>saved,()=>now);
- assert.deepEqual(await client.lookup(query(),new AbortController().signal),{kind:'not_found'});await client.lookup(query(),new AbortController().signal);assert.equal(calls,1);
- now+=3600_001;mode='error';await assert.rejects(client.lookup(query(),new AbortController().signal));now+=61001;mode='large';await assert.rejects(client.lookup(query(),new AbortController().signal));
- now+=500;mode='limited';await assert.rejects(client.lookup(query(),new AbortController().signal));const before=calls;
- now+=120000;mode='ok';await assert.rejects(client.lookup(query(),new AbortController().signal));assert.equal(calls,before,'no request while Retry-After remains active');now+=62000;
- assert.equal((await client.lookup(query(),new AbortController().signal)).kind,'found');
- const hostile=new lyrics.LyricsClient(async()=>new Response(new Uint8Array(300*1024),{headers:{'Content-Type':'application/json'}}),()=>null,()=>now);
- await assert.rejects(hostile.lookup(query(),new AbortController().signal),'stream length bounded even without Content-Length');
-});
-
-test('lyrics cache stays bounded and quota failures retain a usable session cache',async()=>{
- const saved=storage();let now=100000,calls=0;
- const client=new lyrics.LyricsClient(async url=>{calls++;const q=query(new URL(url).searchParams.get('track_name'));return response(record(q,{plainLyrics:'s'.repeat(30000)}))},()=>saved,()=>now);
- for(let i=0;i<25;i++){now+=500;await client.lookup(query(`Song ${i}`),new AbortController().signal)}
- const raw=saved.data.get(lyrics.LYRICS_CACHE_KEY);assert.ok(raw.length<=280000);assert.ok(JSON.parse(raw).length<=20);assert.equal(calls,25);
- const blocked=new lyrics.LyricsClient(async()=>{calls++;return response(record())},()=>({getItem(){throw Error('blocked')},setItem(){throw Error('quota')}}),()=>now);
- await blocked.lookup(query(),new AbortController().signal);await blocked.lookup(query(),new AbortController().signal);assert.equal(calls,26);
-});
-
-test('actual Sleeve lyrics stay opt-in, ignore late old tracks and do not refetch on elapsed/analyzer updates',async()=>{
- const oldWindow=globalThis.window;const stored=storage(),timers=new Map(),listeners=new Map(),jobs=[];let id=0;
- try {
-  globalThis.window={localStorage:stored,setTimeout:fn=>{timers.set(++id,fn);return id},clearTimeout:id=>timers.delete(id),addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:(name,fn)=>{if(listeners.get(name)===fn)listeners.delete(name)}};
-  const h=hooks();const {TrackLyrics}=compile('components/TrackLyrics.tsx',{
-   react:h.react,'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t:key=>key})},'../utils/trackLyrics':{...lyrics,trackLyrics:{lookup(q,signal){const job={...deferred(),q,signal};jobs.push(job);return job.promise}}}
-  });
-  let track={...query(),current_media:{kind:'local'}};const render=()=>h.render(()=>TrackLyrics({track}));let tree=render();assert.equal(timers.size,0);assert.equal(jobs.length,0);
-  nodes(tree,n=>n.type==='input')[0].props.onChange({target:{checked:true}});tree=render();assert.equal(stored.getItem(lyrics.LYRICS_ENABLED_KEY),'true');
-  for(const [id,fn]of [...timers]){timers.delete(id);fn()}await flush();assert.equal(jobs.length,1);
-  track={...track,title:'Next Song'};tree=render();assert.ok(jobs[0].signal.aborted);jobs[0].resolve({kind:'found',text:'OLD LYRICS'});await flush();tree=render();assert.doesNotMatch(text(tree),/OLD LYRICS/);
-  for(const[id,fn]of [...timers]){timers.delete(id);fn()}jobs[1].resolve({kind:'found',text:'CURRENT LYRICS'});await flush();tree=render();assert.match(text(tree),/CURRENT LYRICS/);
-  for(let i=0;i<30;i++){track={...track,elapsed:i,processing:{sample_rate:48000}};tree=render()}assert.equal(jobs.length,2);assert.equal(timers.size,0);
-  nodes(tree,n=>n.type==='input')[0].props.onChange({target:{checked:false}});tree=render();assert.doesNotMatch(text(tree),/CURRENT LYRICS/);
-  h.dispose();assert.equal(timers.size,0);assert.equal(listeners.size,0);
- } finally {globalThis.window=oldWindow}
+test('backend failures are distinct and are never cached as a missing record',async()=>{
+ let calls=0,mode='not_found';const saved=storage();const client=new lyrics.LyricsClient(async()=>{calls++;return {kind:mode}},()=>saved);
+ assert.deepEqual(await client.lookup(query(),new AbortController().signal),{kind:'not_found'});await client.lookup(query(),new AbortController().signal);assert.equal(calls,2,'negative caching is owned by the backend store');
+ for(const [backend,reason] of [['offline','offline'],['timeout','timeout'],['rate_limited','rate_limited'],['service_unavailable','service'],['invalid_response','invalid_response']]){
+  mode=backend;await assert.rejects(client.lookup(query(backend),new AbortController().signal),error=>error.reason===reason);
+ }
+ assert.equal(saved.data.has(lyrics.LYRICS_CACHE_KEY),false,'negative results are stored only by the backend policy');
 });
 
 test('native timer store shares one subscription, fences old replies and only confirmed setters change the deadline',async()=>{
@@ -139,30 +160,13 @@ test('actual timer controls expose options, direct cancellation, failure and cle
 });
 
 
-test('lyrics timeout cancels a stalled fetch and does not persist a false missing result',async()=>{
- const oldSet=globalThis.setTimeout,oldClear=globalThis.clearTimeout;const timers=new Map(),saved=storage();let id=0;
- try{
-  globalThis.setTimeout=(fn,ms)=>{timers.set(++id,{fn,ms});return id};globalThis.clearTimeout=id=>timers.delete(id);
-  const client=new lyrics.LyricsClient((_url,{signal})=>new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new DOMException('Timed out','AbortError')),{once:true})),()=>saved,()=>1000);
-  const result=client.lookup(query(),new AbortController().signal);await flush();assert.equal(timers.size,1);const [key,timer]=[...timers][0];assert.equal(timer.ms,10000);timers.delete(key);timer.fn();
-  await assert.rejects(result,/LYRICS_UNAVAILABLE/);await flush();assert.equal(timers.size,0);assert.equal(saved.data.has(lyrics.LYRICS_CACHE_KEY),false);
- }finally{globalThis.setTimeout=oldSet;globalThis.clearTimeout=oldClear}
-});
-
-
-test('observed provider502 honors Retry-After and remains service failure rather than a cached missing track',async()=>{
- let now=100000,calls=0;const saved=storage();let mode='error';
- const client=new lyrics.LyricsClient(async()=>{calls++;return mode==='error'?response({},502,{'Retry-After':'60'}):response(record())},()=>saved,()=>now);
- await assert.rejects(client.lookup(query(),new AbortController().signal),error=>error.reason==='service'&&error.status===502);
- assert.equal(saved.data.has(lyrics.LYRICS_CACHE_KEY),false);
- now+=59000;await assert.rejects(client.lookup(query('Other Song'),new AbortController().signal),error=>error.reason==='service');assert.equal(calls,1,'no retry against an unavailable provider during its cooldown');
- now+=2001;mode='ok';assert.equal((await client.lookup(query(),new AbortController().signal)).kind,'found');assert.equal(calls,2);
-});
-
-test('connection/CORS, timeout and malformed response failures have distinct safe reasons',async()=>{
- const client=new lyrics.LyricsClient(async()=>{throw TypeError('Private URL must never become UI text')},()=>null,()=>100000);
- await assert.rejects(client.lookup(query(),new AbortController().signal),error=>error.reason==='connection'&&!error.message.includes('Private'));
+test('backend outcomes cover 404, 429, timeout, 5xx, offline and invalid HTTP 200 shapes',async()=>{
+ for(const [kind,reason] of [['not_found',null],['rate_limited','rate_limited'],['timeout','timeout'],['service_unavailable','service'],['offline','offline'],['invalid_response','invalid_response']]){
+  const client=new lyrics.LyricsClient(async()=>({kind}),()=>null);
+  if(reason) await assert.rejects(client.lookup(query(kind),new AbortController().signal),error=>error.reason===reason);
+  else assert.deepEqual(await client.lookup(query(kind),new AbortController().signal),{kind:'not_found'});
+ }
+ const invalid200=new lyrics.LyricsClient(async()=>({kind:'records',records:[{...record(),duration:NaN}]}),()=>null);
+ await assert.rejects(invalid200.lookup(query(),new AbortController().signal),error=>error.reason==='invalid_response');
  assert.equal(lyrics.lyricsFailureReason(new lyrics.LyricsLookupError('timeout')),'timeout');
- const malformed=new lyrics.LyricsClient(async()=>new Response('invalid JSON',{headers:{'Content-Type':'application/json'}}),()=>null,()=>100000);
- await assert.rejects(malformed.lookup(query(),new AbortController().signal),error=>error.reason==='invalid_response');
 });

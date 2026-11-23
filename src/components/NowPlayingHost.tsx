@@ -176,7 +176,7 @@ export const NowPlayingHost: React.FC<Props> = ({ snapshot, owner, embedded, bus
     if (busy || hostingError || isSeeking || !owner || owner.host !== (embedded ? "main" : "now-playing")) return;
     const layoutShortcut = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229
-        || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || !/^[1-4]$/.test(event.key)) return;
+        || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || !/^[1-5]$/.test(event.key)) return;
       const root = document.querySelector(".np-shell");
       if (!root) return;
       const target = event.target as HTMLElement | null;

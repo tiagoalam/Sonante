@@ -59,7 +59,7 @@ function fixture(language = "en", overrides = {}) {
     "../utils/localAlbumCatalogSession": { localAlbumCatalog: { subscribe: () => () => {}, getSnapshot: () => host.catalog, ensureLoaded: () => calls.push(["catalog"]) } },
     "../utils/localAlbumCatalog": { confirmedCatalogPlaybackAllowed }, "../utils/frontendDiagnostics": { logError: (...args) => errors.push(args) },
     "../utils/usePlaybackAttempt": { usePlaybackAttempt: () => ({ failure: null, run: action => action({ current: () => true }) }) },
-    "./PlaybackRequestNotice": { PlaybackRequestNotice: () => null }, "./LocalBrowserView": { LocalBrowserView: LocalView },
+    "./PlaybackRequestNotice": { PlaybackRequestNotice: () => null }, "./LocalBrowserView": { LocalBrowserEntry: LocalView, LocalBrowserView: LocalView },
     "./SearchAlbumArtwork": { SearchAlbumArtwork: SearchArtwork },
     "./AlbumView": { AlbumView }, "./ArtistView": { ArtistView },
     "../services/navidrome": {navidromeService:{status:()=>{calls.push(["nav-status"]);return host.navStatus();},search:(...args)=>{calls.push(["nav-search",...args]);return host.readNav(...args);}}},

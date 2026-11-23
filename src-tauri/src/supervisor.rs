@@ -200,8 +200,52 @@ enum PidFileIdentity {
     Invalid,
 }
 
+#[derive(Debug)]
+struct StartupWaitFailure {
+    primary_message: String,
+    message: String,
+    reason: &'static str,
+    last_observation: Option<&'static str>,
+    cleanup_outcome: &'static str,
+    cleanup_error_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupReadiness {
+    Ready,
+    Waiting(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupReadinessError {
+    ProcessMissing,
+    ProcessExited,
+    ProcessQueryFailed,
+    PidReadFailed,
+    PidInvalid,
+    PidMismatch,
+    HandshakeFailed,
+    GreetingInvalid,
+}
+
+impl StartupReadinessError {
+    fn code(self) -> &'static str {
+        match self {
+            Self::ProcessMissing => "process_missing",
+            Self::ProcessExited => "process_exited",
+            Self::ProcessQueryFailed => "process_query_failed",
+            Self::PidReadFailed => "pid_read_failed",
+            Self::PidInvalid => "pid_invalid",
+            Self::PidMismatch => "pid_mismatch",
+            Self::HandshakeFailed => "handshake_failed",
+            Self::GreetingInvalid => "greeting_invalid",
+        }
+    }
+}
+
 impl MpdSupervisor {
     pub const ANALYZER_OUTPUT_NAME: &'static str = "Sonante Analyzer";
+    pub const SHARED_EQ_OUTPUT_NAME: &'static str = "Sonante Shared EQ";
     pub fn new(socket_path: &str) -> Self {
         let socket_path = PathBuf::from(socket_path);
         let pid_path = socket_path
@@ -797,14 +841,14 @@ impl MpdSupervisor {
         let mixer = if backend == Some(SharedVolumeBackend::PipeWire) { "none" } else { "software" };
         Ok(format!(r#"audio_output {{
     type "fifo"
-    name "Sonante Shared EQ"
+    name "{}"
     sonante_strict_eq "yes"
     sonante_continuity "{marker}"
     path "{path}"
     format "48000:32:2"
     mixer_type "{mixer}"
     always_on "yes"
-}}"#))
+}}"#, Self::SHARED_EQ_OUTPUT_NAME))
     }
 
     fn render_config(
@@ -1237,8 +1281,30 @@ decoder {{
                 || engine.verify_child(&child));
             self.process = Some(child);
             let result = match identity {
-                Ok(()) => crate::local_diagnostics::timed(crate::local_diagnostics::Stage::StartupEngineWait,
-                    || self.wait_for_startup(50, Duration::from_millis(50))),
+                Ok(()) => {
+                    let wait_started = Instant::now();
+                    let wait = self.wait_for_startup(50, Duration::from_millis(50));
+                    let elapsed = wait_started.elapsed();
+                    match wait {
+                        Ok(()) => {
+                            crate::local_diagnostics::record_startup_wait(
+                                elapsed, None, None, None, None, None,
+                            );
+                            Ok(())
+                        }
+                        Err(failure) => {
+                            crate::local_diagnostics::record_startup_wait(
+                                elapsed,
+                                Some(&failure.primary_message),
+                                Some(failure.reason),
+                                failure.last_observation,
+                                Some(failure.cleanup_outcome),
+                                failure.cleanup_error_summary.as_deref(),
+                            );
+                            Err(failure.message)
+                        }
+                    }
+                }
                 Err(error) => {
                     // A pre-main abort may exit before /proc/PID/exe can be opened.
                     // A hash mismatch or any other identity failure never qualifies.
@@ -1467,13 +1533,21 @@ decoder {{
         Ok(())
     }
 
-    fn wait_for_startup(&mut self, attempts: usize, delay: Duration) -> Result<(), String> {
+    fn wait_for_startup(
+        &mut self,
+        attempts: usize,
+        delay: Duration,
+    ) -> Result<(), StartupWaitFailure> {
+        let mut last_observation = "socket_not_observed";
         for _ in 0..attempts {
             let (child_pid, child_status) = {
-                let child = self
-                    .process
-                    .as_mut()
-                    .ok_or_else(|| "Processo MPD ausente durante a inicialização.".to_string())?;
+                let Some(child) = self.process.as_mut() else {
+                    return Err(self.startup_wait_failure(
+                        StartupReadinessError::ProcessMissing.code(),
+                        None,
+                        "Processo MPD ausente durante a inicialização.".to_string(),
+                    ));
+                };
                 (child.id(), child.try_wait())
             };
 
@@ -1484,69 +1558,97 @@ decoder {{
                         "O processo MPD encerrou antes de criar o socket (status: {}).",
                         status
                     );
-                    return Err(self.cleanup_after_start_failure(message));
+                    return Err(self.startup_wait_failure(
+                        StartupReadinessError::ProcessExited.code(),
+                        None,
+                        message,
+                    ));
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    let message = format!(
-                        "Falha ao consultar o processo MPD durante a inicialização: {}",
-                        e
-                    );
-                    return Err(self.cleanup_after_start_failure(message));
+                    return Err(self.startup_process_query_failure(e));
                 }
             }
 
             if Path::new(&self.socket_path).exists() {
                 match self.validate_started_process(child_pid) {
-                    Ok(true) => {
+                    Ok(StartupReadiness::Ready) => {
                         self.owns_runtime_files = true;
                         println!("[Supervisor] MPD instance started successfully.");
                         return Ok(());
                     }
-                    Ok(false) => {}
-                    Err(e) => return Err(self.cleanup_after_start_failure(e)),
+                    Ok(StartupReadiness::Waiting(observation)) => last_observation = observation,
+                    Err((reason, e)) => {
+                        return Err(self.startup_wait_failure(reason.code(), None, e));
+                    }
                 }
+            } else {
+                last_observation = "socket_not_observed";
             }
 
             thread::sleep(delay);
         }
 
-        Err(self.cleanup_after_start_failure(
+        Err(self.startup_wait_failure(
+            "startup_timeout",
+            Some(last_observation),
             "Tempo esgotado aguardando o socket do MPD inicializar.".to_string(),
         ))
     }
 
-    fn validate_started_process(&self, expected_pid: u32) -> Result<bool, String> {
-        match self.read_pid_identity(expected_pid)? {
-            PidFileIdentity::Missing => return Ok(false),
+    fn validate_started_process(
+        &self,
+        expected_pid: u32,
+    ) -> Result<StartupReadiness, (StartupReadinessError, String)> {
+        match self
+            .read_pid_identity(expected_pid)
+            .map_err(|error| (StartupReadinessError::PidReadFailed, error))?
+        {
+            PidFileIdentity::Missing => return Ok(StartupReadiness::Waiting("pid_missing")),
             PidFileIdentity::Matches => {}
             PidFileIdentity::Mismatch => {
-                return Err(format!(
+                return Err((StartupReadinessError::PidMismatch, format!(
                     "O PID file do MPD não pertence ao processo iniciado (PID esperado: {}).",
                     expected_pid
-                ));
+                )));
             }
             PidFileIdentity::Invalid => {
-                return Err("O PID file do MPD contém uma identidade inválida.".to_string());
+                return Err((
+                    StartupReadinessError::PidInvalid,
+                    "O PID file do MPD contém uma identidade inválida.".to_string(),
+                ));
             }
         }
 
         let stream = match UnixStream::connect(&self.socket_path) {
             Ok(stream) => stream,
-            Err(_) => return Ok(false),
+            Err(_) => return Ok(StartupReadiness::Waiting("socket_connect_failed")),
         };
         stream
             .set_read_timeout(Some(Duration::from_millis(200)))
-            .map_err(|e| format!("Falha ao configurar timeout do handshake MPD: {}", e))?;
+            .map_err(|e| {
+                (
+                    StartupReadinessError::HandshakeFailed,
+                    format!("Falha ao configurar timeout do handshake MPD: {}", e),
+                )
+            })?;
         let mut greeting = String::new();
         BufReader::new(stream)
             .read_line(&mut greeting)
-            .map_err(|e| format!("Falha ao ler o handshake do MPD: {}", e))?;
+            .map_err(|e| {
+                (
+                    StartupReadinessError::HandshakeFailed,
+                    format!("Falha ao ler o handshake do MPD: {}", e),
+                )
+            })?;
         if !Self::is_valid_greeting(&greeting) {
-            return Err("O socket criado não respondeu com um handshake MPD válido.".to_string());
+            return Err((
+                StartupReadinessError::GreetingInvalid,
+                "O socket criado não respondeu com um handshake MPD válido.".to_string(),
+            ));
         }
 
-        Ok(true)
+        Ok(StartupReadiness::Ready)
     }
 
     fn is_valid_greeting(greeting: &str) -> bool {
@@ -1554,13 +1656,59 @@ decoder {{
     }
 
     fn cleanup_after_start_failure(&mut self, failure: String) -> String {
+        self.cleanup_after_start_failure_details(failure).0
+    }
+
+    fn cleanup_after_start_failure_details(&mut self, failure: String) -> (String, Option<String>) {
         self.startup_cleanup_confirmed = false;
         match self.stop() {
-            Ok(()) => { self.startup_cleanup_confirmed = true; failure },
+            Ok(()) => {
+                self.startup_cleanup_confirmed = true;
+                (failure, None)
+            }
             Err(cleanup_error) => {
-                format!("{} Falha adicional no cleanup: {}", failure, cleanup_error)
+                (
+                    format!("{} Falha adicional no cleanup: {}", failure, cleanup_error),
+                    Some(cleanup_error),
+                )
             }
         }
+    }
+
+    fn startup_wait_failure(
+        &mut self,
+        reason: &'static str,
+        last_observation: Option<&'static str>,
+        message: String,
+    ) -> StartupWaitFailure {
+        let primary_message = message.clone();
+        let (message, cleanup_error) = self.cleanup_after_start_failure_details(message);
+        StartupWaitFailure {
+            primary_message,
+            message,
+            reason,
+            last_observation,
+            cleanup_outcome: if self.startup_cleanup_confirmed {
+                "confirmed"
+            } else {
+                "failed"
+            },
+            cleanup_error_summary: cleanup_error
+                .as_deref()
+                .map(crate::diagnostics::error_summary),
+        }
+    }
+
+    fn startup_process_query_failure(&mut self, error: std::io::Error) -> StartupWaitFailure {
+        let message = format!(
+            "Falha ao consultar o processo MPD durante a inicialização: {}",
+            error
+        );
+        self.startup_wait_failure(
+            StartupReadinessError::ProcessQueryFailed.code(),
+            None,
+            message,
+        )
     }
 
     fn read_pid_identity(&self, expected_pid: u32) -> Result<PidFileIdentity, String> {
@@ -3146,7 +3294,9 @@ mod tests {
             .wait_for_startup(1, Duration::ZERO)
             .expect_err("processo já encerrado deve falhar");
 
-        assert!(error.contains("encerrou antes de criar o socket"));
+        assert!(error.message.contains("encerrou antes de criar o socket"));
+        assert_eq!(error.reason, "process_exited");
+        assert_eq!(error.cleanup_outcome, "confirmed");
         assert!(supervisor.process.is_none());
         assert!(!pid_path.exists());
 
@@ -3168,11 +3318,115 @@ mod tests {
             .wait_for_startup(1, Duration::ZERO)
             .expect_err("socket ausente deve falhar");
 
-        assert!(error.contains("Tempo esgotado"));
+        assert!(error.message.contains("Tempo esgotado"));
+        assert_eq!(error.reason, "startup_timeout");
+        assert_eq!(error.last_observation, Some("socket_not_observed"));
         assert!(supervisor.process.is_none());
         assert!(!pid_path.exists());
         assert!(!Path::new(&format!("/proc/{}", child_pid)).exists());
 
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_wait_classifies_missing_process_and_query_error_without_raw_telemetry() {
+        let (dir, socket_path, pid_path) = test_runtime_paths("startup-process-missing");
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+        let failure = supervisor.wait_for_startup(1, Duration::ZERO).unwrap_err();
+        assert_eq!(failure.reason, "process_missing");
+        assert_eq!(failure.cleanup_outcome, "confirmed");
+        fs::remove_dir_all(dir).unwrap();
+
+        let (dir, socket_path, pid_path) = test_runtime_paths("startup-process-query-failed");
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+        let failure = supervisor.startup_process_query_failure(std::io::Error::other("private detail"));
+        assert_eq!(failure.reason, "process_query_failed");
+        assert_eq!(failure.cleanup_outcome, "confirmed");
+        assert!(failure.message.contains("private detail"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_readiness_distinguishes_pid_and_socket_observations() {
+        let (dir, socket_path, pid_path) = test_runtime_paths("startup-pid-observations");
+        let supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+        assert_eq!(
+            supervisor.validate_started_process(10).unwrap(),
+            StartupReadiness::Waiting("pid_missing")
+        );
+
+        fs::write(&pid_path, "not-a-pid").unwrap();
+        assert_eq!(
+            supervisor.validate_started_process(10).unwrap_err().0,
+            StartupReadinessError::PidInvalid
+        );
+
+        fs::write(&pid_path, "11").unwrap();
+        assert_eq!(
+            supervisor.validate_started_process(10).unwrap_err().0,
+            StartupReadinessError::PidMismatch
+        );
+
+        fs::remove_file(&pid_path).unwrap();
+        fs::create_dir(&pid_path).unwrap();
+        assert_eq!(
+            supervisor.validate_started_process(10).unwrap_err().0,
+            StartupReadinessError::PidReadFailed
+        );
+        fs::remove_dir(&pid_path).unwrap();
+
+        fs::write(&pid_path, "10").unwrap();
+        fs::write(&socket_path, "not a unix socket").unwrap();
+        assert_eq!(
+            supervisor.validate_started_process(10).unwrap(),
+            StartupReadiness::Waiting("socket_connect_failed")
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_readiness_rejects_non_mpd_greeting() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixListener;
+
+        let (dir, socket_path, pid_path) = test_runtime_paths("startup-invalid-greeting");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        fs::write(&pid_path, std::process::id().to_string()).unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"NOT MPD\n").unwrap();
+        });
+        let supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+        let failure = supervisor.validate_started_process(std::process::id()).unwrap_err();
+        assert_eq!(failure.0, StartupReadinessError::GreetingInvalid);
+        peer.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_wait_preserves_primary_reason_when_cleanup_fails() {
+        let (dir, socket_path, pid_path) = test_runtime_paths("startup-cleanup-failure");
+        let mut supervisor = MpdSupervisor::new_with_runtime_paths(&socket_path, &pid_path);
+        let fifo = supervisor.analyzer_fifo_path_for_instance();
+        fs::create_dir(&fifo).unwrap();
+        supervisor.owns_analyzer_fifo = true;
+
+        let failure = supervisor.startup_wait_failure(
+            "greeting_invalid",
+            None,
+            "synthetic failure".into(),
+        );
+        assert_eq!(failure.reason, "greeting_invalid");
+        assert_eq!(failure.cleanup_outcome, "failed");
+        let cleanup_summary = failure.cleanup_error_summary.as_deref().unwrap();
+        assert!(cleanup_summary.starts_with("error_hint="));
+        assert!(!cleanup_summary.contains(&dir.display().to_string()));
+        assert!(failure.message.contains("synthetic failure"));
+        assert!(failure.message.contains("cleanup"));
+
+        fs::remove_dir(&fifo).unwrap();
+        supervisor.owns_analyzer_fifo = false;
+        supervisor.stop().unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 

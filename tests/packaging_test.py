@@ -54,13 +54,13 @@ class PackagingTests(unittest.TestCase):
             block = checkout.split('      - name:', 1)[0]
             self.assertIn('ref: ${{ inputs.candidate_sha || github.sha }}', block)
             self.assertIn('fetch-depth: 0', block)
-        self.assertIn('sonante-0.7.0-candidate-${{ inputs.candidate_sha || github.sha }}', ci)
+        self.assertIn('sonante-0.7.1-candidate-${{ inputs.candidate_sha || github.sha }}', ci)
         self.assertNotIn('actions/create-release', release + ci)
 
     def test_arch_container_trust_is_scoped_to_workspace_before_source_gate(self):
         ci = Path('.github/workflows/ci.yml').read_text()
         arch = ci.split('\n  arch:\n', 1)[1]
-        bootstrap = 'run: pacman -Sy --noconfirm git'
+        bootstrap = 'run: pacman -Syu --noconfirm --needed git'
         checkout = 'uses: actions/checkout@v4'
         trust = 'run: git config --global --add safe.directory "$GITHUB_WORKSPACE"'
         gate = 'run: python3 scripts/verify-candidate-source.py'
@@ -73,6 +73,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('runuser -u builder -- makepkg', arch)
         self.assertIn('runuser -u builder -- git -C .. rev-parse HEAD', arch)
         self.assertLess(arch.index('chown -R builder:builder'), arch.index('runuser -u builder -- makepkg'))
+        self.assertNotIn('pacman -Sy --noconfirm git', arch)
 
     def test_arch_ci_pins_glibc_floor_and_tests_openssl3_installability(self):
         ci = Path('.github/workflows/ci.yml').read_text()
@@ -88,6 +89,26 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('openssl-3', ci)
         self.assertIn('openssl-3.6.5-1-x86_64.pkg.tar.zst', ci)
 
+    def test_candidate_artifacts_avoid_unconsumed_rpm_and_expire_after_assembly_window(self):
+        ci = Path('.github/workflows/ci.yml').read_text()
+        linux = ci.split('\n  linux:\n', 1)[1].split('\n  arch:\n', 1)[0]
+        self.assertIn('Build DEB and RPM packages', linux)
+        self.assertIn('tests/rpm_solver_check.py', linux)
+        self.assertIn('cp src-tauri/target/release/bundle/deb/*.deb artifacts/', linux)
+        self.assertNotIn('bundle/rpm/*.rpm artifacts/', linux)
+        self.assertEqual(sum(line.strip() == 'retention-days: 1' for line in ci.splitlines()), 3)
+        self.assertIn('compression-level: 0', ci)
+        self.assertIn('retention-days: 14', ci)
+
+    def test_complete_artifact_uses_pinned_external_source_manifest(self):
+        assembler = Path('scripts/complete-packages.py').read_text()
+        docs = Path('packaging/COMPLETE_PACKAGES.md').read_text()
+        self.assertIn('write_source_materials_manifest(output, list(selected_sources.values()), directory)', assembler)
+        self.assertIn("'sources_by_variant'", assembler)
+        self.assertIn("'source_materials':", assembler)
+        self.assertIn('SOURCE-MATERIALS.json', docs)
+        self.assertIn('byte lengths and SHA-256 values', docs)
+
     def test_candidate_source_gate_accepts_only_exact_safe_directory_in_container(self):
         script = Path('scripts/verify-candidate-source.py').resolve()
         with tempfile.TemporaryDirectory(prefix='sn-candidate-owner-') as directory:
@@ -97,7 +118,7 @@ class PackagingTests(unittest.TestCase):
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             subprocess.run(['git', '-C', str(root), 'config', 'user.name', 'Sonante test'], check=True)
             subprocess.run(['git', '-C', str(root), 'config', 'user.email', 'test@example.invalid'], check=True)
-            (root / 'package.json').write_text('{"version":"0.7.0"}\n')
+            (root / 'package.json').write_text('{"version":"0.7.1"}\n')
             (root / 'payload.txt').write_text('candidate\n')
             subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
             subprocess.run(['git', '-C', str(root), 'commit', '-qm', 'candidate'], check=True)
@@ -129,7 +150,7 @@ class PackagingTests(unittest.TestCase):
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             subprocess.run(['git', '-C', str(root), 'config', 'user.name', 'Sonante test'], check=True)
             subprocess.run(['git', '-C', str(root), 'config', 'user.email', 'test@example.invalid'], check=True)
-            (root / 'package.json').write_text('{"version":"0.7.0"}\n')
+            (root / 'package.json').write_text('{"version":"0.7.1"}\n')
             (root / 'payload.txt').write_text('first\n')
             subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
             subprocess.run(['git', '-C', str(root), 'commit', '-qm', 'first'], check=True)

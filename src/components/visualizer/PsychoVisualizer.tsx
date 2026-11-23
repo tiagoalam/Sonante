@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Pause, Play } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { AudioLevelFrame } from "../../types/audio";
+import type { AudioLevelFrame, TrackMetadata } from "../../types/audio";
+import { AnalyzerUnavailableNotice } from "./AnalyzerUnavailableNotice";
 import {
   drawPsychoScene, psychoCanvasSize, psychoEnergy, PsychoRenderBudget,
   PSYCHO_SCENES, psychoSceneName, readPsychoPreferences, savePsychoPreferences,
@@ -13,11 +14,12 @@ interface Props {
   active: boolean;
   inactiveLabel: string;
   inactiveHelp?: string;
+  artworkTrack?: Pick<TrackMetadata, "thumb" | "plex_image">;
   compact?: boolean;
 }
 const silence: AudioLevelFrame = { leftRms: 0, rightRms: 0, leftPeak: 0, rightPeak: 0, spectrum: [] };
 
-export const PsychoVisualizer: React.FC<Props> = ({ levels, active, inactiveLabel, inactiveHelp, compact = false }) => {
+export const PsychoVisualizer: React.FC<Props> = ({ levels, active, inactiveLabel, inactiveHelp, artworkTrack, compact = false }) => {
   const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef(levels);
@@ -125,6 +127,6 @@ export const PsychoVisualizer: React.FC<Props> = ({ levels, active, inactiveLabe
         </button>
       </div>
     </div>
-    {!active && <div className="np-psycho-inactive" role="status"><strong>{inactiveLabel}</strong>{inactiveHelp && <p>{inactiveHelp}</p>}</div>}
+    {!active && <AnalyzerUnavailableNotice label={inactiveLabel} help={inactiveHelp} artworkTrack={artworkTrack} className="np-psycho-inactive" />}
   </section>;
 };

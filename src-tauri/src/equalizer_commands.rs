@@ -1,6 +1,6 @@
 //! UI/persistence and lifecycle orchestration; a saved EQ request is restored
 //! only through the existing confirmed Shared-route lifecycle.
-use crate::equalizer::{EqPreset, EqualizerConfig, EqualizerStore, PresetRef};
+use crate::equalizer::{EquipmentCategory, EqPreset, EqualizerConfig, EqualizerStore, PresetRef};
 use crate::shared_dsp;
 use crate::*;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,19 @@ pub(crate) struct Catalog {
     runtime_available: bool,
     runtime_diagnostic: Option<&'static str>,
     pulse_audio: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApplyResult {
+    runtime: shared_dsp::Snapshot,
+    audio_route: Option<crate::audio_route::AudioRouteProjection>,
+}
+
+struct ConfirmedRouteTransition {
+    generation: u64,
+    requested: crate::audio_route::AudioRoute,
+    legacy_issues: Vec<crate::audio_route::LegacyRouteIssue>,
 }
 
 fn camilla_runtime_diagnostic(error: shared_dsp::Error) -> &'static str {
@@ -44,6 +57,19 @@ fn runtime_diagnostic() -> Option<&'static str> {
         .err()
         .map(|error| mpd_eq_runtime_diagnostic(&error))
 }
+
+fn route_failure_details(
+    stage: &'static str,
+    error: &str,
+    output_changed: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "stage": stage,
+        "code": shared_dsp::diagnostics::safe_error_code(error),
+        "output_changed": output_changed,
+    })
+}
+
 fn revision(config: &EqualizerConfig) -> Result<String, String> {
     let bytes = serde_json::to_vec(config).map_err(|_| "EQ_STORE_FAILED")?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -117,6 +143,26 @@ fn update_preference(store: &EqualizerStore, update: &PreferenceUpdate) -> Resul
     }
 }
 
+fn validate_preference_before_route(
+    store: &EqualizerStore,
+    update: &PreferenceUpdate,
+) -> Result<(), String> {
+    match update {
+        PreferenceUpdate::SetEnabled(_) => Ok(()),
+        PreferenceUpdate::RequireEnabledRevision(_) => update_preference(store, update),
+    }
+}
+
+fn persist_preference_after_route(
+    store: &EqualizerStore,
+    update: &PreferenceUpdate,
+) -> Result<(), String> {
+    match update {
+        PreferenceUpdate::SetEnabled(_) => update_preference(store, update),
+        PreferenceUpdate::RequireEnabledRevision(_) => Ok(()),
+    }
+}
+
 fn load_from_store(store: &EqualizerStore) -> Result<(EqualizerConfig, String), String> {
     let config = store
         .load()
@@ -181,7 +227,12 @@ pub(crate) async fn get_equalizer(app: AppHandle) -> Result<Catalog, String> {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Edit {
     Import { document: String, name: String },
+    ImportAutoEq { document: String, name: String },
     LinkEquipment { id: Option<String>, name: String, reference: PresetRef },
+    AddEquipment { id: Option<String>, name: String, category: EquipmentCategory, manufacturer: Option<String>, opra_vendor_id: Option<String>, opra_product_id: Option<String> },
+    AddEquipmentPreset { id: String, reference: PresetRef, preferred: bool },
+    RemoveEquipmentPreset { id: String, reference: PresetRef },
+    SetPreferredEquipmentPreset { id: String, reference: Option<PresetRef> },
     UnlinkEquipment { id: String },
     Create {
         name: String,
@@ -234,6 +285,36 @@ pub(crate) async fn pick_equalizer_preset() -> Result<Option<ImportPreview>,Stri
         Ok(Some(ImportPreview{document,preset}))
     }).await.map_err(|_|"EQ_IMPORT_INVALID")?
 }
+
+#[derive(Serialize)]
+pub(crate) struct AutoEqImportPreview {
+    document: String,
+    preset: EqPreset,
+    source_filter_count: usize,
+    source_name: String,
+}
+
+#[tauri::command]
+pub(crate) async fn pick_autoeq_preset() -> Result<Option<AutoEqImportPreview>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Parametric EQ text", &["txt"])
+            .pick_file()
+        else { return Ok(None) };
+        let document = crate::equalizer_portable::read_document(&path)
+            .map_err(|_| "EQ_AUTOEQ_IMPORT_INVALID")?;
+        let imported = crate::equalizer_autoeq::parse(&document)?;
+        // Return only a sanitized basename; never expose or persist the selected path.
+        let source_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("ParametricEQ.txt")
+            .chars().filter(|c| !c.is_control()).take(120).collect::<String>();
+        Ok(Some(AutoEqImportPreview {
+            document,
+            preset: imported.preset,
+            source_filter_count: imported.source_filter_count,
+            source_name,
+        }))
+    }).await.map_err(|_| "EQ_AUTOEQ_IMPORT_INVALID")?
+}
 #[tauri::command]
 pub(crate) async fn export_equalizer_preset(preset: EqPreset) -> Result<bool,String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -258,7 +339,19 @@ fn edit_store(store: &EqualizerStore, expected_revision: &str, edit: Edit) -> Re
             config.update_user_preset(&created.id,value).map_err(|_|"EQ_PRESET_INVALID")?;
             config.set_active_preset(PresetRef::User{id:created.id})
         }
+        Edit::ImportAutoEq { document, name } => {
+            let mut value = crate::equalizer_autoeq::parse(&document)?.preset;
+            let created = config.create_user_preset(&name, None).map_err(|_| "EQ_PRESET_INVALID")?;
+            value.id = created.id.clone();
+            value.name = created.name;
+            // Saving an imported copy must not select it or alter activation state.
+            config.update_user_preset(&created.id, value)
+        }
         Edit::LinkEquipment { id, name, reference } => config.link_equipment(id,&name,reference),
+        Edit::AddEquipment { id, name, category, manufacturer, opra_vendor_id, opra_product_id } => config.add_equipment(id, &name, category, manufacturer, opra_vendor_id, opra_product_id).map(|_| ()),
+        Edit::AddEquipmentPreset { id, reference, preferred } => config.add_equipment_preset(&id, reference, preferred),
+        Edit::RemoveEquipmentPreset { id, reference } => config.remove_equipment_preset(&id, &reference),
+        Edit::SetPreferredEquipmentPreset { id, reference } => config.set_preferred_equipment_preset(&id, reference),
         Edit::UnlinkEquipment { id } => config.unlink_equipment(&id),
         Edit::Create {
             name,
@@ -378,9 +471,23 @@ pub(crate) async fn apply_equalizer(
     preset: Option<EqPreset>,
     bypass_expected: Option<EqPreset>,
     app: AppHandle,
-) -> Result<shared_dsp::Snapshot, String> {
+) -> Result<ApplyResult, String> {
     let mut attempt = shared_dsp::diagnostics::Attempt::begin();
     let initial = app.state::<shared_dsp::State>().snapshot();
+    let selected_mode = app
+        .state::<ConfigState>()
+        .0
+        .lock()
+        .map(|config| {
+            if crate::is_shared_output(&config) {
+                "shared"
+            } else if config.audio_output_type == "alsa" {
+                "direct"
+            } else {
+                "other"
+            }
+        })
+        .unwrap_or("configuration_unavailable");
     attempt.event(
         "tauri.command",
         "started",
@@ -388,12 +495,26 @@ pub(crate) async fn apply_equalizer(
         serde_json::json!({
             "enabled": enabled,
             "preset_present": preset.is_some(),
+            "selected_output_mode": selected_mode,
             "initial_phase": initial.phase,
             "initial_dsp_verified": initial.verified,
             "initial_preset_present": initial.applied.is_some(),
             "initial_error": initial.error,
         }),
     );
+    if shared_dsp::diagnostics::is_enabled() && enabled {
+        let validation_started = std::time::Instant::now();
+        let diagnostic = runtime_diagnostic();
+        attempt.event(
+            "runtime.validation",
+            if diagnostic.is_none() { "ok" } else { "error" },
+            Some(validation_started.elapsed().as_millis()),
+            serde_json::json!({
+                "code": diagnostic.map(shared_dsp::diagnostics::safe_error_code),
+                "process_readiness_confirmed": false,
+            }),
+        );
+    }
     let result = apply_equalizer_inner(
         enabled,
         preset,
@@ -417,7 +538,7 @@ async fn apply_equalizer_inner(
     bypass_expected: Option<EqPreset>,
     preference: PreferenceUpdate,
     app: AppHandle,
-) -> Result<shared_dsp::Snapshot, String> {
+) -> Result<ApplyResult, String> {
     if enabled {
         // Recheck the live server; a catalog observation is not authorization
         // to activate after the system audio server changes. Bypass stays usable.
@@ -438,16 +559,28 @@ async fn apply_equalizer_inner(
     }
     app.state::<AudioState>().0.lock().map_err(|_|"EQ_AUDIO_UNAVAILABLE")?.note_eq_intervention();
     if enabled {
-        shared_config(&app)?;
+        let preflight_started = std::time::Instant::now();
+        shared_dsp::diagnostics::event("activation.preflight", "started", None, serde_json::json!({"stage": "shared_route_and_preset"}));
+        if let Err(error) = shared_config(&app) {
+            shared_dsp::diagnostics::event("activation.preflight", "error", Some(preflight_started.elapsed().as_millis()), serde_json::json!({"stage": "shared_route_and_preset", "code": shared_dsp::diagnostics::safe_error_code(&error)}));
+            return Err(error);
+        }
         let preset = preset.as_ref().ok_or("EQ_PRESET_REQUIRED")?;
-        crate::equalizer::validate_v1(&preset).map_err(|_| "EQ_PRESET_INVALID")?;
-        shared_dsp::safety::assess(&preset, 48000).map_err(|_| "EQ_UNSAFE_HEADROOM")?;
+        if crate::equalizer::validate_v1(&preset).is_err() {
+            shared_dsp::diagnostics::event("activation.preflight", "error", Some(preflight_started.elapsed().as_millis()), serde_json::json!({"stage": "preset_validation", "code": "preset_invalid"}));
+            return Err("EQ_PRESET_INVALID".into());
+        }
+        if shared_dsp::safety::assess(&preset, 48000).is_err() {
+            shared_dsp::diagnostics::event("activation.preflight", "error", Some(preflight_started.elapsed().as_millis()), serde_json::json!({"stage": "headroom_validation", "code": "headroom_rejected"}));
+            return Err("EQ_UNSAFE_HEADROOM".into());
+        }
+        shared_dsp::diagnostics::event("activation.preflight", "ok", Some(preflight_started.elapsed().as_millis()), serde_json::json!({"stage": "shared_route_and_preset"}));
     } else {
         let current = app.state::<shared_dsp::State>().snapshot();
         confirm_level_return(&current, bypass_expected.as_ref())?;
     }
 
-    if enabled {
+    let confirmed_transition = if enabled {
         let preset = preset.ok_or("EQ_PRESET_REQUIRED")?;
         let state=app.state::<shared_dsp::State>().snapshot();
         if (state.applied.is_some()||state.comparison.is_some())
@@ -473,13 +606,17 @@ async fn apply_equalizer_inner(
             })
             .await
             .map_err(|_| "EQ_APPLY_FAILED")??;
+            None
         } else {
-            set_route(&app, Some(preset), None, preference).await?;
+            Some(set_route(&app, Some(preset), None, preference).await?)
         }
     } else {
-        set_route(&app, None, bypass_expected, preference).await?;
-    }
-    Ok(runtime_snapshot(&app))
+        Some(set_route(&app, None, bypass_expected, preference).await?)
+    };
+    let runtime = runtime_snapshot(&app);
+    let audio_route = confirmed_transition
+        .and_then(|transition| confirmed_route_projection(&app, transition, &runtime));
+    Ok(ApplyResult { runtime, audio_route })
 }
 
 /// One-shot startup restoration, invoked only after the already-owned MPD and
@@ -598,8 +735,8 @@ pub(crate) async fn restore_desired_on_startup(app: AppHandle) {
     )
     .await
     {
-        Ok(snapshot) if startup_restore_confirmed(&snapshot) => {
-            shared_dsp::diagnostics::event("eq.startup_restore", "confirmed", None, serde_json::json!({"revision": snapshot.revision}));
+        Ok(result) if startup_restore_confirmed(&result.runtime) => {
+            shared_dsp::diagnostics::event("eq.startup_restore", "confirmed", None, serde_json::json!({"revision": result.runtime.revision}));
         }
         Ok(_) => {
             shared_dsp::diagnostics::event("eq.startup_restore", "unconfirmed", None, serde_json::json!({"code": "EQ_RUNTIME_UNCONFIRMED"}));
@@ -659,7 +796,7 @@ async fn set_route(
     preset: Option<EqPreset>,
     bypass_expected: Option<EqPreset>,
     preference: PreferenceUpdate,
-) -> Result<(), String> {
+) -> Result<ConfirmedRouteTransition, String> {
     let transactions = app.state::<ConfigTransactionState>();
     let current = app.state::<shared_dsp::State>().snapshot();
     if preset.is_none() {
@@ -671,28 +808,155 @@ async fn set_route(
     } else {
         crate::audio_route::AudioProcessing::Off
     };
+    let requested_mode = if preset.is_some() { "shared_eq" } else { "shared" };
     let requested = crate::configured_audio_route(&config, processing)?;
+    let confirmed_route = requested.clone();
+    let legacy_issues = crate::audio_route::interpret_legacy_route(
+        &config.audio_output_type,
+        &config.alsa_device,
+    ).issues;
     // Serialize the preference update/check with the route operation. Startup
     // restoration uses a revision check here so a late restore cannot override
     // a newer explicit disable.
     let store = EqualizerStore::default();
-    let (_route_transaction, route) = transactions.begin_audio_transition(
+    shared_dsp::diagnostics::event("route.transition_admission", "started", None, serde_json::json!({"requested_mode": requested_mode}));
+    let transition = transactions.begin_audio_transition(
         requested,
         crate::config_save_operation::AudioTransitionKind::Equalizer,
-        || update_preference(&store, &preference),
-    )?;
+        || validate_preference_before_route(&store, &preference),
+    );
+    let (_route_transaction, route) = match transition {
+        Ok(value) => {
+            shared_dsp::diagnostics::event("route.transition_admission", "ok", None, serde_json::json!({"requested_mode": requested_mode}));
+            value
+        }
+        Err(error) => {
+            shared_dsp::diagnostics::event("route.transition_admission", "error", None, serde_json::json!({"requested_mode": requested_mode, "code": shared_dsp::diagnostics::safe_error_code(&error)}));
+            return Err(error);
+        }
+    };
+    let generation = route.generation();
     // A failed DSP cleanup is not a healthy transition eligible for autoplay.
     let may_resume = preset.is_some() || (current.verified && (current.applied.is_some()||current.comparison.is_some()));
     let result = set_route_admitted(app, preset, may_resume, route.clone()).await;
-    if result.is_ok() {
-        route.confirm();
-    } else {
+    if let Err(error) = result {
         // Preflight failures are known failures. Once output mutation begins,
         // switch_output marks the operation uncertain and resolves it only
         // after a verified rollback or a successful transition.
         route.fail();
+        shared_dsp::diagnostics::event("route.confirmation", "failed_or_uncertain", None, serde_json::json!({"requested_mode": requested_mode}));
+        return Err(error);
     }
-    result
+    route.confirm();
+    shared_dsp::diagnostics::event("route.confirmation", "confirmed", None, serde_json::json!({"requested_mode": requested_mode}));
+    match persist_preference_after_route(&store, &preference) {
+        Ok(()) => {
+            let enabled = match &preference {
+                PreferenceUpdate::SetEnabled(value) => Some(*value),
+                _ => None,
+            };
+            shared_dsp::diagnostics::event(
+                "preference.persist",
+                "confirmed",
+                None,
+                serde_json::json!({"enabled": enabled}),
+            );
+            Ok(ConfirmedRouteTransition {
+                generation,
+                requested: confirmed_route,
+                legacy_issues,
+            })
+        }
+        Err(error) => {
+            shared_dsp::diagnostics::event(
+                "preference.persist",
+                "error",
+                None,
+                serde_json::json!({"code": shared_dsp::diagnostics::safe_error_code(&error)}),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn confirmed_route_projection(
+    app: &AppHandle,
+    transition: ConfirmedRouteTransition,
+    runtime: &shared_dsp::Snapshot,
+) -> Option<crate::audio_route::AudioRouteProjection> {
+    let current = app
+        .state::<ConfigTransactionState>()
+        .audio_transition_snapshot()?;
+    if current.generation != transition.generation
+        || current.state != crate::audio_route::RouteOperationState::Stable
+        || current.requested != transition.requested
+    {
+        return None;
+    }
+    let observation = app
+        .state::<SupervisorState>()
+        .0
+        .try_lock()
+        .ok()?
+        .audio_route_observation();
+    confirmed_route_projection_from_observation(
+        transition,
+        runtime,
+        observation,
+        crate::next_audio_route_snapshot_generation(),
+    )
+}
+
+fn confirmed_route_projection_from_observation(
+    transition: ConfirmedRouteTransition,
+    runtime: &shared_dsp::Snapshot,
+    observation: crate::supervisor::AudioRouteObservation,
+    snapshot_generation: u64,
+) -> Option<crate::audio_route::AudioRouteProjection> {
+    use crate::audio_route::{
+        AudioAccess, AudioProcessing, AudioRouteSnapshot, RouteEvidence, RouteOperationState,
+    };
+
+    let route = transition.requested;
+    if route.access != AudioAccess::Shared {
+        // A successful DSP bypass does not prove physical Direct PCM ownership.
+        return None;
+    }
+    let mut applied = route.clone();
+    applied.processing = AudioProcessing::Off;
+    if observation.null_output_test
+        || observation.operation != RouteOperationState::Stable
+        || observation.applied.as_ref() != Some(&applied)
+        || observation.eq_pipe_configured != (route.processing == AudioProcessing::Equalizer)
+    {
+        return None;
+    }
+    let mut evidence = vec![
+        RouteEvidence::PersistedConfiguration,
+        RouteEvidence::SupervisorOutputApplied,
+        RouteEvidence::MpdProtocolAvailable,
+    ];
+    if route.processing == AudioProcessing::Equalizer {
+        if !runtime.verified
+            || runtime.in_path != Some(true)
+            || !matches!(runtime.phase, shared_dsp::Phase::Ready | shared_dsp::Phase::Active)
+        {
+            return None;
+        }
+        evidence.push(RouteEvidence::DspGraphVerified);
+    }
+    Some(crate::audio_route::AudioRouteProjection {
+        generation: snapshot_generation,
+        operation_id: Some(format!("route:{}", transition.generation)),
+        operation: RouteOperationState::Stable,
+        route: AudioRouteSnapshot::confirmed(route.clone(), route.clone()).ok(),
+        applied: Some(applied),
+        evidence,
+        diagnostic: None,
+        pcm_acquired: None,
+        exclusive_access_confirmed: None,
+        legacy_issues: transition.legacy_issues,
+    })
 }
 async fn set_route_admitted(
     app: &AppHandle,
@@ -772,7 +1036,11 @@ async fn set_route_admitted(
     let switch_started = std::time::Instant::now();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let result = switch_output(&worker, &config, &resolved, preset, watch, &route);
-        if result.is_ok() { route.confirm(); } else { route.fail(); }
+        if result.is_ok() {
+            route.confirm();
+        } else {
+            route.fail();
+        }
         result
     })
     .await
@@ -821,9 +1089,14 @@ fn switch_output(
     let tx = app.state::<ConfigTransactionState>();
     let dsp = app.state::<shared_dsp::State>();
     let is_enabling = preset.is_some();
+    let failure_stage = Cell::new("transition_admission");
+    let failure_logged = Cell::new(false);
     let result = (|| {
+        failure_stage.set("restart_admission");
         let _restart = tx.try_begin_restart().ok_or("EQ_CANCELLED")?;
+        failure_stage.set("shared_route_validation");
         shared_config(app)?;
+        failure_stage.set("transition_superseded_check");
         if watch.as_ref().is_some_and(|w| !w.current()) {
             return Err("EQ_SUPERSEDED".into());
         }
@@ -835,6 +1108,7 @@ fn switch_output(
             .map_err(|_| "EQ_AUDIO_UNAVAILABLE")?
             .invalidate_playback_intents();
         let preparation = {
+            failure_stage.set("playback_suspension");
             audio
                 .0
                 .lock()
@@ -881,6 +1155,7 @@ fn switch_output(
         };
         let analyzer_state = app.state::<AnalyzerState>();
         let suspended = {
+            failure_stage.set("analyzer_suspension");
             let mut analyzer = analyzer_state
                 .0
                 .lock()
@@ -915,6 +1190,7 @@ fn switch_output(
         // reject the selected AUX stereo sink. The queue has already been
         // captured and stopped above; prepare only after that point.
         let prepared = if let Some(preset) = preset {
+            failure_stage.set("dsp_prepare");
             let prepare_started = std::time::Instant::now();
             shared_dsp::diagnostics::event(
                 "route.dsp_prepare",
@@ -962,19 +1238,37 @@ fn switch_output(
         let pipe = prepared.as_ref().map(|p| p.pipe.clone());
         let changed = Cell::new(false);
         let applied = (|| {
+            failure_stage.set("transition_cancellation_check");
             if tx.shutdown_requested() {
                 return Err("EQ_CANCELLED".into());
             }
+            failure_stage.set("dsp_prepared_validation");
             if prepared.as_ref().is_some_and(|p| !dsp.verify_prepared(p)) {
+                shared_dsp::diagnostics::event(
+                    "dsp.prepared_validation",
+                    "error",
+                    Some(switch_started.elapsed().as_millis()),
+                    serde_json::json!({"code": "prepared_generation_unconfirmed"}),
+                );
                 return Err("EQ_CANCELLED".into());
+            }
+            if prepared.is_some() {
+                shared_dsp::diagnostics::event(
+                    "dsp.prepared_validation",
+                    "ok",
+                    Some(switch_started.elapsed().as_millis()),
+                    serde_json::json!({"generation_bound": true}),
+                );
             }
             // Mark before the first process/output mutation (including DSP
             // stop); successful rollback can later refine this to Failed.
             route.mark_uncertain();
             if pipe.is_none() {
+                failure_stage.set("dsp_stop");
                 dsp.stop().map_err(|e| e.to_string())?;
             }
             changed.set(true); // start may stop the old process before failing.
+            failure_stage.set("mpd_eq_output_start");
             let mpd_started = std::time::Instant::now();
             let output_result = supervisor
                 .0
@@ -989,14 +1283,17 @@ fn switch_output(
             if tx.shutdown_requested() {
                 return Err("EQ_CANCELLED".into());
             }
+            failure_stage.set("playback_position_restore");
             let restore_started = std::time::Instant::now();
             restore_paused(snapshot)?;
             shared_dsp::diagnostics::event("playback.position_restored", "ok", Some(restore_started.elapsed().as_millis()), serde_json::json!({}));
             if is_enabling {
+                failure_stage.set("dsp_commit");
                 dsp.commit().map_err(|e| e.to_string())?;
                 shared_dsp::diagnostics::event("dsp.route_committed", "ok", Some(switch_started.elapsed().as_millis()), serde_json::json!({}));
             }
             if let Some(watch) = &watch {
+                failure_stage.set("playback_resume");
                 if tx.shutdown_requested() {
                     return Err("EQ_CANCELLED".into());
                 }
@@ -1020,11 +1317,12 @@ fn switch_output(
             Ok(())
         })();
         if let Err(original) = applied {
+            failure_logged.set(true);
             shared_dsp::diagnostics::event(
                 "route.apply_stage",
                 "error",
                 Some(switch_started.elapsed().as_millis()),
-                serde_json::json!({"code": shared_dsp::diagnostics::safe_error_code(&original), "output_changed": changed.get()}),
+                route_failure_details(failure_stage.get(), &original, changed.get()),
             );
             if tx.shutdown_requested() {
                 return Err(format!("{original};EQ_CANCELLED"));
@@ -1062,6 +1360,16 @@ fn switch_output(
         resume.confirmed = true;
         Ok(())
     })();
+    if let Err(error) = &result {
+        if !failure_logged.get() {
+            shared_dsp::diagnostics::event(
+                "route.pre_apply_failure",
+                "error",
+                Some(switch_started.elapsed().as_millis()),
+                route_failure_details(failure_stage.get(), error, false),
+            );
+        }
+    }
     // A dependency prepared before a refused queue/suspension cannot stay
     // published as applied. Do not stop an existing DSP on a preflight refusal.
     if result.is_err() && is_enabling {
@@ -1098,7 +1406,123 @@ pub(crate) fn stop_for_output_switch(app: &AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn my_headphones_edits_persist_offline_without_changing_active_preset_or_eq_state() {
+        let dir = std::env::temp_dir().join(format!("sonante-my-headphones-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let store = EqualizerStore::new(dir.join("eq.json"));
+        let mut initial = EqualizerConfig::default();
+        let saved = initial.create_user_preset("Travel", None).unwrap();
+        initial.set_enabled(true).unwrap();
+        let active = initial.active_preset.clone();
+        store.save(&initial).unwrap();
+
+        let current = store.load().unwrap();
+        edit_store(&store, &revision(&current).unwrap(), Edit::AddEquipment {
+            id: None, name: "Edition XS".into(), category: EquipmentCategory::Headphones, manufacturer: Some("HIFIMAN".into()),
+            opra_vendor_id: Some("hifiman".into()), opra_product_id: Some("hifiman_edition_xs".into()),
+        }).unwrap();
+        let current = store.load().unwrap();
+        let equipment = current.equipment_profiles[0].clone();
+        assert_eq!(equipment.category, EquipmentCategory::Headphones);
+        assert!(equipment.presets.is_empty());
+        assert_eq!(equipment.opra_product_id.as_deref(), Some("hifiman_edition_xs"));
+        assert!(current.enabled);
+        assert_eq!(current.active_preset, active);
+        assert_eq!(current.user_presets, vec![saved.clone()]);
+
+        let reference = PresetRef::User { id: saved.id.clone() };
+        edit_store(&store, &revision(&current).unwrap(), Edit::AddEquipmentPreset { id: equipment.id.clone(), reference: reference.clone(), preferred: true }).unwrap();
+        let current = store.load().unwrap();
+        assert_eq!(current.equipment_profiles[0].presets, vec![reference.clone()]);
+        assert_eq!(current.equipment_profiles[0].preferred_preset, Some(reference.clone()));
+        edit_store(&store, &revision(&current).unwrap(), Edit::UnlinkEquipment { id: equipment.id }).unwrap();
+        let current = store.load().unwrap();
+        assert!(current.equipment_profiles.is_empty());
+        assert_eq!(current.user_presets, vec![saved]);
+        assert!(current.enabled);
+        assert_eq!(current.active_preset, active);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use std::sync::{Arc, Mutex};
+
+    fn route_confirmation_fixture(processing: crate::audio_route::AudioProcessing) -> ConfirmedRouteTransition {
+        ConfirmedRouteTransition {
+            generation: 17,
+            requested: crate::audio_route::AudioRoute {
+                destination: crate::audio_route::AudioDestination::SystemDefault,
+                access: crate::audio_route::AudioAccess::Shared,
+                processing,
+            },
+            legacy_issues: Vec::new(),
+        }
+    }
+
+    fn supervisor_route_fixture(eq_pipe_configured: bool) -> crate::supervisor::AudioRouteObservation {
+        crate::supervisor::AudioRouteObservation {
+            generation: 9,
+            operation: crate::audio_route::RouteOperationState::Stable,
+            applied: Some(crate::audio_route::AudioRoute {
+                destination: crate::audio_route::AudioDestination::SystemDefault,
+                access: crate::audio_route::AudioAccess::Shared,
+                processing: crate::audio_route::AudioProcessing::Off,
+            }),
+            null_output_test: false,
+            eq_pipe_configured,
+        }
+    }
+
+    #[test]
+    fn confirmed_eq_command_returns_a_generation_fenced_route_projection() {
+        let mut runtime = shared_dsp::Snapshot {
+            phase: shared_dsp::Phase::Ready,
+            verified: true,
+            in_path: Some(true),
+            applied: Some(crate::equalizer::flat_preset()),
+            ..Default::default()
+        };
+        let projection = confirmed_route_projection_from_observation(
+            route_confirmation_fixture(crate::audio_route::AudioProcessing::Equalizer),
+            &runtime,
+            supervisor_route_fixture(true),
+            42,
+        ).unwrap();
+        assert_eq!(projection.generation, 42);
+        assert_eq!(projection.operation_id.as_deref(), Some("route:17"));
+        assert_eq!(projection.operation, crate::audio_route::RouteOperationState::Stable);
+        let route = projection.route.unwrap();
+        assert_eq!(route.state, crate::audio_route::AudioRouteState::Confirmed);
+        assert_eq!(route.confirmed.unwrap().processing, crate::audio_route::AudioProcessing::Equalizer);
+        assert!(projection.evidence.contains(&crate::audio_route::RouteEvidence::DspGraphVerified));
+        assert_eq!(projection.pcm_acquired, None, "Shared+EQ confirmation is not Direct PCM ownership");
+
+        runtime.verified = false;
+        assert!(confirmed_route_projection_from_observation(
+            route_confirmation_fixture(crate::audio_route::AudioProcessing::Equalizer),
+            &runtime,
+            supervisor_route_fixture(true),
+            43,
+        ).is_none(), "unverified DSP state cannot confirm the UI route");
+    }
+
+    #[test]
+    fn unavailable_or_null_route_observations_are_not_reported_as_confirmed() {
+        let runtime = shared_dsp::Snapshot::default();
+        assert!(confirmed_route_projection_from_observation(
+            route_confirmation_fixture(crate::audio_route::AudioProcessing::Off),
+            &runtime,
+            supervisor_route_fixture(true),
+            1,
+        ).is_none(), "EQ pipe must be absent after a confirmed bypass");
+        let mut unavailable = supervisor_route_fixture(false);
+        unavailable.null_output_test = true;
+        assert!(confirmed_route_projection_from_observation(
+            route_confirmation_fixture(crate::audio_route::AudioProcessing::Off),
+            &runtime,
+            unavailable,
+            2,
+        ).is_none(), "null output never claims a physical output route");
+    }
 
     #[test]
     fn failed_eq_prepare_restores_queue_without_autoplay_for_playing_paused_and_stopped_origins() {
@@ -1176,6 +1600,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn route_failure_diagnostic_keeps_the_exact_stage_and_never_logs_raw_error_text() {
+        let details = route_failure_details(
+            "dsp_prepared_validation",
+            "EQ_GraphInvalid; private path /home/user/music",
+            true,
+        );
+        assert_eq!(details["stage"], "dsp_prepared_validation");
+        assert_eq!(details["code"], "unclassified");
+        assert_eq!(details["output_changed"], true);
+        assert!(!details.to_string().contains("/home/user/music"));
+
+        let known = route_failure_details("mpd_eq_output_start", "EQ_GraphInvalid", false);
+        assert_eq!(known["code"], "graph_invalid");
+    }
+
     fn private_equalizer_store(label: &str) -> (std::path::PathBuf, EqualizerStore) {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1251,6 +1691,33 @@ mod tests {
     }
 
     #[test]
+    fn explicit_enable_preference_is_persisted_only_after_route_confirmation() {
+        let (root, store) = private_equalizer_store("confirmed-intent");
+        let enabling = PreferenceUpdate::SetEnabled(true);
+        validate_preference_before_route(&store, &enabling).unwrap();
+        assert!(
+            !store.load().unwrap().enabled,
+            "failed activation leaves the last confirmed preference unchanged"
+        );
+        // The caller invokes this only after set_route_admitted returns success
+        // and the route handle has been confirmed.
+        persist_preference_after_route(&store, &enabling).unwrap();
+        assert!(store.load().unwrap().enabled);
+
+        let disabling = PreferenceUpdate::SetEnabled(false);
+        validate_preference_before_route(&store, &disabling).unwrap();
+        assert!(
+            store.load().unwrap().enabled,
+            "a pending bypass does not rewrite the saved state"
+        );
+        persist_preference_after_route(&store, &disabling).unwrap();
+        assert!(!store.load().unwrap().enabled);
+
+        std::fs::remove_file(root.join("eq.json")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
     fn startup_restore_requires_owned_shared_ready_and_idle_audio() {
         let safe = (true, true, true, true, true, false, false, true, false);
         assert!(startup_restore_allowed(safe.0, safe.1, safe.2, safe.3, safe.4, safe.5, safe.6, safe.7, safe.8));
@@ -1318,6 +1785,36 @@ mod tests {
         std::fs::remove_file(root.join("eq.json")).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
+
+    #[test]
+    fn autoeq_copy_persists_without_changing_selected_preset_or_enable_intent() {
+        let (root, store) = private_equalizer_store("autoeq-copy");
+        let initial = store.load().unwrap();
+        edit_store(
+            &store,
+            &revision(&initial).unwrap(),
+            Edit::Create { name: "Current".into(), source: None, preset: Some(equalizer::flat_preset()) },
+        ).unwrap();
+        update_preference(&store, &PreferenceUpdate::SetEnabled(true)).unwrap();
+        let before = store.load().unwrap();
+        let selected = before.active_preset.clone();
+        let document = "Preamp: 2 dB\nFilter 1: ON LSC Fc 105 Hz Gain 3 dB Q 0.7\n".to_string();
+        edit_store(&store, &revision(&before).unwrap(), Edit::ImportAutoEq { document, name: "Imported profile".into() }).unwrap();
+
+        // Reload from disk: import persists the full copy but does not select,
+        // enable, apply, or otherwise change the current EQ intent.
+        let after = store.load().unwrap();
+        assert_eq!(after.active_preset, selected);
+        assert!(after.enabled);
+        assert_eq!(after.user_presets.len(), before.user_presets.len() + 1);
+        let imported = after.user_presets.iter().find(|p| p.name == "Imported profile").unwrap();
+        assert_eq!(imported.preamp_db, 2.0);
+        assert_eq!(imported.bands[0].frequency_hz, 105.0);
+        assert_eq!(imported.bands[0].filter_type, equalizer::EqFilterType::LowShelf);
+        std::fs::remove_file(root.join("eq.json")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
     #[test]
     fn private_crud_cas_does_not_activate_and_preserves_corruption() {
         let dir = std::env::temp_dir().join(format!("sonante-eq-crud-{}", std::process::id()));
@@ -1431,7 +1928,7 @@ mod daily_tests {
   assert!(edit_store(&store,&revision(&c).unwrap(),Edit::Import{document,name:"Travel".into()}).is_err());assert_eq!(std::fs::read(root.join("eq.json")).unwrap(),bytes);
   edit_store(&store,&revision(&c).unwrap(),Edit::LinkEquipment{id:None,name:"DAC and headphones".into(),reference:selected.clone()}).unwrap();let c=store.load().unwrap();assert!(!c.enabled);let equipment=c.equipment_profiles[0].clone();
   assert!(edit_store(&store,&revision(&c).unwrap(),Edit::Delete{reference:selected.clone()}).is_err());assert_eq!(store.load().unwrap(),c);
-  edit_store(&store,&revision(&c).unwrap(),Edit::Rename{id:c.user_presets[0].id.clone(),name:"Renamed".into()}).unwrap();let c=store.load().unwrap();assert_eq!(c.equipment_profiles[0].preset,selected);
+  edit_store(&store,&revision(&c).unwrap(),Edit::Rename{id:c.user_presets[0].id.clone(),name:"Renamed".into()}).unwrap();let c=store.load().unwrap();assert_eq!(c.equipment_profiles[0].preferred_preset,Some(selected.clone()));
   edit_store(&store,&revision(&c).unwrap(),Edit::UnlinkEquipment{id:equipment.id}).unwrap();let c=store.load().unwrap();assert_eq!(c.user_presets.len(),1);
   edit_store(&store,&revision(&c).unwrap(),Edit::Delete{reference:selected}).unwrap();assert!(store.load().unwrap().user_presets.is_empty());std::fs::remove_file(root.join("eq.json")).unwrap();std::fs::remove_dir(root).unwrap();
  }

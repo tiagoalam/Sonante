@@ -17,6 +17,14 @@ mod config;
 mod music_sources;
 mod equalizer;
 mod equalizer_portable;
+mod equalizer_autoeq;
+// The isolated OPRA reader is intentionally not wired to networking or EQ
+// application yet; AUTOEQ-071-03 validates its parsing contract only.
+#[allow(dead_code)]
+mod opra_catalog;
+#[allow(dead_code)]
+mod opra_compat;
+mod opra_online;
 mod equalizer_commands;
 mod shared_dsp;
 mod config_save_operation;
@@ -61,6 +69,7 @@ mod mpris_shutdown;
 mod online_artwork;
 mod system_tray;
 mod online_metadata;
+mod online_lyrics;
 mod persistence;
 mod playlists;
 mod listening_history;
@@ -2299,15 +2308,51 @@ fn prepare_initial_preferences(
     operation: &config_save_operation::Operation,
 ) -> Result<local_watcher::PreparedWatch, String> {
     let transactions = app.state::<ConfigTransactionState>();
-    let owner = app.state::<profile_lease::State>().lease()?;
-    owner.validate()?;
-    let _startup = transactions.startup_config_read_gate.try_lock().map_err(|_| "SOURCE_AVAILABILITY_BUSY")?;
+    let owner = local_diagnostics::wizard_step(
+        local_diagnostics::Stage::WizardPreparationProfile,
+        || {
+            let owner = app.state::<profile_lease::State>().lease()?;
+            owner.validate()?;
+            Ok::<_, String>(owner)
+        },
+    )?;
+    let startup_started = Instant::now();
+    let startup = transactions.startup_config_read_gate.try_lock()
+        .map_err(|_| "SOURCE_AVAILABILITY_BUSY".to_string());
+    local_diagnostics::observe(
+        local_diagnostics::Stage::WizardPreparationStartupGuard,
+        startup_started.elapsed(),
+        &startup,
+    );
+    let _startup = startup?;
     let cancelled = || operation.shutdown_requested() || transactions.shutdown_requested();
-    recovery_fs::check(&cancelled)?;
-    managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())?;
-    let current = app.state::<ConfigState>().0.lock().map_err(|_| "Config unavailable")?.clone();
-    validate_config_change_preflight(observed, &current, next, alsa_preflight::probe)?;
-    if !is_finishing_first_run(&current, next) { return Err("FIRST_RUN_CONFIG_CHANGED".into()); }
+    local_diagnostics::wizard_step(
+        local_diagnostics::Stage::WizardPreparationStartupGuard,
+        || {
+            recovery_fs::check(&cancelled)?;
+            managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())
+        },
+    )?;
+    let current = local_diagnostics::wizard_step(
+        local_diagnostics::Stage::WizardPreparationConfig,
+        || {
+            app.state::<ConfigState>()
+                .0
+                .lock()
+                .map(|config| config.clone())
+                .map_err(|_| "Config unavailable".to_string())
+        },
+    )?;
+    local_diagnostics::wizard_step(
+        local_diagnostics::Stage::WizardPreparationValidation,
+        || {
+            validate_config_change_preflight(observed, &current, next, alsa_preflight::probe)?;
+            if !is_finishing_first_run(&current, next) {
+                return Err("FIRST_RUN_CONFIG_CHANGED".into());
+            }
+            Ok(())
+        },
+    )?;
     let watch = local_diagnostics::wizard_step(local_diagnostics::Stage::WizardWatch, ||
         app.state::<LocalWatcherState>().prepare(next.local_folders.iter().map(PathBuf::from).collect()))?;
     let generation = format!("first-run-{}-{}", std::process::id(), MIRROR_GENERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed));
@@ -2322,7 +2367,11 @@ fn prepare_initial_preferences(
         supervisor.0.lock().map_err(|_| "MPD unavailable".to_string())?.start(next)
             .and_then(|_| initial.validate_published()));
     if let Err(error) = started {
-        return Err(error_with_rollback(error, initial.rollback(|| stop_supervisor(&supervisor.0))));
+        let cleanup = local_diagnostics::wizard_step(
+            local_diagnostics::Stage::WizardPreparationCleanup,
+            || initial.rollback(|| stop_supervisor(&supervisor.0)),
+        );
+        return Err(error_with_rollback(error, cleanup));
     }
     let preferences_committed = Cell::new(false);
     let persistence_uncertain = Cell::new(false);
@@ -2359,8 +2408,16 @@ fn prepare_initial_preferences(
         Ok(()) => Ok(watch),
         Err(error) => {
             let cleanup = if !preferences_committed.get() && !persistence_uncertain.get() {
-                initial.rollback(|| stop_supervisor(&supervisor.0))
-            } else { stop_supervisor(&supervisor.0) };
+                local_diagnostics::wizard_step(
+                    local_diagnostics::Stage::WizardPreparationCleanup,
+                    || initial.rollback(|| stop_supervisor(&supervisor.0)),
+                )
+            } else {
+                local_diagnostics::wizard_step(
+                    local_diagnostics::Stage::WizardPreparationCleanup,
+                    || stop_supervisor(&supervisor.0),
+                )
+            };
             Err(error_with_rollback(error, cleanup))
         }
     }
@@ -2372,13 +2429,23 @@ fn confirm_sqlite_initial_preferences<T>(
     library: &SqliteLibraryState,
     publish: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    if !is_finishing_first_run(current, next) {
-        return Err("FIRST_RUN_CONFIG_CHANGED".into());
-    }
-    library.with_initial_sources_guard(
-        &next.local_folders,
-        next.sources.unwrap_or_default().local,
-        publish,
+    local_diagnostics::wizard_step(
+        local_diagnostics::Stage::WizardPreparationSqliteSources,
+        || {
+            if !is_finishing_first_run(current, next) {
+                return Err("FIRST_RUN_CONFIG_CHANGED".into());
+            }
+            library.with_initial_sources_guard(
+                &next.local_folders,
+                next.sources.unwrap_or_default().local,
+                || {
+                    local_diagnostics::wizard_step(
+                        local_diagnostics::Stage::WizardPreparationPersist,
+                        publish,
+                    )
+                },
+            )
+        },
     )
 }
 
@@ -2393,41 +2460,73 @@ fn prepare_initial_sqlite_preferences(
     let started_here = Cell::new(false);
     let result = (|| {
         let transactions = app.state::<ConfigTransactionState>();
-        let owner = app.state::<profile_lease::State>().lease()?;
-        owner.validate()?;
-        let _startup = transactions
-            .startup_config_read_gate
-            .try_lock()
-            .map_err(|_| "SOURCE_AVAILABILITY_BUSY")?;
+        let owner = local_diagnostics::wizard_step(
+            local_diagnostics::Stage::WizardPreparationProfile,
+            || {
+                let owner = app.state::<profile_lease::State>().lease()?;
+                owner.validate()?;
+                Ok::<_, String>(owner)
+            },
+        )?;
+        let startup_started = Instant::now();
+        let startup = transactions.startup_config_read_gate.try_lock()
+            .map_err(|_| "SOURCE_AVAILABILITY_BUSY".to_string());
+        local_diagnostics::observe(
+            local_diagnostics::Stage::WizardPreparationStartupGuard,
+            startup_started.elapsed(),
+            &startup,
+        );
+        let _startup = startup?;
         let cancelled = || operation.shutdown_requested() || transactions.shutdown_requested();
-        recovery_fs::check(&cancelled)?;
-        managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())?;
-        let current = app
-            .state::<ConfigState>()
-            .0
-            .lock()
-            .map_err(|_| "Config unavailable")?
-            .clone();
-        validate_config_change_preflight(observed, &current, next, alsa_preflight::probe)?;
+        local_diagnostics::wizard_step(
+            local_diagnostics::Stage::WizardPreparationStartupGuard,
+            || {
+                recovery_fs::check(&cancelled)?;
+                managed_save_intent::check_startup(&MpdSupervisor::sonante_config_dir())
+            },
+        )?;
+        let current = local_diagnostics::wizard_step(
+            local_diagnostics::Stage::WizardPreparationConfig,
+            || {
+                app.state::<ConfigState>()
+                    .0
+                    .lock()
+                    .map(|config| config.clone())
+                    .map_err(|_| "Config unavailable".to_string())
+            },
+        )?;
+        local_diagnostics::wizard_step(
+            local_diagnostics::Stage::WizardPreparationValidation,
+            || validate_config_change_preflight(observed, &current, next, alsa_preflight::probe),
+        )?;
         let library = app.state::<SqliteLibraryState>();
-        library.with_initial_sources_guard(
-            &next.local_folders,
-            next.sources.unwrap_or_default().local,
-            || Ok(()),
+        local_diagnostics::wizard_step(
+            local_diagnostics::Stage::WizardPreparationSqliteSources,
+            || {
+                library.with_initial_sources_guard(
+                    &next.local_folders,
+                    next.sources.unwrap_or_default().local,
+                    || Ok(()),
+                )
+            },
         )?;
         // The null-output test already owns its private MPD on first run.
         // Normal first run admits the requested output before committing the
         // completed preferences, as the legacy Wizard does.
         let supervisor = app.state::<SupervisorState>();
-        {
-            let mut supervisor = supervisor.0.lock().map_err(|_| "MPD unavailable")?;
-            if supervisor.observed_process_pid().is_none() {
-                local_diagnostics::wizard_step(local_diagnostics::Stage::WizardEngine, || {
-                    supervisor.start(next).map(|_| ())
-                })?;
-                started_here.set(true);
-            }
-        }
+        local_diagnostics::wizard_step(
+            local_diagnostics::Stage::WizardPreparationMpd,
+            || {
+                let mut supervisor = supervisor.0.lock().map_err(|_| "MPD unavailable")?;
+                if supervisor.observed_process_pid().is_none() {
+                    local_diagnostics::wizard_step(local_diagnostics::Stage::WizardEngine, || {
+                        supervisor.start(next).map(|_| ())
+                    })?;
+                    started_here.set(true);
+                }
+                Ok(())
+            },
+        )?;
         confirm_sqlite_initial_preferences(&current, next, &library, || {
             owner.validate()?;
             recovery_fs::check(&cancelled)?;
@@ -2450,7 +2549,13 @@ fn prepare_initial_sqlite_preferences(
     let uncertain = uncertain_save.get() || (committed.get() && result.is_err());
     let result = if result.is_err() && started_here.get() && !uncertain {
         let supervisor = app.state::<SupervisorState>();
-        result.map_err(|error| error_with_rollback(error, stop_supervisor(&supervisor.0)))
+        result.map_err(|error| {
+            let cleanup = local_diagnostics::wizard_step(
+                local_diagnostics::Stage::WizardPreparationCleanup,
+                || stop_supervisor(&supervisor.0),
+            );
+            error_with_rollback(error, cleanup)
+        })
     } else {
         result
     };
@@ -3860,16 +3965,7 @@ fn project_linux_audio_route(
     let dsp_state = snapshot
         .shared_dsp
         .as_ref()
-        .map(|dsp| match dsp.phase {
-            shared_dsp::Phase::Off => RouteDspState::Off,
-            shared_dsp::Phase::Preparing => RouteDspState::Preparing,
-            shared_dsp::Phase::Ready => RouteDspState::Ready,
-            shared_dsp::Phase::Active if dsp.verified && dsp.in_path == Some(true) => RouteDspState::ActiveVerified,
-            shared_dsp::Phase::Active => RouteDspState::ActiveUnverified,
-            shared_dsp::Phase::Updating => RouteDspState::Updating,
-            shared_dsp::Phase::Stopping => RouteDspState::Stopping,
-            shared_dsp::Phase::Error => RouteDspState::Failed,
-        })
+        .map(route_dsp_state_from_snapshot)
         .unwrap_or_else(|| {
             if runtime.as_ref().is_some_and(|value| value.eq_pipe_configured) {
                 RouteDspState::ActiveUnverified
@@ -3994,6 +4090,66 @@ fn project_linux_audio_route(
         }
     }
     projection
+}
+
+fn route_dsp_state_from_snapshot(dsp: &shared_dsp::Snapshot) -> crate::audio_route::RouteDspState {
+    use crate::audio_route::RouteDspState;
+    match dsp.phase {
+        shared_dsp::Phase::Off => RouteDspState::Off,
+        shared_dsp::Phase::Preparing => RouteDspState::Preparing,
+        // Ready is a stable no-playback state after a successful commit. Before
+        // commit it remains unverified and is still reported as transitioning.
+        shared_dsp::Phase::Ready if dsp.verified && dsp.in_path == Some(true) => RouteDspState::ActiveVerified,
+        shared_dsp::Phase::Ready => RouteDspState::Ready,
+        shared_dsp::Phase::Active if dsp.verified && dsp.in_path == Some(true) => RouteDspState::ActiveVerified,
+        shared_dsp::Phase::Active => RouteDspState::ActiveUnverified,
+        shared_dsp::Phase::Updating => RouteDspState::Updating,
+        shared_dsp::Phase::Stopping => RouteDspState::Stopping,
+        shared_dsp::Phase::Error => RouteDspState::Failed,
+    }
+}
+
+#[cfg(test)]
+mod route_dsp_projection_tests {
+    use super::*;
+
+    #[test]
+    fn committed_ready_dsp_is_stable_but_unverified_ready_is_still_transitioning() {
+        let confirmed = shared_dsp::Snapshot {
+            phase: shared_dsp::Phase::Ready,
+            verified: true,
+            in_path: Some(true),
+            applied: Some(equalizer::flat_preset()),
+            ..Default::default()
+        };
+        let mut config = AppConfig::default();
+        config.first_run = false;
+        config.audio_output_type = "pipewire".into();
+        let route = configured_audio_route(&config, crate::audio_route::AudioProcessing::Off).unwrap();
+        let project = |dsp| crate::audio_route::project_audio_route(crate::audio_route::RouteProjectionInput {
+            persisted: Some(crate::audio_route::interpret_legacy_route(&config.audio_output_type, &config.alsa_device)),
+            applied: Some(route.clone()),
+            supervisor: crate::audio_route::RouteSupervisorState::Available,
+            playback_consistent: true,
+            playing: false,
+            direct_pcm_observed: false,
+            dsp,
+            operation: crate::audio_route::RouteOperationState::Stable,
+            diagnostic: None,
+            operation_id: Some("route:17".into()),
+            generation: 42,
+            platform: crate::audio_route::RoutePlatform::Linux,
+            null_output_test: false,
+        });
+        let projection = project(route_dsp_state_from_snapshot(&confirmed));
+        assert_eq!(projection.operation, crate::audio_route::RouteOperationState::Stable);
+        assert_eq!(projection.route.unwrap().confirmed.unwrap().processing, crate::audio_route::AudioProcessing::Equalizer);
+
+        let mut unverified = confirmed;
+        unverified.verified = false;
+        let projection = project(route_dsp_state_from_snapshot(&unverified));
+        assert_eq!(projection.operation, crate::audio_route::RouteOperationState::Transitioning);
+    }
 }
 
 fn apply_volume_context(playback: &mut PlaybackStatus, before: &direct_volume::Context, after: &direct_volume::Context) {
@@ -6776,6 +6932,11 @@ async fn save_config_inner(
             return Err("LOCAL_SOURCE_REMOVAL_QUEUE_CONFIRMATION_STALE".into());
         }
         if app.try_state::<SqliteLibraryState>().is_some() {
+            local_diagnostics::record(
+                local_diagnostics::Stage::WizardPreparationSqliteMode,
+                Duration::ZERO,
+                None,
+            );
             let worker_app = app.clone();
             let (_, operation) = transaction_state.operations.reserve()?;
             let prepared = tauri::async_runtime::spawn_blocking(move || {
@@ -6800,6 +6961,11 @@ async fn save_config_inner(
             result?;
             return Ok(config_save_operation::SaveResponse::completed(audio::DeviceSwitchRestoreOutcome::Complete));
         }
+        local_diagnostics::record(
+            local_diagnostics::Stage::WizardPreparationManagedMode,
+            Duration::ZERO,
+            None,
+        );
         let worker_app = app.clone();
         let (_, operation) = transaction_state.operations.reserve()?;
         let prepared = tauri::async_runtime::spawn_blocking(move || {
@@ -8566,6 +8732,12 @@ pub fn run() {
     }
     let sqlite_library = SqliteLibraryState::open(&sqlite_database)
         .expect("could not open isolated SQLite catalog");
+    let lyrics_root = profile_root.join("data").join("lyrics");
+    // Lyrics persistence is optional storage. A full or read-only disk must
+    // not prevent playback or application startup; commands return a sanitized
+    // store error while the current fetched lyric remains available in-session.
+    let lyrics_store = online_lyrics::LyricsStore::open(lyrics_root.clone())
+        .unwrap_or_else(|_| online_lyrics::LyricsStore::unavailable(lyrics_root));
     std::fs::set_permissions(
         &sqlite_database,
         std::os::unix::fs::PermissionsExt::from_mode(0o600),
@@ -8724,6 +8896,7 @@ pub fn run() {
         .manage(remote_state)
         .manage(remote_bridge::MediaState::default())
         .manage(sqlite_library)
+        .manage(lyrics_store)
         .invoke_handler(tauri::generate_handler![
             local_diagnostics::get_local_diagnostics,
             analyze_library_recovery,
@@ -8808,11 +8981,16 @@ pub fn run() {
             get_edition_cache_namespace,
             get_local_album_doctor,
             search_online_album_metadata,
+            online_lyrics::search_lrclib,
+            online_lyrics::get_lyrics_choice,
+            online_lyrics::set_lyrics_choice,
+            online_lyrics::migrate_legacy_lyrics_cache,
             get_online_album_metadata_details,
             resolve_local_library_path,
             get_local_track_tags,
             get_local_file_info,
             player_source_info::get_player_source_info,
+            player_source_info::get_current_local_lyrics,
             player_source_info::get_album_source_info,
             get_local_album_tag_inspection,
             preflight_local_album_tag_batch,
@@ -8852,6 +9030,8 @@ pub fn run() {
             get_local_source_availability,
             equalizer_commands::get_equalizer,
             equalizer_commands::pick_equalizer_preset,
+            equalizer_commands::pick_autoeq_preset,
+            opra_online::search_opra_profiles,
             equalizer_commands::export_equalizer_preset,
             equalizer_commands::edit_equalizer,
             equalizer_commands::apply_equalizer,

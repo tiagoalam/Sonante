@@ -26,7 +26,9 @@ export const NowPlayingQueue: React.FC<{ open: boolean; available: boolean; stat
   const filterId = useId();
   const filterRef = useRef<HTMLInputElement>(null);
   const presentation = useMemo(() => queuePresentation(state.items), [state.items]);
-  const entries = useMemo(() => queueCoherent ? presentation.filter(filter) : [], [presentation, filter, queueCoherent]);
+  const queueUncertain = !queueCoherent || state.phase === "uncertain";
+  const queueKnown = queueAvailable && state.phase === "ready";
+  const entries = useMemo(() => queueUncertain ? [] : presentation.filter(filter), [presentation, filter, queueUncertain]);
   const ready = queueAvailable && state.phase === "ready";
   const queueContext = useMemo(() => ({}), [presentation.identity, open, queueAvailable]);
   const queueActions = useQueueInsertion(queueContext, open && ready);
@@ -55,7 +57,13 @@ export const NowPlayingQueue: React.FC<{ open: boolean; available: boolean; stat
     reader.setActive(open && queueAvailable);
     return () => { availableRef.current = false; reader.setActive(false); readerRef.current = null; };
   }, []);
-  useEffect(() => { readerRef.current?.setActive(open && queueAvailable); }, [open, queueAvailable]);
+  useEffect(() => {
+    const reader = readerRef.current;
+    if (!queueCoherent) {
+      reader?.setActive(false);
+      reader?.markUncertain();
+    } else reader?.setActive(open && queueAvailable);
+  }, [open, queueAvailable, queueCoherent]);
   useEffect(() => {
     const node = listRef.current;
     if (!open || !node) return;
@@ -119,9 +127,9 @@ export const NowPlayingQueue: React.FC<{ open: boolean; available: boolean; stat
   const artwork = useLocalQueueArtwork(state.items, start, end, open, queueAvailable, status, artworkContext, detached, visibleEntries.map(entry => entry.index));
   return <aside data-now-playing-queue-content id="now-playing-queue" hidden={!open} className="np-queue" aria-label={t("queue.title")}>
     {queueActions.notice}{queueActions.menu}
-    <div className="np-queue-heading"><div><h2>{t("queue.title")}</h2><span aria-live="polite" aria-atomic="true">{filter.trim() && queueCoherent
-      ? t("queue.filteredCount", { count: entries.length, total: state.items.length }) : t("common.trackCount", { count: queueCoherent ? state.items.length : 0 })}</span></div>
-      {queueCoherent && state.items.length > 0 && <button type="button" onClick={() => void act()} disabled={!queueAvailable || actionBusy}
+    <div className="np-queue-heading"><div><h2>{t("queue.title")}</h2><span aria-live="polite" aria-atomic="true" aria-label={!queueKnown ? t("queue.countUnknown") : undefined}>{!queueKnown ? "—" : filter.trim()
+      ? t("queue.filteredCount", { count: entries.length, total: state.items.length }) : t("common.trackCount", { count: state.items.length })}</span></div>
+      {queueKnown && state.items.length > 0 && <button type="button" onClick={() => void act()} disabled={!queueAvailable || actionBusy}
         aria-label={t(filter.trim() ? "queue.clearAll" : "queue.clear")} title={t(filter.trim() ? "queue.clearAll" : "queue.clear")}><Trash2 size={15} /></button>}
     </div>
     <div className="np-queue-tools">
@@ -141,11 +149,11 @@ export const NowPlayingQueue: React.FC<{ open: boolean; available: boolean; stat
       </div>}
     </div>
     {actionError && <p role="alert" className="np-queue-notice">{t(actionError === "current" || actionError === "changed" ? `queueEdit.${actionError}` : "nowPlaying.queueActionFailed")}</p>}
-    {!queueCoherent ? <p role="alert" className="np-queue-notice">{t("player.playbackError.queue_uncertain")}</p> : !available ? <p role="status" className="np-queue-notice">{t("player.engineUnavailable")}</p>
+    {queueUncertain ? <p role="alert" className="np-queue-notice">{t("player.playbackError.queue_uncertain")}</p> : !available ? <p role="status" className="np-queue-notice">{t("player.engineUnavailable")}</p>
       : state.phase === "loading" ? <p role="status" className="np-queue-notice">{t("nowPlaying.queueLoading")}</p>
       : state.phase === "error" ? <p role="alert" className="np-queue-notice">{t("nowPlaying.queueFailed")}</p> : null}
-    {available && state.phase === "ready" && !state.items.length && <p className="np-queue-notice">{t("queue.empty")}</p>}
-    {queueCoherent && state.items.length > 0 && !entries.length && <p role="status" className="np-queue-notice">{t("queue.noMatches")}</p>}
+    {queueKnown && !state.items.length && <p className="np-queue-notice">{t("queue.empty")}</p>}
+    {!queueUncertain && queueKnown && state.items.length > 0 && !entries.length && <p role="status" className="np-queue-notice">{t("queue.noMatches")}</p>}
     <div ref={listRef} tabIndex={0} className="np-queue-scroll" aria-label={t("queue.title")}
       onScroll={event => setViewport({ top: event.currentTarget.scrollTop, height: event.currentTarget.clientHeight })}>
       <ol style={{ height: entries.length * 64, position: "relative" }}>

@@ -34,7 +34,7 @@ import { NowPlayingHost } from "./components/NowPlayingHost";
 import { NowPlayingHosting, capturePagePresentation } from "./utils/nowPlayingHosting";
 import { claimAudioAnalyzerHost, closeDetachedWindow, exchangeDetachedHost, onDetachedWindowClosed, releaseAudioAnalyzerHost, REINCORPORATE_EVENT, NAVIGATE_EVENT } from "./services/nowPlayingWindow";
 import { configuredSignalRoute } from "./utils/signalPath";
-import { equalizerIsActive } from "./utils/audioExperience";
+import { equalizerIsActive, latestEqualizerSnapshot } from "./utils/audioExperience";
 import { logError, installInteractionProbe, recordInteractionState } from "./utils/frontendDiagnostics";
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo, useSyncExternalStore, memo } from "react";
 import {
@@ -78,13 +78,13 @@ import { discoverLanguage } from "./utils/plexDiscoverPresentation";
 import type { ExploreContext, ExploreEntry } from "./utils/explore";
 import { exploreEntryIsCurrent } from "./utils/explore";
 import { PlexCatalogCoordinator } from "./utils/plexCatalogCoordinator";
-import { LocalBrowserView, localAlbumCatalog, type LocalSubview } from "./components/LocalBrowserView";
+import { LocalBrowserEntry, localAlbumCatalog, type LocalBrowserCatalogContext, type LocalSubview } from "./components/LocalBrowserView";
 import { localExplorePresentation } from "./utils/localExploreState";
 import { localArtworkEnrichment, localArtworkResolver, localAlbumThumbnails } from "./utils/localArtworkSession";
 import { sqliteAlbumThumbnailContext } from "./utils/localAlbumThumbnails";
 import { isSqliteCatalogEnabled } from "./utils/sqliteExperimentalMode";
 import { artworkReadBlocked } from "./utils/localArtwork";
-import { initialMediaSource, initialSqliteMediaSource, createMainSectionPreference, MAIN_SECTION_STORAGE_KEY, SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY,
+import { initialMediaSource, initialSqliteMediaSource, createMainSectionPreference, disabledAutoEqFallback, MAIN_SECTION_STORAGE_KEY, SQLITE_EXPERIMENTAL_MAIN_SECTION_STORAGE_KEY,
   preferredSqlitePlexLibrary, saveSqlitePlexLibraryPreference, type MainSection } from "./utils/appBootstrap";
 import { createLibraryActivityVisibility } from "./utils/libraryActivityLifecycle";
 import { FavoritesView } from "./components/FavoritesView";
@@ -135,6 +135,7 @@ import {
 import { PlaybackStatus, AudioDevice, MpdHealth, AudioRouteProjection } from "./types/audio";
 import { acceptsAudioRouteGeneration } from "./utils/audioRoute";
 import { AppConfig } from "./types/config";
+import type { DspSnapshot } from "./types/equalizer";
 import { FavoriteAlbum } from "./types/favorite";
 import type { NewPlaylistItem } from "./types/playlist";
 import {
@@ -469,6 +470,9 @@ export function App() {
   }, [sqliteMode]);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [mediaSource, setMediaSource] = useState<MainSection | null>(sqliteMode ? "local" : null);
+  // Older installations may still restore the former AutoEQ destination.
+  // Keep that stored route usable by showing the stable manual editor only.
+  const showManualEqualizer = mediaSource === "equalizer" || mediaSource === "autoeq";
   const eqReturnSectionRef = useRef<MainSection>("local");
   const [playerNavigation, setPlayerNavigation] = useState<PlayerNavigationSession | null>(null);
   const playerTarget = playerNavigation?.target ?? null;
@@ -489,7 +493,7 @@ export function App() {
   const [playerNavigationError, setPlayerNavigationError] = useState(false);
   const playerNavigationRequests = useMemo(() => new PlayerNavigationRequests(), []);
   // Keep the previous view (including its context and scroll) mounted while visiting the player target.
-  const centralSection = playerReturnSection ?? (mediaSource === "equalizer" ? eqReturnSectionRef.current : mediaSource);
+  const centralSection = playerReturnSection ?? (mediaSource === "equalizer" || mediaSource === "autoeq" ? eqReturnSectionRef.current : mediaSource);
   const mainSectionPreferenceRef = useRef<ReturnType<typeof createMainSectionPreference> | null>(null);
   if (!mainSectionPreferenceRef.current) {
     mainSectionPreferenceRef.current = createMainSectionPreference(setMediaSource, undefined,
@@ -1835,8 +1839,11 @@ export function App() {
   useEffect(() => {
     if (!config || experimental) return;
     const fallback = initialMediaSource(config) ?? 'radio';
-    if (isExperimentalSection(mediaSource)) { resetAllNavigation(); mainSectionPreference.navigate(fallback); }
-    if (isExperimentalSection(playerReturnSection)) setPlayerNavigation(previous => previous ? { ...previous, returnSection: fallback } : null);
+    const autoEqFallback = disabledAutoEqFallback(mediaSource, experimental);
+    if (autoEqFallback) mainSectionPreference.navigate(autoEqFallback);
+    else if (isExperimentalSection(mediaSource)) { resetAllNavigation(); mainSectionPreference.navigate(fallback); }
+    if (disabledAutoEqFallback(playerReturnSection, experimental)) setPlayerNavigation(previous => previous ? { ...previous, returnSection: "equalizer" } : null);
+    else if (isExperimentalSection(playerReturnSection)) setPlayerNavigation(previous => previous ? { ...previous, returnSection: fallback } : null);
   }, [experimental, config, mediaSource, playerReturnSection]);
 
   useEffect(() => {
@@ -2099,6 +2106,22 @@ export function App() {
     );
   }
 
+  const localBrowserCatalogContext: LocalBrowserCatalogContext = {
+    sqliteBacked: sqliteMode,
+    sqliteTagEditorEarlyAccessEnabled: sqliteMode && experimental,
+    sqliteIndexing,
+    sqliteProgress,
+    sqliteSources,
+    sqliteSourcesLoaded,
+    sqliteActivityHidden: hiddenSqliteActivityId === sqliteProgress?.operationId,
+    onSqliteActivityDismiss: operationId => sqliteActivityVisibilityRef.current?.dismiss(operationId),
+    onSqliteAddFolder: addSqliteFolder,
+    legacySqliteSourcesPending,
+    onImportLegacySqliteSources: importLegacySqliteSources,
+    onSqliteVerifySource: verifySqliteSource,
+    onSqliteReindexSource: reindexSqliteSource,
+  };
+
   return (
     <ExperimentalFeaturesContext.Provider value={experimental}><div className="h-screen w-screen flex flex-col bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-primary,#E0E0E0)] overflow-hidden select-none"
       onClickCapture={() => playerNavigationRequests.invalidate()}
@@ -2187,9 +2210,9 @@ export function App() {
 
           <nav aria-label={t("sidebar.utilitiesGroup")} className="mt-auto shrink-0 space-y-0.5 pt-2">
             {fullMode && <SidebarNavItem icon={SlidersHorizontal} label={t("equalizer.title")}
-              active={mediaSource === "equalizer"} sourceEnabled={equalizerActive}
+              active={mediaSource === "equalizer" || mediaSource === "autoeq"} sourceEnabled={equalizerActive}
               onClick={() => {
-                if (mediaSource && mediaSource !== "equalizer") eqReturnSectionRef.current = mediaSource;
+                if (mediaSource && mediaSource !== "equalizer" && mediaSource !== "autoeq") eqReturnSectionRef.current = mediaSource;
                 resetAllNavigation();
                 mainSectionPreference.navigate("equalizer");
               }} />}
@@ -2207,12 +2230,15 @@ export function App() {
           </nav>
         </aside>
 
-        {fullMode && mediaSource === "equalizer" && (
-          <div className={nowPlayingEmbedded || playerTarget ? "hidden" : "contents"}
-            inert={nowPlayingEmbedded || playerTarget ? true : undefined} data-equalizer-page>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+
+        {fullMode && (mediaSource === "equalizer" || mediaSource === "autoeq") && (
+          <div className={nowPlayingEmbedded || playerTarget || !showManualEqualizer ? "hidden" : "flex min-h-0 min-w-0 flex-1 flex-col"}
+            id="equalizer-page"
+            inert={nowPlayingEmbedded || playerTarget || !showManualEqualizer ? true : undefined} data-equalizer-page>
             {equalizerActive
               ? <EqualizerView shared={configuredSignalRoute(config)?.mode === "shared"}
-                  available={isPlaybackAvailable} runtime={playbackStatus.shared_dsp}
+                  available={mpdHealth.state === "starting" ? null : mpdHealth.state === "available"} runtime={playbackStatus.shared_dsp}
                   onConfigure={() => { if (!configSaveInProgressRef.current) { setSettingsInitialPage("audio"); setShowSettings(true); } }}
                   onReturn={() => mainSectionPreference.navigate(eqReturnSectionRef.current)} />
               : <main className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-6" data-equalizer-disabled>
@@ -2233,7 +2259,7 @@ export function App() {
           </div>
         )}
 
-        <div ref={previousPageRef} data-now-playing-previous-page className={nowPlayingEmbedded || mediaSource === "equalizer" ? "hidden" : "contents"} inert={nowPlayingEmbedded || mediaSource === "equalizer" ? true : undefined}>
+        <div ref={previousPageRef} data-now-playing-previous-page className={nowPlayingEmbedded || mediaSource === "equalizer" || mediaSource === "autoeq" ? "hidden" : "contents"} inert={nowPlayingEmbedded || mediaSource === "equalizer" || mediaSource === "autoeq" ? true : undefined}>
         {/* Painel Central */}
         <div className={playerTarget ? "hidden" : "contents"}>
         <div className={isExploreSection ? "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" : "contents"}>
@@ -2267,7 +2293,7 @@ export function App() {
                 ensureLocal={() => localAlbumCatalog.ensureLoaded(playbackStatus.is_updating, localExploreConfigured && isPlaybackAvailable)}
                 isCurrent={exploreEntryCurrent} onOpen={openExploreAlbum} onPlay={playExploreAlbum} isPlaybackAvailable={isPlaybackAvailable} />
             </div>
-            {exploreDetail?.source === "local" && <LocalBrowserView initialAlbumId={exploreDetail.album.id}
+            {exploreDetail?.source === "local" && <LocalBrowserEntry catalogContext={localBrowserCatalogContext} initialAlbumId={exploreDetail.album.id}
               subview={exploreLocalSubview} onSubviewChange={setExploreLocalSubview}
               albumNavigationAvailable={exploreEntryCurrent(exploreDetail)} onAlbumNavigationBack={closeExploreAlbum}
               catalogRefreshRevision={localCatalogRevision} isPlaybackAvailable={isPlaybackAvailable} isLibraryUpdating={playbackStatus.is_updating}
@@ -2276,7 +2302,8 @@ export function App() {
         ) : experimental && centralSection === "editions" ? (
           <AlbumEditionsView readiness={sourceReadiness.statuses} retrySource={sourceReadiness.retry} reportSource={sourceReadiness.report} config={config} available={isPlaybackAvailable} status={playbackStatus} anchor={editionAnchor}
             active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded}
-            sourceIdentity={plexConnectionIdentity} navidromeRevision={navidromeConfiguration.revision} catalogRefreshRevision={localCatalogRevision} />
+            sourceIdentity={plexConnectionIdentity} navidromeRevision={navidromeConfiguration.revision} catalogRefreshRevision={localCatalogRevision}
+            localBrowserCatalogContext={localBrowserCatalogContext} />
         ) : experimental && centralSection === "sessions" ? (
           <ListeningSessionsView config={config} available={isPlaybackAvailable} status={playbackStatus}
             active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
@@ -2285,6 +2312,7 @@ export function App() {
             active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
         ) : centralSection === "history" ? (
           <HistoryView config={config} plexIdentity={plexConnectionIdentity} status={playbackStatus} isPlaybackAvailable={isPlaybackAvailable} catalogRefreshRevision={localCatalogRevision}
+            localBrowserCatalogContext={localBrowserCatalogContext}
             active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} />
         ) : centralSection === "playlists" ? (
           <PlaylistsView config={config} isPlaybackAvailable={isPlaybackAvailable} refreshKey={playlistRevision} />
@@ -2298,21 +2326,8 @@ export function App() {
               && !localCatalog.saveBlocked && !localCatalog.mpdBusy && !localCatalog.error && !sqliteIndexing}
           />
         ) : centralSection === "local" ? (
-          <LocalBrowserView
+          <LocalBrowserEntry catalogContext={localBrowserCatalogContext}
             subview={localSubview} onSubviewChange={setLocalSubview}
-            sqliteBacked={sqliteMode}
-            sqliteTagEditorEarlyAccessEnabled={sqliteMode && experimental}
-            sqliteIndexing={sqliteIndexing}
-            sqliteProgress={sqliteProgress}
-            sqliteSources={sqliteSources}
-            sqliteSourcesLoaded={sqliteSourcesLoaded}
-            sqliteActivityHidden={hiddenSqliteActivityId === sqliteProgress?.operationId}
-            onSqliteActivityDismiss={operationId => sqliteActivityVisibilityRef.current?.dismiss(operationId)}
-            onSqliteAddFolder={addSqliteFolder}
-            legacySqliteSourcesPending={legacySqliteSourcesPending}
-            onImportLegacySqliteSources={importLegacySqliteSources}
-            onSqliteVerifySource={verifySqliteSource}
-            onSqliteReindexSource={reindexSqliteSource}
             initialArtist={localSelectedArtist}
             onClearInitialArtist={() => setLocalSelectedArtist(null)}
             importPreview={importPreview}
@@ -2993,7 +3008,7 @@ export function App() {
         {playerTarget && (
           <div className="contents">
             {playerTarget.kind === "local" ? (
-              <LocalBrowserView
+              <LocalBrowserEntry catalogContext={localBrowserCatalogContext}
                 key={`${playerNavigation?.revision}:${playerTarget.view}:${playerTarget.albumId}`}
                 subview={playerSubview} onSubviewChange={changePlayerLocalSubview}
                 playerTarget={playerTarget}
@@ -3041,6 +3056,7 @@ export function App() {
             onReady={nowPlayingHosting.hostReady} onCollapse={() => void nowPlayingHosting.collapse()} onDetach={() => void nowPlayingHosting.detach()}
             onNavigate={view => void navigateFromNowPlaying(view)} />
         </div>}
+        </div>
       </div>
 
       {!nowPlayingEmbedded && hosting.error && <p role="alert" className="px-6 py-2 text-xs text-[color:var(--theme-fg-error,var(--color-red-200))]">{t("nowPlaying.transitionFailed")}</p>}
@@ -3169,10 +3185,20 @@ export function App() {
           initialPage={settingsInitialPage}
           initialDraft={localFoldersDraft}
           initialFolderOverlap={Boolean(localFoldersDraft)}
-          equalizerAvailable={fullMode && mpdHealth.state === "available"}
+          equalizerAvailable={mpdHealth.state === "starting" ? null : fullMode && mpdHealth.state === "available"}
           equalizerShared={configuredSignalRoute(config)?.mode === "shared"}
           equalizerRuntime={playbackStatus.shared_dsp}
           audioRoute={playbackStatus.audio_route}
+          onAudioRouteConfirmed={(projection, runtime: DspSnapshot) => {
+            if (!acceptsAudioRouteGeneration(projection.generation, audioRouteGenerationRef.current)) return;
+            audioRouteGenerationRef.current = projection.generation;
+            audioRouteSnapshotRef.current = projection;
+            setPlaybackStatus(previous => ({
+              ...previous,
+              audio_route: projection,
+              shared_dsp: latestEqualizerSnapshot(runtime, previous.shared_dsp),
+            }));
+          }}
           isPlaying={playbackStatus.state === "play"}
           outputObservation={playbackStatus.output_observation}
           onClose={() => { setShowSettings(false); setLocalFoldersDraft(null); }}

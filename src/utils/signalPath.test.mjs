@@ -276,13 +276,28 @@ test("observed ALSA output is shown separately from MPD format and only for the 
       assert.ok(html.includes(t("signalPath.observation.observedTitle")));
       assert.match(html, /hw:2,0 · S32_LE/); assert.match(html, /192 kHz · 2 (?:channels|canais)/);
       assert.match(html, /np-signal-format/); assert.match(html, /np-signal-stages/);
+      if (horizontal) {
+        const signalStart = html.indexOf('data-signal-summary');
+        const signalEnd = html.indexOf('</section>', signalStart);
+        const observationStart = html.indexOf('data-alsa-observation="observed"');
+        assert.ok(signalEnd >= 0 && observationStart > signalEnd, 'Audiophile observation is a sibling line below the main signal card');
+        assert.match(html, /<p[^>]*data-alsa-observation="observed"[^>]*class="[^"]*np-signal-observation[^"]*break-words/);
+        assert.doesNotMatch(html, /<div[^>]*data-alsa-observation="observed"/);
+      } else {
+        assert.match(html, /<div[^>]*data-alsa-observation="observed"/);
+      }
       assert.doesNotMatch(html, /bit-perfect|data-bitperfect|data-route-assessment|data-signal-info|owner_pid|verified-badge/);
       const compact = renderToStaticMarkup(React.createElement(signalComponent(t,"SignalPath"),{route:configuredSignalRoute(config),status:playback,health,compact:true}));
       assert.doesNotMatch(compact,/S32_LE|192 kHz|hw:2,0/);assert.doesNotMatch(compact,/data-signal-info|data-bitperfect/);
-      for (const change of [{ status: { ...playback, state: "pause" } }, { status: { ...playback, state: "stop" } }, { health: { state: "unavailable" } }, { route: { mode: "shared", endpoint: "default" } }, { route: { mode: "direct", endpoint: "hw:Other,0" } }]) {
+      for (const change of [{ status: { ...playback, state: "pause" } }, { status: { ...playback, state: "stop" } }, { status: { ...playback, snapshot_consistent: false } }, { status: { ...playback, output_observation: { ...observation, state: "unverified" } } }, { health: { state: "unavailable" } }, { route: { mode: "shared", endpoint: "default" } }, { route: { mode: "direct", endpoint: "hw:Other,0" } }]) {
         const stale = renderToStaticMarkup(React.createElement(SignalPath, { route: configuredSignalRoute(config), status: playback, health, ...change }));
         assert.doesNotMatch(stale, /data-alsa-observation="observed"|S32_LE|192 kHz|hw:2,0/);
       }
+      const missingReportedFormat = renderToStaticMarkup(React.createElement(SignalPath, {
+        route: configuredSignalRoute(config), status: { ...playback, audio_format: "" }, health, horizontal: true,
+      }));
+      assert.match(missingReportedFormat, /data-alsa-observation="observed"/);
+      assert.ok(missingReportedFormat.includes(t("signalPath.noSignal")));
     }
   }
 });
@@ -312,9 +327,14 @@ test("DSD transport remains visible only when engine, MPD transport and observed
     assert.equal(observedDsdTransport(playback, output), kind);
     const i18n = i18next.createInstance();
     await i18n.init({ lng: "en", resources: { en: { translation: resource("en") } } });
-    const html = renderToStaticMarkup(React.createElement(signalComponent(i18n.t.bind(i18n)), { route, status: playback, health }));
+    const html = renderToStaticMarkup(React.createElement(signalComponent(i18n.t.bind(i18n)), { route, status: playback, health, horizontal: true }));
     assert.match(html, new RegExp(`data-signal-transport="${kind}"`));
     assert.match(html, /data-alsa-observation="observed"/);
+    const signalStart = html.indexOf('data-signal-summary');
+    const signalEnd = html.indexOf('</section>', signalStart);
+    const observationStart = html.indexOf('data-alsa-observation="observed"');
+    assert.ok(observationStart > signalEnd, `${kind} observation remains below the main signal card`);
+    assert.match(html, /class="[^"]*np-signal-observation[^"]*break-words/);
     assert.doesNotMatch(html, /bit-perfect|data-bitperfect|data-route-assessment|data-signal-info/);
     assert.equal(observedDsdTransport({ ...playback, processing: { transport: { ...playback.processing.transport, output_rate: rate * 2 } } }, output), undefined);
   }

@@ -119,6 +119,12 @@ test("known codes survive, including confirmation code without its private bindi
   assert.deepEqual(summarizeDiagnostic(`${checkCode}: ${secrets}`), { error_type: "string", code: checkCode, hint: "unavailable" });
   assert.equal(summarizeDiagnostic({ code: "secret" }).code, undefined);
   assert.equal(summarizeDiagnostic(`UNKNOWN_CODE:${secrets}`).code, undefined);
+  for (const code of ["SQLITE_WIZARD_SOURCE_REQUIRED", "SQLITE_WIZARD_SOURCE_DISABLED", "SQLITE_WIZARD_SOURCE_DUPLICATE",
+    "SQLITE_WIZARD_SOURCE_UNAVAILABLE", "SQLITE_WIZARD_SOURCE_NOT_INDEXED", "SOURCE_AVAILABILITY_BUSY"]) {
+    assert.deepEqual(summarizeDiagnostic(`${code}: ${secrets}`), {
+      error_type: "string", code, ...(code === "SQLITE_WIZARD_SOURCE_UNAVAILABLE" ? { hint: "unavailable" } : {}),
+    });
+  }
   assert.equal(summarizeDiagnostic({ status: 999 }).http_status, undefined);
 });
 

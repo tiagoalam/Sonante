@@ -17,7 +17,7 @@ import { EditionCard } from './EditionCard';
 import { EditionArtwork } from './EditionArtwork';
 import { AlbumView } from './AlbumView';
 import { ArtistView } from './ArtistView';
-import { LocalBrowserView } from './LocalBrowserView';
+import { LocalBrowserEntry, type LocalBrowserCatalogContext } from './LocalBrowserView';
 import { NavidromeView } from './deferredViews';
 
 const button = 'inline-flex items-center justify-center gap-2 rounded-lg border border-[color:var(--theme-border-soft,#333)] px-3 py-2 text-xs font-semibold hover:bg-[var(--theme-surface-hover,#292929)] disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]';
@@ -30,6 +30,7 @@ interface AlbumEditionsProps {
   retrySource?: (source: EditionSource) => void;
   reportSource?: (source: EditionSource, phase: 'ready' | 'error') => void;
   sourceIdentity: object; navidromeRevision: number; catalogRefreshRevision: number;
+  localBrowserCatalogContext: LocalBrowserCatalogContext;
 }
 export function AlbumEditionsView(props: AlbumEditionsProps) {
   const { t } = useTranslation();
@@ -56,7 +57,7 @@ export function AlbumEditionsView(props: AlbumEditionsProps) {
     </section>)}
   </main>;
 }
-export function SourceAlbumEditionsView({ config, available, active, status, anchor = null, sourceIdentity, navidromeRevision, catalogRefreshRevision, source, readiness, retrySource, reportSource }: AlbumEditionsProps & { source: EditionSource }) {
+export function SourceAlbumEditionsView({ config, available, active, status, anchor = null, sourceIdentity, navidromeRevision, catalogRefreshRevision, source, readiness, retrySource, reportSource, localBrowserCatalogContext }: AlbumEditionsProps & { source: EditionSource }) {
   const { t } = useTranslation();
   const [lanes, setLanes] = useState<EditionLane[]>([]), [retry, setRetry] = useState(0);
   const [profileState, setProfileState] = useState<{ context: object; profiles: Map<string, EditionProfile | null> } | null>(null);
@@ -286,7 +287,7 @@ export function SourceAlbumEditionsView({ config, available, active, status, anc
         </section>}
       </div>
     </div>
-    {detail?.source === 'local' && <section className="flex min-h-0 flex-1 flex-col"><div className="border-b border-[color:var(--theme-border-soft,#333)] px-8 py-4"><button type="button" className={button} onClick={closeDetail}><ArrowLeft size={14} />{t('editions.back')}</button></div><LocalBrowserView initialAlbumId={detail.album.id} externalBackNavigation onAlbumNavigationBack={closeDetail} albumNavigationAvailable={active} isPlaybackAvailable={available && active} isLibraryUpdating={status.is_updating} catalogRefreshRevision={catalogRefreshRevision} onlineArtworkEnabled={config.online_artwork_enabled} configuredLocalFolders={config.local_folders} /></section>}
+    {detail?.source === 'local' && <section className="flex min-h-0 flex-1 flex-col"><div className="border-b border-[color:var(--theme-border-soft,#333)] px-8 py-4"><button type="button" className={button} onClick={closeDetail}><ArrowLeft size={14} />{t('editions.back')}</button></div><LocalBrowserEntry catalogContext={localBrowserCatalogContext} initialAlbumId={detail.album.id} externalBackNavigation onAlbumNavigationBack={closeDetail} albumNavigationAvailable={active} isPlaybackAvailable={available && active} isLibraryUpdating={status.is_updating} catalogRefreshRevision={catalogRefreshRevision} onlineArtworkEnabled={config.online_artwork_enabled} configuredLocalFolders={config.local_folders} /></section>}
     {detail?.source === 'plex' && <>{artist && <ArtistView artist={artist} onBack={() => setArtist(null)} onSelectAlbum={album => { setArtist(null); setOpened({ context, entry: { ...detail, album: { ...album, server_id: detail.serverId, library_id: detail.libraryId }, key: JSON.stringify(['plex', detail.serverId, album.rating_key]) } }); }} status={status} isPlaybackAvailable={available} active={active} requestIdentity={context} />}<div hidden={!!artist} className={artist ? 'hidden' : 'flex min-h-0 flex-1 flex-col'}><AlbumView album={detail.album} active={active && !artist} onBack={closeDetail} backLabel={t('editions.back')} onSelectArtist={setArtist} isPlaybackAvailable={available} /></div></>}
     {detail?.source === 'navidrome' && <NavidromeView embedded initialAlbum={{ account_id: detail.accountId, id: detail.album.id }} active={active} available={available} onAlbumBack={closeDetail} backLabel={t('editions.back')} />}
   </section>;

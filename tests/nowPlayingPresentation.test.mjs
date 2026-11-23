@@ -28,6 +28,8 @@ const dependencies={'../utils/nowPlayingFullscreen':{NowPlayingFullscreen},'./Tr
 const compile=(file,extra={})=>{const js=ts.transpileModule(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),{fileName:file,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;const ex={};new Function('require','exports',js)(name=>{assert.ok(name in extra||name in dependencies,name);return extra[name]??dependencies[name];},ex);return ex;};
 dependencies['./PlexImage']={PlexImage:({alt,className})=>React.createElement('div',{'data-plex-artwork':true,'aria-label':alt,className})};
 dependencies['./TrackArtwork']=compile('components/TrackArtwork.tsx');
+dependencies['../TrackArtwork']=dependencies['./TrackArtwork'];
+dependencies['./AnalyzerUnavailableNotice']=compile('components/visualizer/AnalyzerUnavailableNotice.tsx');
 dependencies['./SignalPath']=compile('components/SignalPath.tsx');
 dependencies['./PlaybackOptionsControls']=compile('components/PlaybackOptionsControls.tsx',{'../services/audio':{audioService:{changePlaybackOption:async()=>{throw new Error('unexpected option request');}}}});
 const graph=name=>({[name]:props=>React.createElement('svg',{'aria-label':props.label??name,role:'img',viewBox:'0 0 480 120',preserveAspectRatio:'none',style:{width:'100%',height:name==='VuHorizontal'?28:'100%'}},Array.from({length:40},(_,i)=>React.createElement('rect',{key:i,x:i*12,y:120-(25+(i*17)%85),width:8,height:25+(i*17)%85,rx:1,fill:'#E5A00D',opacity:.6})))});
@@ -311,6 +313,39 @@ test('late readiness listener registration after timeout is immediately cleaned,
   await assert.rejects(ex.exchangeDetachedHost('ready'));resolveRegistration(()=>cleaned++);await flush();assert.equal(cleaned,1);
  }finally{Object.assign(globalThis,saved);}
 });
+test('queue count distinguishes confirmed empty, populated, and uncertain states in both languages', async () => {
+ const items=[{title:'One',media_locator:{kind:'local',uri:'one.flac'}},{title:'Two',media_locator:{kind:'local',uri:'two.flac'}}];
+ const makeQueueRenderer=queueItems=>{
+  let cursor=0;const slots=[{items:queueItems,phase:'ready'},{top:0,height:480},false,false];
+  const hooks={...React,default:React,useState:initial=>{const i=cursor++;if(!(i in slots))slots[i]=initial;return[slots[i],value=>slots[i]=value];},useEffect(){},useLayoutEffect(){},useId:()=> 'queue-count-test',useMemo:fn=>fn(),useRef:initial=>{const i=cursor++;return slots[i]??={current:initial};}};
+  const {NowPlayingQueue}=compile('components/NowPlayingQueue.tsx',{'react':hooks,'../services/audio':{audioService:{getQueue:async()=>queueItems}}});
+  return status=>{cursor=0;return renderToStaticMarkup(React.createElement(NowPlayingQueue,{open:true,available:true,status}));};
+ };
+ const uncertain={...snapshot.playback,playback_error:{code:'queue_uncertain'}};
+ const confirmed=snapshot.playback;
+ for(const [lng,empty,singular,populated,unknown] of [['en','0 tracks','1 track','2 tracks','Track count unknown'],['pt-BR','0 faixas','1 faixa','2 faixas','Quantidade de faixas desconhecida']]){
+  await i18n.changeLanguage(lng);
+  assert.ok(makeQueueRenderer([])(confirmed).includes(empty));
+  assert.ok(makeQueueRenderer(items.slice(0,1))(confirmed).includes(singular));
+  const renderQueue=makeQueueRenderer(items);
+  assert.ok(renderQueue(confirmed).includes(populated));
+  const uncertainHtml=renderQueue(uncertain);assert.match(uncertainHtml,/<span[^>]*aria-label="[^"]+"[^>]*>—<\/span>/);assert.ok(uncertainHtml.includes(unknown),uncertainHtml);assert.ok(uncertainHtml.includes(i18n.t('player.playbackError.queue_uncertain')),'existing uncertain-queue warning remains visible');assert.doesNotMatch(uncertainHtml,/0 tracks|0 faixas/);
+  assert.ok(renderQueue(confirmed).includes(populated),'confirmed count returns after uncertainty clears');
+ }
+ await i18n.changeLanguage('en');
+});
+
+test('uncertain reader state is never rendered as an empty or actionable queue',async()=>{
+ const stale={title:'Old confirmed row',media_locator:{kind:'local',uri:'old.flac'}};let cursor=0;
+ const slots=[{items:[stale],phase:'uncertain'},{top:0,height:480},false,false];
+ const hooks={...React,default:React,useState:initial=>{const i=cursor++;if(!(i in slots))slots[i]=initial;return[slots[i],value=>slots[i]=value];},useEffect(){},useLayoutEffect(){},useId:()=> 'queue-uncertain-test',useMemo:fn=>fn(),useRef:initial=>{const i=cursor++;return slots[i]??={current:initial};}};
+ const {NowPlayingQueue}=compile('components/NowPlayingQueue.tsx',{'react':hooks,'../services/audio':{audioService:{getQueue:async()=>[]}}});
+ const html=renderToStaticMarkup(React.createElement(NowPlayingQueue,{open:true,available:true,status:snapshot.playback}));
+ assert.match(html,/<span[^>]*aria-label="Track count unknown"[^>]*>—<\/span>/);
+ assert.ok(html.includes(i18n.t('player.playbackError.queue_uncertain')));
+ assert.doesNotMatch(html,/Old confirmed row|0 tracks|queue\.clear/);
+});
+
 test('queue clear failure stays visible and preserves the displayed items',async()=>{
  const local={title:'Preserved',artist:'Artist',media_locator:{kind:'local',uri:'fixture.flac'}};let cursor=0;const slots=[{items:[local],phase:'ready'},{top:0,height:480},false,false],refs=[];
  const hooks={...React,default:React,useState:initial=>{const i=cursor++;if(!(i in slots))slots[i]=initial;return[slots[i],v=>slots[i]=v];},useEffect(){},useLayoutEffect(){},useId:()=> 'queue-filter-test',useMemo:fn=>fn(),useRef:initial=>{const i=cursor++;return refs[i]??={current:initial};}};
@@ -398,15 +433,19 @@ test('recovered current Local artwork reaches PlayerBar, both Now Playing hosts 
 
 
 test('inactive visualizers show readable guidance, hide idle graphs, and keep keyboard help in every mode',async()=>{
+ const Notice=dependencies['./AnalyzerUnavailableNotice'].AnalyzerUnavailableNotice;
  for(const language of ['en','pt-BR']){
   await i18n.changeLanguage(language);
   for(const mode of ['combo','spectrum-neon','spectrum-segmented','vu-amber','vu-blue','vu-radial']){
    const hooks={...React,default:React,useState:()=>[mode,()=>{}],useEffect(){}};
    const {VisualizerPanel}=compile('components/visualizer/VisualizerPanel.tsx',{'react':hooks});
    const label=i18n.t('nowPlaying.analyzerReason.current_audio_format_is_dsd'),help=i18n.t('nowPlaying.visualizer.helpDsdDirect');
-   const tree=VisualizerPanel({levels:props.levels,active:false,inactiveLabel:label,inactiveHelp:help,fullscreen:false});
-   const message=nodes(tree,n=>n.props['data-visualizer-inactive']!==undefined)[0];assert.ok(message);assert.equal(message.props.role,'status');
-   const messageHtml=renderToStaticMarkup(message);assert.ok(messageHtml.includes(label));assert.ok(messageHtml.includes(help));assert.doesNotMatch(messageHtml,/truncate|text-\[8px\]/);
+   const tree=VisualizerPanel({levels:props.levels,active:false,inactiveLabel:label,inactiveHelp:help,fullscreen:false,artworkTrack:{thumb:'/fixture/cover.jpg'}});
+   assert.equal(nodes(tree,n=>n.type===Notice).length,1);
+   const message=Notice({label,help,artworkTrack:{thumb:'/fixture/cover.jpg'}});
+   assert.equal(message.props.role,'status');
+   const messageHtml=renderToStaticMarkup(message);assert.ok(messageHtml.includes(label));assert.ok(messageHtml.includes(help));assert.ok(messageHtml.includes('data-visualizer-static-art'));assert.doesNotMatch(messageHtml,/truncate|text-\[8px\]/);
+   const stillHtml=renderToStaticMarkup(Notice({label,help}));assert.match(stillHtml,/data-visualizer-still-mark/);assert.doesNotMatch(stillHtml,/<img/);
    assert.doesNotMatch(renderToStaticMarkup(tree),/<svg[^>]*role="img"/);
    const details=nodes(tree,n=>n.type==='details')[0];const summary=nodes(details,n=>n.type==='summary')[0];assert.equal(summary.props['aria-label'],i18n.t('nowPlaying.visualizer.howItWorks'));
    const html=renderToStaticMarkup(details);for(const key of ['helpOverview','worksPcm','worksDsd','directDsd'])assert.ok(html.includes(i18n.t('nowPlaying.visualizer.'+key)));
@@ -562,6 +601,21 @@ test('Now Playing uses the same Radio Direct message without changing Local or P
  }await i18n.changeLanguage('en');
 });
 
+test('Audiophile Now Playing keeps the main signal card and renders observed ALSA as one responsive line below it',()=>{
+ const endpoint='hw:CARD=Fixture,DEV=0';
+ const output={state:'observed',configured_endpoint:endpoint,card:2,device:0,subdevice:0,format:'S32_LE',rate:192000,channels:2};
+ const viewProps={...props,layout:'audiophile',snapshot:{...snapshot,route:{mode:'direct',endpoint},playback:{...snapshot.playback,output_observation:output}}};
+ const html=renderToStaticMarkup(React.createElement(View,viewProps));
+ const mainStart=html.indexOf('data-signal-summary');
+ const mainEnd=html.indexOf('</section>',mainStart);
+ const observation=html.indexOf('data-alsa-observation="observed"');
+ assert.ok(mainStart>=0&&mainEnd>=0&&observation>mainEnd,'observed output follows the main signal card');
+ assert.match(html,/<p[^>]*data-alsa-observation="observed"[^>]*class="[^"]*np-signal-observation[^"]*break-words/);
+ assert.doesNotMatch(html,/<div[^>]*data-alsa-observation="observed"/);
+ assert.match(html,/hw:2,0 · S32_LE · 192 kHz/);
+ assert.equal((html.match(/data-signal-summary/g)||[]).length,1,'the Audiophile view renders one full signal path');
+});
+
 
 test('each layout preserves real transport/seek/queue callbacks and keeps instruments exclusive to Audiophile',async()=>{
  for(const language of ['en','pt-BR']) { await i18n.changeLanguage(language);
@@ -680,7 +734,7 @@ test('Psycho animation caps draws and releases frames/listeners when paused, hid
 });
 
 
-test('the visible layout picker exposes four translated choices and scopes Effects to Psycho',async()=>{
+test('the visible layout picker exposes five translated choices and scopes Effects to Psycho',async()=>{
  const Picker=dependencies['./NowPlayingLayoutPicker'].NowPlayingLayoutPicker;
  for(const language of ['en','pt-BR']) {await i18n.changeLanguage(language);
   for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
@@ -823,22 +877,24 @@ test('queue panel memory stays separate for each layout and survives host remoun
 });
 
 
-test('deferred lyrics cannot load or mount in either host even with the old opt-in preference enabled',()=>{
- const previous=window.localStorage;
- try{
-  window.localStorage={getItem:key=>key==='sonante.nowPlaying.lyrics.enabled.v1'?'true':null};
-  const {NowPlayingPresentation:DeferredView}=compile('components/NowPlayingPresentation.tsx',{
-   './TrackLyrics':{get TrackLyrics(){assert.fail('deferred provider must not load in the active player')}}
-  });
-  for(const embedded of [true,false])for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
-   const tree=DeferredView({...props,embedded,layout});
-   assert.equal(nodes(tree,n=>n.type===dependencies['./TrackLyrics'].TrackLyrics).length,0);
-   const html=renderToStaticMarkup(React.createElement(DeferredView,{...props,embedded,layout}));
-   assert.doesNotMatch(html,/np-lyrics|LRCLIB|Buscar letras online|Find lyrics online/);
-   if(layout==='sleeve')assert.ok(html.includes(i18n.t('nowPlaying.look.recordDetails')));
-   assert.ok(nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('player.pause')).length);
+test('local lyrics mount only in the fifth Lyrics layout in embedded and detached hosts',()=>{
+ const localLyrics=({track})=>React.createElement('section',{'data-local-lyrics':true,'data-track-uri':track?.current_media?.uri??'', 'data-snapshot-consistent':String(track?.snapshot_consistent)},track?.current_media?.kind??'no-track');
+ const {NowPlayingPresentation:LyricsView}=compile('components/NowPlayingPresentation.tsx',{'./TrackLyrics':{TrackLyrics:localLyrics}});
+ for(const embedded of [true,false])for(const layout of layoutHelpers.NOW_PLAYING_LAYOUTS){
+  const playback={...snapshot.playback,current_media:{kind:'local',uri:'sqlite-track://first-album-track',queue_index:0},snapshot_consistent:true};
+  const tree=LyricsView({...props,embedded,layout,snapshot:{...snapshot,playback}});
+  assert.equal(nodes(tree,n=>n.type===localLyrics).length,layout==='lyrics'?1:0);
+  if(layout==='lyrics'){
+   const lyricsNode=nodes(tree,n=>n.type===localLyrics)[0];
+   assert.equal(lyricsNode.props.track.current_media.uri,'sqlite-track://first-album-track','the actual presentation forwards the confirmed first queue identity unchanged');
+   assert.equal(lyricsNode.props.track.snapshot_consistent,true,'the lyrics component receives the queue confirmation state');
   }
- }finally{window.localStorage=previous}
+  const html=renderToStaticMarkup(React.createElement(LyricsView,{...props,embedded,layout}));
+  assert.equal(html.includes('data-local-lyrics="true"'),layout==='lyrics');
+  assert.doesNotMatch(html,/LRCLIB|Buscar letras online|Find lyrics online/);
+  if(layout==='sleeve')assert.ok(html.includes(i18n.t('nowPlaying.look.recordDetails')));
+  assert.ok(nodes(tree,n=>n.type==='button'&&n.props['aria-label']===i18n.t('player.pause')).length);
+ }
 });
 
 
@@ -856,7 +912,9 @@ test('cover double-click and visible fullscreen button share one window action i
   }
  }
  const {NowPlayingLayoutPicker}=dependencies['./NowPlayingLayoutPicker'];const picker=NowPlayingLayoutPicker({layout:'audiophile',placement:'frame'});
- const select=nodes(picker,n=>n.type==='select')[0];assert.equal(select.props['aria-keyshortcuts'],'1 2 3 4');assert.equal(select.props.title,i18n.t('nowPlaying.look.shortcuts'));
+ const select=nodes(picker,n=>n.type==='select')[0];assert.equal(select.props['aria-keyshortcuts'],'1 2 3 4 5');assert.equal(select.props.title,i18n.t('nowPlaying.look.shortcuts'));assert.equal(select.props.className,'np-look-picker-select');assert.equal(select.props.value,'audiophile');
+ const pickerLabel=nodes(picker,n=>n.type==='label'&&n.props.className?.includes('np-look-picker-control'))[0];assert.ok(pickerLabel);assert.ok(nodes(pickerLabel,n=>n.props.className==='np-look-picker-current').some(n=>n.props.children===i18n.t('nowPlaying.layouts.audiophile')));
+ const styles=readFileSync(new URL('../src/components/nowPlaying.css',import.meta.url),'utf8');assert.match(styles,/\.np-look-picker-control > \.np-look-picker-select\s*\{[^}]*position:\s*absolute[^}]*inset:\s*0[^}]*width:\s*100%[^}]*height:\s*100%[^}]*opacity:\s*0/s);
 });
 
 test('Navidrome artwork reaches PlayerBar and all four Now Playing layouts in embedded and detached hosts',()=>{

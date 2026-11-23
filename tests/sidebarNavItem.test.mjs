@@ -39,18 +39,27 @@ test("available sidebar items keep primary contrast, visible focus, and selected
 
   const active = renderItem({ sourceEnabled: true, active: true });
   assert.match(active, /aria-current="page"/);
-  assert.match(active, /bg-\[var\(--theme-surface-raised,#242424\)\] text-\[color:var\(--theme-fg-primary,#ffffff\)\] font-semibold/);
+  assert.match(active, /bg-\[var\(--theme-surface-raised,#242424\)\] font-semibold/);
   assert.match(active, /text-\[color:var\(--theme-fg-accent,#E5A00D\)\]/);
   assert.match(active, /aria-hidden="true" class="absolute inset-y-2 left-0 w-0\.5 rounded-r bg-\[var\(--theme-fg-accent,#E5A00D\)\]"/);
 });
 
-test("an unavailable source remains high-contrast when its navigation action is enabled", () => {
+test("a disabled source stays muted but clickable so its settings remain accessible", () => {
   const html = renderItem({ sourceEnabled: false });
-  assert.match(html, /text-\[color:var\(--theme-fg-primary,#ffffff\)\]/);
-  assert.match(html, /<svg[^>]*class="[^"]*text-\[color:var\(--theme-fg-primary,#ffffff\)\]/);
+  assert.match(html, /text-\[color:var\(--theme-fg-muted,#8b8b8b\)\]/);
+  assert.match(html, /<svg[^>]*class="[^"]*text-\[color:var\(--theme-fg-muted,#8b8b8b\)\]/);
   assert.match(html, /<span class="min-w-0 flex-1 truncate">Available item<\/span>/);
   assert.doesNotMatch(html, /<button[^>]*\sdisabled(?:="")?(?:\s|>)/);
   assert.doesNotMatch(html, /aria-disabled="true"/);
+});
+
+test("a selected disabled source keeps its selected marker while its label stays muted", () => {
+  const html = renderItem({ sourceEnabled: false, active: true });
+  assert.match(html, /aria-current="page"/);
+  assert.match(html, /bg-\[var\(--theme-surface-raised,#242424\)\] font-semibold/);
+  assert.match(html, /bg-\[var\(--theme-fg-accent,#E5A00D\)\]/);
+  assert.match(html, /<svg[^>]*class="[^"]*text-\[color:var\(--theme-fg-muted,#8b8b8b\)\]/);
+  assert.doesNotMatch(html, /<button[^>]*\sdisabled(?:="")?(?:\s|>)/);
 });
 
 test("only an actually disabled action is attenuated and non-interactive", () => {

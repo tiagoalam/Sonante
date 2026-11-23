@@ -18,11 +18,11 @@ cat >"$config" <<EOF
 Architecture = x86_64
 SigLevel = Required DatabaseOptional
 LocalFileSigLevel = Optional
-DisableDownloadTimeout
 GPGDir = /etc/pacman.d/gnupg
 DBPath = /var/lib/pacman/
 CacheDir = /var/cache/pacman/pkg/
 LogFile = /var/log/pacman.log
+XferCommand = /usr/bin/curl --fail --show-error --location --retry 4 --retry-connrefused --retry-delay 5 --retry-max-time 1200 --connect-timeout 45 --max-time 900 --output %o %u
 
 [core]
 Server = https://archive.archlinux.org/repos/${snapshot}/core/os/\$arch
@@ -32,8 +32,9 @@ Server = https://archive.archlinux.org/repos/${snapshot}/extra/os/\$arch
 EOF
 
 echo "Installing signed Arch Archive snapshot ${snapshot} in the disposable CI container."
+echo 'Package downloads use bounded connection/transfer timeouts and up to four retries. Pacman signature checks remain required.'
 pacman --config "$config" -Syyuu --noconfirm --needed --ignore=archlinux-keyring \
-  git nodejs npm rust python file binutils gtk3 webkit2gtk-4.1 \
+  curl git nodejs npm rust python file binutils gtk3 webkit2gtk-4.1 \
   alsa-lib alsa-utils openssl xdg-utils xdg-desktop-portal desktop-file-utils
 
 if foreign="$(pacman --config "$config" -Qm 2>&1)"; then

@@ -83,6 +83,10 @@ pub(crate) fn error_summary(error: impl Display) -> String {
         "SONANTE_RUNTIME_OVERRIDE_FORBIDDEN" => Some("runtime_override_forbidden"),
         "FIRST_RUN_EXISTING_LIBRARY_REQUIRES_REVIEW" => Some("existing_library"),
         "FIRST_RUN_CONFIG_CHANGED" => Some("conflict"),
+        "SQLITE_WIZARD_SOURCE_REQUIRED" | "SQLITE_WIZARD_SOURCE_DISABLED"
+        | "SQLITE_WIZARD_SOURCE_DUPLICATE" | "SQLITE_WIZARD_SOURCE_NOT_INDEXED" => Some("invalid_state"),
+        "SQLITE_WIZARD_SOURCE_UNAVAILABLE" => Some("unavailable"),
+        "SOURCE_AVAILABILITY_BUSY" => Some("busy"),
         "FIRST_RUN_MANAGED_SAVE_UNCONFIRMED" | "FIRST_RUN_PREPARATION_INCOMPLETE" | "FIRST_RUN_DATABASE_UNCONFIRMED" => Some("uncertain"),
         "LIBRARY_RECOVERY_PROFILE_BUSY" | "CONFIG_SAVE_BUSY" => Some("busy"),
         "LIBRARY_RECOVERY_UNSAFE_FILESYSTEM" => Some("unsafe_filesystem"),
@@ -981,6 +985,22 @@ mod playback_error_log_tests {
 #[cfg(test)]
 mod fixed_application_code_tests {
  use super::*;
+ #[test]
+ fn sqlite_wizard_guard_codes_are_sanitized_and_distinguishable() {
+  for (code,hint) in [
+   ("SQLITE_WIZARD_SOURCE_REQUIRED","invalid_state"),
+   ("SQLITE_WIZARD_SOURCE_DISABLED","invalid_state"),
+   ("SQLITE_WIZARD_SOURCE_DUPLICATE","invalid_state"),
+   ("SQLITE_WIZARD_SOURCE_NOT_INDEXED","invalid_state"),
+   ("SQLITE_WIZARD_SOURCE_UNAVAILABLE","unavailable"),
+   ("SOURCE_AVAILABILITY_BUSY","busy"),
+  ] {
+   let error=format!("{code}: /home/private token=secret");
+   let summary=error_summary(&error);
+   assert_eq!(summary,format!("error_hint={hint} code={code}"));
+   assert!(!summary.contains("private")&&!summary.contains("secret"));
+  }
+ }
  #[test] fn known_guard_codes_are_useful_without_exposing_their_details_or_changing_raw_errors() {
   for (code,hint) in [("LIBRARY_RECOVERY_PROFILE_BUSY","busy"),("LIBRARY_RECOVERY_UNSAFE_FILESYSTEM","unsafe_filesystem"),("NAVIDROME_AUTH","authentication"),("CONFIG_PERSISTENCE_UNCERTAIN","uncertain")] {
    let error=format!("{code}: https://private/?password=secret /home/private");let summary=error_summary(&error);assert_eq!(summary,format!("error_hint={hint} code={code}"));for secret in ["https", "private", "password", "secret"]{assert!(!summary.contains(secret));}assert!(error.contains("secret"));

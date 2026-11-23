@@ -86,7 +86,8 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
     <span data-signal-route className="inline-flex h-6 min-w-0 max-w-full items-center truncate rounded-md border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] bg-[var(--theme-surface-raised,rgb(255_255_255_/_0.05))] px-1.5 font-medium text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.75))]" title={`${mode} · ${formatLabel} · ${state}`}>{compactMode}</span>
     <span data-signal-state title={state} className="inline-flex h-6 shrink-0 items-center rounded-md border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] px-1.5 font-medium text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.85))]">{compactState}</span>
   </section>;
-  return <section aria-label={t("signalPath.title")} data-signal-summary
+  return <>
+  <section aria-label={t("signalPath.title")} data-signal-summary
     className={`relative w-full min-w-0 rounded-xl border border-[color:var(--theme-border-accent,#E5A00D)]/20 bg-[var(--theme-surface-subtle,rgb(0_0_0_/_0.25))] p-4 ${horizontal ? "np-signal-path" : ""}`}>
     <div className="np-signal-heading flex flex-wrap items-center justify-between gap-2">
       <h3 className="text-xs font-semibold text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.85))]">{t("signalPath.title")}</h3>
@@ -125,7 +126,7 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
             {t("signalPath.volume")}: {status.volume.available ? `${status.volume.value}% · ` : ""}{t(`player.volumeBackend.${information.volumeBackend}`)}
           </p>}
         </div>
-        {observedOutput && <div data-alsa-observation="observed" className="min-w-0 rounded-lg border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] px-3 py-2">
+        {observedOutput && !horizontal && <div data-alsa-observation="observed" className="min-w-0 rounded-lg border border-[color:var(--theme-border-soft,rgb(255_255_255_/_0.15))] px-3 py-2">
           <p className="mb-1 text-[10px] font-semibold text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.7))]">{t("signalPath.observation.observedTitle")}</p>
           <p className="break-words text-sm font-semibold tabular-nums text-[color:var(--theme-fg-primary,rgb(255_255_255_/_0.95))]">hw:{observedOutput.card},{observedOutput.device} · {observedOutput.format}</p>
           <p className="text-[11px]">{observedOutput.rate / 1000} kHz · {t("signalPath.observation.channelCount", { count: observedOutput.channels })}</p>
@@ -145,5 +146,10 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
             </details>
           : <p className="mt-1 text-[11px]">{t("equalizer.sharedProcessingHelp")}</p>}
       </section>}
-  </section>;
+  </section>
+    {horizontal && observedOutput && <p data-alsa-observation="observed" className="np-signal-observation mt-2 min-w-0 break-words px-1 text-[11px] leading-relaxed text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.7))]">
+      <span className="font-medium">{t("signalPath.observation.observedTitle")}: </span>
+      <span>hw:{observedOutput.card},{observedOutput.device} · {observedOutput.format} · {observedOutput.rate / 1000} kHz · {t("signalPath.observation.channelCount", { count: observedOutput.channels })}</span>
+    </p>}
+  </>;
 };

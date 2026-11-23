@@ -87,5 +87,5 @@ cd -- "$ROOT"
 export SONANTE_EQ_MPD_PATH="$mpd_eq"
 export SONANTE_EQ_CAMILLA_PATH="$camilla"
 export SONANTE_EQ_DIAGNOSTICS=1
-printf 'EQ diagnostics: %s/config/sonante/eq-activation-diagnostics.jsonl\n' "${XDG_CONFIG_HOME:?private profile config directory must be set}"
+printf 'EQ diagnostics: %s/sonante/logs/eq-activation-diagnostics.jsonl\n' "${XDG_CONFIG_HOME:?private profile config directory must be set}"
 exec npm run tauri -- dev

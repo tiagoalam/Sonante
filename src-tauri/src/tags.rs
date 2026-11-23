@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::{self, File, Metadata, OpenOptions};
-use std::io::{self, BufReader, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -41,6 +41,15 @@ pub enum LocalTrackTagsErrorCode {
     TransactionFailed,
     MetadataPreservationFailed,
     DurabilityFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalLyricsReadError {
+    NotEligible,
+    PermissionDenied,
+    Changed,
+    TooLarge,
+    ReadFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2152,6 +2161,197 @@ fn revalidate_original(
     Ok(())
 }
 
+/// Read only the exact lowercase `.lrc` sibling of an authorized legacy Local
+/// queue URI. The caller must already have matched the URI to the exact queue
+/// occurrence. No metadata-derived names or directory search are used.
+pub(crate) fn read_local_track_lrc(
+    library_dir: &Path,
+    uri: &str,
+    local_folders: &[String],
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, LocalLyricsReadError> {
+    read_local_track_lrc_with_hook(library_dir, uri, local_folders, max_bytes, || {})
+}
+
+fn read_local_track_lrc_with_hook<F: FnOnce()>(
+    library_dir: &Path,
+    uri: &str,
+    local_folders: &[String],
+    max_bytes: usize,
+    after_open: F,
+) -> Result<Option<Vec<u8>>, LocalLyricsReadError> {
+    const MAX_LRC_BYTES: usize = 512 * 1024;
+    if max_bytes > MAX_LRC_BYTES {
+        return Err(LocalLyricsReadError::TooLarge);
+    }
+    if is_virtual_cue_track(uri) {
+        return Err(LocalLyricsReadError::NotEligible);
+    }
+    let original = resolve_local_track_file(library_dir, uri, local_folders)
+        .map_err(|_| LocalLyricsReadError::Changed)?;
+    let initial_revision =
+        revision_for_file(&original.file).map_err(|_| LocalLyricsReadError::ReadFailed)?;
+    let relative = original
+        .canonical_path
+        .strip_prefix(&original.selected_root)
+        .map_err(|_| LocalLyricsReadError::Changed)?;
+    let mut sidecar = relative.to_path_buf();
+    sidecar.set_extension("lrc");
+    if sidecar == relative || sidecar.parent() != relative.parent() {
+        return Err(LocalLyricsReadError::Changed);
+    }
+    let bytes = read_local_source_relative_file_with_hook(
+        &original.selected_root,
+        &sidecar,
+        max_bytes,
+        after_open,
+    )?;
+    revalidate_original(
+        library_dir,
+        uri,
+        local_folders,
+        &original,
+        &initial_revision,
+    )
+    .map_err(|_| LocalLyricsReadError::Changed)?;
+    Ok(bytes)
+}
+
+fn read_local_source_relative_file_with_hook<F: FnOnce()>(
+    root: &Path,
+    relative: &Path,
+    max_bytes: usize,
+    after_open: F,
+) -> Result<Option<Vec<u8>>, LocalLyricsReadError> {
+    use std::os::fd::AsRawFd;
+    let path_parts = relative
+        .components()
+        .map(|part| match part {
+            Component::Normal(value) => Ok(value.to_os_string()),
+            _ => Err(LocalLyricsReadError::Changed),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some((leaf, parents)) = path_parts.split_last() else {
+        return Err(LocalLyricsReadError::Changed);
+    };
+    let root_canonical = fs::canonicalize(root).map_err(|_| LocalLyricsReadError::Changed)?;
+    if root_canonical != root {
+        return Err(LocalLyricsReadError::Changed);
+    }
+    let mut directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)
+        .map_err(map_lyrics_io)?;
+    if !directory.metadata().map_err(map_lyrics_io)?.is_dir() {
+        return Err(LocalLyricsReadError::Changed);
+    }
+    for component in parents {
+        let name = CString::new(component.as_bytes()).map_err(|_| LocalLyricsReadError::Changed)?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(map_lyrics_io(io::Error::last_os_error()));
+        }
+        let child = unsafe { File::from_raw_fd(fd) };
+        let metadata = child.metadata().map_err(map_lyrics_io)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(LocalLyricsReadError::Changed);
+        }
+        directory = child;
+    }
+
+    let name = CString::new(leaf.as_bytes()).map_err(|_| LocalLyricsReadError::Changed)?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::NotFound {
+            Ok(None)
+        } else {
+            Err(map_lyrics_io(error))
+        };
+    }
+    let path_handle = unsafe { File::from_raw_fd(fd) };
+    let before = path_handle.metadata().map_err(map_lyrics_io)?;
+    if before.file_type().is_symlink() || !before.is_file() {
+        return Err(LocalLyricsReadError::Changed);
+    }
+    if before.len() > max_bytes as u64 {
+        return Err(LocalLyricsReadError::TooLarge);
+    }
+    let before_stamp = lyrics_file_stamp(&before);
+    let readable = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(format!("/proc/self/fd/{}", path_handle.as_raw_fd()))
+        .map_err(map_lyrics_io)?;
+    if lyrics_file_stamp(&readable.metadata().map_err(map_lyrics_io)?) != before_stamp {
+        return Err(LocalLyricsReadError::Changed);
+    }
+    after_open();
+    let mut bytes = Vec::with_capacity(before.len().min(max_bytes as u64) as usize);
+    readable
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(map_lyrics_io)?;
+    if bytes.len() > max_bytes {
+        return Err(LocalLyricsReadError::TooLarge);
+    }
+    let opened_after = path_handle.metadata().map_err(map_lyrics_io)?;
+    let named_fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if named_fd < 0 {
+        return Err(LocalLyricsReadError::Changed);
+    }
+    let named = unsafe { File::from_raw_fd(named_fd) };
+    let named_after = named.metadata().map_err(map_lyrics_io)?;
+    if lyrics_file_stamp(&opened_after) != before_stamp
+        || lyrics_file_stamp(&named_after) != before_stamp
+        || named_after.file_type().is_symlink()
+        || !named_after.is_file()
+    {
+        return Err(LocalLyricsReadError::Changed);
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(target_os = "linux")]
+fn lyrics_file_stamp(metadata: &Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    )
+}
+
+fn map_lyrics_io(error: io::Error) -> LocalLyricsReadError {
+    match error.kind() {
+        io::ErrorKind::PermissionDenied => LocalLyricsReadError::PermissionDenied,
+        io::ErrorKind::NotFound => LocalLyricsReadError::Changed,
+        _ => LocalLyricsReadError::ReadFailed,
+    }
+}
+
 fn revision_for_file(file: &File) -> Result<String, LocalTrackTagsError> {
     file.metadata()
         .map(|metadata| revision_for_metadata(&metadata))
@@ -2395,7 +2595,7 @@ fn validate_relative_path(relative_path: &str) -> Result<PathBuf, LocalTrackTags
     Ok(path.to_path_buf())
 }
 
-fn is_virtual_cue_track(relative_path: &str) -> bool {
+pub(crate) fn is_virtual_cue_track(relative_path: &str) -> bool {
     let path = Path::new(relative_path);
     if path
         .components()
@@ -2981,6 +3181,113 @@ mod tests {
             )
         };
         assert_eq!(result, 0, "{}", io::Error::last_os_error());
+    }
+
+    #[test]
+    fn legacy_local_lrc_uses_exact_authorized_sibling_and_rejects_symlinks_or_oversize() {
+        let fixture = Fixture::new("Music");
+        let audio = fixture.root.join("01 - Música (ao vivo).flac");
+        let sidecar = fixture.root.join("01 - Música (ao vivo).lrc");
+        fs::write(&audio, b"synthetic audio").unwrap();
+        fs::write(&sidecar, "[00:01.00]♫ Olá, 世界".as_bytes()).unwrap();
+        let uri = "Music/01 - Música (ao vivo).flac";
+        assert_eq!(
+            read_local_track_lrc(&fixture.library, uri, &fixture.folders(), 512 * 1024)
+                .unwrap()
+                .as_deref(),
+            Some("[00:01.00]♫ Olá, 世界".as_bytes())
+        );
+        fs::write(
+            fixture.root.join("sem-letra.flac"),
+            b"synthetic audio without sidecar",
+        )
+        .unwrap();
+        assert_eq!(
+            read_local_track_lrc(
+                &fixture.library,
+                "Music/sem-letra.flac",
+                &fixture.folders(),
+                512 * 1024
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            read_local_track_lrc(
+                &fixture.library,
+                "../outside.lrc",
+                &fixture.folders(),
+                512 * 1024
+            ),
+            Err(LocalLyricsReadError::Changed)
+        );
+
+        let outside = fixture.base.join("outside.lrc");
+        fs::write(&outside, b"outside").unwrap();
+        fs::remove_file(&sidecar).unwrap();
+        symlink(&outside, &sidecar).unwrap();
+        assert_eq!(
+            read_local_track_lrc(&fixture.library, uri, &fixture.folders(), 512 * 1024),
+            Err(LocalLyricsReadError::Changed)
+        );
+
+        fs::remove_file(&sidecar).unwrap();
+        fs::write(&sidecar, vec![b'x'; 33]).unwrap();
+        assert_eq!(
+            read_local_track_lrc(&fixture.library, uri, &fixture.folders(), 32),
+            Err(LocalLyricsReadError::TooLarge)
+        );
+        assert_eq!(
+            read_local_track_lrc(&fixture.library, uri, &fixture.folders(), 512 * 1024 + 1),
+            Err(LocalLyricsReadError::TooLarge)
+        );
+        assert_eq!(
+            fs::read(&audio).unwrap(),
+            b"synthetic audio",
+            "lyrics inspection never writes the audio file"
+        );
+        drop(fixture);
+    }
+
+    #[test]
+    fn legacy_local_lrc_rejects_sidecar_and_audio_replacement_during_read() {
+        let fixture = Fixture::new("Music");
+        let audio = fixture.root.join("track.flac");
+        let sidecar = fixture.root.join("track.lrc");
+        fs::write(&audio, b"original audio").unwrap();
+        fs::write(&sidecar, b"original lyrics").unwrap();
+        let replacement = fixture.base.join("replacement.lrc");
+        fs::write(&replacement, b"replacement lyrics").unwrap();
+
+        let replaced_sidecar = read_local_track_lrc_with_hook(
+            &fixture.library,
+            "Music/track.flac",
+            &fixture.folders(),
+            512 * 1024,
+            || {
+                fs::remove_file(&sidecar).unwrap();
+                fs::rename(&replacement, &sidecar).unwrap();
+            },
+        );
+        assert_eq!(replaced_sidecar, Err(LocalLyricsReadError::Changed));
+
+        fs::write(&sidecar, b"original lyrics").unwrap();
+        let uri = "Music/track.flac";
+        let replaced_audio = read_local_track_lrc_with_hook(
+            &fixture.library,
+            uri,
+            &fixture.folders(),
+            512 * 1024,
+            || {
+                fs::write(&audio, b"replacement audio with a new length").unwrap();
+            },
+        );
+        assert_eq!(replaced_audio, Err(LocalLyricsReadError::Changed));
+        assert_eq!(
+            fs::read(&audio).unwrap(),
+            b"replacement audio with a new length"
+        );
+        drop(fixture);
     }
 
     #[test]

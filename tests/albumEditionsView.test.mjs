@@ -52,12 +52,12 @@ function fixture(options = {}) {
     './ExperimentalFeatures': { BetaBadge: () => null, ExperimentalNotice: () => null },
     './AlbumABComparison': { AlbumABComparison: () => null },
     './LibrarySourceTabs': { LibrarySourceTabs: Tabs },
-    './EditionCard': { EditionCard: Card }, './EditionArtwork': { EditionArtwork: () => null }, './AlbumView': { AlbumView: Plex }, './ArtistView': { ArtistView: Artist }, './LocalBrowserView': { LocalBrowserView: Local }, './deferredViews': { NavidromeView: Nav },
+    './EditionCard': { EditionCard: Card }, './EditionArtwork': { EditionArtwork: () => null }, './AlbumView': { AlbumView: Plex }, './ArtistView': { ArtistView: Artist }, './LocalBrowserView': { LocalBrowserEntry: Local, LocalBrowserView: Local }, './deferredViews': { NavidromeView: Nav },
   };
   const exported = compile('components/AlbumEditionsView.tsx', deps, { requestAnimationFrame: fn => fn(), IntersectionObserver: options.observe ? Observer : undefined });
   const View = options.wrapper ? exported.AlbumEditionsView : exported.SourceAlbumEditionsView;
   const host = { slots: [], effects: [], cursor: 0, closed: false,
-    props: { config: { sources: { local: true, plex: true, navidrome: true }, local_folders: ['fixture'], online_artwork_enabled: false }, active: true, available: true, source: 'local', status: { state: 'play', is_updating: false }, sourceIdentity: {}, navidromeRevision: 0, catalogRefreshRevision: 0, ...options.props },
+    props: { config: { sources: { local: true, plex: true, navidrome: true }, local_folders: ['fixture'], online_artwork_enabled: false }, active: true, available: true, source: 'local', status: { state: 'play', is_updating: false }, sourceIdentity: {}, navidromeRevision: 0, catalogRefreshRevision: 0, localBrowserCatalogContext: { sqliteBacked: false }, ...options.props },
     paint() { let result; for (let i = 0; i < 3; i++) { host.cursor = 0; host.effects = []; current = host; result = View(host.props); current = null;
       if (options.scroll) for (const node of nodes(result, n => n.props?.ref)) {
         if (node.props.className?.includes('overflow-y-auto p-8')) node.props.ref.current = scrollRoot;
@@ -94,7 +94,7 @@ test('each active source view queries only that source and does not combine albu
     const f = fixture({ props: { source } }); await f.host.settle(); assert.deepEqual(f.calls, [source]); assert.equal(f.profileCalls.length, 2); assert.equal(rows(f).length, 1);
     f.host.openGroup(); await f.host.settle(); assert.equal(f.host.cards().length, 2); assert.ok(f.host.cards().every(card => card.props.copies.every(e => e.source === source)));
     const chosen=f.host.cards()[0].props.copies[0]; f.host.cards()[0].props.onOpenCopy(chosen,{isConnected:false}); f.host.paint();
-    if(source==='local'){const target=nodes(f.host.tree,n=>n.type===f.Local)[0];assert.equal(target.props.initialAlbumId,chosen.album.id);target.props.onAlbumNavigationBack();}
+    if(source==='local'){const target=nodes(f.host.tree,n=>n.type===f.Local)[0];assert.equal(target.props.initialAlbumId,chosen.album.id);assert.deepEqual(target.props.catalogContext,{sqliteBacked:false});target.props.onAlbumNavigationBack();}
     if(source==='plex'){const target=nodes(f.host.tree,n=>n.type===f.Plex)[0];assert.equal(target.props.album.rating_key,chosen.album.rating_key);assert.equal(target.props.album.server_id,chosen.serverId);target.props.onBack();}
     if(source==='navidrome'){const target=nodes(f.host.tree,n=>n.type===f.Nav)[0];assert.deepEqual(target.props.initialAlbum,{account_id:chosen.accountId,id:chosen.album.id});target.props.onAlbumBack();}
     f.host.paint();assert.equal(f.host.cards().length,2);assert.deepEqual(f.calls,[source]);f.host.close();
@@ -144,9 +144,10 @@ test('only verified edition groups publish album shortcut identities; title-only
 });
 test('query, scrolling and source detail navigation preserve the source catalog and do not repeat analysis',async()=>{
   const entries=Array.from({length:31},(_,i)=>[entry('local',i+'-a','Record '+i),entry('local',i+'-b','Record '+i+' (Deluxe Edition)')]).flat();
-  const f=fixture({observe:true,scroll:true,load:async source=>({source,phase:'ready',entries})});for(let i=0;i<5;i++)await f.host.settle();assert.equal(rows(f).length,24);const reads=f.profileCalls.length;
+  const localBrowserCatalogContext={sqliteBacked:true,sqliteSources:[{id:'fixture-source',displayName:'Fixture'}],sqliteSourcesLoaded:true};
+  const f=fixture({observe:true,scroll:true,props:{localBrowserCatalogContext},load:async source=>({source,phase:'ready',entries})});for(let i=0;i<5;i++)await f.host.settle();assert.equal(rows(f).length,24);const reads=f.profileCalls.length;
   f.observers.at(-1).intersect();f.host.paint();assert.equal(rows(f).length,31);setQuery(f,'Record 9');await f.host.settle();assert.equal(rows(f).length,1);assert.equal(f.profileCalls.length,reads);assert.deepEqual(f.calls,['local']);
-  f.host.openGroup();await f.host.settle();const chosen=f.host.cards()[0].props.copies[0];f.host.cards()[0].props.onOpenCopy(chosen,{isConnected:false});f.host.paint();const destination=nodes(f.host.tree,n=>n.type===f.Local)[0];assert.equal(destination.props.initialAlbumId,chosen.album.id);destination.props.onAlbumNavigationBack();f.host.paint();assert.equal(f.host.cards().length,2);f.host.close();
+  f.host.openGroup();await f.host.settle();const chosen=f.host.cards()[0].props.copies[0];f.host.cards()[0].props.onOpenCopy(chosen,{isConnected:false});f.host.paint();const destination=nodes(f.host.tree,n=>n.type===f.Local)[0];assert.equal(destination.props.initialAlbumId,chosen.album.id);assert.equal(destination.props.catalogContext,localBrowserCatalogContext);destination.props.onAlbumNavigationBack();f.host.paint();assert.equal(f.host.cards().length,2);f.host.close();
 });
 test('pause and leaving a source stop new reads and fence late replies',async()=>{
   const wait=deferred();const f=fixture({readProfile:async()=>wait.promise});await f.host.settle();assert.equal(f.profileCalls.length,2);f.host.button('editions.pauseAnalysis').props.onClick();f.host.paint();wait.resolve({sizes:[123,456],titles:['A','B'],cover_id:null});await f.host.settle();assert.equal(rows(f).length,0);assert.ok(text(f.host.tree).includes(f.t('editions.scanPaused')));f.host.close();

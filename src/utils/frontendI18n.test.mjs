@@ -97,6 +97,27 @@ function muteLabelKeys(source) {
 }
 
 const catalogErrorProducer = readFileSync(new URL("utils/localAlbumCatalog.ts", src), "utf8");
+const equalizerErrorProducer = readFileSync(new URL("utils/equalizerError.ts", src), "utf8");
+function equalizerFailureKeys(source) {
+  const tree = ts.createSourceFile("equalizerError.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const producer = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "equalizerFailureMessageKey");
+  assert.ok(producer?.body, "equalizer failure message producer must remain inspectable");
+  const keys = new Set();
+  function finite(node) {
+    if (ts.isStringLiteral(node)) keys.add(node.text);
+    else if (ts.isConditionalExpression(node)) { finite(node.whenTrue); finite(node.whenFalse); }
+    else if (ts.isParenthesizedExpression(node)) finite(node.expression);
+    else assert.fail(`uncovered equalizer failure message producer ${node.getText(tree)}`);
+  }
+  function visit(node) {
+    if (ts.isReturnStatement(node)) { assert.ok(node.expression); finite(node.expression); }
+    else ts.forEachChild(node, visit);
+  }
+  visit(producer.body);
+  assert.ok(keys.size > 0);
+  return keys;
+}
+
 function catalogErrorKeys(source) {
   const tree = ts.createSourceFile("localAlbumCatalog.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const producer = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "localCatalogErrorKey");
@@ -169,6 +190,16 @@ function translationCollector(tree, file, keys, mixSaveKeys) {
       assert.ok(imported, "catalog error key must bind to its inspected producer");
       assert.ok(guardedNullable, "nullable catalog error key must be guarded before translation");
       catalogErrorKeys(catalogErrorProducer).forEach(key => keys.add(key));
+    }
+    else if (["components/EqualizerToggle.tsx", "components/EqualizerView.tsx"].includes(file) && ts.isCallExpression(node)
+      && node.getText(tree) === "equalizerFailureMessageKey(error)") {
+      const imported = tree.statements.some(statement => ts.isImportDeclaration(statement)
+        && statement.moduleSpecifier.text === "../utils/equalizerError"
+        && statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)
+        && statement.importClause.namedBindings.elements.some(item => item.name.text === "equalizerFailureMessageKey"
+          && (item.propertyName?.text ?? item.name.text) === "equalizerFailureMessageKey"));
+      assert.ok(imported, `${file}: equalizer failure translation must bind to its inspected producer`);
+      equalizerFailureKeys(equalizerErrorProducer).forEach(key => keys.add(key));
     }
     else if (file === "components/PlexDiscoverView.tsx" && ts.isPropertyAccessExpression(node)
       && node.getText(tree) === "state.mixSave.error") mixSaveKeys.forEach(key => keys.add(key));

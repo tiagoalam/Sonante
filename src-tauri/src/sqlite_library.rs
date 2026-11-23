@@ -1468,6 +1468,39 @@ impl SqliteLibraryState {
         }))
     }
 
+    /// Read the exact lowercase `.lrc` sibling for an opaque SQLite physical
+    /// track locator. CUE locators are rejected by the track-only parser; the
+    /// independent catalog connection keeps disk I/O outside shared state
+    /// locks, while the catalog fences source generation and file identity.
+    pub(crate) fn read_local_track_lrc(
+        &self,
+        uri: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let (source_id, relative) = parse_sqlite_track_locator(uri)
+            .map_err(|_| "SQLITE_LYRICS_TRACK_NOT_ELIGIBLE".to_owned())?;
+        let catalog = Catalog::open(&self.inner.database_path)?;
+        let source = catalog
+            .sources()?
+            .into_iter()
+            .find(|source| source.id == source_id)
+            .ok_or_else(|| "SQLITE_LYRICS_SOURCE_UNAVAILABLE".to_owned())?;
+        catalog
+            .read_verified_track_lrc(source_id, source.generation, &relative, max_bytes)
+            .map_err(|error| {
+                if error.contains("exceeds size limit")
+                    || error.contains("grew beyond size limit")
+                    || error.contains("exceeds the supported maximum")
+                {
+                    "SQLITE_LYRICS_TOO_LARGE".to_owned()
+                } else if error.contains("Permission denied") {
+                    "SQLITE_LYRICS_PERMISSION_DENIED".to_owned()
+                } else {
+                    "SQLITE_LYRICS_SOURCE_CHANGED_OR_UNAVAILABLE".to_owned()
+                }
+            })
+    }
+
     fn list_sources(&self) -> Result<Vec<SourceDto>, String> {
         let catalog = self.catalog()?;
         catalog
@@ -1747,6 +1780,25 @@ fn unique_cue_disc_number(preferred: u32, used: &mut std::collections::BTreeSet<
     preferred.max(1)
 }
 
+fn normalized_album_year(dates: &[String]) -> Option<String> {
+    let years = dates
+        .iter()
+        .filter_map(|date| {
+            let year = date.get(..4)?;
+            if !year.bytes().all(|byte| byte.is_ascii_digit())
+                || (date.len() > 4 && !matches!(date.as_bytes()[4], b'-' | b'/' | b'.'))
+            {
+                return None;
+            }
+            let numeric = year.parse::<u32>().ok()?;
+            (1000..=9999).contains(&numeric).then(|| year.to_owned())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    (years.len() == 1)
+        .then(|| years.into_iter().next())
+        .flatten()
+}
+
 fn cue_album_dto(source: &Source, group: &CueAlbumGroup) -> LocalBrowserAlbumDto {
     let mut artist_names = Vec::<String>::new();
     let mut album_artists = Vec::<String>::new();
@@ -1803,7 +1855,7 @@ fn cue_album_dto(source: &Source, group: &CueAlbumGroup) -> LocalBrowserAlbumDto
         title: group.title.clone(),
         artist,
         artist_names,
-        year: dates.first().cloned(),
+        year: normalized_album_year(&dates),
         added_at,
         genres,
         folder_path: path,
@@ -1976,7 +2028,7 @@ fn local_browser_album_dto(
         title: album.title.clone(),
         artist: display_artist,
         artist_names,
-        year: dates.first().cloned(),
+        year: normalized_album_year(&dates),
         added_at: album.first_seen_ns.and_then(format_added_at),
         genres,
         folder_path: path.clone(),
@@ -3480,6 +3532,25 @@ mod tests {
     }
 
     #[test]
+    fn normalized_album_year_preserves_only_unambiguous_valid_years() {
+        assert_eq!(
+            normalized_album_year(&["2024-03-01".into()]),
+            Some("2024".into())
+        );
+        assert_eq!(
+            normalized_album_year(&["2025-22-05".into()]),
+            Some("2025".into())
+        );
+        assert_eq!(normalized_album_year(&["2024".into()]), Some("2024".into()));
+        assert_eq!(
+            normalized_album_year(&["2023-01-01".into(), "2024-01-01".into()]),
+            None
+        );
+        assert_eq!(normalized_album_year(&["99-not-a-year".into()]), None);
+        assert_eq!(normalized_album_year(&["2024unknown".into()]), None);
+    }
+
+    #[test]
     fn album_artist_display_matches_mature_consistency_and_dominance_rules() {
         let consistent = vec![
             album_track_fixture("CD1/01.flac", Some("Singer A"), Some("The Group")),
@@ -3538,6 +3609,53 @@ mod tests {
         assert_eq!(dto.discs.len(), 2);
         assert_eq!(dto.discs[0].number, 1);
         assert_eq!(dto.discs[1].number, 2);
+    }
+
+    #[test]
+    fn album_dto_exposes_track_artists_from_persisted_metadata() {
+        let mut tracks = vec![album_track_fixture(
+            "Release/01.dsf",
+            Some("Genesis"),
+            Some("Genesis"),
+        )];
+        tracks[0]
+            .metadata
+            .as_mut()
+            .unwrap()
+            .last_success
+            .as_mut()
+            .unwrap()
+            .track_artists
+            .push("Guest Voice".into());
+        let refs = tracks.iter().collect::<Vec<_>>();
+        let album = Album {
+            id: AlbumId {
+                source_id: 1,
+                identity: b"dsd-album".to_vec(),
+            },
+            source_id: 1,
+            title: "Abacab".into(),
+            album_artists: vec!["Genesis".into()],
+            track_count: 1,
+            first_seen_ns: None,
+            stale_track_count: 0,
+            date_values: vec!["2024-04-03".into()],
+            ambiguous: false,
+            grouping_notes: Vec::new(),
+            directory_hint: PathBuf::from("Release"),
+        };
+        let source = Source {
+            id: 1,
+            canonical_path: PathBuf::from("/synthetic"),
+            display_name: "Synthetic".into(),
+            generation: 1,
+            last_checked_ns: 0,
+        };
+
+        let dto = local_browser_album_dto(&source, &album, &refs);
+        assert_eq!(dto.artist, "Genesis");
+        assert_eq!(dto.artist_names, ["Genesis", "Guest Voice"]);
+        assert_eq!(dto.year.as_deref(), Some("2024"));
     }
 
     #[test]

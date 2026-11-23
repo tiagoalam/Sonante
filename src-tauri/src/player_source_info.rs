@@ -2,8 +2,10 @@
 use crate::{audio::{AudioState, CurrentMedia, MediaLocator, TrackMetadata}, ConfigState,
     local_file_info::{InspectionPermit, LocalFileInfo}, PlexState, supervisor::MpdSupervisor, tags};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tauri::State;
+
+const MAX_LRC_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct SourceAudioFacts {
@@ -27,14 +29,17 @@ impl From<LocalFileInfo> for SourceAudioFacts {
 pub struct PlayerSourceInfo { media: CurrentMedia, info: SourceAudioFacts }
 
 // One physical acquisition globally, including the worker after a caller disappears.
-static ACTIVE: AtomicBool = AtomicBool::new(false);
-pub(crate) struct SourcePermit;
+// Waiters queue here rather than turning a harmless overlap into a user-visible
+// read failure. The permit is moved into blocking workers and released on Drop.
+static SOURCE_READ_ADMISSION: Semaphore = Semaphore::const_new(1);
+pub(crate) struct SourcePermit {
+    _permit: SemaphorePermit<'static>,
+}
 impl SourcePermit {
-    pub(crate) fn acquire() -> Option<Self> {
-        ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok().map(|_| Self)
+    pub(crate) async fn acquire() -> Option<Self> {
+        SOURCE_READ_ADMISSION.acquire().await.ok().map(|permit| Self { _permit: permit })
     }
 }
-impl Drop for SourcePermit { fn drop(&mut self) { ACTIVE.store(false, Ordering::Release); } }
 
 fn queued_locator(queue: &[TrackMetadata], media: &CurrentMedia) -> Option<MediaLocator> {
     match media {
@@ -58,7 +63,7 @@ fn snapshot(audio: &State<'_, AudioState>, media: &CurrentMedia) -> Option<Media
 async fn acquire_player_source_info(media: CurrentMedia, audio_state: State<'_, AudioState>,
     config_state: State<'_, ConfigState>, state: State<'_, PlexState>,
     sqlite_library: State<'_, crate::sqlite_library::SqliteLibraryState>) -> Option<PlayerSourceInfo> {
-    let permit = SourcePermit::acquire()?;
+    let permit = SourcePermit::acquire().await?;
     let locator = snapshot(&audio_state, &media)?;
     let info = match &locator {
         MediaLocator::Upnp { .. } | MediaLocator::Radio { .. } | MediaLocator::Navidrome { .. } => return None,
@@ -99,6 +104,186 @@ pub async fn get_player_source_info(media: CurrentMedia, audio_state: State<'_, 
     Ok(acquire_player_source_info(media, audio_state, config_state, state, sqlite_library).await)
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LocalLyricsLookup {
+    Found { content: String },
+    NotFound,
+    NotEligible { reason: &'static str },
+    ReadFailed { reason: &'static str },
+    InvalidContent { reason: &'static str },
+}
+
+fn confirm_local_queue_identity(
+    current: Option<&CurrentMedia>,
+    queue: &[TrackMetadata],
+    requested: &CurrentMedia,
+) -> Result<MediaLocator, &'static str> {
+    if current != Some(requested) {
+        return Err("stale");
+    }
+    let locator = queued_locator(queue, requested).ok_or("stale")?;
+    if !matches!(locator, MediaLocator::Local { .. }) {
+        return Err("not_local");
+    }
+    Ok(locator)
+}
+
+fn confirm_current_local_locator(
+    audio: &AudioState,
+    requested: &CurrentMedia,
+) -> Result<MediaLocator, &'static str> {
+    let engine = audio.0.lock().map_err(|_| "unavailable")?;
+    let status = engine.get_telemetry_status().map_err(|_| "unavailable")?;
+    confirm_local_queue_identity(
+        status.current_media.as_ref(),
+        &engine.get_queue(),
+        requested,
+    )
+}
+
+fn decode_local_lyrics(bytes: Vec<u8>) -> LocalLyricsLookup {
+    if bytes.len() > MAX_LRC_BYTES {
+        return LocalLyricsLookup::InvalidContent {
+            reason: "too_large",
+        };
+    }
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    let Ok(content) = std::str::from_utf8(bytes) else {
+        return LocalLyricsLookup::InvalidContent {
+            reason: "invalid_utf8",
+        };
+    };
+    if content.contains('\0') {
+        return LocalLyricsLookup::InvalidContent {
+            reason: "invalid_text",
+        };
+    }
+    LocalLyricsLookup::Found {
+        content: content.to_owned(),
+    }
+}
+
+fn is_eligible_physical_local_uri(uri: &str) -> bool {
+    if crate::sqlite_library::SqliteLibraryState::is_sqlite_cue_locator(uri) {
+        return false;
+    }
+    if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(uri) {
+        return true;
+    }
+    !uri.contains("://") && !crate::tags::is_virtual_cue_track(uri)
+}
+
+/// Read the exact LRC sidecar for the currently playing physical Local track.
+/// Current-media and queue identity are checked before and after bounded disk
+/// I/O; the command never accepts a path/locator directly from the caller.
+#[tauri::command]
+pub async fn get_current_local_lyrics(
+    media: CurrentMedia,
+    audio_state: State<'_, AudioState>,
+    config_state: State<'_, ConfigState>,
+    sqlite_library: State<'_, crate::sqlite_library::SqliteLibraryState>,
+) -> Result<LocalLyricsLookup, ()> {
+    let Some(permit) = SourcePermit::acquire().await else {
+        return Ok(LocalLyricsLookup::ReadFailed { reason: "busy" });
+    };
+    let locator = match confirm_current_local_locator(&audio_state, &media) {
+        Ok(locator) => locator,
+        Err("not_local") => {
+            return Ok(LocalLyricsLookup::NotEligible {
+                reason: "not_local",
+            })
+        }
+        Err("stale") => {
+            return Ok(LocalLyricsLookup::ReadFailed {
+                reason: "stale_track",
+            })
+        }
+        Err(_) => {
+            return Ok(LocalLyricsLookup::ReadFailed {
+                reason: "unavailable",
+            })
+        }
+    };
+    let uri = match locator {
+        MediaLocator::Local { uri } => uri,
+        _ => {
+            return Ok(LocalLyricsLookup::NotEligible {
+                reason: "not_local",
+            })
+        }
+    };
+    if !is_eligible_physical_local_uri(&uri) {
+        return Ok(LocalLyricsLookup::NotEligible {
+            reason: "cue_track",
+        });
+    }
+
+    let roots = config_state.0.lock().map_err(|_| ())?.local_folders.clone();
+    let roots_for_read = roots.clone();
+    let sqlite = (*sqlite_library).clone();
+    let library_dir = MpdSupervisor::library_dir();
+    let requested_uri = uri.clone();
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        // The command future may be cancelled while spawn_blocking continues.
+        // Keep admission owned by the worker until its filesystem read ends.
+        let _permit = permit;
+        if crate::sqlite_library::SqliteLibraryState::is_sqlite_track_locator(&requested_uri) {
+            sqlite
+                .read_local_track_lrc(&requested_uri, MAX_LRC_BYTES)
+                .map_err(|error| match error.as_str() {
+                    "SQLITE_LYRICS_TOO_LARGE" => crate::tags::LocalLyricsReadError::TooLarge,
+                    "SQLITE_LYRICS_PERMISSION_DENIED" => {
+                        crate::tags::LocalLyricsReadError::PermissionDenied
+                    }
+                    "SQLITE_LYRICS_TRACK_NOT_ELIGIBLE" => {
+                        crate::tags::LocalLyricsReadError::NotEligible
+                    }
+                    _ => crate::tags::LocalLyricsReadError::Changed,
+                })
+        } else {
+            crate::tags::read_local_track_lrc(
+                &library_dir,
+                &requested_uri,
+                &roots_for_read,
+                MAX_LRC_BYTES,
+            )
+        }
+    })
+    .await
+    .map_err(|_| ())?;
+    let lookup = match bytes {
+        Ok(Some(bytes)) => decode_local_lyrics(bytes),
+        Ok(None) => LocalLyricsLookup::NotFound,
+        Err(crate::tags::LocalLyricsReadError::NotEligible) => LocalLyricsLookup::NotEligible {
+            reason: "not_local_track",
+        },
+        Err(crate::tags::LocalLyricsReadError::TooLarge) => LocalLyricsLookup::InvalidContent {
+            reason: "too_large",
+        },
+        Err(crate::tags::LocalLyricsReadError::PermissionDenied) => LocalLyricsLookup::ReadFailed {
+            reason: "permission_denied",
+        },
+        Err(crate::tags::LocalLyricsReadError::Changed) => LocalLyricsLookup::ReadFailed {
+            reason: "source_changed",
+        },
+        Err(crate::tags::LocalLyricsReadError::ReadFailed) => LocalLyricsLookup::ReadFailed {
+            reason: "read_failed",
+        },
+    };
+    if config_state.0.lock().map_err(|_| ())?.local_folders != roots {
+        return Ok(LocalLyricsLookup::ReadFailed {
+            reason: "source_changed",
+        });
+    }
+    match confirm_current_local_locator(&audio_state, &media) {
+        Ok(current) if current == (MediaLocator::Local { uri }) => Ok(lookup),
+        _ => Ok(LocalLyricsLookup::ReadFailed {
+            reason: "stale_track",
+        }),
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SourceAlbum {
@@ -120,7 +305,7 @@ fn album_file_reason(error: crate::local_file_info::InfoError) -> &'static str {
 }
 async fn acquire_album_source_info(album: SourceAlbum, audio: State<'_, AudioState>,
     config: State<'_, ConfigState>, plex: State<'_, PlexState>) -> Option<Vec<SourceAudioFacts>> {
-    let permit = SourcePermit::acquire().or_else(|| album_source_absent("admission", "busy", 0))?;
+    let permit = SourcePermit::acquire().await.or_else(|| album_source_absent("admission", "busy", 0))?;
     match album {
         SourceAlbum::Local { album_id, track_count } => {
             if track_count == 0 || track_count > 32 || album_id.len() > 4096 { return album_source_absent("identity", "limit", track_count); }
@@ -207,10 +392,84 @@ mod tests {
         assert!(queued_locator(&queue, &wrong).is_none());
     }
     #[test]
-    fn source_admission_is_bounded_and_released() {
-        let permit = SourcePermit::acquire().unwrap();
-        assert!(SourcePermit::acquire().is_none()); drop(permit);
-        assert!(SourcePermit::acquire().is_some());
+    fn local_lyrics_confirmation_rejects_stale_media_and_changed_queue_slot() {
+        let requested = CurrentMedia::Local {
+            uri: "sqlite-track://1/track.flac".into(),
+            queue_index: 0,
+        };
+        let other = CurrentMedia::Local {
+            uri: "sqlite-track://1/other.flac".into(),
+            queue_index: 0,
+        };
+        let queue = vec![track(
+            Some(MediaLocator::Local {
+                uri: "sqlite-track://1/track.flac".into(),
+            }),
+            "ignored",
+        )];
+        assert!(confirm_local_queue_identity(None, &queue, &requested).is_err());
+        assert_eq!(
+            confirm_local_queue_identity(Some(&other), &queue, &requested),
+            Err("stale")
+        );
+        assert!(confirm_local_queue_identity(Some(&requested), &[], &requested).is_err());
+        assert_eq!(
+            confirm_local_queue_identity(Some(&requested), &queue, &requested),
+            Ok(MediaLocator::Local {
+                uri: "sqlite-track://1/track.flac".into()
+            })
+        );
+    }
+    #[test]
+    fn local_lyrics_excludes_cue_and_protocol_locators() {
+        assert!(!is_eligible_physical_local_uri("sqlite-cue://1/YQ/1"));
+        assert!(!is_eligible_physical_local_uri(
+            "sonante-cue-range://encoded/0/open"
+        ));
+        assert!(!is_eligible_physical_local_uri("Album/Disc.cue/track01"));
+        assert!(!is_eligible_physical_local_uri(
+            "https://example.invalid/audio.flac"
+        ));
+        assert!(is_eligible_physical_local_uri("sqlite-track://1/YQ"));
+        assert!(is_eligible_physical_local_uri("Music/01 - Airbag.flac"));
+    }
+    #[tokio::test]
+    async fn source_admission_serializes_waiters_and_releases_after_the_owner() {
+        let permit = SourcePermit::acquire().await.unwrap();
+        let waiter = tokio::spawn(async { SourcePermit::acquire().await.unwrap() });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "concurrent source reads wait instead of failing as busy");
+        drop(permit);
+        let next = waiter.await.unwrap();
+        drop(next);
+        assert!(SourcePermit::acquire().await.is_some());
+    }
+    #[test]
+    fn local_lyrics_bom_utf8_and_content_limits_are_classified_without_partial_text() {
+        assert_eq!(
+            decode_local_lyrics(b"\xef\xbb\xbf[00:01.00]Synthetic".to_vec()),
+            LocalLyricsLookup::Found {
+                content: "[00:01.00]Synthetic".into()
+            }
+        );
+        assert_eq!(
+            decode_local_lyrics(vec![0xff, 0xfe]),
+            LocalLyricsLookup::InvalidContent {
+                reason: "invalid_utf8"
+            }
+        );
+        assert_eq!(
+            decode_local_lyrics(vec![0; MAX_LRC_BYTES + 1]),
+            LocalLyricsLookup::InvalidContent {
+                reason: "too_large"
+            }
+        );
+        assert_eq!(
+            decode_local_lyrics(b"line\0break".to_vec()),
+            LocalLyricsLookup::InvalidContent {
+                reason: "invalid_text"
+            }
+        );
     }
     #[test]
     fn source_info_local_fixture_uses_the_existing_bounded_flac_reader() {

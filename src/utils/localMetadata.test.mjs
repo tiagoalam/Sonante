@@ -226,7 +226,7 @@ test("Local sidebar omits Metadata and preserves Local/player subview context an
     const item = SidebarNavItem({ icon: () => null, label: "Local", active: true, onClick: new Function("sourceEnabled", "config", "configureSource", "navigateLocalSubview", `return (${localSidebarClick()});`)(sourceEnabled, {}, () => assert.fail("enabled source must navigate"), navigate) });
     item.props.onClick(); assert.deepEqual(calls, expected); assert.deepEqual(player, before);
   }
-  const app = source("../App.tsx"); assert.match(app, /<LocalBrowserView\s+subview=\{localSubview\}/); assert.match(app, /subview=\{playerSubview\} onSubviewChange=\{changePlayerLocalSubview\}/);
+  const app = source("../App.tsx"); assert.match(app, /<LocalBrowserEntry catalogContext=\{localBrowserCatalogContext\}\s+subview=\{localSubview\}/); assert.match(app, /subview=\{playerSubview\} onSubviewChange=\{changePlayerLocalSubview\}/);
   assert.ok(app.includes('onClick={() => navigateLocalSubview("browser")}'));
   assert.doesNotMatch(app, /label=\{t\("localMetadata\.title"\)\}/);
   assert.ok(source("../components/LocalBrowserView.tsx").includes('title={t("localMetadata.review")}'));

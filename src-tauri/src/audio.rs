@@ -616,6 +616,11 @@ struct PlaybackProgressStatus {
 
 const SHARED_PROGRESS_SAMPLE_DELAY: Duration = Duration::from_millis(80);
 const SHARED_MIN_PROGRESS: f64 = 0.02;
+const MPD_IO_READ_SLICE: Duration = Duration::from_millis(500);
+// Queue replacement runs clear/add/play as one ordered MPD command list. Give
+// only that response a bounded 3 s budget, matching the existing multi-step
+// Shared seek budget; never resend the command list after it was written.
+const MPD_QUEUE_REPLACE_BUDGET: Duration = Duration::from_secs(3);
 
 // Seek-only budget: 4 samples over 960 ms; after the existing single recovery,
 // 2 more tail samples (880 ms including recovery's 80 ms). At most 11 status
@@ -632,11 +637,11 @@ struct MpdDeadlineReader {
 fn mpd_deadline_timeout(deadline: Option<Instant>) -> Result<Duration, String> {
     let remaining = deadline
         .map(|end| end.saturating_duration_since(Instant::now()))
-        .unwrap_or(Duration::from_millis(500));
+        .unwrap_or(MPD_IO_READ_SLICE);
     if remaining.is_zero() {
         return Err("Prazo de confirmação do seek Shared esgotado.".into());
     }
-    Ok(remaining.min(Duration::from_millis(500)))
+    Ok(remaining.min(MPD_IO_READ_SLICE))
 }
 
 impl Read for MpdDeadlineReader {
@@ -3044,7 +3049,41 @@ impl AudioEngine {
         } else if error.starts_with("Falha ao ler resposta do MPD")
             || error.starts_with("Conexão MPD encerrada")
         {
-            "mpd_socket_response".into()
+            let details = error
+                .split_once("[response ")
+                .and_then(|(_, details)| details.strip_suffix(']'))
+                .and_then(|details| {
+                    let fields = details
+                        .split_whitespace()
+                        .filter_map(|field| field.split_once('='))
+                        .collect::<std::collections::HashMap<_, _>>();
+                    let stage = match fields.get("stage").copied() {
+                        Some("read_line") => "read_line",
+                        Some("eof") => "eof",
+                        _ => return None,
+                    };
+                    let kind = fields
+                        .get("kind")
+                        .copied()
+                        .filter(|value| value.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+                        .unwrap_or("unknown");
+                    let errno = fields
+                        .get("errno")
+                        .copied()
+                        .filter(|value| *value == "none" || value.parse::<i32>().is_ok())
+                        .unwrap_or("unknown");
+                    let bytes = fields
+                        .get("bytes")
+                        .copied()
+                        .filter(|value| value.parse::<usize>().is_ok())
+                        .unwrap_or("unknown");
+                    let elapsed = fields.get("elapsed_ms").copied().filter(|value| value.parse::<u128>().is_ok()).unwrap_or("unknown");
+                    let retries = fields.get("retries").copied().filter(|value| value.parse::<usize>().is_ok()).unwrap_or("unknown");
+                    let limit = fields.get("limit_ms").copied().filter(|value| value.parse::<u128>().is_ok()).unwrap_or("unknown");
+                    Some(format!(" stage={stage} kind={kind} errno={errno} bytes_received={bytes} elapsed_ms={elapsed} read_retries={retries} limit_ms={limit} terminator=false"))
+                })
+                .unwrap_or_default();
+            format!("mpd_socket_response{details}")
         } else if error.starts_with("Handshake inválido") {
             "mpd_handshake".into()
         } else {
@@ -3415,6 +3454,31 @@ impl AudioEngine {
         Self::send_command_to_socket_before(socket_path, command, None)
     }
 
+    fn is_queue_replace_batch(command: &str) -> bool {
+        let mut lines = command.lines();
+        lines.next() == Some("command_list_begin")
+            && lines.next() == Some("clear")
+            && lines.any(|line| line.starts_with("add "))
+            && command.lines().any(|line| line.starts_with("play "))
+            && command.lines().last() == Some("command_list_end")
+    }
+
+    fn send_queue_replace_with_gate(
+        socket_path: &str,
+        gate: Option<&crate::direct_playback::Gate>,
+        command: &str,
+        budget: Duration,
+    ) -> Result<Vec<String>, String> {
+        let send = |pid: Option<u32>, command: &str| {
+            let deadline = Self::is_queue_replace_batch(command).then(|| Instant::now() + budget);
+            Self::send_command_for_peer_before(socket_path, pid, command, deadline)
+        };
+        match gate {
+            Some(gate) => gate.send_with(command, send),
+            None => send(None, command),
+        }
+    }
+
     fn send_command_to_socket_before(
         socket_path: &str,
         command: &str,
@@ -3425,29 +3489,61 @@ impl AudioEngine {
             let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_millis(500));
             let stream = crate::signal_processing::connect(Path::new(socket_path), pid, deadline)
                 .map_err(|_| "PLAYBACK_SUPERSEDED".to_string())?;
-            return Self::send_command_on_stream(stream, command, Some(deadline));
+            return Self::send_command_on_stream(stream, command, Some(deadline), false);
         }
         let stream = UnixStream::connect(socket_path)
             .map_err(|e| format!("Falha ao conectar no socket MPD: {}", e))?;
-        Self::send_command_on_stream(stream, command, deadline)
+        Self::send_command_on_stream(stream, command, deadline, false)
     }
 
-    pub(crate) fn send_owned_command_to_socket(socket_path: &str, pid: u32, command: &str) -> Result<Vec<String>, String> {
+    fn send_command_for_peer_before(
+        socket_path: &str,
+        pid: Option<u32>,
+        command: &str,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<String>, String> {
+        let Some(pid) = pid else {
+            return match deadline {
+                Some(deadline) => Self::send_command_to_socket_with_read_retry(socket_path, command, deadline),
+                None => Self::send_command_to_socket(socket_path, command),
+            };
+        };
         if crate::initial_plex_playback::command_peer(socket_path)?.is_some_and(|expected| expected != pid) {
             return Err("PLAYBACK_SUPERSEDED".into());
         }
-        let deadline = Instant::now() + Duration::from_millis(500);
+        let retry_read_would_block = deadline.is_some();
+        let deadline = deadline.unwrap_or_else(|| Instant::now() + MPD_IO_READ_SLICE);
         let stream = crate::signal_processing::connect(Path::new(socket_path), pid, deadline)
             .map_err(|_| crate::direct_volume::STALE.to_string())?;
-        Self::send_command_on_stream(stream, command, Some(deadline))
+        Self::send_command_on_stream(stream, command, Some(deadline), retry_read_would_block)
     }
 
-    fn send_command_on_stream(mut stream: UnixStream, command: &str, deadline: Option<Instant>) -> Result<Vec<String>, String> {
+    fn send_command_to_socket_with_read_retry(
+        socket_path: &str,
+        command: &str,
+        deadline: Instant,
+    ) -> Result<Vec<String>, String> {
+        mpd_deadline_timeout(Some(deadline))?;
+        if let Some(pid) = crate::initial_plex_playback::command_peer(socket_path)? {
+            let stream = crate::signal_processing::connect(Path::new(socket_path), pid, deadline)
+                .map_err(|_| "PLAYBACK_SUPERSEDED".to_string())?;
+            return Self::send_command_on_stream(stream, command, Some(deadline), true);
+        }
+        let stream = UnixStream::connect(socket_path)
+            .map_err(|e| format!("Falha ao conectar no socket MPD: {}", e))?;
+        Self::send_command_on_stream(stream, command, Some(deadline), true)
+    }
+
+    pub(crate) fn send_owned_command_to_socket(socket_path: &str, pid: u32, command: &str) -> Result<Vec<String>, String> {
+        Self::send_command_for_peer_before(socket_path, Some(pid), command, None)
+    }
+
+    fn send_command_on_stream(mut stream: UnixStream, command: &str, deadline: Option<Instant>, retry_read_would_block: bool) -> Result<Vec<String>, String> {
         stream
-            .set_read_timeout(Some(Duration::from_millis(500)))
+            .set_read_timeout(Some(MPD_IO_READ_SLICE))
             .map_err(|e| format!("Falha ao configurar timeout de leitura do MPD: {}", e))?;
         stream
-            .set_write_timeout(Some(Duration::from_millis(500)))
+            .set_write_timeout(Some(MPD_IO_READ_SLICE))
             .map_err(|e| format!("Falha ao configurar timeout de escrita do MPD: {}", e))?;
 
         let mut reader = BufReader::new(MpdDeadlineReader {
@@ -3476,6 +3572,7 @@ impl AudioEngine {
             .map_err(|e| format!("Falha ao concluir envio do comando ao MPD: {}", e))?;
 
         match deadline {
+            Some(_) if retry_read_would_block => Self::read_mpd_response_retrying_before(&mut reader, deadline),
             Some(_) => Self::read_mpd_response_before(&mut reader, deadline),
             None => Self::read_mpd_response(&mut reader),
         }
@@ -3753,17 +3850,74 @@ impl AudioEngine {
         reader: &mut R,
         deadline: Option<Instant>,
     ) -> Result<Vec<String>, String> {
+        Self::read_mpd_response_inner(reader, deadline, false)
+    }
+
+    fn read_mpd_response_retrying_before<R: BufRead>(
+        reader: &mut R,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<String>, String> {
+        Self::read_mpd_response_inner(reader, deadline, true)
+    }
+
+    fn read_mpd_response_inner<R: BufRead>(
+        reader: &mut R,
+        deadline: Option<Instant>,
+        retry_read_would_block: bool,
+    ) -> Result<Vec<String>, String> {
+        let started = Instant::now();
+        let limit_ms = deadline
+            .map(|end| end.saturating_duration_since(started))
+            .unwrap_or(MPD_IO_READ_SLICE)
+            .as_millis();
         let mut lines = Vec::new();
+        let mut response_bytes = 0usize;
+        let mut retries = 0usize;
         loop {
-            mpd_deadline_timeout(deadline)?;
             let mut line = String::new();
-            let bytes = reader
-                .read_line(&mut line)
-                .map_err(|e| format!("Falha ao ler resposta do MPD: {}", e))?;
-            mpd_deadline_timeout(deadline)?;
-            if bytes == 0 {
-                return Err("Conexão MPD encerrada antes da resposta final.".to_string());
+            let bytes = loop {
+                if deadline.is_some_and(|end| Instant::now() >= end) {
+                    let received = response_bytes.saturating_add(line.len());
+                    return Err(format!(
+                        "Falha ao ler resposta do MPD: [response stage=read_line kind=TimedOut errno=none bytes={received} elapsed_ms={} retries={retries} limit_ms={limit_ms}]",
+                        started.elapsed().as_millis()
+                    ));
+                }
+                match reader.read_line(&mut line) {
+                    Ok(bytes) => break bytes,
+                    Err(error)
+                        if retry_read_would_block
+                            && error.kind() == std::io::ErrorKind::WouldBlock
+                            && deadline.is_some_and(|end| Instant::now() < end) =>
+                    {
+                        // read_line appends to `line`; retry the same line so
+                        // bytes received before EAGAIN are not discarded.
+                        retries = retries.saturating_add(1);
+                    }
+                    Err(error) => {
+                        let received = response_bytes.saturating_add(line.len());
+                        let errno = error.raw_os_error().map(|value| value.to_string()).unwrap_or_else(|| "none".into());
+                        return Err(format!(
+                            "Falha ao ler resposta do MPD: [response stage=read_line kind={:?} errno={errno} bytes={received} elapsed_ms={} retries={retries} limit_ms={limit_ms}]",
+                            error.kind(), started.elapsed().as_millis()
+                        ));
+                    }
+                }
+            };
+            if deadline.is_some_and(|end| Instant::now() >= end) {
+                let received = response_bytes.saturating_add(line.len());
+                return Err(format!(
+                    "Falha ao ler resposta do MPD: [response stage=read_line kind=TimedOut errno=none bytes={received} elapsed_ms={} retries={retries} limit_ms={limit_ms}]",
+                    started.elapsed().as_millis()
+                ));
             }
+            if bytes == 0 {
+                return Err(format!(
+                    "Conexão MPD encerrada antes da resposta final: [response stage=eof kind=none errno=none bytes={response_bytes} elapsed_ms={} retries={retries} limit_ms={limit_ms}]",
+                    started.elapsed().as_millis()
+                ));
+            }
+            response_bytes = response_bytes.saturating_add(line.len());
             let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
             if trimmed == "OK" {
                 return Ok(lines);
@@ -4874,7 +5028,7 @@ impl AudioEngine {
         let socket = self.socket_path.clone();
         let gate=self.direct_playback.clone();
         self.play_tracks_with_io(tracks, playback_uris, start_index,
-            |command| Self::send_with_gate(&socket,gate.as_deref(),command), |audio| audio.save_queue_cache())
+            |command| Self::send_queue_replace_with_gate(&socket,gate.as_deref(),command,MPD_QUEUE_REPLACE_BUDGET), |audio| audio.save_queue_cache())
     }
 
     fn play_tracks_with_io(
@@ -11783,6 +11937,171 @@ mod tests {
     }
 
     #[test]
+    fn queue_response_diagnostic_distinguishes_simulated_timeout_and_eof_without_private_text() {
+        struct TimeoutReader;
+        impl Read for TimeoutReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "private path /home/user/secret.flac",
+                ))
+            }
+        }
+
+        let mut timed_out = BufReader::new(TimeoutReader);
+        let timeout = AudioEngine::read_mpd_response(&mut timed_out).unwrap_err();
+        let timeout_cause = AudioEngine::queue_play_failure_reason(&timeout);
+        assert!(timeout_cause.starts_with("mpd_socket_response stage=read_line kind=TimedOut errno=none bytes_received=0 elapsed_ms="),"{timeout_cause}");
+        assert!(timeout_cause.ends_with("read_retries=0 limit_ms=500 terminator=false"),"{timeout_cause}");
+        assert!(!timeout_cause.contains("secret"));
+
+        let mut eof = std::io::Cursor::new(b"partial response\n");
+        let eof_error = AudioEngine::read_mpd_response(&mut eof).unwrap_err();
+        let eof_cause = AudioEngine::queue_play_failure_reason(&eof_error);
+        assert!(eof_cause.starts_with("mpd_socket_response stage=eof kind=none errno=none bytes_received=17 elapsed_ms="),"{eof_cause}");
+        assert!(eof_cause.ends_with("read_retries=0 limit_ms=500 terminator=false"),"{eof_cause}");
+    }
+
+    #[test]
+    fn queue_replace_read_retries_would_block_and_preserves_partial_response_line() {
+        let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from(format!("/tmp/queue-partial-response-{}-{id}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server_path = path.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"OK MPD 0.24.15\n").unwrap();
+            let mut command = String::new();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            reader.read_line(&mut command).unwrap();
+            assert_eq!(command, "status\n");
+            stream.write_all(b"list_").unwrap();
+            thread::sleep(Duration::from_millis(650));
+            stream.write_all(b"OK\nOK\n").unwrap();
+            drop(stream);
+            std::fs::remove_file(server_path).unwrap();
+        });
+        let result = AudioEngine::send_command_to_socket_with_read_retry(
+            &path.to_string_lossy(),
+            "status",
+            Instant::now() + Duration::from_secs(2),
+        );
+        assert_eq!(result.unwrap(), ["list_OK"]);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn queue_replace_deadline_reports_would_block_without_retrying_commands() {
+        use std::sync::mpsc;
+        let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from(format!("/tmp/queue-deadline-{}-{id}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server_path = path.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"OK MPD 0.24.15\n").unwrap();
+            let mut command = String::new();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                command.push_str(&line);
+                if line == "command_list_end\n" { break; }
+            }
+            accepted_tx.send(command).unwrap();
+            release_rx.recv().unwrap();
+            let _ = stream.write_all(b"OK\n");
+            drop(stream);
+            std::fs::remove_file(server_path).unwrap();
+        });
+        let batch = "command_list_begin\nclear\nadd \"one.flac\"\nplay 0\ncommand_list_end";
+        assert!(AudioEngine::is_queue_replace_batch(batch));
+        let socket = path.to_string_lossy().into_owned();
+        let (client_tx, client_rx) = mpsc::channel();
+        let client = thread::spawn(move || {
+            client_tx.send(AudioEngine::send_queue_replace_with_gate(
+                &socket,
+                None,
+                batch,
+                Duration::from_millis(120),
+            )).unwrap();
+        });
+        let sent = accepted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(sent, format!("{batch}\n"));
+        let error = client_rx.recv_timeout(Duration::from_secs(1)).unwrap().unwrap_err();
+        assert!(error.contains("kind=WouldBlock") || error.contains("kind=TimedOut"),"{error}");
+        assert!(error.contains("bytes=0"),"{error}");
+        release_tx.send(()).unwrap();
+        client.join().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn accepted_replace_and_play_batch_with_late_terminator_leaves_queue_uncertain() {
+        use std::sync::mpsc;
+
+        let id = ALBUM_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from(format!("/tmp/queue-late-ok-{}-{id}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server_path = path.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"OK MPD 0.24.15\n").unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut command = String::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                command.push_str(&line);
+                if line == "command_list_end\n" {
+                    break;
+                }
+            }
+            assert!(command.starts_with("command_list_begin\nclear\nadd "));
+            assert!(command.ends_with("play 0\ncommand_list_end\n"));
+            // The fixture models a server that accepted/applied the batch but
+            // has not emitted the response terminator yet.
+            accepted_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let _ = stream.write_all(b"OK\n");
+            drop(stream);
+            std::fs::remove_file(server_path).unwrap();
+        });
+
+        let socket = path.to_string_lossy().into_owned();
+        let (client_tx, client_rx) = mpsc::channel();
+        let client = thread::spawn(move || {
+            let mut engine = engine_with_track("old.flac");
+            let previous_queue = engine.queue.clone();
+            let track = radio_track_fixture();
+            let result = engine.play_tracks_with_io(
+                vec![track.clone()],
+                vec![track.uri.clone()],
+                0,
+                |command| AudioEngine::send_queue_replace_with_gate(&socket, None, command, Duration::from_millis(120)),
+                |_| panic!("a response timeout must not persist an unconfirmed queue"),
+            );
+            client_tx
+                .send((result, engine.queue, engine.queue_coherent, previous_queue))
+                .unwrap();
+        });
+
+        accepted_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (result, queue, coherent, previous_queue) =
+            client_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(result.unwrap_err(), "PLAYBACK_QUEUE_UNCERTAIN");
+        assert_eq!(queue, previous_queue);
+        assert!(!coherent);
+        release_tx.send(()).unwrap();
+        client.join().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn playback_error_classification_requires_known_output_context() {
         for (message, expected) in [
             (
@@ -13504,7 +13823,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(b"state: play\nOK\n");
         assert!(AudioEngine::read_mpd_response_before(&mut reader, expired)
             .unwrap_err()
-            .contains("Prazo"));
+            .contains("kind=TimedOut"));
         assert_eq!(reader.position(), 0);
         assert_eq!(
             AudioEngine::read_mpd_response(&mut reader).unwrap(),

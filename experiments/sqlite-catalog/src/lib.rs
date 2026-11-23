@@ -5,10 +5,10 @@ use rusqlite::{
     Connection, OpenFlags, Transaction, TransactionBehavior,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, File},
     io::{BufReader, Read},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -1721,6 +1721,7 @@ fn is_audio(p: &Path) -> bool {
         "aac"
             | "aif"
             | "aiff"
+            | "aifc"
             | "ape"
             | "dsf"
             | "dff"
@@ -2191,6 +2192,24 @@ fn is_aiff(p: &Path) -> bool {
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "aif" | "aiff"))
 }
 
+fn is_aifc(p: &Path) -> bool {
+    p.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("aifc"))
+}
+
+fn is_aac(p: &Path) -> bool {
+    p.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("aac"))
+}
+
+fn is_ape(p: &Path) -> bool {
+    p.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("ape"))
+}
+
 fn is_flac(p: &Path) -> bool {
     p.extension()
         .and_then(|value| value.to_str())
@@ -2213,6 +2232,18 @@ fn is_mp4_candidate(p: &Path) -> bool {
     p.extension()
         .and_then(|value| value.to_str())
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "m4a" | "mp4"))
+}
+
+fn is_dsf(p: &Path) -> bool {
+    p.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("dsf"))
+}
+
+fn is_dff(p: &Path) -> bool {
+    p.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("dff"))
 }
 
 fn prepare_metadata_with_progress<F>(
@@ -2292,6 +2323,12 @@ where
             Some(metadata::parse_wav)
         } else if is_aiff(&file.relative) {
             Some(metadata::parse_aiff)
+        } else if is_aifc(&file.relative) {
+            Some(metadata::parse_aifc)
+        } else if is_aac(&file.relative) {
+            Some(metadata::parse_aac)
+        } else if is_ape(&file.relative) {
+            Some(metadata::parse_ape)
         } else if is_flac(&file.relative) {
             Some(metadata::parse_flac)
         } else if is_mp3(&file.relative) {
@@ -2300,6 +2337,10 @@ where
             Some(metadata::parse_mp4)
         } else if is_ogg_candidate(&file.relative) {
             Some(metadata::parse_ogg)
+        } else if is_dsf(&file.relative) {
+            Some(metadata::parse_dsf)
+        } else if is_dff(&file.relative) {
+            Some(metadata::parse_dff)
         } else {
             None
         };
@@ -2360,6 +2401,16 @@ fn write_metadata_update(tx: &Tx<'_>, source_id: i64, update: &MetadataUpdate) -
         MetadataStatus::ParsedWithTags | MetadataStatus::ParsedWithoutTags
     );
     let values = attempt.values.as_ref();
+    let track_artists = normalized_artist_values(
+        values
+            .map(|value| value.track_artists.as_slice())
+            .unwrap_or_default(),
+    );
+    let album_artists = normalized_artist_values(
+        values
+            .map(|value| value.album_artists.as_slice())
+            .unwrap_or_default(),
+    );
     let relative_blob = path_codec::encode_relative(&update.relative)?;
     tx.execute(
         "INSERT INTO track_metadata(\
@@ -2398,8 +2449,8 @@ fn write_metadata_update(tx: &Tx<'_>, source_id: i64, update: &MetadataUpdate) -
             val_opt_i(successful.then_some(update.size)),
             val_opt_i(successful.then_some(update.mtime_ns)),
             val_opt_t(values.and_then(|value| value.title.as_deref())),
-            val_opt_t(values.and_then(|value| value.track_artists.first().map(String::as_str))),
-            val_opt_t(values.and_then(|value| value.album_artists.first().map(String::as_str))),
+            val_opt_t(track_artists.first().map(String::as_str)),
+            val_opt_t(album_artists.first().map(String::as_str)),
             val_opt_t(values.and_then(|value| value.album.as_deref())),
             val_opt_t(values.and_then(|value| value.genre.as_deref())),
             val_opt_t(values.and_then(|value| value.date_text.as_deref())),
@@ -2416,27 +2467,32 @@ fn write_metadata_update(tx: &Tx<'_>, source_id: i64, update: &MetadataUpdate) -
             "DELETE FROM track_metadata_extra_artists WHERE source_id=? AND relative_path=?",
             &[val_i(source_id), val_b(relative_blob.clone())],
         )?;
-        if let Some(values) = values {
-            for (role, artists) in [
-                (1_i64, &values.track_artists),
-                (2_i64, &values.album_artists),
-            ] {
-                for (index, artist) in artists.iter().enumerate().skip(1) {
-                    tx.execute(
-                        "INSERT INTO track_metadata_extra_artists(source_id,relative_path,artist_role,ordinal,value) VALUES(?,?,?,?,?)",
-                        &[
-                            val_i(source_id),
-                            val_b(relative_blob.clone()),
-                            val_i(role),
-                            val_i(i64::try_from(index + 1).unwrap_or(i64::MAX)),
-                            val_t(artist),
-                        ],
-                    )?;
-                }
+        for (role, artists) in [(1_i64, &track_artists), (2_i64, &album_artists)] {
+            for (index, artist) in artists.iter().enumerate().skip(1) {
+                tx.execute(
+                    "INSERT INTO track_metadata_extra_artists(source_id,relative_path,artist_role,ordinal,value) VALUES(?,?,?,?,?)",
+                    &[
+                        val_i(source_id),
+                        val_b(relative_blob.clone()),
+                        val_i(role),
+                        val_i(i64::try_from(index + 1).unwrap_or(i64::MAX)),
+                        val_t(artist),
+                    ],
+                )?;
             }
         }
     }
     Ok(())
+}
+
+fn normalized_artist_values(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && seen.insert((*value).to_owned()))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn artist_values(
@@ -2446,15 +2502,17 @@ fn artist_values(
     role: i64,
     first: Option<String>,
 ) -> Result<Vec<String>> {
-    let mut values = first.into_iter().collect::<Vec<_>>();
     let rows = query(
         connection,
         "SELECT value FROM track_metadata_extra_artists \
          WHERE source_id=? AND relative_path=? AND artist_role=? ORDER BY ordinal",
         &[val_i(source_id), val_b(relative_path.to_vec()), val_i(role)],
     )?;
-    values.extend(rows.iter().map(|row| text(row, 0)));
-    Ok(values)
+    let values = first
+        .into_iter()
+        .chain(rows.iter().map(|row| text(row, 0)))
+        .collect::<Vec<_>>();
+    Ok(normalized_artist_values(&values))
 }
 
 fn grouping_text(value: &str) -> String {
@@ -4313,6 +4371,76 @@ impl Catalog {
         Ok(tracks)
     }
 
+    /// Read only the exact lowercase `.lrc` sibling of a cataloged physical
+    /// track. The audio locator/path is never supplied by an external caller.
+    /// Source generation and the audio file identity are checked on both sides
+    /// of the bounded sidecar read; all filesystem opens use the scanner's
+    /// descriptor-anchored, no-symlink reader.
+    pub fn read_verified_track_lrc(
+        &self,
+        source_id: i64,
+        generation: i64,
+        relative: &Path,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        const MAX_LRC_BYTES: usize = 512 * 1024;
+        if max_bytes > MAX_LRC_BYTES {
+            return Err("LRC read limit exceeds the supported maximum".into());
+        }
+        if relative.is_absolute()
+            || !relative
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+        {
+            return Err("invalid source-relative track identity".into());
+        }
+        let source = source_row(&self.db.connection, source_id)?;
+        validate_observed_generation(&self.db.connection, source_id, generation)?;
+        if self.source_tag_edit_pending(source_id)? {
+            return Err("source requires reconciliation after a tag edit".into());
+        }
+        let track = source_track_row(&self.db.connection, source_id, relative)?;
+        if track.generation != generation {
+            return Err("track does not belong to the requested source generation".into());
+        }
+        let (audio_before, audio_identity) = scanner::open_verified_file(
+            &source.canonical_path,
+            relative,
+            track.size,
+            track.mtime_ns,
+        )?;
+        let mut sidecar = relative.to_path_buf();
+        sidecar.set_extension("lrc");
+        if sidecar == relative || sidecar.parent() != relative.parent() {
+            return Err("track has no safe sidecar name".into());
+        }
+        let bytes = scanner::read_relative_file(&source.canonical_path, &sidecar, max_bytes)?;
+        let (audio_after, after_identity) = scanner::open_verified_file(
+            &source.canonical_path,
+            relative,
+            track.size,
+            track.mtime_ns,
+        )?;
+        if audio_identity != after_identity
+            || !scanner::identity_matches(&audio_before, audio_identity)
+            || !scanner::identity_matches(&audio_after, after_identity)
+        {
+            return Err("cataloged audio identity changed during sidecar read".into());
+        }
+        validate_observed_generation(&self.db.connection, source_id, generation)?;
+        if self.source_tag_edit_pending(source_id)? {
+            return Err("source requires reconciliation after a tag edit".into());
+        }
+        let track_after = source_track_row(&self.db.connection, source_id, relative)?;
+        if track_after.generation != track.generation
+            || track_after.size != track.size
+            || track_after.mtime_ns != track.mtime_ns
+        {
+            return Err("cataloged track changed during sidecar read".into());
+        }
+        Ok(bytes)
+    }
+
     pub fn cue_sheets_for_source(&self, source_id: i64) -> Result<Vec<CueSheetRecord>> {
         source_row(&self.db.connection, source_id)?;
         let path_format = path_codec::native_format()?;
@@ -4396,9 +4524,19 @@ impl Catalog {
                 end_frame,
                 duration_ms,
                 title: optional_text(row, 6),
-                performers: artists.get(&(cue_blob.clone(), int(row, 2), 1)).cloned().unwrap_or_default(),
+                performers: normalized_artist_values(
+                    artists
+                        .get(&(cue_blob.clone(), int(row, 2), 1))
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                ),
                 album: optional_text(row, 7),
-                album_performers: artists.get(&(cue_blob, int(row, 2), 2)).cloned().unwrap_or_default(),
+                album_performers: normalized_artist_values(
+                    artists
+                        .get(&(cue_blob, int(row, 2), 2))
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                ),
                 genre: optional_text(row, 8),
                 date: optional_text(row, 9),
                 disc_number: optional_int(row, 10).map(u32::try_from).transpose().map_err(|_| "catalog CUE disc number is invalid")?,
@@ -4668,6 +4806,17 @@ impl Catalog {
             if !invoked_row_hook {
                 invoked_row_hook = true;
                 after_first_row();
+            }
+        }
+
+        for track in &mut tracks {
+            if let Some(values) = track
+                .metadata
+                .as_mut()
+                .and_then(|metadata| metadata.last_success.as_mut())
+            {
+                values.track_artists = normalized_artist_values(&values.track_artists);
+                values.album_artists = normalized_artist_values(&values.album_artists);
             }
         }
 
@@ -5003,6 +5152,97 @@ mod tests {
         riff
     }
 
+    fn dsdiff_chunk(id: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(id);
+        chunk.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        chunk.extend_from_slice(payload);
+        if payload.len() % 2 != 0 {
+            chunk.push(0);
+        }
+        chunk
+    }
+
+    fn catalog_dsf_fixture(items: &[(lofty::tag::ItemKey, &str)]) -> Vec<u8> {
+        let mp3 = metadata::synthetic_mp3(&[(lofty::tag::TagType::Id3v2, items)], false);
+        let tag_size = mp3[6..10]
+            .iter()
+            .fold(0usize, |size, byte| (size << 7) | usize::from(*byte));
+        let tag = &mp3[..10 + tag_size];
+        let data_len = 12 + 32usize;
+        let tag_offset = 80 + data_len;
+        let total = tag_offset + tag.len();
+        let mut dsf = Vec::new();
+        dsf.extend_from_slice(b"DSD ");
+        dsf.extend_from_slice(&28u64.to_le_bytes());
+        dsf.extend_from_slice(&(total as u64).to_le_bytes());
+        dsf.extend_from_slice(&(tag_offset as u64).to_le_bytes());
+        dsf.extend_from_slice(b"fmt ");
+        dsf.extend_from_slice(&52u64.to_le_bytes());
+        dsf.extend_from_slice(&[0; 40]);
+        dsf.extend_from_slice(b"data");
+        dsf.extend_from_slice(&(data_len as u64).to_le_bytes());
+        dsf.resize(80 + data_len, 0);
+        dsf.extend_from_slice(tag);
+        dsf
+    }
+
+    fn catalog_dff_fixture() -> Vec<u8> {
+        let mut body = b"DSD ".to_vec();
+        body.extend(dsdiff_chunk(b"FVER", &0x01050000u32.to_be_bytes()));
+        body.extend(dsdiff_chunk(b"PROP", b"SND "));
+        body.extend(dsdiff_chunk(b"DSD ", &[0; 4]));
+        let mut info = Vec::new();
+        for (id, value) in [(b"DIAR", "Artist DFF"), (b"DITI", "Native DFF")] {
+            let mut payload = (value.len() as u32).to_be_bytes().to_vec();
+            payload.extend_from_slice(value.as_bytes());
+            info.extend(dsdiff_chunk(id, &payload));
+        }
+        body.extend(dsdiff_chunk(b"DIIN", &info));
+        let mut dff = b"FRM8".to_vec();
+        dff.extend_from_slice(&(body.len() as u64).to_be_bytes());
+        dff.extend(body);
+        dff
+    }
+
+    fn catalog_id3_bytes(items: &[(lofty::tag::ItemKey, &str)]) -> Vec<u8> {
+        let mp3 = metadata::synthetic_mp3(&[(lofty::tag::TagType::Id3v2, items)], false);
+        let tag_size = mp3[6..10]
+            .iter()
+            .fold(0usize, |size, byte| (size << 7) | usize::from(*byte));
+        mp3[..10 + tag_size].to_vec()
+    }
+
+    fn catalog_aac_fixture(items: &[(lofty::tag::ItemKey, &str)]) -> Vec<u8> {
+        let mut bytes = catalog_id3_bytes(items);
+        let frame = [0xff, 0xf1, 0x50, 0x80, 0x00, 0xe0, 0xfc];
+        bytes.extend_from_slice(&frame);
+        bytes.extend_from_slice(&frame);
+        bytes
+    }
+
+    fn catalog_ape_fixture(items: &[(&str, &str)]) -> Vec<u8> {
+        let mut encoded_items = Vec::new();
+        for (key, value) in items {
+            encoded_items.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            encoded_items.extend_from_slice(&0u32.to_le_bytes());
+            encoded_items.extend_from_slice(key.as_bytes());
+            encoded_items.push(0);
+            encoded_items.extend_from_slice(value.as_bytes());
+        }
+        let tag_size = encoded_items.len() as u32 + 32;
+        let mut bytes = b"MAC ".to_vec();
+        bytes.extend_from_slice(&[0; 32]);
+        bytes.extend(encoded_items);
+        bytes.extend_from_slice(b"APETAGEX");
+        bytes.extend_from_slice(&2000u32.to_le_bytes());
+        bytes.extend_from_slice(&tag_size.to_le_bytes());
+        bytes.extend_from_slice(&(items.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 8]);
+        bytes
+    }
+
     #[test]
     fn metadata_open_failure_is_recorded_per_file_and_does_not_abort_sibling_extraction() {
         let fixture = Fixture::new();
@@ -5168,6 +5408,132 @@ mod tests {
         assert_eq!(tracks[0].size, size);
         drop(catalog);
         assert_database_integrity(path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_lrc_read_is_exact_bounded_and_source_generation_fenced() {
+        use std::os::unix::fs::symlink;
+        let f = Fixture::new();
+        let root = f.dir("Letras Ü");
+        let audio = root.join("01 - Airbag.flac");
+        let sidecar = root.join("01 - Airbag.lrc");
+        Fixture::file(&audio, b"synthetic audio bytes");
+        Fixture::file(&sidecar, b"[00:01.00]fixture lyrics");
+        let outside = f.path("outside.lrc");
+        Fixture::file(&outside, b"private fixture");
+        let mut catalog = Catalog::open(f.db()).unwrap();
+        let source_id = catalog.add_source(&root, "synthetic").unwrap().source_id;
+        let source = catalog
+            .sources()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == source_id)
+            .unwrap();
+        assert_eq!(
+            catalog
+                .read_verified_track_lrc(
+                    source_id,
+                    source.generation,
+                    Path::new("01 - Airbag.flac"),
+                    512 * 1024
+                )
+                .unwrap()
+                .as_deref(),
+            Some(&b"[00:01.00]fixture lyrics"[..])
+        );
+        assert!(
+            catalog
+                .read_verified_track_lrc(
+                    source_id,
+                    source.generation,
+                    Path::new("01 - Airbag.flac"),
+                    512 * 1024 + 1
+                )
+                .is_err(),
+            "the catalog API cannot widen the parser's fixed 512 KiB boundary"
+        );
+        assert!(catalog
+            .read_verified_track_lrc(
+                source_id,
+                source.generation,
+                Path::new("missing.flac"),
+                512 * 1024
+            )
+            .is_err());
+
+        fs::remove_file(&sidecar).unwrap();
+        Fixture::file(
+            &root.join("01 - Airbag.LRC"),
+            b"uppercase extension is not selected",
+        );
+        assert_eq!(
+            catalog
+                .read_verified_track_lrc(
+                    source_id,
+                    source.generation,
+                    Path::new("01 - Airbag.flac"),
+                    512 * 1024
+                )
+                .unwrap(),
+            None,
+            "only the exact lowercase .lrc sidecar is admitted on a case-sensitive filesystem"
+        );
+        fs::remove_file(root.join("01 - Airbag.LRC")).unwrap();
+        Fixture::file(&sidecar, b"[00:01.00]fixture lyrics");
+
+        fs::remove_file(&sidecar).unwrap();
+        symlink(&outside, &sidecar).unwrap();
+        assert!(
+            catalog
+                .read_verified_track_lrc(
+                    source_id,
+                    source.generation,
+                    Path::new("01 - Airbag.flac"),
+                    512 * 1024
+                )
+                .is_err(),
+            "a symlink is never treated as a sidecar or followed"
+        );
+        fs::remove_file(&sidecar).unwrap();
+        Fixture::file(&sidecar, &vec![b'x'; 33]);
+        assert!(
+            catalog
+                .read_verified_track_lrc(
+                    source_id,
+                    source.generation,
+                    Path::new("01 - Airbag.flac"),
+                    32
+                )
+                .is_err(),
+            "oversize is rejected before content is returned"
+        );
+
+        fs::write(&audio, b"synthetic audio bytes changed").unwrap();
+        assert!(
+            catalog
+                .read_verified_track_lrc(
+                    source_id,
+                    source.generation,
+                    Path::new("01 - Airbag.flac"),
+                    512 * 1024
+                )
+                .is_err(),
+            "a changed physical track cannot authorize its sidecar"
+        );
+        let next = catalog.verify_source(source_id).unwrap();
+        assert!(next.generation > source.generation);
+        assert!(
+            catalog
+                .read_verified_track_lrc(
+                    source_id,
+                    source.generation,
+                    Path::new("01 - Airbag.flac"),
+                    512 * 1024
+                )
+                .is_err(),
+            "old generation cannot authorize a later read"
+        );
     }
 
     #[test]
@@ -6406,6 +6772,528 @@ mod tests {
             metadata.last_success.unwrap().title.as_deref(),
             Some("Previously unsupported")
         );
+    }
+
+    #[test]
+    fn dsd_metadata_persists_and_old_unsupported_attempts_retry_selectively() {
+        use lofty::tag::ItemKey;
+
+        let fixture = Fixture::new();
+        let root = fixture.dir("DSD");
+        Fixture::file(
+            &root.join("album.dsf"),
+            &catalog_dsf_fixture(&[
+                (ItemKey::TrackTitle, "Abacab 東京"),
+                (ItemKey::TrackArtist, "Genesis"),
+                (ItemKey::TrackArtist, "Guest Voice"),
+                (ItemKey::AlbumArtist, "Genesis"),
+                (ItemKey::AlbumTitle, "Abacab"),
+            ]),
+        );
+        Fixture::file(&root.join("native.dff"), &catalog_dff_fixture());
+        Fixture::file(&root.join("stable.wav"), &pcm_wav(Some("Stable WAV")));
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        let source_id = catalog.add_source(&root, "DSD").unwrap().source_id;
+
+        // Model previous Unsupported results from the old catalog parser.
+        for (path, extension, previous_parser_version) in [
+            ("album.dsf", "dsf", metadata::PARSER_VERSION),
+            ("native.dff", "dff", metadata::PARSER_VERSION),
+        ] {
+            catalog
+                .db
+                .connection
+                .execute(
+                    "UPDATE track_metadata SET attempt_status=3,file_format=?1,\
+                     attempt_parser_version=?2,success_size=NULL,success_mtime_ns=NULL,\
+                     title=NULL,track_artist=NULL,album_artist=NULL,album=NULL \
+                     WHERE source_id=?3 AND relative_path=?4",
+                    rusqlite::params![
+                        format!("extension:{extension}"),
+                        previous_parser_version,
+                        source_id,
+                        path_codec::encode_relative(Path::new(path)).unwrap(),
+                    ],
+                )
+                .unwrap();
+        }
+
+        let report = catalog.verify_source(source_id).unwrap();
+        assert_eq!(report.metrics.files_examined, 3);
+        assert_eq!(report.metrics.files_opened_for_extraction, 2);
+        assert_eq!(report.metrics.files_processed_by_parser, 2);
+        assert_eq!(report.metrics.metadata_records_written, 2);
+
+        let dsf = catalog
+            .metadata_for_track(source_id, "album.dsf")
+            .unwrap()
+            .unwrap();
+        assert_eq!(dsf.status, MetadataStatus::ParsedWithTags);
+        assert_eq!(dsf.file_format, "dsf");
+        assert_eq!(dsf.parser_version, metadata::DSF_PARSER_VERSION);
+        let values = dsf.last_success.unwrap();
+        assert_eq!(values.track_artists, ["Genesis", "Guest Voice"]);
+        assert_eq!(values.album_artists, ["Genesis"]);
+        assert_eq!(values.title.as_deref(), Some("Abacab 東京"));
+
+        let dff = catalog
+            .metadata_for_track(source_id, "native.dff")
+            .unwrap()
+            .unwrap();
+        assert_eq!(dff.status, MetadataStatus::ParsedWithTags);
+        assert_eq!(dff.file_format, "dff");
+        assert_eq!(dff.parser_version, metadata::DFF_PARSER_VERSION);
+        let values = dff.last_success.unwrap();
+        assert_eq!(values.track_artists, ["Artist DFF"]);
+        assert_eq!(values.title.as_deref(), Some("Native DFF"));
+        assert!(values.album_artists.is_empty());
+        assert!(values.album.is_none());
+
+        let stable = catalog
+            .metadata_for_track(source_id, "stable.wav")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stable.parser_version, metadata::PARSER_VERSION);
+        assert_eq!(stable.status, MetadataStatus::ParsedWithTags);
+
+        drop(catalog);
+        let reopened = Catalog::open(fixture.db()).unwrap();
+        assert_eq!(
+            reopened
+                .metadata_for_track(source_id, "album.dsf")
+                .unwrap()
+                .unwrap()
+                .last_success
+                .unwrap()
+                .track_artists,
+            ["Genesis", "Guest Voice"]
+        );
+    }
+
+    #[test]
+    fn dsd_parser_version_rechecks_existing_metadata_without_reprocessing_other_formats() {
+        use lofty::tag::ItemKey;
+
+        let fixture = Fixture::new();
+        let root = fixture.dir("DSD-version-refresh");
+        Fixture::file(
+            &root.join("album.dsf"),
+            &catalog_dsf_fixture(&[
+                (ItemKey::TrackTitle, "Abacab"),
+                (ItemKey::TrackArtist, "Genesis"),
+                (ItemKey::RecordingDate, "2025"),
+            ]),
+        );
+        Fixture::file(&root.join("stable.wav"), &pcm_wav(Some("Stable WAV")));
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        let source_id = catalog
+            .add_source(&root, "DSD version refresh")
+            .unwrap()
+            .source_id;
+
+        // Simulate the version-2 parser result that predated the DSD date fix.
+        // The previous version matched the generic version, so this must now
+        // revisit only the DSD and leave the stable WAV untouched.
+        catalog
+            .db
+            .connection
+            .execute(
+                "UPDATE track_metadata SET attempt_parser_version=?1,date_text=NULL \
+                 WHERE source_id=?2 AND relative_path=?3",
+                rusqlite::params![
+                    metadata::PARSER_VERSION,
+                    source_id,
+                    path_codec::encode_relative(Path::new("album.dsf")).unwrap(),
+                ],
+            )
+            .unwrap();
+
+        let report = catalog.verify_source(source_id).unwrap();
+        assert_eq!(report.metrics.files_examined, 2);
+        assert_eq!(report.metrics.files_opened_for_extraction, 1);
+        assert_eq!(report.metrics.files_processed_by_parser, 1);
+        assert_eq!(report.metrics.metadata_records_written, 1);
+
+        let dsf = catalog
+            .metadata_for_track(source_id, "album.dsf")
+            .unwrap()
+            .unwrap();
+        assert_eq!(dsf.parser_version, metadata::DSF_PARSER_VERSION);
+        assert_eq!(dsf.last_success.unwrap().date_text.as_deref(), Some("2025"));
+        let wav = catalog
+            .metadata_for_track(source_id, "stable.wav")
+            .unwrap()
+            .unwrap();
+        assert_eq!(wav.parser_version, metadata::PARSER_VERSION);
+        assert_eq!(wav.status, MetadataStatus::ParsedWithTags);
+    }
+
+    #[test]
+    fn metadata_date_parser_bumps_reprocess_only_mp3_and_aiff() {
+        use lofty::tag::{ItemKey, TagType};
+
+        let fixture = Fixture::new();
+        let root = fixture.dir("metadata-date-version-refresh");
+        Fixture::file(
+            &root.join("updated.mp3"),
+            &metadata::synthetic_mp3(
+                &[(
+                    TagType::Id3v2,
+                    &[
+                        (ItemKey::TrackTitle, "Updated MP3"),
+                        (ItemKey::RecordingDate, "2001"),
+                    ],
+                )],
+                true,
+            ),
+        );
+        Fixture::file(
+            &root.join("updated.aiff"),
+            &metadata::synthetic_aiff(
+                &[
+                    (ItemKey::TrackTitle, "Updated AIFF"),
+                    (ItemKey::RecordingDate, "2002"),
+                ],
+                &[],
+                false,
+            ),
+        );
+        Fixture::file(&root.join("stable.wav"), &pcm_wav(Some("Stable WAV")));
+        Fixture::file(
+            &root.join("stable.flac"),
+            &metadata::synthetic_flac(&[("TITLE", "Stable FLAC")]),
+        );
+        Fixture::file(
+            &root.join("stable.m4a"),
+            &metadata::synthetic_mp4(
+                include_bytes!("fixtures/synthetic-aac.m4a"),
+                &[(ItemKey::TrackTitle, "Stable MP4")],
+            ),
+        );
+        Fixture::file(
+            &root.join("stable.ogg"),
+            &metadata::synthetic_ogg(
+                include_bytes!("fixtures/synthetic-vorbis.ogg"),
+                &[(ItemKey::TrackTitle, "Stable Ogg")],
+            ),
+        );
+        Fixture::file(
+            &root.join("stable.opus"),
+            &metadata::synthetic_ogg(
+                include_bytes!("fixtures/synthetic-opus.opus"),
+                &[(ItemKey::TrackTitle, "Stable Opus")],
+            ),
+        );
+
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        let source_id = catalog
+            .add_source(&root, "metadata date version refresh")
+            .unwrap()
+            .source_id;
+        for (path, old_version) in [
+            ("updated.mp3", metadata::MP3_PARSER_VERSION - 1),
+            ("updated.aiff", metadata::AIFF_PARSER_VERSION - 1),
+        ] {
+            catalog
+                .db
+                .connection
+                .execute(
+                    "UPDATE track_metadata SET attempt_parser_version=?1,date_text=NULL \
+                     WHERE source_id=?2 AND relative_path=?3",
+                    rusqlite::params![
+                        old_version,
+                        source_id,
+                        path_codec::encode_relative(Path::new(path)).unwrap(),
+                    ],
+                )
+                .unwrap();
+        }
+
+        assert!(catalog
+            .verify_with_interruption(source_id)
+            .unwrap_err()
+            .contains("simulated interruption"));
+        let interrupted_mp3 = catalog
+            .metadata_for_track(source_id, "updated.mp3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            interrupted_mp3.parser_version,
+            metadata::MP3_PARSER_VERSION - 1
+        );
+        assert!(interrupted_mp3.last_success.unwrap().date_text.is_none());
+
+        let refreshed = catalog.verify_source(source_id).unwrap();
+        assert_eq!(refreshed.metrics.files_examined, 7);
+        assert_eq!(refreshed.metrics.files_opened_for_extraction, 2);
+        assert_eq!(refreshed.metrics.files_processed_by_parser, 2);
+        assert_eq!(refreshed.metrics.metadata_records_written, 2);
+        assert_eq!(
+            catalog
+                .metadata_for_track(source_id, "updated.mp3")
+                .unwrap()
+                .unwrap()
+                .last_success
+                .unwrap()
+                .date_text
+                .as_deref(),
+            Some("2001")
+        );
+        assert_eq!(
+            catalog
+                .metadata_for_track(source_id, "updated.aiff")
+                .unwrap()
+                .unwrap()
+                .last_success
+                .unwrap()
+                .date_text
+                .as_deref(),
+            Some("2002")
+        );
+
+        let unchanged = catalog.verify_source(source_id).unwrap();
+        assert_eq!(unchanged.metrics.files_opened_for_extraction, 0);
+        assert_eq!(unchanged.metrics.files_processed_by_parser, 0);
+        assert_eq!(unchanged.metrics.metadata_records_written, 0);
+        drop(catalog);
+
+        let reopened = Catalog::open(fixture.db()).unwrap();
+        assert_eq!(
+            reopened
+                .metadata_for_track(source_id, "updated.mp3")
+                .unwrap()
+                .unwrap()
+                .last_success
+                .unwrap()
+                .date_text
+                .as_deref(),
+            Some("2001")
+        );
+        assert_eq!(
+            reopened
+                .metadata_for_track(source_id, "updated.aiff")
+                .unwrap()
+                .unwrap()
+                .last_success
+                .unwrap()
+                .date_text
+                .as_deref(),
+            Some("2002")
+        );
+    }
+
+    #[test]
+    fn aac_ape_and_aifc_metadata_persist_and_retry_previous_unsupported_only() {
+        use lofty::tag::ItemKey;
+
+        let fixture = Fixture::new();
+        let root = fixture.dir("metadata-parity");
+        Fixture::file(
+            &root.join("stream.aac"),
+            &catalog_aac_fixture(&[
+                (ItemKey::TrackTitle, "AAC title"),
+                (ItemKey::TrackArtist, "AAC artist"),
+                (ItemKey::AlbumArtist, "AAC album artist"),
+                (ItemKey::AlbumTitle, "AAC album"),
+                (ItemKey::TrackNumber, "2/9"),
+            ]),
+        );
+        Fixture::file(
+            &root.join("record.ape"),
+            &catalog_ape_fixture(&[
+                ("Title", "APE title"),
+                ("Artist", "APE artist"),
+                ("Album Artist", "APE album artist"),
+                ("Album", "APE album"),
+                ("Track", "3/10"),
+            ]),
+        );
+        Fixture::file(
+            &root.join("piece.aifc"),
+            &metadata::synthetic_aiff(
+                &[
+                    (ItemKey::TrackTitle, "AIFC title"),
+                    (ItemKey::TrackArtist, "AIFC artist"),
+                    (ItemKey::AlbumArtist, "AIFC album artist"),
+                    (ItemKey::AlbumTitle, "AIFC album"),
+                    (ItemKey::TrackNumber, "4"),
+                ],
+                &[],
+                true,
+            ),
+        );
+        Fixture::file(
+            &root.join("unsupported.wma"),
+            b"ASF/WMA fixture without a parser",
+        );
+        Fixture::file(&root.join("stable.wav"), &pcm_wav(Some("Stable WAV")));
+
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        let source_id = catalog
+            .add_source(&root, "metadata parity")
+            .unwrap()
+            .source_id;
+        for (path, format, parser_version) in [
+            ("stream.aac", "aac_adts", metadata::AAC_PARSER_VERSION),
+            ("record.ape", "ape", metadata::APE_PARSER_VERSION),
+            ("piece.aifc", "aifc_metadata", metadata::AIFC_PARSER_VERSION),
+        ] {
+            let record = catalog
+                .metadata_for_track(source_id, path)
+                .unwrap()
+                .unwrap();
+            assert_eq!(record.status, MetadataStatus::ParsedWithTags);
+            assert_eq!(record.file_format, format);
+            assert_eq!(record.parser_version, parser_version);
+        }
+        let unsupported = catalog
+            .metadata_for_track(source_id, "unsupported.wma")
+            .unwrap()
+            .unwrap();
+        assert_eq!(unsupported.status, MetadataStatus::Unsupported);
+        assert_eq!(unsupported.file_format, "extension:wma");
+
+        for (path, extension) in [
+            ("stream.aac", "aac"),
+            ("record.ape", "ape"),
+            ("piece.aifc", "aifc"),
+        ] {
+            catalog
+                .db
+                .connection
+                .execute(
+                    "UPDATE track_metadata SET attempt_status=3,file_format=?1,\
+                     attempt_parser_version=?2,success_size=NULL,success_mtime_ns=NULL,\
+                     title=NULL,track_artist=NULL,album_artist=NULL,album=NULL \
+                     WHERE source_id=?3 AND relative_path=?4",
+                    rusqlite::params![
+                        format!("extension:{extension}"),
+                        metadata::PARSER_VERSION,
+                        source_id,
+                        path_codec::encode_relative(Path::new(path)).unwrap(),
+                    ],
+                )
+                .unwrap();
+        }
+        let report = catalog.verify_source(source_id).unwrap();
+        assert_eq!(report.metrics.files_examined, 5);
+        assert_eq!(report.metrics.files_opened_for_extraction, 3);
+        assert_eq!(report.metrics.files_processed_by_parser, 3);
+        assert_eq!(report.metrics.metadata_records_written, 3);
+
+        let aac = catalog
+            .metadata_for_track(source_id, "stream.aac")
+            .unwrap()
+            .unwrap()
+            .last_success
+            .unwrap();
+        assert_eq!(aac.track_artists, ["AAC artist"]);
+        assert_eq!(aac.album_artists, ["AAC album artist"]);
+        assert_eq!(aac.track_number, Some(2));
+        let ape = catalog
+            .metadata_for_track(source_id, "record.ape")
+            .unwrap()
+            .unwrap()
+            .last_success
+            .unwrap();
+        assert_eq!(ape.track_artists, ["APE artist"]);
+        assert_eq!(ape.album_artists, ["APE album artist"]);
+        assert_eq!(ape.track_number, Some(3));
+        let aifc = catalog
+            .metadata_for_track(source_id, "piece.aifc")
+            .unwrap()
+            .unwrap()
+            .last_success
+            .unwrap();
+        assert_eq!(aifc.track_artists, ["AIFC artist"]);
+        assert_eq!(aifc.album_artists, ["AIFC album artist"]);
+        assert_eq!(aifc.track_number, Some(4));
+
+        let wav = catalog
+            .metadata_for_track(source_id, "stable.wav")
+            .unwrap()
+            .unwrap();
+        assert_eq!(wav.parser_version, metadata::PARSER_VERSION);
+        assert_eq!(wav.status, MetadataStatus::ParsedWithTags);
+        let wma = catalog
+            .metadata_for_track(source_id, "unsupported.wma")
+            .unwrap()
+            .unwrap();
+        assert_eq!(wma.status, MetadataStatus::Unsupported);
+
+        drop(catalog);
+        let reopened = Catalog::open(fixture.db()).unwrap();
+        assert_eq!(
+            reopened
+                .metadata_for_track(source_id, "record.ape")
+                .unwrap()
+                .unwrap()
+                .last_success
+                .unwrap()
+                .album_artists,
+            ["APE album artist"]
+        );
+    }
+
+    #[test]
+    fn persisted_artist_projection_deduplicates_legacy_rows_without_losing_order() {
+        let fixture = Fixture::new();
+        let root = fixture.dir("artist-dedup");
+        Fixture::file(
+            &root.join("track.flac"),
+            &metadata::synthetic_flac(&[
+                ("ARTIST", "Artist"),
+                ("ARTIST", " Artist "),
+                ("ARTIST", "Guest; Feature"),
+                ("ALBUMARTIST", "Album Artist"),
+                ("ALBUMARTIST", " Album Artist "),
+            ]),
+        );
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        let source_id = catalog.add_source(&root, "artist dedup").unwrap().source_id;
+        let relative = path_codec::encode_relative(Path::new("track.flac")).unwrap();
+        let normalized_extra_count: i64 = catalog
+            .db
+            .connection
+            .query_row(
+                "SELECT count(*) FROM track_metadata_extra_artists WHERE source_id=? AND relative_path=?",
+                rusqlite::params![source_id, relative],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(normalized_extra_count, 1);
+        for (role, ordinal, value) in [
+            (1_i64, 3_i64, "Artist"),
+            (1, 4, "Guest; Feature"),
+            (2, 2, "Album Artist"),
+        ] {
+            catalog
+                .db
+                .connection
+                .execute(
+                    "INSERT INTO track_metadata_extra_artists(source_id,relative_path,artist_role,ordinal,value) VALUES(?,?,?,?,?)",
+                    rusqlite::params![source_id, relative, role, ordinal, value],
+                )
+                .unwrap();
+        }
+        let values = catalog
+            .metadata_for_track(source_id, "track.flac")
+            .unwrap()
+            .unwrap()
+            .last_success
+            .unwrap();
+        assert_eq!(values.track_artists, ["Artist", "Guest; Feature"]);
+        assert_eq!(values.album_artists, ["Album Artist"]);
+        let view = catalog.source_library_view(source_id).unwrap();
+        let projected = view.tracks[0]
+            .metadata
+            .as_ref()
+            .unwrap()
+            .last_success
+            .as_ref()
+            .unwrap();
+        assert_eq!(projected.track_artists, ["Artist", "Guest; Feature"]);
+        assert_eq!(projected.album_artists, ["Album Artist"]);
     }
 
     #[test]

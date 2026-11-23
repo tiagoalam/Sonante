@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc::{self, SyncSender},
@@ -53,16 +53,19 @@ pub(crate) fn set_experimental_profile_root(root: &std::path::Path) {
 }
 
 fn diagnostic_directory() -> Result<std::path::PathBuf, &'static str> {
-    if let Some(directory) = PROFILE_LOG_DIRECTORY
+    let directory = if let Some(directory) = PROFILE_LOG_DIRECTORY
         .get_or_init(|| RwLock::new(None))
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
     {
-        return Ok(directory);
-    }
-    resolve_log_directory(None, crate::persistence::ensure_sonante_config_dir)
-        .map_err(|_| "profile_unavailable")
+        directory
+    } else {
+        resolve_log_directory(None, crate::persistence::ensure_sonante_config_dir)
+            .map_err(|_| "profile_unavailable")?
+    };
+    ensure_private_log_directory(&directory)?;
+    Ok(directory)
 }
 
 fn resolve_log_directory<F>(
@@ -72,10 +75,52 @@ fn resolve_log_directory<F>(
 where
     F: FnOnce() -> Result<std::path::PathBuf, String>,
 {
-    match experimental_root {
-        Some(root) => Ok(root.join("logs")),
-        None => normal_directory(),
+    let profile = match experimental_root {
+        Some(root) => root.to_path_buf(),
+        None => normal_directory()?,
+    };
+    Ok(profile.join("logs"))
+}
+
+fn ensure_private_log_directory(directory: &std::path::Path) -> Result<(), &'static str> {
+    let profile = directory.parent().ok_or("profile_path_invalid")?;
+    let profile_metadata = fs::symlink_metadata(profile).map_err(|_| "profile_unavailable")?;
+    if !profile_metadata.is_dir()
+        || profile_metadata.file_type().is_symlink()
+        || profile_metadata.uid() != unsafe { libc::geteuid() }
+        || profile_metadata.mode() & 0o077 != 0
+    {
+        return Err("profile_not_private");
     }
+
+    let mut created = false;
+    match fs::symlink_metadata(directory) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(directory) {
+                Ok(()) => created = true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err("log_directory_create_failed"),
+            }
+        }
+        Err(_) => return Err("log_directory_unavailable"),
+    }
+
+    if created {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+            .map_err(|_| "log_directory_permissions_failed")?;
+    }
+    let metadata = fs::symlink_metadata(directory).map_err(|_| "log_directory_unavailable")?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o700
+    {
+        return Err("log_directory_not_private");
+    }
+    Ok(())
 }
 
 pub(crate) struct Attempt {
@@ -162,28 +207,44 @@ pub(crate) fn safe_error_code(error: &str) -> &'static str {
         "EQ_SinkUnavailable" => "sink_unavailable",
         "EQ_RuntimeMissing" | "SONANTE_RUNTIME_MISSING" => "runtime_missing",
         "EQ_RuntimeUntrusted" | "SONANTE_RUNTIME_UNTRUSTED" => "runtime_untrusted",
+        "EQ_CAMILLA_RUNTIME_MISSING" => "camilla_runtime_missing",
+        "EQ_CAMILLA_RUNTIME_UNTRUSTED" => "camilla_runtime_untrusted",
+        "EQ_CAMILLA_RUNTIME_UNAVAILABLE" => "camilla_runtime_unavailable",
+        "EQ_MPD_RUNTIME_MISSING" => "mpd_runtime_missing",
+        "EQ_MPD_RUNTIME_UNAVAILABLE" => "mpd_runtime_unavailable",
         "EQ_RuntimeStartFailed" => "runtime_start_failed",
         "EQ_RuntimeExited" => "runtime_exited",
         "EQ_ControlFailed" => "control_failed",
         "EQ_ApplyFailed" => "apply_failed",
+        "EQ_APPLY_FAILED" => "apply_failed",
         "EQ_PipeWireUnavailable" => "pipewire_unavailable",
+        "EQ_PULSEAUDIO_UNSUPPORTED" => "pulseaudio_unsupported",
         "EQ_Cancelled" | "EQ_CANCELLED" => "cancelled",
+        "EQ_SUPERSEDED" | "EQ_STARTUP_RESTORE_SUPERSEDED" => "superseded",
         "EQ_CleanupFailed" => "cleanup_failed",
+        "EQ_STOP_FAILED" => "dsp_stop_failed",
+        "EQ_SWITCH_FAILED" => "switch_failed",
+        "EQ_POSITION_NOT_RESTORED" => "playback_position_unconfirmed",
+        "EQ_RUNTIME_UNCONFIRMED" => "runtime_unconfirmed",
+        "EQ_BYPASS_LEVEL_RETURN_CONFIRMATION_REQUIRED" => "bypass_confirmation_required",
         "EQ_ContinuityLost" => "continuity_lost",
         "EQ_SHARED_ONLY" => "not_shared_route",
+        "EQ_AVAILABILITY_UNCONFIRMED" => "availability_unconfirmed",
+        "EQ_RUNTIME_UNAVAILABLE" => "runtime_unavailable",
+        "EQ_CONFIG_UNAVAILABLE" => "configuration_unavailable",
+        "EQ_QUEUE_UNAVAILABLE" => "queue_unavailable",
+        "EQ_ANALYZER_UNAVAILABLE" => "analyzer_unavailable",
+        "EQ_PRESET_REQUIRED" => "preset_required",
+        "EQ_PRESET_INVALID" => "preset_invalid",
+        "EQ_UNSAFE_HEADROOM" => "headroom_rejected",
+        "EQ_STORE_UNAVAILABLE" | "EQ_STORE_UNAVAILABLE_PRESERVED" => "eq_store_unavailable",
+        "EQ_STORE_WRITE_UNCONFIRMED" => "store_write_unconfirmed",
         "EQ_LIBRARY_UNAVAILABLE" => "library_unavailable",
         "EQ_PIPE_UNSAFE" => "pipe_unsafe",
         "EQ_PIPE_UNAVAILABLE" => "pipe_unavailable",
         "MPD_STARTUP_PROBE_TIMEOUT" => "mpd_probe_timeout",
         "MPD_STARTUP_PROBE_UNCONFIRMED" => "mpd_probe_unconfirmed",
         "MPD_STARTUP_PROBE_CLEANUP_UNCONFIRMED" => "mpd_cleanup_unconfirmed",
-        "EQ_MPD_RUNTIME_MISSING" => "mpd_runtime_missing",
-        "EQ_MPD_RUNTIME_UNAVAILABLE" => "mpd_runtime_unavailable",
-        "EQ_CAMILLA_RUNTIME_MISSING" => "camilla_runtime_missing",
-        "EQ_CAMILLA_RUNTIME_UNTRUSTED" => "camilla_runtime_untrusted",
-        "EQ_PRESET_REQUIRED" => "preset_required",
-        "EQ_PRESET_INVALID" => "preset_invalid",
-        "EQ_UNSAFE_HEADROOM" => "headroom_rejected",
         "EQ_AUDIO_UNAVAILABLE" => "audio_state_unavailable",
         "EQ_SUPERVISOR_UNAVAILABLE" => "supervisor_unavailable",
         _ => "unclassified",
@@ -267,7 +328,7 @@ fn emit_for(
 
 fn start_writer() -> Option<SyncSender<Vec<u8>>> {
     let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(128);
-    thread::Builder::new()
+    let writer = thread::Builder::new()
         .name("sonante-eq-diagnostics".into())
         .spawn(move || {
             while let Ok(bytes) = receiver.recv() {
@@ -278,9 +339,14 @@ fn start_writer() -> Option<SyncSender<Vec<u8>>> {
                     eprintln!("[EQ-Diagnostics] log_write={reason}");
                 }
             }
-        })
-        .ok()?;
-    Some(sender)
+        });
+    match writer {
+        Ok(_) => Some(sender),
+        Err(_) => {
+            eprintln!("[EQ-Diagnostics] writer_start=failed");
+            None
+        }
+    }
 }
 
 fn append_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), &'static str> {
@@ -340,6 +406,11 @@ mod tests {
         let second = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
         assert!(second > first);
         assert_eq!(safe_error_code("EQ_GraphInvalid"), "graph_invalid");
+        assert_eq!(safe_error_code("EQ_AVAILABILITY_UNCONFIRMED"), "availability_unconfirmed");
+        assert_eq!(safe_error_code("EQ_RUNTIME_UNAVAILABLE"), "runtime_unavailable");
+        assert_eq!(safe_error_code("EQ_CAMILLA_RUNTIME_UNAVAILABLE"), "camilla_runtime_unavailable");
+        assert_eq!(safe_error_code("EQ_POSITION_NOT_RESTORED"), "playback_position_unconfirmed");
+        assert_eq!(safe_error_code("EQ_PULSEAUDIO_UNSUPPORTED"), "pulseaudio_unsupported");
         assert_eq!(
             safe_error_code("private path /home/user/runtime"),
             "unclassified"
@@ -381,6 +452,46 @@ mod tests {
     }
 
     #[test]
+    fn normal_diagnostics_use_a_private_logs_subdirectory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = temporary.path().join("sonante");
+        fs::create_dir(&profile).unwrap();
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+        let logs = resolve_log_directory(None, || Ok(profile.clone())).unwrap();
+        assert_eq!(logs, profile.join("logs"));
+        ensure_private_log_directory(&logs).unwrap();
+        assert_eq!(fs::symlink_metadata(&logs).unwrap().mode() & 0o777, 0o700);
+        append_private(&logs.join(LOG_NAME), b"fixture\n").unwrap();
+        assert_eq!(fs::read(logs.join(LOG_NAME)).unwrap(), b"fixture\n");
+    }
+
+    #[test]
+    fn diagnostic_log_directory_rejects_symlinks_and_group_access() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = temporary.path().join("sonante");
+        fs::create_dir(&profile).unwrap();
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let logs = profile.join("logs");
+        fs::create_dir(&logs).unwrap();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o750)).unwrap();
+        assert_eq!(
+            ensure_private_log_directory(&logs),
+            Err("log_directory_not_private")
+        );
+        fs::remove_dir(&logs).unwrap();
+
+        let outside = temporary.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&outside, &logs).unwrap();
+        assert_eq!(
+            ensure_private_log_directory(&logs),
+            Err("log_directory_not_private")
+        );
+    }
+
+    #[test]
     fn profile_resolution_uses_bootstrap_root_for_experimental_and_default_config_for_normal() {
         let temporary = tempfile::tempdir().unwrap();
         let experimental = temporary.path().join("sonante-experimental");
@@ -398,7 +509,8 @@ mod tests {
         assert!(!stable.join(LOG_NAME).exists());
 
         let normal_directory = resolve_log_directory(None, || Ok(stable.clone())).unwrap();
-        assert_eq!(normal_directory, stable);
+        assert_eq!(normal_directory, stable.join("logs"));
+        ensure_private_log_directory(&normal_directory).unwrap();
         let normal = normal_directory.join(LOG_NAME);
         append_private(&normal, b"normal\n").unwrap();
         assert_eq!(fs::read(normal).unwrap(), b"normal\n");

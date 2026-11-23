@@ -612,6 +612,10 @@ impl Transaction<'_> {
 }
 
 impl AudioTransitionHandle {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub(crate) fn mark_uncertain(&self) {
         set_audio_transition_state(&self.coordinator, self.generation, RouteOperationState::Uncertain, false);
     }

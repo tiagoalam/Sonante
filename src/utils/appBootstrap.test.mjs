@@ -23,13 +23,13 @@ test("Local Browser has no source before configuration resolves", () => {
   assert.equal(initialMediaSource({ plex_token: " token " }), "plex");
 });
 
-test("App gates LocalBrowserView behind admitted initial config", () => {
+test("App gates LocalBrowserEntry behind admitted initial config", () => {
   const source = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
-  assert.ok(source.indexOf("if (!config || mediaSource === null)") < source.indexOf("<LocalBrowserView"));
+  assert.ok(source.indexOf("if (!config || mediaSource === null)") < source.indexOf("<LocalBrowserEntry"));
 });
 
 test("each whitelisted section restores only after config bootstrap without writing", () => {
-  for (const section of ["search", "local", "plex", "favorites", "playlists", "explore"]) {
+  for (const section of ["search", "local", "plex", "favorites", "playlists", "explore", "autoeq"]) {
     const state = preference(section);
     assert.deepEqual(state.published, []);
     assert.equal(state.reads(), 0);
@@ -40,6 +40,18 @@ test("each whitelisted section restores only after config bootstrap without writ
     assert.equal(state.published.at(-1), section === "explore" ? "local" : section);
     assert.deepEqual(state.writes, []);
   }
+});
+
+test("AutoEQ is an independent advanced route and Simple mode falls back safely", () => {
+  const state = preference("autoeq");
+  state.controller.restore({ ...config, usage_mode: "full" });
+  assert.equal(state.published.at(-1), "autoeq");
+  state.controller.navigate("autoeq");
+  assert.deepEqual(state.writes, [[MAIN_SECTION_STORAGE_KEY, "autoeq"]]);
+  const simple = preference("autoeq");
+  simple.controller.restore({ ...config, usage_mode: "simple" });
+  assert.equal(simple.published.at(-1), initialMediaSource(config));
+  assert.deepEqual(simple.writes, []);
 });
 
 test("invalid or absent preference preserves the existing initial source", () => {

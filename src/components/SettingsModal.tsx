@@ -28,6 +28,7 @@ import { SettingsPages, type SettingsPage } from "./SettingsPages";
 import { RemoteControlSetting } from "./RemoteControlSetting";
 import { UpnpSetting } from "./UpnpSetting";
 import { ScrobblingSetting } from "./ScrobblingSetting";
+import { LyricsOnlinePreference } from "./LyricsOnlinePreference";
 import { UsageModeSetting } from "./UsageModeSetting";
 import { fullModeEnabled } from "../utils/usageMode";
 import { ExperimentalFeaturesSetting } from "./ExperimentalFeatures";
@@ -53,10 +54,11 @@ interface Props {
   initialPage?: SettingsPage;
   initialDraft?: AppConfig | null;
   initialFolderOverlap?: boolean;
-  equalizerAvailable?: boolean;
+  equalizerAvailable?: boolean | null;
   equalizerShared?: boolean;
   equalizerRuntime?: DspSnapshot | null;
   audioRoute?: AudioRouteProjection | null;
+  onAudioRouteConfirmed?: (projection: AudioRouteProjection, runtime: DspSnapshot) => void;
   isPlaying?: boolean;
   outputObservation?: OutputObservation | null;
   readOnly?: boolean;
@@ -104,10 +106,11 @@ export const SettingsModal: React.FC<Props> = ({
   initialPage,
   initialDraft,
   initialFolderOverlap,
-  equalizerAvailable = true,
+  equalizerAvailable = null,
   equalizerShared = false,
   equalizerRuntime = null,
   audioRoute = null,
+  onAudioRouteConfirmed,
   isPlaying = false,
   outputObservation = null,
   readOnly = false,
@@ -590,6 +593,7 @@ export const SettingsModal: React.FC<Props> = ({
             ? <ExperimentalFeaturesSetting enabled={config.experimental_features === true} disabled={saving || connectionBusy} onChange={enabled => setConfig({ ...config, experimental_features: enabled })} />
             : null}
           network={<>
+            <LyricsOnlinePreference disabled={readOnly || nullOutputTestMode} />
             {fullModeEnabled(config) && (readOnly
               ? <p className="settings-section-note text-[color:var(--theme-fg-muted,#888)]">{t("sqliteLibrary.settingsUnavailable")}</p>
               : nullOutputTestMode
@@ -706,7 +710,8 @@ export const SettingsModal: React.FC<Props> = ({
             <AudioRouteStatus projection={audioRoute} selectedMode={selectedAudioMode} pendingSave={routeDraftChanged}
               playing={isPlaying} outputObservation={outputObservation} />
             {fullModeEnabled(config) && <EqualizerToggle shared={equalizerShared && !isDirect} available={equalizerAvailable}
-              runtime={equalizerRuntime} audioRoute={audioRoute} disabled={readOnly || saving || nullOutputTestMode} />}
+              runtime={equalizerRuntime} audioRoute={audioRoute} disabled={readOnly || saving || nullOutputTestMode}
+              onAudioRouteConfirmed={onAudioRouteConfirmed} />}
 
             {originalConfigRef.current && !originalConfigRef.current.first_run && audioRestartExpected(originalConfigRef.current, config) && (
               <p role="status" className="settings-section-note text-[color:var(--theme-fg-accent,#C9A45D)]">{t("settings.audioChangeNotice")}</p>

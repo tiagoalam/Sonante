@@ -227,7 +227,7 @@ test("player visits preserve Explore as the return section without replacing its
   let visit=visitPlayerTarget(null,localTarget,"explore");s.syncContext(c,false);
   visit=visitPlayerTarget(visit,plexTarget,"plex");assert.equal(visit.returnSection,"explore");
   s.syncContext(c,true);assert.deepEqual(s.getSnapshot().selected,before);
-  assert.match(appSource,/const centralSection = playerReturnSection \?\? \(mediaSource === "equalizer" \? eqReturnSectionRef\.current : mediaSource\)/);
+  assert.match(appSource,/const centralSection = playerReturnSection \?\? \(mediaSource === "equalizer" \|\| mediaSource === "autoeq" \? eqReturnSectionRef\.current : mediaSource\)/);
   assert.match(appSource,/else if \(playerTarget\) \{\s*closePlayerNavigation\(\);\s*\} else if \(exploreDetail\)/);
 });
 

@@ -76,11 +76,13 @@ mod tests {
     fn native_pulse_is_distinct_from_pipewire_compatibility_and_unknown_results() {
         for bytes in [b"Server Name: pulseaudio\n".as_slice(), b"User Name: fixture\nServer Name: PulseAudio\r\n"] {
             assert!(native_pulse(bytes));
+            assert_eq!(require_supported_with(|| native_pulse(bytes)), Err(PULSE_AUDIO_UNSUPPORTED.into()));
         }
         for bytes in [b"Server Name: PulseAudio (on PipeWire 1.4.2)\n".as_slice(),
             b"Server Name: PipeWire\n", b"Server Name: other\n", b"Server Name:\n", b"", b"bad \xff",
             b"Server Name: pulseaudio\nServer Name: PipeWire\n"] {
             assert!(!native_pulse(bytes));
+            assert_eq!(require_supported_with(|| native_pulse(bytes)), Ok(()), "unknown or PipeWire-compatible endpoints are not mislabeled native PulseAudio");
         }
     }
     #[test]

@@ -10,7 +10,7 @@
 
 A modern, open-source music player for enjoying your own albums, Plex and Navidrome in one place.
 
-[**Explore the website**](https://tiagoalam.github.io/Sonante/) · [**Download Sonante**](https://github.com/tiagoalam/Sonante/releases/latest) · [**Get started**](docs/GETTING_STARTED.md)
+[**Explore the website**](https://tiagoalam.github.io/Sonante/) · [**Download Sonante**](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.1) · [**Get started**](docs/GETTING_STARTED.md)
 
 **Available for Linux** · Windows in development
 
@@ -18,7 +18,7 @@ A modern, open-source music player for enjoying your own albums, Plex and Navidr
 
 </div>
 
-**0.7.0 homologation candidate — not published.** No 0.7.0 installation packages or public tag are available. The latest public release remains [v0.6.3](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.3).
+**Latest stable release: [Sonante 0.7.1](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.1).** Linux packages are available for Ubuntu/Debian, Fedora and Arch.
 
 ## More music. Less searching.
 
@@ -43,25 +43,23 @@ Browse your favorite artists, rediscover forgotten albums and spend more time li
 - **Customize your player:** Simple and Full modes, six themes, library layouts and immersive Now Playing screens.
 - **Look after your music:** local album diagnostics and reviewed FLAC metadata editing.
 - **Choose how to listen:** Shared and Direct audio-output options, EQ, audio-device selection and playback controls.
-- **Go further when you want:** online radio, Last.fm and ListenBrainz, and optional advanced features.
+- **Go further when you want:** online radio, lyrics, Last.fm and ListenBrainz, and optional advanced features.
 
 Some features are specific to certain music sources or interface modes. [See all the details](docs/LINUX_GUIDE.md).
 
 ## Download Sonante
 
-**The latest Linux release is v0.6.3.**
+[**Get Sonante 0.7.1 for Linux**](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.1) · [Release notes](RELEASE-NOTES.md) · [Checksums and source files](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.1)
 
-[**Get the latest release for Linux**](https://github.com/tiagoalam/Sonante/releases/latest)
-
-| Distribution | Download |
+| Distribution | Package |
 | --- | --- |
-| Ubuntu 22.04 or newer, and compatible derivatives (e.g. Linux Mint) | `.deb` |
-| Fedora 43 or newer, and compatible derivatives | `.rpm` |
-| Arch Linux / Manjaro (updated rolling releases) | `.pkg.tar.zst` |
+| Ubuntu 22.04 or newer and compatible derivatives | `.deb` |
+| Fedora 44 or newer and compatible derivatives | `.rpm` |
+| Current Arch Linux (glibc 2.43 or newer; OpenSSL 3 SONAMEs) | `.pkg.tar.zst` |
 
-Download the package that matches your distribution and install it using your package manager. The latest release also provides a checksum file for download verification. Versions and derivatives listed here describe expected package compatibility, not a guarantee of testing on every distribution: native library requirements still apply.
+Install the package that matches your distribution. Verify its SHA-256 against `SHA256SUMS.txt` before installation. The listed distributions describe expected compatibility; system library requirements still apply.
 
-**Windows is being developed** and isn't part of the current public release. Other platforms are not available yet.
+**Windows is in development** and is not part of the public release.
 
 ### Updating from an earlier public version
 
@@ -83,7 +81,7 @@ Switch between modes without losing your music collection, playback state or sav
 
 Sonante is open source and actively evolving. If you try it, we'd like to know how it works with your distribution, music library and audio setup.
 
-[**Report a problem**](https://github.com/tiagoalam/Sonante/issues/new/choose) · [Release notes](RELEASE-NOTES.md) · [Full Linux documentation](docs/LINUX_GUIDE.md)
+[**Report a problem**](https://github.com/tiagoalam/Sonante/issues/new/choose) · [Full Linux documentation](docs/LINUX_GUIDE.md)
 
 Please review logs and screenshots before posting them publicly, and remove any personal information or credentials.
 
@@ -92,9 +90,10 @@ Please review logs and screenshots before posting them publicly, and remove any 
 <details>
 <summary><strong>For developers and technical readers</strong></summary>
 
-Sonante is built with React, TypeScript, Tauri and Rust. Linux playback uses a supervised private MPD engine and ALSA.
+Sonante is built with React, TypeScript, Tauri and Rust. Linux playback uses a supervised MPD engine and ALSA.
 
 - [Detailed Linux guide, requirements and source builds](docs/LINUX_GUIDE.md)
+- [AutoEQ import and online catalog notes](docs/autoeq-import.md)
 - [UPnP receiver](docs/UPNP_RECEIVER.md)
 - [Remote-control API](docs/remote-control-api.md)
 - [Gapless validation notes](docs/GAPLESS_VALIDATION.md)

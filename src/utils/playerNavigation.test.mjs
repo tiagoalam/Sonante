@@ -251,7 +251,7 @@ test("IPC is read-only and player links use guarded identity resolution with a m
   assert.ok(app.includes('onNavigateToAlbum={playerSourceKind === "upnp" ? undefined : () => navigateFromPlayer("album")}'));
   assert.ok(app.includes('onNavigateToArtist={playerSourceKind === "upnp" ? undefined : () => navigateFromPlayer("artist")}'));
   assert.ok(app.includes('className={playerTarget ? "hidden" : "contents"}'));
-  assert.ok(app.includes('const centralSection = playerReturnSection ?? (mediaSource === "equalizer" ? eqReturnSectionRef.current : mediaSource)'));
+  assert.ok(app.includes('const centralSection = playerReturnSection ?? (mediaSource === "equalizer" || mediaSource === "autoeq" ? eqReturnSectionRef.current : mediaSource)'));
   assert.match(app, /else if \(playerTarget\) \{\s*closePlayerNavigation\(\)/);
   assert.match(app, /playerNavigationRequests\.invalidate\(\);\s*audioService\.next\(\)/);
   assert.match(app, /playerNavigationRequests\.invalidate\(\);\s*audioService\.previous\(\)/);

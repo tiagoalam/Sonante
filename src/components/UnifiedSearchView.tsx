@@ -22,7 +22,7 @@ import { SearchLane, localSearchIndex, localTrackRows, plexSearchPreview, navidr
 import { logError } from "../utils/frontendDiagnostics";
 import { usePlaybackAttempt } from "../utils/usePlaybackAttempt";
 import { PlaybackRequestNotice } from "./PlaybackRequestNotice";
-import { LocalBrowserView } from "./LocalBrowserView";
+import { LocalBrowserEntry } from "./LocalBrowserView";
 import { SearchAlbumArtwork } from "./SearchAlbumArtwork";
 import { AlbumView } from "./AlbumView";
 import { ArtistView } from "./ArtistView";
@@ -294,13 +294,13 @@ export const UnifiedSearchView: React.FC<Props> = ({ config, navidromeConfigured
       </div>
     </main>
     {currentDetail && <div className="flex min-h-0 min-w-0 flex-1 flex-col">{currentDetail.source === "local" && <div className="shrink-0 border-b border-[color:var(--theme-border-soft,#262626)] px-6 py-3 sm:px-8"><button type="button" onClick={back} className="flex items-center gap-2 rounded-lg px-2 py-1 text-sm text-[color:var(--theme-fg-secondary,#AAAAAA)] hover:text-[color:var(--theme-fg-accent,#E5A00D)]"><ArrowLeft size={17} />{t("unifiedSearch.back")}</button></div>}
-      {currentDetail.source === "local" ? <LocalBrowserView key={currentDetail.key} externalBackNavigation
+      {currentDetail.source === "local" ? <LocalBrowserEntry key={currentDetail.key} catalogContext={{
+        sqliteBacked, sqliteIndexing, sqliteSources, sqliteTagEditorEarlyAccessEnabled,
+      }} externalBackNavigation
         initialAlbumId={currentDetail.kind === "album" ? currentDetail.album.id : undefined}
         initialArtist={currentDetail.kind === "artist" ? currentDetail.artist.name : undefined} onClearInitialArtist={back}
         onAlbumNavigationBack={back} catalogRefreshRevision={catalogRefreshRevision} isPlaybackAvailable={isPlaybackAvailable}
-        isLibraryUpdating={status.is_updating} onlineArtworkEnabled={config.online_artwork_enabled} configuredLocalFolders={config.local_folders}
-        sqliteBacked={sqliteBacked} sqliteIndexing={sqliteIndexing} sqliteSources={sqliteSources}
-        sqliteTagEditorEarlyAccessEnabled={sqliteTagEditorEarlyAccessEnabled} />
+        isLibraryUpdating={status.is_updating} onlineArtworkEnabled={config.online_artwork_enabled} configuredLocalFolders={config.local_folders} />
       : currentDetail.source === "navidrome" ? currentDetail.kind === "album" ? <NavidromeView key={currentDetail.key} embedded available={isPlaybackAvailable&&active} initialAlbum={{account_id:currentDetail.connection.account_id!,id:currentDetail.album.id}} onAlbumBack={back} backLabel={t("unifiedSearch.back")}/>
       : <NavidromeArtistView key={currentDetail.key} artist={{account_id:currentDetail.connection.account_id!,id:currentDetail.artist.id}} revision={navidromeRevision} onBack={back} backLabel={t("unifiedSearch.back")} available={isPlaybackAvailable} active={active}/>
       : currentDetail.kind === "album" ? <AlbumView album={currentDetail.album} active={active} onBack={back} backLabel={t("unifiedSearch.back")} isPlaybackAvailable={isPlaybackAvailable}

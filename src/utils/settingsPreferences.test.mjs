@@ -108,6 +108,7 @@ async function modal(overrides = {}) {
     } },
     "./AudioRouteStatus": { AudioRouteStatus: function AudioRouteStatus({ pendingSave }) { return pendingSave ? React.createElement("p", { "data-audio-route-status": true }, "audioExperience.status.pendingSave") : null; } },
     "./EqualizerToggle": { EqualizerToggle: function EqualizerToggle(props) { return React.createElement("div", { "data-equalizer-toggle": true, "data-shared": props.shared }, React.createElement("input", { type: "checkbox", role: "switch", disabled: props.disabled })); } },
+    "./LyricsOnlinePreference": { LyricsOnlinePreference: function LyricsOnlinePreference() {} },
     "./ScrobblingSetting": { ScrobblingSetting: () => null },
     "./AppearanceSetting": { AppearanceSetting: function AppearanceSetting() {} },
     "../utils/usageMode": usageMode,
