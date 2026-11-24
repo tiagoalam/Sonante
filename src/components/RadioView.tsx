@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Radio, Search, Heart, Play, Square, Plus, Globe2, LoaderCircle, X, Pencil, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { SourceHeader } from "./SourceHeader";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { radioService } from "../services/radio";
 import { RadioDirectorySession, RADIO_PAGE_SIZE, radioStationMatches } from "../utils/radioDirectory";
@@ -96,7 +97,7 @@ export function RadioView({ active, available, status }: { active: boolean; avai
   const loading = tab === "directory" && directory.phase === "loading";
   return <section data-radio-view className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)]">
     <header className="shrink-0 border-b border-[color:var(--theme-border-soft,#292929)] px-6 py-6 sm:px-8">
-      <div className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="flex items-center gap-3 text-2xl font-bold"><Radio size={26} className="text-[color:var(--theme-fg-accent,#e5a00d)]" />{t("radio.title")}</h1><p className="mt-2 text-xs text-[color:var(--theme-fg-muted,#999)]">{t("radio.subtitle")}</p></div>
+      <div className="flex flex-wrap items-start justify-between gap-4"><SourceHeader icon={Radio} title={t("radio.title")} description={t("radio.subtitle")} />
         <button type="button" onClick={() => openManual()} className="flex items-center gap-2 rounded-lg border border-[color:var(--theme-border-soft,#3a3a3a)] px-4 py-2 text-xs hover:bg-[var(--theme-surface-raised,#252525)]"><Plus size={15} />{t("radio.addManual")}</button></div>
       <nav aria-label={t("radio.navigation")} className="mt-6 flex gap-2">{(["directory", "favorites"] as const).map(item => <button key={item} type="button" aria-pressed={tab === item} onClick={() => setTab(item)} className={`flex items-center gap-2 rounded-lg border px-5 py-2.5 text-sm ${tab === item ? "border-[color:var(--theme-border-accent,#e5a00d)] bg-[var(--theme-surface-accent,#332b15)] text-[color:var(--theme-fg-accent,#e5a00d)]" : "border-[color:var(--theme-border-soft,#333)] text-[color:var(--theme-fg-secondary,#aaa)]"}`}>{item === "directory" ? <Globe2 size={17} /> : <Heart size={17} />}{t(`radio.${item}`)}{item === "favorites" && <span className="text-xs opacity-70">({favorites.length})</span>}</button>)}</nav>
       <form className="mt-5 flex flex-wrap items-end gap-3" onSubmit={event => { event.preventDefault(); setQuery({ ...draft, offset: 0 }); }}>

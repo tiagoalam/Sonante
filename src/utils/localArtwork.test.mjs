@@ -310,7 +310,7 @@ test("cards and selected album retain covers, invalidate obsolete reads and resu
   assert.match(view, /if \(!selectedAlbum \|\| artworkBlocked\) return/);
   assert.match(view, /const persistedThumbnail = sqliteBacked \? localAlbumThumbnails\.get\(selectedAlbum\) : null[\s\S]*if \(persistedThumbnail\)[\s\S]*return;/);
   assert.match(view, /if \(active && cover\) setAlbumCover\(cover\)/);
-  assert.equal((view.match(/getLocalAlbumCover\(/g) ?? []).length, 3, "definition, cards and selected album share the bounded resolver");
+  assert.equal((view.match(/getLocalAlbumCover\(/g) ?? []).length, 4, "cards, focused carousel and selected album share the bounded resolver");
   assert.match(view, /sqliteBacked \? false : onlineEnabledRef\.current/);
   assert.match(view, /return \(\) => \{ active = false; \};\s*\}, \[selectedAlbum, artworkBlocked, sqliteBacked\]/);
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");

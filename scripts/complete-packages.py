@@ -494,13 +494,13 @@ def build_rpm(base, stage, output, work, version, revision, epoch):
     payload = work / 'payload.tar'
     write_tar(payload, stage, files, epoch)
     text = ('Name: sonante\nVersion: ' + version + '\nRelease: ' + revision + '\n'
-            'Summary: Sonante local and Plex music player\n'
+            'Summary: Sonante music player for Local, Plex and Subsonic libraries\n'
             'License: GPL-3.0-only AND GPL-2.0-or-later AND (GPL-3.0-only OR MPL-2.0)\n'
             'URL: https://github.com/tiagoalam/Sonante\nBuildArch: x86_64\nAutoReqProv: no\n'
             'Conflicts: sonante-bin, sonante-private\nObsoletes: sonante-bin < ' + version + ', sonante-private < ' + version + '\nRecommends: xdg-desktop-portal-gtk\n'
             + ''.join('Requires: ' + value + '\n' for value in sorted(requires))
             + '%global debug_package %{nil}\n%global __os_install_post %{nil}\nSource0: payload.tar\n'
-            '%description\nLocal and Plex music player with pinned Fedora audio runtimes.\n'
+            '%description\nMusic player for Local libraries, Plex, and compatible Subsonic/OpenSubsonic servers with pinned Fedora audio runtimes.\n'
             '%prep\n%build\n%install\nmkdir -p %{buildroot}\ntar -xf %{SOURCE0} -C %{buildroot}\n'
             '%files\n%defattr(-,root,root,-)\n' + ''.join('/' + name + '\n' for name in files))
     recipe = work / 'sonante.spec'
@@ -558,7 +558,7 @@ def arch_info(previous, version, revision, glibc, size, epoch):
             'Arch package must declare both OpenSSL 3 SONAME runtime requirements')
     require(not any(line.startswith('depend = openssl') for line in lines),
             'Arch package must depend on OpenSSL SONAMEs, not a version-specific package')
-    lines += ['pkgver = ' + version + '-' + revision, 'pkgdesc = Local and Plex music player with pinned audio runtimes',
+    lines += ['pkgver = ' + version + '-' + revision, 'pkgdesc = Local, Plex and Subsonic music player with pinned audio runtimes',
               'builddate = ' + str(epoch), 'packager = Tiago Alam', 'size = ' + str(size)]
     return '\n'.join(lines) + '\n'
 

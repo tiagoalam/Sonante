@@ -1,17 +1,84 @@
 import { LocalDiagnostics } from './LocalDiagnostics';
-import React, { useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { X, Sparkles, Cpu, HardDrive, Server, ShieldCheck, Heart, ExternalLink } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { KeyboardShortcutsHelp } from "./KeyboardShortcutsHelp";
 
+type AboutTab = "about" | "shortcuts";
 interface Props {
   onClose: () => void;
+  initialTab?: AboutTab;
 }
 
-export const AboutModal: React.FC<Props> = ({ onClose }) => {
+export const AboutModal: React.FC<Props> = ({ onClose, initialTab = "about" }) => {
   const { t } = useTranslation();
   const [channelError, setChannelError] = useState(false);
   const [sponsorError, setSponsorError] = useState(false);
+  const [activeTab, setActiveTab] = useState<AboutTab>(initialTab);
+  const id = useId();
+  const aboutTabId = id + "-about-tab";
+  const shortcutsTabId = id + "-shortcuts-tab";
+  const aboutPanelId = id + "-about-panel";
+  const shortcutsPanelId = id + "-shortcuts-panel";
+  const aboutTabRef = useRef<HTMLButtonElement>(null);
+  const shortcutsTabRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    returnFocusRef.current = previousFocus instanceof HTMLElement ? previousFocus : null;
+    (initialTab === "shortcuts" ? shortcutsTabRef : aboutTabRef).current?.focus({ preventScroll: true });
+    return () => {
+      const target = returnFocusRef.current;
+      if (target?.isConnected) target.focus({ preventScroll: true });
+    };
+  }, []);
+
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const tabs: AboutTab[] = ["about", "shortcuts"];
+    let nextTab: AboutTab | undefined;
+    if (event.key === "ArrowRight") nextTab = tabs[(tabs.indexOf(activeTab) + 1) % tabs.length];
+    else if (event.key === "ArrowLeft") nextTab = tabs[(tabs.indexOf(activeTab) + tabs.length - 1) % tabs.length];
+    else if (event.key === "Home") nextTab = tabs[0];
+    else if (event.key === "End") nextTab = tabs[tabs.length - 1];
+    if (!nextTab) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setActiveTab(nextTab);
+    (nextTab === "shortcuts" ? shortcutsTabRef : aboutTabRef).current?.focus({ preventScroll: true });
+  };
+
+  const handleDialogKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const dialog = event.currentTarget;
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )).filter(element => !element.closest("[hidden], [inert]"));
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const focusIsInside = dialog.contains(document.activeElement);
+    if (event.shiftKey && (document.activeElement === first || !focusIsInside)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !focusIsInside)) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   const openChannel = async (url: string) => {
     setChannelError(false);
     try { await openUrl(url); } catch { setChannelError(true); }
@@ -23,9 +90,10 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs select-none p-4">
-      <div className="bg-[var(--theme-surface-panel,#181818)] border border-[color:var(--theme-border-soft,#2B2B2B)] rounded-2xl w-full max-w-lg max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in duration-150">
+      <div role="dialog" aria-modal="true" aria-label={t("sidebar.about")} tabIndex={-1} onKeyDown={handleDialogKeyDown}
+        className="bg-[var(--theme-surface-panel,#181818)] border border-[color:var(--theme-border-soft,#2B2B2B)] rounded-2xl w-full max-w-lg max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in duration-150">
         {/* Cabeçalho */}
-        <div className="p-6 border-b border-[color:var(--theme-border-soft,#262626)] flex items-center justify-between bg-[var(--theme-surface-panel,#1D1D1D)]">
+        <div className="shrink-0 p-6 border-b border-[color:var(--theme-border-soft,#262626)] flex items-center justify-between bg-[var(--theme-surface-panel,#1D1D1D)]">
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 rounded-xl bg-[#E5A00D]/10 border border-[color:var(--theme-border-accent,#E5A00D)]/30 flex items-center justify-center text-[color:var(--theme-fg-accent,#E5A00D)]">
               <Sparkles size={22} />
@@ -34,22 +102,46 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
               <div className="flex items-center space-x-2">
                 <h2 className="text-lg font-black tracking-wider text-[color:var(--theme-fg-accent,#E5A00D)]">SONANTE</h2>
                 <span className="text-[10px] font-mono font-bold bg-[#E5A00D] text-black px-1.5 py-0.5 rounded-sm">
-                  {t("about.version", { version: "0.7.1" })}
+                  {t("about.version", { version: "0.7.2" })}
                 </span>
               </div>
               <p className="text-[11px] text-[color:var(--theme-fg-muted,#888888)]">{t("about.tagline")}</p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1.5 text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] rounded-lg hover:bg-[var(--theme-surface-raised,#252525)] transition-colors cursor-pointer"
+            aria-label={t("about.close")}
+            className="p-1.5 text-[color:var(--theme-fg-muted,#888888)] hover:text-[color:var(--theme-fg-primary,#ffffff)] rounded-lg hover:bg-[var(--theme-surface-raised,#252525)] transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--theme-fg-accent,#E5A00D)]"
           >
             <X size={18} />
           </button>
         </div>
 
-        {/* Conteúdo */}
-        <div className="p-6 min-h-0 overflow-y-auto space-y-4 text-xs">
+        <div role="tablist" aria-label={t("about.tabsLabel")} aria-orientation="horizontal" onKeyDown={handleTabKeyDown}
+          className="flex shrink-0 gap-1 overflow-x-auto border-b border-[color:var(--theme-border-soft,#262626)] px-4">
+          <button ref={aboutTabRef} type="button" role="tab" id={aboutTabId} aria-controls={aboutPanelId}
+            aria-selected={activeTab === "about"} tabIndex={activeTab === "about" ? 0 : -1}
+            onClick={() => setActiveTab("about")}
+            className={activeTab === "about"
+              ? "shrink-0 whitespace-nowrap border-b-2 border-[color:var(--theme-border-accent,#E5A00D)] px-3 py-3 text-sm font-semibold text-[color:var(--theme-fg-accent,#E5A00D)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
+              : "shrink-0 whitespace-nowrap border-b-2 border-transparent px-3 py-3 text-sm font-medium text-[color:var(--theme-fg-secondary,#bbbbbb)] hover:text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"}>
+            {t("about.tabAbout")}
+          </button>
+          <button ref={shortcutsTabRef} type="button" role="tab" id={shortcutsTabId} aria-controls={shortcutsPanelId}
+            aria-selected={activeTab === "shortcuts"} tabIndex={activeTab === "shortcuts" ? 0 : -1}
+            onClick={() => setActiveTab("shortcuts")}
+            className={activeTab === "shortcuts"
+              ? "shrink-0 whitespace-nowrap border-b-2 border-[color:var(--theme-border-accent,#E5A00D)] px-3 py-3 text-sm font-semibold text-[color:var(--theme-fg-accent,#E5A00D)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"
+              : "shrink-0 whitespace-nowrap border-b-2 border-transparent px-3 py-3 text-sm font-medium text-[color:var(--theme-fg-secondary,#bbbbbb)] hover:text-[color:var(--theme-fg-primary,#ffffff)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[color:var(--theme-border-accent,#E5A00D)]"}>
+            {t("about.tabShortcuts")}
+          </button>
+        </div>
+
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+        <section id={aboutPanelId} role="tabpanel" aria-labelledby={aboutTabId} tabIndex={activeTab === "about" ? 0 : -1}
+          hidden={activeTab !== "about"}
+          className={activeTab === "about" ? "min-h-0 flex-1 overflow-y-auto p-6 space-y-4 text-xs" : "hidden"}>
           <div className="space-y-3">
             <h3 className="text-[11px] font-bold text-[color:var(--theme-fg-secondary,#CCCCCC)] uppercase tracking-wider">
               {t("about.techTitle")}
@@ -129,10 +221,16 @@ export const AboutModal: React.FC<Props> = ({ onClose }) => {
             </button>
             {sponsorError && <p role="alert" className="text-[11px] text-[color:var(--theme-fg-muted,#888888)]">{t("about.sponsorOpenError")}</p>}
           </div>
+        </section>
+        <section id={shortcutsPanelId} role="tabpanel" aria-labelledby={shortcutsTabId} tabIndex={activeTab === "shortcuts" ? 0 : -1}
+          hidden={activeTab !== "shortcuts"}
+          className={activeTab === "shortcuts" ? "min-h-0 flex-1 overflow-y-auto p-6" : "hidden"}>
+          <KeyboardShortcutsHelp />
+        </section>
         </div>
 
         {/* Rodapé */}
-        <div className="px-6 py-4 border-t border-[color:var(--theme-border-soft,#262626)] bg-[var(--theme-surface-base,#161616)] flex items-center justify-between text-[11px] text-[color:var(--theme-fg-muted,#666666)]">
+        <div className="shrink-0 px-6 py-4 border-t border-[color:var(--theme-border-soft,#262626)] bg-[var(--theme-surface-base,#161616)] flex items-center justify-between text-[11px] text-[color:var(--theme-fg-muted,#666666)]">
           <div className="flex items-center space-x-1">
             <span>{t("about.builtWith")}</span>
             <Heart size={12} className="text-[color:var(--theme-fg-accent,#E5A00D)] fill-[#E5A00D]" />

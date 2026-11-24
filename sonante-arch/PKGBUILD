@@ -1,8 +1,8 @@
 # Maintainer: Tiago Alam <tiagoalam@protonmail.com>
 pkgname=sonante
-pkgver=0.7.1
+pkgver=0.7.2
 pkgrel=1
-pkgdesc="Linux desktop audio player for local and Plex libraries"
+pkgdesc="Linux audio player for Local, Plex, and Subsonic libraries"
 arch=('x86_64')
 url="https://github.com/tiagoalam/sonante"
 license=('GPL-3.0-only')

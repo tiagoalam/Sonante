@@ -601,7 +601,7 @@ test('Now Playing uses the same Radio Direct message without changing Local or P
  }await i18n.changeLanguage('en');
 });
 
-test('Audiophile Now Playing keeps the main signal card and renders observed ALSA as one responsive line below it',()=>{
+test('Audiophile Now Playing keeps observed ALSA inside the main signal card as one responsive line',()=>{
  const endpoint='hw:CARD=Fixture,DEV=0';
  const output={state:'observed',configured_endpoint:endpoint,card:2,device:0,subdevice:0,format:'S32_LE',rate:192000,channels:2};
  const viewProps={...props,layout:'audiophile',snapshot:{...snapshot,route:{mode:'direct',endpoint},playback:{...snapshot.playback,output_observation:output}}};
@@ -609,7 +609,7 @@ test('Audiophile Now Playing keeps the main signal card and renders observed ALS
  const mainStart=html.indexOf('data-signal-summary');
  const mainEnd=html.indexOf('</section>',mainStart);
  const observation=html.indexOf('data-alsa-observation="observed"');
- assert.ok(mainStart>=0&&mainEnd>=0&&observation>mainEnd,'observed output follows the main signal card');
+ assert.ok(mainStart>=0&&mainEnd>=0&&observation<mainEnd,'observed output remains inside the main signal card');
  assert.match(html,/<p[^>]*data-alsa-observation="observed"[^>]*class="[^"]*np-signal-observation[^"]*break-words/);
  assert.doesNotMatch(html,/<div[^>]*data-alsa-observation="observed"/);
  assert.match(html,/hw:2,0 · S32_LE · 192 kHz/);

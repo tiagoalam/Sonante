@@ -64,6 +64,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PlayerBar } from "./components/PlayerBar";
+import { SourceHeader } from "./components/SourceHeader";
 import { AlbumView } from "./components/AlbumView";
 import { ArtistView } from "./components/ArtistView";
 import { QueueDrawer } from "./components/QueueDrawer";
@@ -88,10 +89,11 @@ import { initialMediaSource, initialSqliteMediaSource, createMainSectionPreferen
   preferredSqlitePlexLibrary, saveSqlitePlexLibraryPreference, type MainSection } from "./utils/appBootstrap";
 import { createLibraryActivityVisibility } from "./utils/libraryActivityLifecycle";
 import { FavoritesView } from "./components/FavoritesView";
+import { PersonalCollectionSelectionProvider, usePersonalCollectionSelection } from "./components/PersonalCollectionSelection";
+import { PersonalCollectionsView } from "./components/PersonalCollectionsView";
 import { PlaylistPickerModal } from "./components/PlaylistPickerModal";
 import type { SettingsPage } from "./components/SettingsPages";
 import { SettingsModal, QueueClearConfirmationDialog, formatConfigError } from "./components/SettingsModal";
-import { KeyboardShortcutsHelp } from "./components/KeyboardShortcutsHelp";
 import { WelcomeWizard } from "./components/WelcomeWizard";
 import { DirectVolumeChoiceDialog } from "./components/DirectVolumeChoiceDialog";
 import { PlexImage } from "./components/PlexImage";
@@ -107,7 +109,7 @@ import { AlbumGenreGrid } from "./components/AlbumGenreGrid";
 import { SidebarNavItem } from "./components/SidebarNavItem";
 import { plexService } from "./services/plex";
 import { audioService, LOCAL_LIBRARY_RECONCILED_EVENT } from "./services/audio";
-import { sqliteLibrary, type Source as SqliteSource, type SqliteIndexProgress } from "./services/sqliteLibrary";
+import { sqliteLibrary, type Source as SqliteSource, type SqliteIndexProgress, type PersonalCollectionMember, type PersonalCollectionTarget } from "./services/sqliteLibrary";
 import { configService } from "./services/config";
 import { createImportArtworkCache } from "./utils/importArtworkCache";
 import { createLocalImportPreview } from "./utils/localImportPreview";
@@ -325,6 +327,12 @@ const PlexAlbumCard = memo<{
   isPlaybackAvailable,
   layout = "grid",
 }) => {
+  const { t } = useTranslation();
+  const collectionSelection = usePersonalCollectionSelection();
+  const collectionAlbum = album.server_id && album.library_id
+    ? { source: "plex" as const, serverId: album.server_id, libraryId: album.library_id, ratingKey: album.rating_key, title: album.title, artist: album.artist }
+    : null;
+  const selectedForCollection = collectionAlbum ? collectionSelection.isSelected(collectionAlbum) : false;
   const cardContext = useMemo(() => ({}), [album]);
   const cardActions = useQueueInsertion(cardContext, isPlaybackAvailable);
   const albumRequest = { track: { title: album.title, artist: album.artist, album: album.title }, scope: "album" as const,
@@ -342,7 +350,7 @@ const PlexAlbumCard = memo<{
     </div>;
   }
   return (
-    <div onContextMenu={event => cardActions.open(event, albumRequest)}
+    <div data-album-open onContextMenu={event => cardActions.open(event, albumRequest)}
       onClick={() => onSelect(album)}
       className="group flex flex-col cursor-pointer relative"
     >
@@ -361,6 +369,14 @@ const PlexAlbumCard = memo<{
             <Disc3 size={40} />
           </div>
         )}
+
+        {collectionSelection.enabled && collectionAlbum && <button type="button" data-theme-surface="contrast"
+          aria-pressed={selectedForCollection} aria-label={t(selectedForCollection ? "collections.deselectAlbum" : "collections.selectAlbum", { title: album.title })}
+          title={t(selectedForCollection ? "collections.deselectAlbum" : "collections.selectAlbum", { title: album.title })}
+          onClick={event => { event.stopPropagation(); collectionSelection.toggle(collectionAlbum); }}
+          className={`absolute left-2 top-2 z-20 rounded-full p-1.5 shadow backdrop-blur-xs ${selectedForCollection ? "bg-[var(--theme-control-accent,#E5A00D)] text-[color:var(--theme-control-on-accent,#000)]" : "bg-black/60 text-white/85 hover:text-white"}`}>
+          {selectedForCollection ? <CheckCircle2 size={14} /> : <ListPlus size={14} />}
+        </button>}
 
 
         <button data-theme-surface="contrast"
@@ -387,7 +403,7 @@ const PlexAlbumCard = memo<{
         </div>
       </div>
 
-      <span className="text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)] truncate" title={album.title}>
+      <span className="album-card-caption text-sm font-semibold text-[color:var(--theme-fg-primary,#ffffff)] truncate" title={album.title}>
         {album.title}
       </span>
       <button
@@ -399,12 +415,12 @@ const PlexAlbumCard = memo<{
             onSelectArtist(artistKey, album.artist);
           }
         }}
-        className="text-xs text-[color:var(--theme-fg-secondary,#999999)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate mt-0.5 text-left cursor-pointer"
+        className="album-card-caption text-xs text-[color:var(--theme-fg-secondary,#999999)] hover:text-[color:var(--theme-fg-accent,#E5A00D)] transition-colors truncate mt-0.5 text-left cursor-pointer"
       >
         {album.artist}
       </button>
       {album.year && (
-        <span className="text-[11px] text-[color:var(--theme-fg-muted,#666666)] mt-0.5">
+        <span className="album-card-caption album-card-detail text-[11px] text-[color:var(--theme-fg-muted,#666666)] mt-0.5">
           {album.year}
         </span>
       )}
@@ -492,6 +508,9 @@ export function App() {
   };
   const [playerNavigationError, setPlayerNavigationError] = useState(false);
   const playerNavigationRequests = useMemo(() => new PlayerNavigationRequests(), []);
+  const [collectionToOpen, setCollectionToOpen] = useState<number | null>(null);
+  const collectionNavigationGeneration = useRef(0);
+  useEffect(() => { collectionNavigationGeneration.current++; }, [mediaSource]);
   // Keep the previous view (including its context and scroll) mounted while visiting the player target.
   const centralSection = playerReturnSection ?? (mediaSource === "equalizer" || mediaSource === "autoeq" ? eqReturnSectionRef.current : mediaSource);
   const mainSectionPreferenceRef = useRef<ReturnType<typeof createMainSectionPreference> | null>(null);
@@ -537,6 +556,7 @@ export function App() {
   // Opaque identities prevent credential values from reaching cards, errors or persisted navigation.
   const plexConnectionIdentity = useMemo(() => ({}), [config?.plex_server_id, config?.plex_url, config?.plex_token, config?.sources?.plex]);
   const plexBrowserIdentity = useMemo(() => ({}), [plexConnectionIdentity, selectedLibrary?.key]);
+  const collectionSourceContext = useMemo(() => ({}), [plexConnectionIdentity, navidromeConfiguration.revision, localCatalog.albums]);
   const plexBrowserIdentityRef = useRef(plexBrowserIdentity);
   plexBrowserIdentityRef.current = plexBrowserIdentity;
   const plexCatalogRetryRef = useRef<unknown>(null);
@@ -853,6 +873,45 @@ export function App() {
       sqliteMode ? sqliteLibrary.albumForTrack : undefined,
     );
   };
+
+  const openCollectionAlbum = useCallback(async (member: PersonalCollectionMember, resolved: PersonalCollectionTarget) => {
+    const own = ++collectionNavigationGeneration.current;
+    setPlayerNavigationError(false);
+    try {
+      let target: PlayerNavigationTarget;
+      if (resolved.source === "local") {
+        if (!sqliteMode || !sourceEnabled(config, "local")) throw new Error("unavailable");
+        const catalog = localAlbumCatalog.getSnapshot();
+        if (catalog.loading || !catalog.loaded || catalog.error || catalog.saveBlocked || catalog.mpdBusy
+          || playbackStatus.is_updating || catalog.albums !== localCatalog.albums) throw new Error("unavailable");
+        const album = catalog.albums.find(item => item.id === resolved.album_id);
+        if (!album) throw new Error("unresolved");
+        const groups = await audioService.getLocalAlbumTracks(album.id);
+        const latest = localAlbumCatalog.getSnapshot();
+        if (own !== collectionNavigationGeneration.current) return;
+        if (!groups.length || latest.albums !== catalog.albums || latest.loading || !latest.loaded || latest.error
+          || latest.saveBlocked || latest.mpdBusy || playbackStatus.is_updating
+          || !latest.albums.some(item => item.id === album.id)) throw new Error("changed");
+        target = { kind: "local", view: "album", albumId: album.id, verified: { groups, catalog: latest.albums } };
+      } else if (resolved.source === "plex") {
+        if (!sourceEnabled(config, "plex") || config?.plex_server_id !== resolved.server_id) throw new Error("unavailable");
+        target = {
+          kind: "plex", view: "album",
+          album: { rating_key: resolved.rating_key, title: member.title, artist: member.artist ?? "", server_id: resolved.server_id, library_id: resolved.library_id },
+          artist: { rating_key: "", name: member.artist ?? "", server_id: resolved.server_id, library_id: resolved.library_id },
+        };
+      } else {
+        if (!sourceEnabled(config, "navidrome")) throw new Error("unavailable");
+        target = { kind: "navidrome", view: "album", accountId: resolved.account_id, albumId: resolved.album_id, artistId: null };
+      }
+      if (own === collectionNavigationGeneration.current) {
+        setPlayerNavigation(previous => visitPlayerTarget(previous, target, centralSection ?? "collections"));
+      }
+    } catch {
+      if (own === collectionNavigationGeneration.current) setPlayerNavigationError(true);
+    }
+  }, [sqliteMode, config, localCatalog.albums, localCatalog.loaded, localCatalog.loading, localCatalog.error,
+    localCatalog.saveBlocked, localCatalog.mpdBusy, playbackStatus.is_updating, centralSection]);
 
   const navigateFromNowPlaying = async (view: "album" | "artist") => {
     if (nowPlayingHosting.getSnapshot().busy) return;
@@ -1837,14 +1896,17 @@ export function App() {
   };
 
   useEffect(() => {
-    if (!config || experimental) return;
+    if (!config) return;
     const fallback = initialMediaSource(config) ?? 'radio';
+    if (mediaSource === "collections" && !sqliteMode) { resetAllNavigation(); mainSectionPreference.navigate(fallback); }
+    if (playerReturnSection === "collections" && !sqliteMode) setPlayerNavigation(previous => previous ? { ...previous, returnSection: fallback } : null);
+    if (experimental) return;
     const autoEqFallback = disabledAutoEqFallback(mediaSource, experimental);
     if (autoEqFallback) mainSectionPreference.navigate(autoEqFallback);
     else if (isExperimentalSection(mediaSource)) { resetAllNavigation(); mainSectionPreference.navigate(fallback); }
     if (disabledAutoEqFallback(playerReturnSection, experimental)) setPlayerNavigation(previous => previous ? { ...previous, returnSection: "equalizer" } : null);
     else if (isExperimentalSection(playerReturnSection)) setPlayerNavigation(previous => previous ? { ...previous, returnSection: fallback } : null);
-  }, [experimental, config, mediaSource, playerReturnSection]);
+  }, [experimental, config, mediaSource, playerReturnSection, sqliteMode]);
 
   useEffect(() => {
     if (!config || fullMode) return;
@@ -2050,6 +2112,16 @@ export function App() {
     || selectedPlexUnknownYear
     || activePlexGenre !== null,
   );
+  const plexHeaderCount = searchQuery.trim().length > 0 ? null
+    : activeCollection ? t("plex.albumsCount", { count: collectionAlbums.length })
+      : fallbackPlexArtist ? t("plex.albumsCount", { count: fallbackPlexArtistAlbums.length })
+        : activePlexGenre !== null ? t("plex.albumsCount", { count: selectedPlexGenreAlbums.length })
+          : selectedPlexUnknownYear || selectedPlexYear !== null ? t("plex.albumsCount", { count: selectedPlexYearAlbums.length })
+            : selectedPlexDecadeSummary ? t("plex.albumsCount", { count: selectedPlexDecadeSummary.albumCount })
+              : plexViewMode === "collections" ? t("plex.collectionsCount", { count: collections.length })
+                : plexViewMode === "artists" ? t("plex.artistsCount", { count: plexArtists.length })
+                  : t("plex.albumsCount", { count: albums.length });
+  const showPlexSourceHeader = !hasPlexSubview && searchQuery.trim().length === 0;
   const visibleSearchAlbums = useMemo(() => filterAlbumsByGenre(searchResults?.albums ?? [],
     activePlexGenre), [searchResults, activePlexGenre]);
   const showPlexAlbumIndex = searchQuery.trim().length === 0
@@ -2123,7 +2195,7 @@ export function App() {
   };
 
   return (
-    <ExperimentalFeaturesContext.Provider value={experimental}><div className="h-screen w-screen flex flex-col bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-primary,#E0E0E0)] overflow-hidden select-none"
+    <PersonalCollectionSelectionProvider enabled={sqliteMode} onViewCollection={id => { resetAllNavigation(); setCollectionToOpen(id); mainSectionPreference.navigate("collections"); }}><ExperimentalFeaturesContext.Provider value={experimental}><div className="h-screen w-screen flex flex-col bg-[var(--theme-surface-base,#121212)] text-[color:var(--theme-fg-primary,#E0E0E0)] overflow-hidden select-none"
       onClickCapture={() => playerNavigationRequests.invalidate()}
       onChangeCapture={() => playerNavigationRequests.invalidate()}>
       <div className="min-h-0 flex-1 flex overflow-hidden">
@@ -2204,6 +2276,8 @@ export function App() {
                     mainSectionPreference.navigate("playlists");
                   }}
                 />
+                {sqliteMode && <SidebarNavItem icon={Layers3} label={t("collections.navTitle")} active={mediaSource === "collections"}
+                  onClick={() => { resetAllNavigation(); mainSectionPreference.navigate("collections"); }} />}
               </nav>
             </section>
           </div>
@@ -2216,7 +2290,6 @@ export function App() {
                 resetAllNavigation();
                 mainSectionPreference.navigate("equalizer");
               }} />}
-            <KeyboardShortcutsHelp />
             <SidebarNavItem diagnosticAction="settings"
               icon={Settings}
               label={t("sidebar.preferences")}
@@ -2268,7 +2341,7 @@ export function App() {
         <div id={showExploreTabs ? "explore-source-panel" : undefined} role={showExploreTabs ? "tabpanel" : undefined}
           aria-labelledby={showExploreTabs ? `explore-source-${activeExploreSource}` : undefined}
           className={isExploreSection ? "flex min-h-0 min-w-0 flex-1" : "contents"}>
-        {(!fullMode && isAdvancedSection(centralSection)) || (!experimental && isExperimentalSection(centralSection)) ? null : centralSection && (centralSection === 'local' || centralSection === 'plex' || centralSection === 'navidrome' || centralSection === 'explore') && !sourceEnabled(config, centralSection === 'explore' ? 'local' : centralSection) ? <main className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center"><p className="text-sm text-[color:var(--theme-fg-secondary,#999)]">{t('sources.disabledNotice')}</p><button type="button" className="rounded-lg bg-[var(--theme-control-accent,#E5A00D)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-control-on-accent,#000)]" onClick={() => configureSource(centralSection === 'explore' ? 'local' : centralSection)}>{t('sources.enableConfigure')}</button></main> : fullMode && centralSection === "navidrome" && navidromeArea === "explore" ? <NavidromeExploreView available={isPlaybackAvailable} active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} revision={navidromeConfiguration.revision} onConfigure={() => configureSource("navidrome")} /> : centralSection === "navidrome" ? <NavidromeView onCatalogAvailability={phase => sourceReadiness.report('navidrome', phase)} available={isPlaybackAvailable} active={!playerTarget&&!showSettings&&!showAbout&&!nowPlayingEmbedded} onConfigure={() => configureSource("navidrome")} /> : centralSection === "search" ? (
+        {(!fullMode && isAdvancedSection(centralSection)) || (!experimental && isExperimentalSection(centralSection)) ? null : centralSection && (centralSection === 'local' || centralSection === 'plex' || centralSection === 'navidrome' || centralSection === 'explore') && !sourceEnabled(config, centralSection === 'explore' ? 'local' : centralSection) ? <main className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center"><p className="text-sm text-[color:var(--theme-fg-secondary,#999)]">{t('sources.disabledNotice')}</p><button type="button" className="rounded-lg bg-[var(--theme-control-accent,#E5A00D)] px-4 py-2 text-sm font-semibold text-[color:var(--theme-control-on-accent,#000)]" onClick={() => configureSource(centralSection === 'explore' ? 'local' : centralSection)}>{t('sources.enableConfigure')}</button></main> : centralSection === "collections" && sqliteMode ? <PersonalCollectionsView sourceContext={collectionSourceContext} requestedCollectionId={collectionToOpen} onRequestHandled={() => setCollectionToOpen(null)} onOpenAlbum={(member, target) => { void openCollectionAlbum(member, target); }} onContextChange={() => { collectionNavigationGeneration.current++; }} /> : fullMode && centralSection === "navidrome" && navidromeArea === "explore" ? <NavidromeExploreView available={isPlaybackAvailable} active={!playerTarget && !showSettings && !showAbout && !nowPlayingEmbedded} revision={navidromeConfiguration.revision} onConfigure={() => configureSource("navidrome")} /> : centralSection === "navidrome" ? <NavidromeView onCatalogAvailability={phase => sourceReadiness.report('navidrome', phase)} available={isPlaybackAvailable} active={!playerTarget&&!showSettings&&!showAbout&&!nowPlayingEmbedded} onConfigure={() => configureSource("navidrome")} /> : centralSection === "search" ? (
           <UnifiedSearchView config={config} navidromeConfigured={navidromeConfiguration.configured} navidromeRevision={navidromeConfiguration.revision} plexIdentity={plexConnectionIdentity} status={playbackStatus}
             sqliteBacked={sqliteMode}
             sqliteIndexing={sqliteIndexing} sqliteSources={sqliteSources}
@@ -2414,7 +2487,7 @@ export function App() {
         ) : (
           <main className="flex-1 flex flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)]">
             <div className="flex flex-wrap items-center justify-between gap-4 px-8 pt-8 pb-4">
-              <div className="flex items-center space-x-3">
+              <div className="flex min-w-0 items-start space-x-3">
                 {hasPlexSubview && (
                   <button
                     onClick={handlePlexContextBack}
@@ -2424,7 +2497,8 @@ export function App() {
                     <ArrowLeft size={16} />
                   </button>
                 )}
-                <div>
+                {showPlexSourceHeader ? <SourceHeader icon={Disc3} title={t("sources.names.plex")}
+                  description={t("sourceHeaders.plexDescription")} meta={plexHeaderCount} accentClassName="text-orange-400" /> : <div>
                   <h2 className="text-2xl font-bold text-[color:var(--theme-fg-primary,#ffffff)] tracking-tight">
                     {searchQuery.trim().length > 0
                       ? t("plex.resultsFor", { query: searchQuery })
@@ -2442,26 +2516,8 @@ export function App() {
                                 ? `${selectedPlexDecade}s`
                                 : plexViewMode === "genres" ? t("common.genresLabel") : t("player.source.plex")}
                   </h2>
-                  {searchQuery.trim().length === 0 && (
-                    <p className="mt-1 text-sm font-medium tabular-nums text-[color:var(--theme-fg-secondary,#BBBBBB)]">
-                      {activeCollection
-                        ? t("plex.albumsCount", { count: collectionAlbums.length })
-                        : fallbackPlexArtist
-                          ? t("plex.albumsCount", { count: fallbackPlexArtistAlbums.length })
-                          : activePlexGenre !== null
-                            ? t("plex.albumsCount", { count: selectedPlexGenreAlbums.length })
-                          : selectedPlexUnknownYear || selectedPlexYear !== null
-                            ? t("plex.albumsCount", { count: selectedPlexYearAlbums.length })
-                            : selectedPlexDecadeSummary
-                              ? t("plex.albumsCount", { count: selectedPlexDecadeSummary.albumCount })
-                        : plexViewMode === "collections"
-                          ? t("plex.collectionsCount", { count: collections.length })
-                          : plexViewMode === "artists"
-                            ? t("plex.artistsCount", { count: plexArtists.length })
-                          : t("plex.albumsCount", { count: albums.length })}
-                    </p>
-                  )}
-                </div>
+                  {plexHeaderCount && <p className="mt-1 text-sm font-medium tabular-nums text-[color:var(--theme-fg-secondary,#BBBBBB)]">{plexHeaderCount}</p>}
+                </div>}
               </div>
             </div>
 
@@ -2652,14 +2708,14 @@ export function App() {
                         <h3 className="text-sm font-bold text-[color:var(--theme-fg-muted,#888888)] uppercase tracking-wider mb-3">
                           {t("plex.albums")} <span className="tabular-nums">({visibleSearchAlbums.length})</span>
                         </h3>
-                        <AlbumCatalog presentation={plexAlbumPresentation} items={visibleSearchAlbums}
+                        <AlbumCatalog sourceLabel={t("sources.names.plex")} presentation={plexAlbumPresentation} items={visibleSearchAlbums}
                           getItemKey={album => album.rating_key} scrollContainer={plexScrollContainer}
                           resetKey={JSON.stringify([selectedLibrary?.key, "search", searchQuery])}
                           renderItem={(album) => {
                             const albumKey = String(album.rating_key || "");
                             return (
                               <PlexAlbumCard
-                                layout={plexAlbumPresentation.layout}
+                                layout={plexAlbumPresentation.layout === 'carousel' || plexAlbumPresentation.layout === 'shelf' ? 'grid' : plexAlbumPresentation.layout}
                                 key={albumKey || album.title}
                                 album={album}
                                 isFav={albumKey ? plexFavIds.has(albumKey) : false}
@@ -2774,14 +2830,14 @@ export function App() {
                   {t("plex.loading")}
                 </div>
               ) : activeCollection ? (
-                <AlbumCatalog presentation={plexAlbumPresentation} items={collectionAlbums}
+                <AlbumCatalog sourceLabel={t("sources.names.plex")} presentation={plexAlbumPresentation} items={collectionAlbums}
                   getItemKey={album => album.rating_key} scrollContainer={plexScrollContainer}
                   resetKey={JSON.stringify([selectedLibrary?.key, "collection", activeCollection.rating_key])}
                   renderItem={(album) => {
                     const albumKey = String(album.rating_key || "");
                     return (
                       <PlexAlbumCard
-                        layout={plexAlbumPresentation.layout}
+                        layout={plexAlbumPresentation.layout === 'carousel' || plexAlbumPresentation.layout === 'shelf' ? 'grid' : plexAlbumPresentation.layout}
                         key={albumKey || album.title}
                         album={album}
                         isFav={albumKey ? plexFavIds.has(albumKey) : false}
@@ -2799,6 +2855,7 @@ export function App() {
                 />
               ) : fallbackPlexArtist ? (
                 <AlbumCatalog
+                  sourceLabel={t("sources.names.plex")}
                   presentation={plexAlbumPresentation}
                   items={fallbackPlexArtistAlbums}
                   getItemKey={(album) => album.rating_key}
@@ -2808,7 +2865,7 @@ export function App() {
                     const albumKey = String(album.rating_key || "");
                     return (
                       <PlexAlbumCard
-                        layout={plexAlbumPresentation.layout}
+                        layout={plexAlbumPresentation.layout === 'carousel' || plexAlbumPresentation.layout === 'shelf' ? 'grid' : plexAlbumPresentation.layout}
                         album={album}
                         isFav={albumKey ? plexFavIds.has(albumKey) : false}
                         onSelect={setActiveAlbum}
@@ -2825,6 +2882,7 @@ export function App() {
                 />
               ) : selectedPlexYear !== null || selectedPlexUnknownYear ? (
                 <AlbumCatalog
+                  sourceLabel={t("sources.names.plex")}
                   presentation={plexAlbumPresentation}
                   items={selectedPlexYearAlbums}
                   getItemKey={(album) => album.rating_key}
@@ -2834,7 +2892,7 @@ export function App() {
                     const albumKey = String(album.rating_key || "");
                     return (
                       <PlexAlbumCard
-                        layout={plexAlbumPresentation.layout}
+                        layout={plexAlbumPresentation.layout === 'carousel' || plexAlbumPresentation.layout === 'shelf' ? 'grid' : plexAlbumPresentation.layout}
                         album={album}
                         isFav={albumKey ? plexFavIds.has(albumKey) : false}
                         onSelect={setActiveAlbum}
@@ -2852,6 +2910,7 @@ export function App() {
               ) : plexViewMode === "genres" ? (
                 activePlexGenre !== null ? (
                   <AlbumCatalog
+                    sourceLabel={t("sources.names.plex")}
                     presentation={plexAlbumPresentation}
                     items={selectedPlexGenreAlbums}
                     getItemKey={(album) => album.rating_key}
@@ -2861,7 +2920,7 @@ export function App() {
                       const albumKey = String(album.rating_key || "");
                       return (
                         <PlexAlbumCard
-                          layout={plexAlbumPresentation.layout}
+                          layout={plexAlbumPresentation.layout === 'carousel' || plexAlbumPresentation.layout === 'shelf' ? 'grid' : plexAlbumPresentation.layout}
                           album={album}
                           isFav={albumKey ? plexFavIds.has(albumKey) : false}
                           onSelect={setActiveAlbum}
@@ -2880,6 +2939,7 @@ export function App() {
                   albumCountLabel={count => t("plex.albumsCount", { count })} />
               ) : plexViewMode === "albums" ? (
                 <AlbumCatalog
+                  sourceLabel={t("sources.names.plex")}
                   presentation={plexAlbumPresentation}
                   ref={plexGridRef}
                   items={sortedPlexAlbums}
@@ -2890,7 +2950,7 @@ export function App() {
                     const albumKey = String(album.rating_key || "");
                     return (
                       <PlexAlbumCard
-                        layout={plexAlbumPresentation.layout}
+                        layout={plexAlbumPresentation.layout === 'carousel' || plexAlbumPresentation.layout === 'shelf' ? 'grid' : plexAlbumPresentation.layout}
                         album={album}
                         isFav={albumKey ? plexFavIds.has(albumKey) : false}
                         onSelect={(a) => setActiveAlbum(a)}
@@ -3230,7 +3290,7 @@ export function App() {
 
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
       <DirectVolumeChoiceDialog />
-    </div></ExperimentalFeaturesContext.Provider>
+    </div></ExperimentalFeaturesContext.Provider></PersonalCollectionSelectionProvider>
   );
 }
 

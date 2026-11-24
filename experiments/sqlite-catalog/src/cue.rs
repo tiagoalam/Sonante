@@ -308,20 +308,34 @@ fn parse_timestamp(value: &str) -> Result<u64, String> {
 }
 
 fn parse_rem(rest: &str, tags: &mut Tags) -> Result<(), String> {
-    let Some((key, value)) = rest.split_once(char::is_whitespace) else {
+    let rest = rest.trim();
+    if rest.is_empty() {
         return Err("CUE REM directive is incomplete".into());
+    }
+    let (key, value) = match rest.split_once(char::is_whitespace) {
+        Some((key, value)) => (key, Some(value.trim())),
+        None => (rest, None),
     };
     let key = key.to_ascii_uppercase();
     match key.as_str() {
-        "GENRE" => tags.genre = Some(parse_text_value(value.trim())?),
-        "DATE" | "YEAR" => tags.date = Some(parse_text_value(value.trim())?),
+        "GENRE" => tags.genre = Some(parse_rem_value(value)?),
+        "DATE" | "YEAR" => tags.date = Some(parse_rem_value(value)?),
         "DISCNUMBER" | "DISC" => {
-            let value = parse_text_value(value.trim())?;
+            let value = parse_rem_value(value)?;
             tags.disc_number = Some(value.parse().map_err(|_| "CUE disc number is invalid")?);
         }
+        // REM keys are extensible. Unknown annotations, including valueless
+        // flags used by some ripping tools, have no bearing on track safety.
         _ => {}
     }
     Ok(())
+}
+
+fn parse_rem_value(value: Option<&str>) -> Result<String, String> {
+    let value = value
+        .filter(|value| !value.is_empty())
+        .ok_or("CUE REM known directive is missing a value")?;
+    parse_text_value(value)
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -360,6 +374,41 @@ mod tests {
         );
         assert_eq!(sheet.tracks[2].start_frame, 375);
         assert_eq!(sheet.tracks[2].file, PathBuf::from("second.flac"));
+    }
+
+    #[test]
+    fn index_00_and_gap_directives_do_not_change_index_01_ranges() {
+        let sheet = parse(b"FILE image.wv WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 00 00:01:74\nPREGAP 00:00:02\nINDEX 01 00:02:00\nPOSTGAP 00:00:01\nTRACK 03 AUDIO\nINDEX 00 00:03:74\nINDEX 01 00:04:00\n").unwrap();
+
+        assert_eq!(sheet.tracks.len(), 3);
+        assert_eq!(
+            sheet
+                .tracks
+                .iter()
+                .map(|track| (track.start_frame, track.end_frame))
+                .collect::<Vec<_>>(),
+            [(0, Some(150)), (150, Some(300)), (300, None)]
+        );
+    }
+
+    #[test]
+    fn ignores_valueless_unknown_rem_but_validates_known_rem_values() {
+        let sheet = parse(b"REM BAZAR_VinylRiP\nREM LABEL Impex Records\nREM GENRE Jazz\nREM DATE 2020\nFILE \"disc.wv\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n").unwrap();
+        assert_eq!(sheet.tracks.len(), 1);
+        assert_eq!(sheet.tracks[0].file, PathBuf::from("disc.wv"));
+        assert_eq!(sheet.tracks[0].genre.as_deref(), Some("Jazz"));
+        assert_eq!(sheet.tracks[0].date.as_deref(), Some("2020"));
+
+        for malformed in [
+            b"REM GENRE\nFILE disc.wv WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n".as_slice(),
+            b"REM DATE \"\"\nFILE disc.wv WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n".as_slice(),
+            b"REM DISCNUMBER nope\nFILE disc.wv WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n"
+                .as_slice(),
+            b"FILE ../disc.wv WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n".as_slice(),
+            b"FILE disc.wv WAVE\nTRACK 01 AUDIO\nINDEX 01 00:60:00\n".as_slice(),
+        ] {
+            assert!(parse(malformed).is_err());
+        }
     }
 
     #[test]

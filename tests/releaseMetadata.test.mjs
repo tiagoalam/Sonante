@@ -2,33 +2,35 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const read = path => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const read = path => readFileSync(new URL("../" + path, import.meta.url), "utf8");
 const json = path => JSON.parse(read(path));
 
-test("active product manifests and package recipe agree on Sonante 0.7.1", () => {
-  assert.equal(json("package.json").version, "0.7.1");
+test("active product manifests and package recipe agree on Sonante 0.7.2", () => {
+  assert.equal(json("package.json").version, "0.7.2");
   const npmLock = json("package-lock.json");
-  assert.equal(npmLock.version, "0.7.1");
-  assert.equal(npmLock.packages[""].version, "0.7.1");
+  assert.equal(npmLock.version, "0.7.2");
+  assert.equal(npmLock.packages[""].version, "0.7.2");
 
-  assert.match(read("src-tauri/Cargo.toml"), /^version = "0\.7\.1"$/m);
-  assert.match(read("src-tauri/Cargo.lock"), /\[\[package\]\]\nname = "sonante"\nversion = "0\.7\.1"/);
-  assert.equal(json("src-tauri/tauri.conf.json").version, "0.7.1");
-  assert.match(read("sonante-arch/PKGBUILD"), /^pkgver=0\.7\.1$/m);
-  assert.match(read("sonante-arch/PKGBUILD"), /_source_tag="v\$\{pkgver\}"/);
+  assert.ok(read("src-tauri/Cargo.toml").includes('version = "0.7.2"'));
+  assert.ok(read("src-tauri/Cargo.lock").includes('name = "sonante"\nversion = "0.7.2"'));
+  assert.equal(json("src-tauri/tauri.conf.json").version, "0.7.2");
+  assert.ok(read("sonante-arch/PKGBUILD").includes("pkgver=0.7.2"));
+  assert.ok(read("sonante-arch/PKGBUILD").includes("_source_tag="));
 });
 
-test("release docs identify 0.7.1 as the stable public release", () => {
+test("public release docs and CI identify 0.7.2", () => {
   const readme = read("README.md");
   const changelog = read("CHANGELOG.md");
   const releaseNotes = read("RELEASE-NOTES.md");
-  assert.match(readme, /Latest stable release: \[Sonante 0\.7\.1\]/);
-  assert.match(changelog, /## 0\.7\.1/);
-  assert.match(releaseNotes, /# Sonante 0\.7\.1/);
-  assert.match(releaseNotes, /manual(?:ly)? import/i);
-  assert.match(releaseNotes, /old queue is not automatically/i);
-  assert.match(releaseNotes, /DSD64 mono\/stereo/i);
-  assert.match(releaseNotes, /converted to PCM/i);
-  assert.match(releaseNotes, /bit-perfect/i);
-  assert.match(releaseNotes, /Physical audio and hardware validation was not performed/);
+  const workflow = read(".github/workflows/ci.yml");
+  assert.ok(readme.includes("Latest stable release: [Sonante 0.7.2]"));
+  assert.ok(readme.includes("docs/releases/0.7.2/README.md"));
+  assert.ok(changelog.indexOf("## 0.7.2") < changelog.indexOf("## 0.7.1"));
+  assert.ok(releaseNotes.includes("# Sonante 0.7.2"));
+  assert.ok(releaseNotes.includes("WavPack"));
+  assert.ok(releaseNotes.includes("Subsonic/OpenSubsonic"));
+  assert.ok(releaseNotes.includes("bit-perfect"));
+  assert.ok(workflow.includes("sonante-0.7.2-candidate-"));
+  assert.ok(!workflow.includes("sonante_0.7.1"));
+  assert.ok(!workflow.includes("sonante-0.7.1"));
 });

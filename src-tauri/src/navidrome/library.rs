@@ -142,8 +142,10 @@ pub(crate) async fn smart_favorites(id: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static CONNECTION_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn fixture(username: &str, session: &str) -> Connection {
-        Connection {credentials:api::Credentials {connection_id:session.into(),server:"http://fixture.invalid/".into(),username:username.into(),password:"PRIVATE_PASSWORD".into()},client:api::client().unwrap(),port:1234,secret:"PRIVATE_PROXY".into(),live:std::sync::atomic::AtomicBool::new(true),stop:Arc::new(tokio::sync::Notify::new()),covers:tokio::sync::Semaphore::new(3),details:std::sync::Mutex::new(std::collections::VecDeque::new()),catalog:tokio::sync::Mutex::new(None)}
+        Connection {credentials:api::Credentials {connection_id:session.into(),server:"http://fixture.invalid/".into(),username:username.into(),password:"PRIVATE_PASSWORD".into(),auth_method:api::AuthMethod::Password,api_version_index:Default::default()},server_info:None,client:api::client().unwrap(),port:1234,secret:"PRIVATE_PROXY".into(),live:std::sync::atomic::AtomicBool::new(true),stop:Arc::new(tokio::sync::Notify::new()),covers:tokio::sync::Semaphore::new(3),details:std::sync::Mutex::new(std::collections::VecDeque::new()),catalog:tokio::sync::Mutex::new(None)}
     }
     #[test]
     fn saved_reference_survives_reconnect_but_never_crosses_accounts_or_contains_sessions() {
@@ -154,7 +156,10 @@ mod tests {
         let rebound=bound(&after,&saved).unwrap();assert!(matches!(rebound,MediaLocator::Navidrome{connection_id,..} if connection_id=="NEW_SESSION"));
         assert!(bound(&other,&saved).is_err());
         assert!(storage_locator(&MediaLocator::Navidrome{connection_id:"old".into(),song_id:"song".into(),account_id:None}).is_none());
-        for song in ["../escape","http://private/?token=SECRET",""] {assert!(storage_locator(&MediaLocator::Navidrome{connection_id:String::new(),song_id:song.into(),account_id:Some(favorites::scope(&after.credentials))}).is_none());}
+        for song in ["bad\0id", ""] {assert!(storage_locator(&MediaLocator::Navidrome{connection_id:String::new(),song_id:song.into(),account_id:Some(favorites::scope(&after.credentials))}).is_none());}
+        for song in ["../escape", "https://remote.invalid/id?part=2", "曲目/二"] {
+            assert!(storage_locator(&MediaLocator::Navidrome{connection_id:String::new(),song_id:song.into(),account_id:Some(favorites::scope(&after.credentials))}).is_some());
+        }
     }
     #[test]
     fn smart_metadata_uses_server_genres_and_added_date_without_guessing_unknown_fields() {
@@ -164,6 +169,7 @@ mod tests {
     }
     #[test]
     fn queue_effect_holds_the_live_session_and_refuses_retired_references_before_effects() {
+        let _guard = CONNECTION_STATE_TEST_LOCK.lock().unwrap();
         let c=Arc::new(fixture("one","LIVE_SESSION"));let account=favorites::scope(&c.credentials);
         let previous={let mut guard=state().current.lock().unwrap();guard.replace(c)};
         let track=TrackMetadata{title:"Fixture".into(),artist:String::new(),album:String::new(),uri:String::new(),thumb:None,plex_image:None,duration:None,media_locator:Some(MediaLocator::Navidrome{connection_id:"LIVE_SESSION".into(),account_id:Some(account),song_id:"song-a".into()})};
@@ -175,6 +181,7 @@ mod tests {
 
     #[test]
     fn restored_queue_rebinds_only_the_saved_account_and_revalidates_the_session_before_effects() {
+        let _guard = CONNECTION_STATE_TEST_LOCK.lock().unwrap();
         let first = Arc::new(fixture("one", "NEW_SESSION"));
         let id = favorites::scope(&first.credentials);
         let previous = state().current.lock().unwrap().replace(first.clone());
@@ -203,6 +210,7 @@ mod tests {
 
     #[tokio::test(flavor="current_thread")]
     async fn edition_catalog_reuses_complete_album_metadata_without_track_requests_and_refuses_other_sessions() {
+        let _guard = CONNECTION_STATE_TEST_LOCK.lock().unwrap();
         let c=Arc::new(fixture("editions","EDITION_SESSION"));let account=favorites::scope(&c.credentials);
         let row=serde_json::json!({"id":"album","name":"Album","artist":"Artist","genre":"Jazz","coverArt":"al-cover","songCount":12,"year":1974});
         *c.catalog.lock().await=Some(CatalogSnapshot {at:Instant::now(),smart:vec![metadata(&row).unwrap()],presentation:vec![api::album(&row).unwrap()]});

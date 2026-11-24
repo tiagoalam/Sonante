@@ -1,8 +1,19 @@
+export type NavidromeAuthMethod = 'password' | 'api_key';
+export interface NavidromeExtension {
+    name: string;
+    versions: number[];
+}
 export interface NavidromeStatus {
     connection_id: string | null;
     account_id?: string | null;
     server: string | null;
     username: string | null;
+    auth_method?: NavidromeAuthMethod | null;
+    server_type?: string | null;
+    server_version?: string | null;
+    api_version?: string | null;
+    open_subsonic?: boolean;
+    extensions?: NavidromeExtension[];
 }
 export interface NavidromeAlbum {
     id: string;

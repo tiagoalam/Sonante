@@ -11,7 +11,7 @@ Visit the [latest release](https://github.com/tiagoalam/Sonante/releases/latest)
 | Linux distribution | What to download |
 | --- | --- |
 | Ubuntu 22.04 or newer, and compatible derivatives (such as Linux Mint) | The `.deb` file |
-| Fedora 43 or newer, and compatible derivatives | The `.rpm` file |
+| Fedora 44 or newer, and compatible derivatives | The `.rpm` file |
 | Arch Linux / Manjaro (updated rolling releases) | The `.pkg.tar.zst` file |
 
 Install it with your system's package manager, then open **Sonante** from the application menu.
@@ -24,7 +24,7 @@ The welcome wizard helps you choose a source. You can also visit **Preferences â
 
 - **Local:** choose one or more folders containing your music, including mounted network shares.
 - **Plex:** connect your Plex account, then choose the server and library you want.
-- **Navidrome:** enter your server address and account details to browse that library.
+- **Subsonic:** connect to Navidrome or another compatible Subsonic/OpenSubsonic server.
 
 You can use more than one source, and Sonante keeps track of where albums come from.
 

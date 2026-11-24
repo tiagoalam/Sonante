@@ -1,0 +1,43 @@
+{
+  "source": {
+    "commit": "ee3eca800cac5bf2bb0773ed933bbfcbe9d36b0a",
+    "tree": "722f4a67b87d2c5c9f604b94c4360c5212e60050",
+    "epoch": 1795549765,
+    "version": "0.7.2",
+    "assembler_commit": "ee3eca800cac5bf2bb0773ed933bbfcbe9d36b0a"
+  },
+  "packages": [
+    {
+      "schema": 1,
+      "version": "0.7.2",
+      "revision": "1",
+      "variant": "ubuntu",
+      "source_commit": "ee3eca800cac5bf2bb0773ed933bbfcbe9d36b0a",
+      "source_tree": "722f4a67b87d2c5c9f604b94c4360c5212e60050",
+      "base_installer_sha256": "b2b5c9273685b9efde527741e9b05ac3f83dade625a9ab0ecbcff3c7a77237c2",
+      "application_sha256": "d715156613893d00d6cc95165574db943e3778dd56a333a430fa3fe410f7d1cb",
+      "compiled_descriptor_sha256": "13368d6e4e114964f9a80e481ae02e6a2fb1289747ded6232c7562bf675872a4",
+      "runtime_pins_unchanged": true,
+      "minimum_glibc": "2.35",
+      "ELF_files_checked": 96,
+      "source_materials": [
+        {
+          "filename": "runtime-source-materials-consumer-clock.tar.zst",
+          "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/runtime-source-materials-consumer-clock.tar.zst",
+          "sha256": "0b0f8a91f965711398a36b912b7ae8d193c1230622fd14d67f8c3a8c5e503af6",
+          "bytes": 272635700
+        }
+      ],
+      "sources": [
+        "sonante-0.7.2-1-sources.tar.gz",
+        "runtime-source-materials-consumer-clock.tar.zst"
+      ],
+      "validation": "Encoded payload, dependency, descriptor, runtime hash and ELF ABI checks; no installation or hardware execution.",
+      "package": "sonante_0.7.2-1_amd64.deb",
+      "package_sha256": "aaf33c33f321834ee3b10b82bb60f2a750c1ed6296377f54f893a6b587ba7b87",
+      "package_bytes": 86415032
+    }
+  ],
+  "source_materials_manifest": "SOURCE-MATERIALS.json",
+  "installed_or_executed": false
+}

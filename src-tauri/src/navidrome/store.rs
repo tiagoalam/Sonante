@@ -70,10 +70,21 @@ mod tests {
             server: "http://localhost:4533/".into(),
             username: "fixture".into(),
             password: "fixture".into(),
+            auth_method: super::super::api::AuthMethod::Password,
+            api_version_index: Default::default(),
         };
         save(&path, Some(c)).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
         assert!(load(&path).unwrap().is_some());
+        std::fs::write(
+            &path,
+            br#"{"version":1,"connection":{"connection_id":"legacy","server":"http://localhost:4533/","username":"fixture","password":"fixture"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load(&path).unwrap().unwrap().auth_method,
+            super::super::api::AuthMethod::Password
+        );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(load(&path).is_err());
         std::fs::remove_file(&path).unwrap();

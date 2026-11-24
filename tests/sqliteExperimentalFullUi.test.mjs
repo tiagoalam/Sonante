@@ -55,7 +55,8 @@ test("production launches the original Sonante UI with SQLite Local catalog read
   assert.match(browser, /reconcileLocalLibrarySourceSelection\(\s*selectedSourceId, sourceOptions, !sqliteBacked \|\| sqliteSourcesLoaded,/);
   assert.match(browser, /if \(!sqliteBacked \|\| !sqliteSourcesLoaded \|\| !catalog\.loaded \|\| catalog\.loading\) return/);
   assert.match(app, /sqliteSourcesLoaded,[\s\S]*?sqliteActivityHidden:/);
-  assert.match(browser, /grid h-\[84px\] min-h-\[84px\] shrink-0 grid-cols-\[minmax\(0,0\.4fr\)_minmax\(0,2\.6fr\)_auto\]/);
+  assert.match(browser, /grid min-h-\[84px\] shrink-0 grid-cols-\[minmax\(0,1fr\)\]/);
+  assert.match(browser, /sm:grid-cols-\[minmax\(220px,1fr\)_minmax\(0,1\.8fr\)_auto\]/);
   assert.match(browser, /<div className="h-14 min-w-0 sm:h-16">[\s\S]*?<LibraryActivityPanel activity=\{sqliteProgress\}/);
   assert.match(browser, /className="w-32 shrink-0 rounded-lg/);
   assert.doesNotMatch(browser, /data-library-activity-reserved|h-\[132px\]/);

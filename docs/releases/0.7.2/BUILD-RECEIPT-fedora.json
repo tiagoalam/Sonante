@@ -1,0 +1,50 @@
+{
+  "source": {
+    "commit": "ee3eca800cac5bf2bb0773ed933bbfcbe9d36b0a",
+    "tree": "722f4a67b87d2c5c9f604b94c4360c5212e60050",
+    "epoch": 1795549765,
+    "version": "0.7.2",
+    "assembler_commit": "ee3eca800cac5bf2bb0773ed933bbfcbe9d36b0a"
+  },
+  "packages": [
+    {
+      "schema": 1,
+      "version": "0.7.2",
+      "revision": "1",
+      "variant": "fedora",
+      "source_commit": "ee3eca800cac5bf2bb0773ed933bbfcbe9d36b0a",
+      "source_tree": "722f4a67b87d2c5c9f604b94c4360c5212e60050",
+      "base_installer_sha256": "0f76dd33c190fbdca1c4b76b56c8e85e31213b6b095d85a34fdfa15f80cd91a8",
+      "application_sha256": "ecfa69403a21fa91f5975fc1a2eedaff784713a0ca3e4a7e922fc017c55d78be",
+      "compiled_descriptor_sha256": "c93f1ac2dc06a8dcee5101858381efc265c3907e50dc2a334a11d293a21cf02f",
+      "runtime_pins_unchanged": true,
+      "minimum_glibc": "2.35",
+      "ELF_files_checked": 98,
+      "source_materials": [
+        {
+          "filename": "runtime-source-materials-consumer-clock.tar.zst",
+          "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/runtime-source-materials-consumer-clock.tar.zst",
+          "sha256": "0b0f8a91f965711398a36b912b7ae8d193c1230622fd14d67f8c3a8c5e503af6",
+          "bytes": 272635700
+        },
+        {
+          "filename": "fedora-compat-source-materials-20261020.3.tar.zst",
+          "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/fedora-compat-source-materials-20261020.3.tar.zst",
+          "sha256": "b6ed25e1c11614ab5e07c3112710f9309a1ad211a321d05220dc18c187880533",
+          "bytes": 1071301
+        }
+      ],
+      "sources": [
+        "sonante-0.7.2-1-fedora-sources.tar.gz",
+        "runtime-source-materials-consumer-clock.tar.zst",
+        "fedora-compat-source-materials-20261020.3.tar.zst"
+      ],
+      "validation": "Encoded payload, dependency, descriptor, runtime hash and ELF ABI checks; no installation or hardware execution.",
+      "package": "sonante-0.7.2-1.x86_64.rpm",
+      "package_sha256": "bd6334ccba85c8c8baf3866e9dab7ac41519d1ad04561107ab29cb26198d1f6e",
+      "package_bytes": 86099873
+    }
+  ],
+  "source_materials_manifest": "SOURCE-MATERIALS.json",
+  "installed_or_executed": false
+}

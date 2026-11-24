@@ -8,9 +8,9 @@
 
 **Your music collection, all together.**
 
-A modern, open-source music player for enjoying your own albums, Plex and Navidrome in one place.
+A modern, open-source music player for local albums, Plex and compatible Subsonic/OpenSubsonic servers.
 
-[**Explore the website**](https://tiagoalam.github.io/Sonante/) · [**Download Sonante**](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.1) · [**Get started**](docs/GETTING_STARTED.md)
+[**Explore the website**](https://tiagoalam.github.io/Sonante/) · [**Download Sonante**](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.2) · [**Get started**](docs/GETTING_STARTED.md)
 
 **Available for Linux** · Windows in development
 
@@ -18,11 +18,11 @@ A modern, open-source music player for enjoying your own albums, Plex and Navidr
 
 </div>
 
-**Latest stable release: [Sonante 0.7.1](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.1).** Linux packages are available for Ubuntu/Debian, Fedora and Arch.
+**Latest stable release: [Sonante 0.7.2](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.2).** Linux packages are available for Ubuntu/Debian, Fedora and Arch.
 
 ## More music. Less searching.
 
-Your albums deserve more than a folder list. Sonante brings your collection together, whether it's stored on your computer, a network drive, Plex or Navidrome.
+Your albums deserve more than a folder list. Sonante brings your collection together, whether it's stored on your computer, a network drive, Plex or a compatible Subsonic server.
 
 Browse your favorite artists, rediscover forgotten albums and spend more time listening.
 
@@ -37,25 +37,27 @@ Browse your favorite artists, rediscover forgotten albums and spend more time li
 
 ## What can Sonante do?
 
-- **Bring your libraries together:** a persistent SQLite catalog for local folders and mounted shares, plus Plex and Navidrome.
+- **Bring your libraries together:** a persistent SQLite catalog for local folders and mounted shares, plus Plex and Subsonic/OpenSubsonic.
 - **Rediscover your collection:** Explore, suggestions, albums, artists, genres and decades.
-- **Create your own listening experience:** queues, favorites, manual playlists and smart playlists.
+- **Create your own listening experience:** personal Collections for Local, Plex and Subsonic albums, alongside queues, favorites and playlists.
 - **Customize your player:** Simple and Full modes, six themes, library layouts and immersive Now Playing screens.
 - **Look after your music:** local album diagnostics and reviewed FLAC metadata editing.
 - **Choose how to listen:** Shared and Direct audio-output options, EQ, audio-device selection and playback controls.
-- **Go further when you want:** online radio, lyrics, Last.fm and ListenBrainz, and optional advanced features.
+- **Go further when you want:** WavPack and supported WavPack/CUE albums, online radio, lyrics, Last.fm and ListenBrainz.
 
 Some features are specific to certain music sources or interface modes. [See all the details](docs/LINUX_GUIDE.md).
 
+The 0.7.2 Discotheque adds a keyboard-navigable album Carousel. Personal Collections can mix albums from Local, Plex and Subsonic sources. See the [release notes](RELEASE-NOTES.md) and [release source and provenance information](docs/releases/0.7.2/README.md).
+
 ## Download Sonante
 
-[**Get Sonante 0.7.1 for Linux**](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.1) · [Release notes](RELEASE-NOTES.md) · [Checksums and source files](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.1)
+[**Get Sonante 0.7.2 for Linux**](https://github.com/tiagoalam/Sonante/releases/tag/v0.7.2) · [Release notes](RELEASE-NOTES.md) · [Checksums and source information](docs/releases/0.7.2/README.md)
 
 | Distribution | Package |
 | --- | --- |
 | Ubuntu 22.04 or newer and compatible derivatives | `.deb` |
 | Fedora 44 or newer and compatible derivatives | `.rpm` |
-| Current Arch Linux (glibc 2.43 or newer; OpenSSL 3 SONAMEs) | `.pkg.tar.zst` |
+| Current Arch Linux with GLIBC 2.43 compatibility and OpenSSL 3 SONAMEs | `.pkg.tar.zst` |
 
 Install the package that matches your distribution. Verify its SHA-256 against `SHA256SUMS.txt` before installation. The listed distributions describe expected compatibility; system library requirements still apply.
 
@@ -90,7 +92,7 @@ Please review logs and screenshots before posting them publicly, and remove any 
 <details>
 <summary><strong>For developers and technical readers</strong></summary>
 
-Sonante is built with React, TypeScript, Tauri and Rust. Linux playback uses a supervised MPD engine and ALSA.
+Sonante is built with React, TypeScript, Tauri and Rust. Linux playback uses a supervised MPD engine and ALSA. The public v0.7.2 source tag includes the application and package build inputs; corresponding sources for bundled runtimes are linked from the release source and provenance guide.
 
 - [Detailed Linux guide, requirements and source builds](docs/LINUX_GUIDE.md)
 - [AutoEQ import and online catalog notes](docs/autoeq-import.md)

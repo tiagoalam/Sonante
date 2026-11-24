@@ -15,7 +15,7 @@ export function initialSqliteMediaSource(config: Pick<AppConfig, "plex_token" | 
   return initialMediaSource(config);
 }
 
-export type MainSection = "editions" | "sessions" | "navidrome" | "radio" | "history" | "search" | "local" | "plex" | "favorites" | "playlists" | "explore" | "equalizer" | "autoeq";
+export type MainSection = "editions" | "sessions" | "navidrome" | "radio" | "history" | "search" | "local" | "plex" | "favorites" | "playlists" | "collections" | "explore" | "equalizer" | "autoeq";
 export function disabledAutoEqFallback(section: MainSection | null, betaEnabled: boolean): MainSection | null {
   return section === "autoeq" && !betaEnabled ? "equalizer" : null;
 }
@@ -28,7 +28,7 @@ export const SQLITE_EXPERIMENTAL_LOCAL_SOURCE_STORAGE_KEY = "sonante.0.6.4-sqlit
 type SectionStorage = Pick<Storage, "getItem" | "setItem">;
 
 function isMainSection(value: unknown): value is MainSection {
-  return value === "editions" || value === "sessions" || value === "navidrome" || value === "radio" || value === "history" || value === "search" || value === "local" || value === "plex" || value === "favorites" || value === "playlists" || value === "explore" || value === "equalizer" || value === "autoeq";
+  return value === "editions" || value === "sessions" || value === "navidrome" || value === "radio" || value === "history" || value === "search" || value === "local" || value === "plex" || value === "favorites" || value === "playlists" || value === "collections" || value === "explore" || value === "equalizer" || value === "autoeq";
 }
 
 function browserStorage(): SectionStorage | null {

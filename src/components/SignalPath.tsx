@@ -146,10 +146,10 @@ export const SignalPath: React.FC<Props> = ({ route, status, health, compact = f
             </details>
           : <p className="mt-1 text-[11px]">{t("equalizer.sharedProcessingHelp")}</p>}
       </section>}
+      {horizontal && observedOutput && <p data-alsa-observation="observed" className="np-signal-observation min-w-0 break-words text-[11px] leading-relaxed text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.7))]">
+        <span className="font-medium">{t("signalPath.observation.observedTitle")}: </span>
+        <span>hw:{observedOutput.card},{observedOutput.device} · {observedOutput.format} · {observedOutput.rate / 1000} kHz · {t("signalPath.observation.channelCount", { count: observedOutput.channels })}</span>
+      </p>}
   </section>
-    {horizontal && observedOutput && <p data-alsa-observation="observed" className="np-signal-observation mt-2 min-w-0 break-words px-1 text-[11px] leading-relaxed text-[color:var(--theme-fg-secondary,rgb(255_255_255_/_0.7))]">
-      <span className="font-medium">{t("signalPath.observation.observedTitle")}: </span>
-      <span>hw:{observedOutput.card},{observedOutput.device} · {observedOutput.format} · {observedOutput.rate / 1000} kHz · {t("signalPath.observation.channelCount", { count: observedOutput.channels })}</span>
-    </p>}
   </>;
 };

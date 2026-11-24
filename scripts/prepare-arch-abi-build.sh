@@ -33,6 +33,39 @@ EOF
 
 echo "Installing signed Arch Archive snapshot ${snapshot} in the disposable CI container."
 echo 'Package downloads use bounded connection/transfer timeouts and up to four retries. Pacman signature checks remain required.'
+
+# The moving base-devel image may carry a parallel openssl-3 package. The
+# pinned snapshot's openssl package owns the same .so.3 files, so remove only
+# that known package before the signed snapshot transaction. In the current
+# base image pacman/curl use OpenSSL 4 and remain runnable during the transition.
+if pacman -Q openssl-3 >/dev/null 2>&1; then
+  for library in /usr/lib/libssl.so.3 /usr/lib/libcrypto.so.3; do
+    if ! owner="$(pacman -Qqo "$library" 2>/dev/null)"; then
+      printf 'Cannot identify the owner of the conflicting OpenSSL 3 library: %s\n' "$library" >&2
+      exit 1
+    fi
+    if [[ "$owner" != 'openssl-3' ]]; then
+      printf 'Refusing to remove openssl-3 because %s is owned by %s.\n' "$library" "$owner" >&2
+      exit 1
+    fi
+  done
+
+  echo 'Removing only the conflicting openssl-3 package from this disposable container before snapshot synchronization.'
+  pacman -Rdd --noconfirm openssl-3
+  if pacman -Q openssl-3 >/dev/null 2>&1; then
+    echo 'The conflicting openssl-3 package remains installed after removal.' >&2
+    exit 1
+  fi
+  for library in /usr/lib/libssl.so.3 /usr/lib/libcrypto.so.3; do
+    if [[ -e "$library" || -L "$library" ]]; then
+      printf 'The conflicting OpenSSL 3 library remains after removing openssl-3: %s\n' "$library" >&2
+      exit 1
+    fi
+  done
+  pacman --version >/dev/null
+  curl --version >/dev/null
+fi
+
 pacman --config "$config" -Syyuu --noconfirm --needed --ignore=archlinux-keyring \
   curl git nodejs npm rust python file binutils gtk3 webkit2gtk-4.1 \
   alsa-lib alsa-utils openssl xdg-utils xdg-desktop-portal desktop-file-utils

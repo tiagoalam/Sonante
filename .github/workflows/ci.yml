@@ -279,7 +279,7 @@ jobs:
       - name: Upload complete installable packages
         uses: actions/upload-artifact@v4
         with:
-          name: sonante-0.7.1-candidate-${{ inputs.candidate_sha || github.sha }}
+          name: sonante-0.7.2-candidate-${{ inputs.candidate_sha || github.sha }}
           path: ${{ runner.temp }}/sonante-complete-output/*
           compression-level: 0
           retention-days: 14
@@ -292,11 +292,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sonante-0.7.1-candidate-${{ inputs.candidate_sha || github.sha }}
+          name: sonante-0.7.2-candidate-${{ inputs.candidate_sha || github.sha }}
           path: ${{ runner.temp }}/sonante-candidate
       - name: Install and load the final DEB
         run: |
-          deb="$RUNNER_TEMP/sonante-candidate/sonante_0.7.1-1_amd64.deb"
+          deb="$RUNNER_TEMP/sonante-candidate/sonante_0.7.2-1_amd64.deb"
           test -f "$deb"
           sudo apt-get update
           sudo apt-get install -y "$deb"
@@ -312,11 +312,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sonante-0.7.1-candidate-${{ inputs.candidate_sha || github.sha }}
+          name: sonante-0.7.2-candidate-${{ inputs.candidate_sha || github.sha }}
           path: /tmp/sonante-candidate
       - name: Install and load the final RPM
         run: |
-          rpm_file="/tmp/sonante-candidate/sonante-0.7.1-1.x86_64.rpm"
+          rpm_file="/tmp/sonante-candidate/sonante-0.7.2-1.x86_64.rpm"
           test -f "$rpm_file"
           dnf install -y "$rpm_file"
           ldd -r /usr/bin/sonante | tee /tmp/sonante-fedora-loader.txt
@@ -331,13 +331,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sonante-0.7.1-candidate-${{ inputs.candidate_sha || github.sha }}
+          name: sonante-0.7.2-candidate-${{ inputs.candidate_sha || github.sha }}
           path: /tmp/sonante-candidate
       - name: Resolve and load package on current Arch
         run: |
           pacman -Syu --noconfirm --needed curl openssl-3 alsa-lib alsa-utils gtk3 webkit2gtk-4.1 xdg-utils xdg-desktop-portal desktop-file-utils
           pacman -T libcrypto.so=3-64 libssl.so=3-64
-          pkg="/tmp/sonante-candidate/sonante-0.7.1-1-x86_64.pkg.tar.zst"
+          pkg="/tmp/sonante-candidate/sonante-0.7.2-1-x86_64.pkg.tar.zst"
           test -f "$pkg"
           pacman -U --noconfirm "$pkg"
           pacman -Q sonante openssl openssl-3

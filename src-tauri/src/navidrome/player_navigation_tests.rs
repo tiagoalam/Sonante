@@ -13,7 +13,7 @@ async fn player_navigation_uses_exact_song_and_rejects_incomplete_remote_identit
                 "valid"=>serde_json::json!({"id":"valid","albumId":"album","artistId":"artist"}),
                 "missing-artist"=>serde_json::json!({"id":"missing-artist","albumId":"album"}),
                 "wrong-song"=>serde_json::json!({"id":"another","albumId":"album","artistId":"artist"}),
-                "wrong-album"=>serde_json::json!({"id":"wrong-album","albumId":"../unsafe","artistId":"artist"}),
+                "wrong-album"=>{let invalid_id="bad\0id";serde_json::json!({"id":"wrong-album","albumId":invalid_id,"artistId":"artist"})},
                 _=>panic!("unexpected song"),
             };
             let body=serde_json::json!({"subsonic-response":{"status":"ok","song":song}}).to_string();
@@ -26,6 +26,6 @@ async fn player_navigation_uses_exact_song_and_rejects_incomplete_remote_identit
     let serialized=serde_json::to_string(&result).unwrap();for secret in [&c.secret,&c.credentials.password,&c.credentials.server] {assert!(!serialized.contains(secret));}
     assert!(player_navigation(&c,"missing-artist").await.unwrap().artist_id.is_none());
     for id in ["wrong-song","wrong-album"] {assert_eq!(player_navigation(&c,id).await.err().as_deref(),Some(PROTOCOL));}
-    assert_eq!(player_navigation(&c,"../invalid").await.err().as_deref(),Some(INVALID));
+    assert_eq!(player_navigation(&c,"bad\0id").await.err().as_deref(),Some(INVALID));
     c.retire();assert_eq!(player_navigation(&c,"valid").await.err().as_deref(),Some(CHANGED));peer.join().unwrap();
 }

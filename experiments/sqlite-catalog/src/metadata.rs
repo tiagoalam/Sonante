@@ -1,4 +1,4 @@
-//! WAV PCM, AIFF PCM, FLAC, MP3, Ogg Vorbis/Opus, MP4 AAC/ALAC, DSF, and DFF metadata extraction. Files are opened by the secure
+//! WAV PCM, AIFF PCM, FLAC, MP3, WavPack, Ogg Vorbis/Opus, MP4 AAC/ALAC, DSF, and DFF metadata extraction. Files are opened by the secure
 //! scanner before they reach this module; this module never opens paths itself.
 
 use lofty::{
@@ -13,6 +13,7 @@ use lofty::{
     mpeg::{Layer, MpegFile},
     probe::Probe,
     tag::{Accessor, ItemKey, Tag, TagType},
+    wavpack::WavPackFile,
 };
 use std::{
     io::{Read, Seek, SeekFrom},
@@ -31,6 +32,7 @@ pub(crate) const DFF_PARSER_VERSION: i64 = 3;
 pub(crate) const AAC_PARSER_VERSION: i64 = 4;
 pub(crate) const APE_PARSER_VERSION: i64 = 4;
 pub(crate) const AIFC_PARSER_VERSION: i64 = 4;
+pub(crate) const WAVPACK_PARSER_VERSION: i64 = 3;
 
 const MAX_ID3_BYTES: usize = 4 * 1024 * 1024;
 const MAX_APE_TAG_BYTES: u64 = 4 * 1024 * 1024;
@@ -64,6 +66,8 @@ pub(crate) fn parser_version_for_extension(extension: &str) -> i64 {
         APE_PARSER_VERSION
     } else if extension.eq_ignore_ascii_case("aifc") {
         AIFC_PARSER_VERSION
+    } else if extension.eq_ignore_ascii_case("wv") {
+        WAVPACK_PARSER_VERSION
     } else {
         PARSER_VERSION
     }
@@ -1151,6 +1155,62 @@ pub(crate) fn parse_flac<R: Read + Seek>(reader: R) -> Attempt {
     }
 }
 
+/// Read bounded APEv2/ID3v1 metadata and stream properties from WavPack.
+/// Audio blocks are not decoded and cover art is intentionally skipped.
+pub(crate) fn parse_wavpack<R: Read + Seek>(mut reader: R) -> Attempt {
+    let started = Instant::now();
+    if let Err(error) = validate_ape_tag_bounds(&mut reader) {
+        return Attempt {
+            duration_us: started.elapsed().as_micros(),
+            ..parse_failure("wavpack", error)
+        };
+    }
+    if let Err(error) = reader.seek(SeekFrom::Start(0)) {
+        return Attempt {
+            duration_us: started.elapsed().as_micros(),
+            ..parse_failure("wavpack", error.to_string())
+        };
+    }
+    let options = ParseOptions::new()
+        .read_cover_art(false)
+        .read_properties(true)
+        .max_junk_bytes(MAX_AAC_LEADING_PADDING as usize)
+        .parsing_mode(ParsingMode::BestAttempt);
+    let parsed = WavPackFile::read_from(&mut std::io::BufReader::new(reader), options);
+    let attempt = match parsed {
+        Err(error) => parse_failure("wavpack", error.to_string()),
+        Ok(wavpack) => {
+            let properties = wavpack.properties();
+            let duration_ms = positive_i64(properties.duration().as_millis());
+            let sample_rate = positive_i64(u128::from(properties.sample_rate()));
+            let channels = positive_i64(u128::from(properties.channels()));
+            let tagged: TaggedFile = wavpack.into();
+            let tag = tagged
+                .tag(TagType::Ape)
+                .or_else(|| tagged.tag(TagType::Id3v1));
+            let mut values = tag.map(values_from_tag).unwrap_or_default();
+            values.duration_ms = duration_ms;
+            values.sample_rate = sample_rate;
+            values.channels = channels;
+            Attempt {
+                status: if has_text_metadata(&values) {
+                    AttemptStatus::ParsedWithTags
+                } else {
+                    AttemptStatus::ParsedWithoutTags
+                },
+                format: "wavpack".to_owned(),
+                values: Some(values),
+                error: None,
+                duration_us: 0,
+            }
+        }
+    };
+    Attempt {
+        duration_us: started.elapsed().as_micros(),
+        ..attempt
+    }
+}
+
 /// Parse classic uncompressed AIFF. AIFF-C is deliberately recognized but not
 /// treated as PCM: its compression variants need a separate support policy.
 pub(crate) fn parse_aiff<R: Read + Seek>(mut reader: R) -> Attempt {
@@ -2119,6 +2179,20 @@ pub(crate) fn synthetic_mp3(
     bytes
 }
 
+#[cfg(test)]
+pub(crate) fn synthetic_wavpack() -> Vec<u8> {
+    let encoded = include_str!("fixtures/synthetic-wavpack.wv.hex");
+    let hex = encoded
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    assert_eq!(hex.len() % 2, 0);
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect()
+}
+
 /// Build Vorbis Comments over a locally encoded synthetic Ogg stream using the pinned Lofty
 /// writer. Repeated artist values remain separate comment entries.
 #[cfg(test)]
@@ -2738,6 +2812,41 @@ mod tests {
         let attempt = parse_wav(Cursor::new(b"not a WAV".to_vec()));
         assert_eq!(attempt.status, AttemptStatus::Failed);
         assert!(attempt.error.is_some());
+    }
+
+    #[test]
+    fn wavpack_apetag_metadata_and_properties_are_read_without_artwork() {
+        let bytes = synthetic_wavpack();
+        let attempt = parse_wavpack(Cursor::new(bytes.clone()));
+        assert_eq!(attempt.status, AttemptStatus::ParsedWithTags);
+        assert_eq!(attempt.format, "wavpack");
+        let values = attempt.values.unwrap();
+        assert_eq!(values.title.as_deref(), Some("Fixture Track"));
+        assert_eq!(values.track_artists, ["Fixture Artist"]);
+        assert_eq!(values.album_artists, ["Fixture Album Artist"]);
+        assert_eq!(values.album.as_deref(), Some("Fixture Album"));
+        assert_eq!(values.genre.as_deref(), Some("Jazz"));
+        assert_eq!(values.date_text.as_deref(), Some("2024"));
+        assert_eq!(values.track_number, Some(2));
+        assert_eq!(values.disc_number, Some(1));
+        assert_eq!(values.sample_rate, Some(8_000));
+        assert_eq!(values.channels, Some(1));
+        assert_eq!(values.duration_ms, Some(2_000));
+
+        let block_size = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize + 8;
+        let untagged = parse_wavpack(Cursor::new(bytes[..block_size].to_vec()));
+        assert_eq!(untagged.status, AttemptStatus::ParsedWithoutTags);
+        assert_eq!(untagged.values.unwrap().sample_rate, Some(8_000));
+
+        let mut oversized = bytes;
+        let footer = oversized.len() - 32;
+        oversized[footer + 12..footer + 16]
+            .copy_from_slice(&((MAX_APE_TAG_BYTES as u32) + 1).to_le_bytes());
+        assert_eq!(parse_wavpack(Cursor::new(oversized)).status, AttemptStatus::Failed);
+        assert_eq!(
+            parse_wavpack(Cursor::new(b"wvpk truncated".to_vec())).status,
+            AttemptStatus::Failed
+        );
     }
 
     #[test]
@@ -3578,6 +3687,8 @@ mod tests {
         assert_eq!(parser_version_for_extension("aifc"), AIFC_PARSER_VERSION);
         assert_eq!(parser_version_for_extension("aac"), AAC_PARSER_VERSION);
         assert_eq!(parser_version_for_extension("ape"), APE_PARSER_VERSION);
+        assert_eq!(parser_version_for_extension("wv"), WAVPACK_PARSER_VERSION);
+        assert_eq!(parser_version_for_extension("WV"), WAVPACK_PARSER_VERSION);
         assert_eq!(parser_version_for_extension("wma"), PARSER_VERSION);
         assert!(MP3_PARSER_VERSION > 3);
         assert!(AIFF_PARSER_VERSION > 1);
@@ -3586,6 +3697,7 @@ mod tests {
         assert!(AIFC_PARSER_VERSION > 3);
         assert!(AAC_PARSER_VERSION > 3);
         assert!(APE_PARSER_VERSION > 3);
+        assert!(WAVPACK_PARSER_VERSION > PARSER_VERSION);
         assert_eq!(parser_version_for_extension("m4a"), MP4_PARSER_VERSION);
         assert_eq!(parser_version_for_extension("MP4"), MP4_PARSER_VERSION);
         assert_eq!(parser_version_for_extension("dsf"), DSF_PARSER_VERSION);

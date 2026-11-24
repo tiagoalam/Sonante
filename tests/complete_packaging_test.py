@@ -115,7 +115,7 @@ class CompletePackagingTests(unittest.TestCase):
             for name in paths:
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text('{"version":"0.7.1"}\n' if name == 'package.json' else 'fixture\n')
+                path.write_text('{"version":"0.7.2"}\n' if name == 'package.json' else 'fixture\n')
             subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
             subprocess.run(['git', '-C', str(root), 'commit', '-qm', 'candidate source'], check=True)
             candidate = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()

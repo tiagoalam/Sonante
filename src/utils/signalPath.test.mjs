@@ -280,7 +280,7 @@ test("observed ALSA output is shown separately from MPD format and only for the 
         const signalStart = html.indexOf('data-signal-summary');
         const signalEnd = html.indexOf('</section>', signalStart);
         const observationStart = html.indexOf('data-alsa-observation="observed"');
-        assert.ok(signalEnd >= 0 && observationStart > signalEnd, 'Audiophile observation is a sibling line below the main signal card');
+        assert.ok(signalEnd >= 0 && observationStart < signalEnd, 'Audiophile observation stays inside the main signal card');
         assert.match(html, /<p[^>]*data-alsa-observation="observed"[^>]*class="[^"]*np-signal-observation[^"]*break-words/);
         assert.doesNotMatch(html, /<div[^>]*data-alsa-observation="observed"/);
       } else {
@@ -333,7 +333,7 @@ test("DSD transport remains visible only when engine, MPD transport and observed
     const signalStart = html.indexOf('data-signal-summary');
     const signalEnd = html.indexOf('</section>', signalStart);
     const observationStart = html.indexOf('data-alsa-observation="observed"');
-    assert.ok(observationStart > signalEnd, `${kind} observation remains below the main signal card`);
+    assert.ok(observationStart < signalEnd, `${kind} observation remains inside the main signal card`);
     assert.match(html, /class="[^"]*np-signal-observation[^"]*break-words/);
     assert.doesNotMatch(html, /bit-perfect|data-bitperfect|data-route-assessment|data-signal-info/);
     assert.equal(observedDsdTransport({ ...playback, processing: { transport: { ...playback.processing.transport, output_rate: rate * 2 } } }, output), undefined);

@@ -1,7 +1,7 @@
 [package]
 name = "sonante"
-version = "0.7.1"
-description = "Linux desktop audio player for local and Plex libraries"
+version = "0.7.2"
+description = "Linux audio player for Local, Plex and Subsonic/OpenSubsonic libraries"
 authors = ["Tiago Alam"]
 license = "GPL-3.0-only"
 edition = "2021"

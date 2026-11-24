@@ -136,7 +136,7 @@ test("visible source tabs have translated labels, selection, and keyboard/click 
 
 
 test('optional third source uses the same visible tabs and keyboard order while defaults remain Local/Plex',()=>{
- const calls=[],focused=[];const labels={local:'Local',plex:'Plex',navidrome:'Navidrome'};
+ const calls=[],focused=[];const labels={local:'Local',plex:'Plex',navidrome:'Subsonic'};
  const base={source:'navidrome',onChange:value=>calls.push(value),idPrefix:'favorites-source',label:'Sources',labels};
  const defaults=sharedExports.LibrarySourceTabs({...base,source:'local'});assert.equal(React.Children.toArray(defaults.props.children.props.children).length,2);
  const tree=sharedExports.LibrarySourceTabs({...base,sources:['local','plex','navidrome']});const buttons=React.Children.toArray(tree.props.children.props.children);assert.equal(buttons.length,3);const selected=buttons.find(button=>button.props['aria-selected']);assert.equal(selected.props.id,'favorites-source-navidrome');
@@ -154,5 +154,5 @@ test("Navidrome Explore uses the shared third tab, routes within Navidrome and r
   const isExploreSection=compile(initializer("isExploreSection"),{centralSection:"navidrome",plexArea:"library",navidromeArea:"explore"});assert.equal(isExploreSection,true);
   assert.equal(compile(initializer("showExploreTabs"),{isExploreSection,exploreSources:sources}),sources.length>1);
  }
- for(const language of ["en","pt-BR"]){const tree=tabs(language,{sources:["local","plex","navidrome"],source:"navidrome",onChange(){}});assert.match(renderToStaticMarkup(tree),/>Navidrome</);assert.equal(React.Children.toArray(tree.props.children.props.children).length,3);}
+ for(const language of ["en","pt-BR"]){const tree=tabs(language,{sources:["local","plex","navidrome"],source:"navidrome",onChange(){}});assert.match(renderToStaticMarkup(tree),/>Subsonic</);assert.equal(React.Children.toArray(tree.props.children.props.children).length,3);}
 });

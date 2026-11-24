@@ -1366,6 +1366,38 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn collection_exact_album_lookup_handles_http_and_source_scope() {
+        let body=serde_json::json!({"MediaContainer":{"machineIdentifier":"fixture-machine-id","Metadata":[{"type":"album","ratingKey":"42","librarySectionID":"7","title":"Album","parentTitle":"Artist","thumb":"/library/metadata/42/thumb/1"}]}});
+        let (client, _server)=availability_client_for_test("200 OK",body.clone());
+        let (member, image, _session)=client.collection_album_with_artwork("fixture-machine-id","7","42").await.unwrap();
+        assert_eq!(image.unwrap().path, "/library/metadata/42/thumb/1");
+        let mut poisoned = body.clone();
+        poisoned["MediaContainer"]["Metadata"][0]["thumb"] = serde_json::json!("/library/metadata/42/thumb?X-Plex-Token=secret");
+        let (unsafe_client, _unsafe_server) = availability_client_for_test("200 OK", poisoned);
+        let (_, unsafe_art, _) = unsafe_client.collection_album_with_artwork("fixture-machine-id", "7", "42").await.unwrap();
+        assert!(unsafe_art.is_none());
+        let mut encoded = body.clone();
+        encoded["MediaContainer"]["Metadata"][0]["thumb"] = serde_json::json!("/library/metadata/42/thumb?value=TEST%5FACCOUNT%5FTOKEN");
+        let (encoded_client, _encoded_server) = availability_client_for_test("200 OK", encoded);
+        let (_, encoded_art, _) = encoded_client.collection_album_with_artwork("fixture-machine-id", "7", "42").await.unwrap();
+        assert!(encoded_art.is_none());
+        assert_eq!(member.reference,"v1:42");
+        let dir=tempfile::tempdir().unwrap();
+        let mut catalog=sonante_sqlite_catalog::Catalog::open(dir.path().join("catalog.sqlite")).unwrap();
+        let collection=catalog.collection_create("Test").unwrap();
+        let member_id=catalog.collection_add(collection,member).unwrap();
+        let before=catalog.collection_member(collection,member_id).unwrap();
+        assert!(!format!("{}{}{}{}",before.scope,before.reference,before.title,before.artist.as_deref().unwrap_or("")).contains("TEST_ACCOUNT_TOKEN"));
+        assert_eq!(client.collection_album("other-server","7","42").await.unwrap_err(),"unavailable");
+        assert_eq!(catalog.collection_member(collection,member_id).unwrap(),before);
+        assert_eq!(client.collection_album("fixture-machine-id","8","42").await.unwrap_err(),"unresolved");
+        let (missing, _server)=availability_client_for_test("404 Not Found",body.clone());
+        assert_eq!(missing.collection_album("fixture-machine-id","7","42").await.unwrap_err(),"unresolved");
+        let (failed, _server)=availability_client_for_test("500 Internal Server Error",body);
+        assert_eq!(failed.collection_album("fixture-machine-id","7","42").await.unwrap_err(),"unavailable");
+    }
+
     fn plex_locator(
         server_id: &str,
         part_key: &str,
@@ -4519,5 +4551,200 @@ impl PlexClient {
         }
 
         Ok(tracks)
+    }
+}
+
+fn collection_request_failure(error: PlexError) -> &'static str {
+    match error.kind {
+        PlexErrorKind::NotFound
+        | PlexErrorKind::InvalidResponse
+        | PlexErrorKind::IdentityMismatch => "unresolved",
+        _ => "unavailable",
+    }
+}
+
+/// An exact album lookup, scoped to a selected Plex server and music library.
+fn collection_album_from_response(
+    json: &serde_json::Value,
+    server: &str,
+    library: &str,
+    rating: &str,
+    secrets: &[&str],
+) -> Result<sonante_sqlite_catalog::collections::NewMember, &'static str> {
+    if validate_plex_server_id(server).is_err()
+        || !navigation_rating_key(library)
+        || !navigation_rating_key(rating)
+    {
+        return Err("unresolved");
+    }
+    let container = json
+        .get("MediaContainer")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("unresolved")?;
+    if container
+        .get("machineIdentifier")
+        .is_some_and(|v| v.as_str() != Some(server))
+    {
+        return Err("unresolved");
+    }
+    let items = container
+        .get("Metadata")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("unresolved")?;
+    if items.len() != 1 {
+        return Err("unresolved");
+    }
+    let item = &items[0];
+    if item["type"].as_str() != Some("album")
+        || item["ratingKey"].as_str() != Some(rating)
+        || source_info::source_library(item).as_deref() != Some(library)
+    {
+        return Err("unresolved");
+    }
+    let title = navigation_text(&item["title"]).map_err(|_| "unresolved")?;
+    let artist = item
+        .get("parentTitle")
+        .and_then(|v| navigation_text(v).ok());
+    let fields = [
+        server,
+        library,
+        rating,
+        title.as_str(),
+        artist.as_deref().unwrap_or(""),
+    ];
+    if secrets
+        .iter()
+        .any(|s| !s.is_empty() && fields.iter().any(|v| v.contains(s)))
+    {
+        return Err("unresolved");
+    }
+    Ok(sonante_sqlite_catalog::collections::NewMember {
+        source: "plex".into(),
+        scope: format!("v1:{server}:{library}"),
+        reference: format!("v1:{rating}"),
+        title,
+        artist,
+    })
+}
+
+impl PlexClient {
+    pub(crate) async fn collection_album(
+        &self, server: &str, library: &str, rating: &str,
+    ) -> Result<sonante_sqlite_catalog::collections::NewMember, &'static str> {
+        self.collection_album_with_artwork(server, library, rating).await.map(|(member, _, _)| member)
+    }
+
+    pub(crate) async fn collection_album_with_artwork(
+        &self, server: &str, library: &str, rating: &str,
+    ) -> Result<(sonante_sqlite_catalog::collections::NewMember, Option<PlexImageRef>, String), &'static str> {
+        if validate_plex_server_id(server).is_err()
+            || !navigation_rating_key(library)
+            || !navigation_rating_key(rating)
+        {
+            return Err("unresolved");
+        }
+        if !crate::music_sources::plex() {
+            return Err("unavailable");
+        }
+        let initial = self
+            .connection_manager
+            .snapshot()
+            .map_err(|_| "unavailable")?;
+        if initial
+            .identity
+            .as_ref()
+            .map(|i| i.machine_identifier.as_str())
+            != Some(server)
+        {
+            return Err("unavailable");
+        }
+        let path = format!("/library/metadata/{}", urlencoding::encode(rating));
+        let (json, connection): (serde_json::Value, _) = self
+            .connection_manager
+            .request_json(&path, "consultar álbum da coleção")
+            .await
+            .map_err(collection_request_failure)?;
+        let current = self
+            .connection_manager
+            .snapshot()
+            .map_err(|_| "unavailable")?;
+        if !crate::music_sources::plex()
+            || initial.generation != current.generation
+            || current.generation != connection.generation
+            || connection.server_id != server
+            || current
+                .identity
+                .as_ref()
+                .map(|i| i.machine_identifier.as_str())
+                != Some(server)
+        {
+            return Err("unavailable");
+        }
+        let secrets = [&connection.token[..], &current.account_token[..], current.resolved_token.as_deref().unwrap_or("")];
+        let member = collection_album_from_response(&json, server, library, rating, &secrets)?;
+        let artwork = json["MediaContainer"]["Metadata"][0]["thumb"].as_str()
+            .filter(|path| {
+                let decoded = urlencoding::decode(path).unwrap_or_default();
+                !secrets.iter().any(|secret| !secret.is_empty() && (path.contains(secret) || decoded.contains(secret)))
+            })
+            .and_then(|path| PlexImageRef::from_connection(&connection, path));
+        Ok((member, artwork, current.generation.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod collection_album_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn validates_server_library_type_album_and_never_stores_secrets() {
+        let response = json!({"MediaContainer":{"machineIdentifier":"server-1","Metadata":[{"type":"album","ratingKey":"42","librarySectionID":7,"title":"Album","parentTitle":"Artist"}]}});
+        let parse = |server, library, rating| {
+            collection_album_from_response(&response, server, library, rating, &["private-token"])
+        };
+        let member = parse("server-1", "7", "42").unwrap();
+        assert_eq!(member.scope, "v1:server-1:7");
+        assert_eq!(member.reference, "v1:42");
+        assert!(parse("server-2", "7", "42").is_err());
+        let mut other = response.clone();
+        other["MediaContainer"]["machineIdentifier"] = json!("server-2");
+        let other_member =
+            collection_album_from_response(&other, "server-2", "7", "42", &[]).unwrap();
+        assert_ne!(member.scope, other_member.scope);
+        assert_eq!(member.reference, other_member.reference);
+        assert_eq!(
+            collection_request_failure(PlexError::from_status("fixture", StatusCode::NOT_FOUND)),
+            "unresolved"
+        );
+        assert_eq!(
+            collection_request_failure(PlexError::from_status(
+                "fixture",
+                StatusCode::INTERNAL_SERVER_ERROR
+            )),
+            "unavailable"
+        );
+        assert_eq!(
+            collection_request_failure(PlexError {
+                operation: "fixture",
+                kind: PlexErrorKind::Transport
+            }),
+            "unavailable"
+        );
+        assert!(parse("server-1", "8", "42").is_err());
+        assert!(parse("server-1", "7", "43").is_err());
+        assert!(parse("server-1", "7", "bad/42").is_err());
+        let mut wrong = response.clone();
+        wrong["MediaContainer"]["Metadata"][0]["type"] = json!("track");
+        assert!(collection_album_from_response(&wrong, "server-1", "7", "42", &[]).is_err());
+        let mut poisoned = response.clone();
+        poisoned["MediaContainer"]["Metadata"][0]["title"] = json!("private-token");
+        assert!(collection_album_from_response(
+            &poisoned,
+            "server-1",
+            "7",
+            "42",
+            &["private-token"]
+        )
+        .is_err());
     }
 }

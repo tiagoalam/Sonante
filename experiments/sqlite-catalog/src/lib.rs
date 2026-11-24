@@ -16,6 +16,7 @@ mod metadata;
 mod path_codec;
 mod scanner;
 mod cue;
+pub mod collections;
 
 pub use metadata::{AttemptStatus as MetadataStatus, Values as TrackMetadataValues};
 
@@ -25,7 +26,9 @@ const SCHEMA_V4_VERSION: i64 = 4;
 const SCHEMA_V5_VERSION: i64 = 5;
 const SCHEMA_V6_VERSION: i64 = 6;
 const SCHEMA_V7_VERSION: i64 = 7;
-const CURRENT_SCHEMA_VERSION: i64 = 8;
+const SCHEMA_V8_VERSION: i64 = 8;
+const SCHEMA_V9_VERSION: i64 = 9;
+const CURRENT_SCHEMA_VERSION: i64 = 10;
 const BASE_SCHEMA_SQL: &str = "CREATE TABLE sources(\
     id INTEGER PRIMARY KEY AUTOINCREMENT, path_format INTEGER NOT NULL CHECK(path_format IN (1,2)),\
     canonical_path BLOB NOT NULL CHECK(typeof(canonical_path)='blob'), display_name TEXT NOT NULL,\
@@ -499,6 +502,25 @@ fn ensure_schema(connection: &mut Connection) -> Result<()> {
     if version == SCHEMA_V7_VERSION {
         validate_schema_v7(connection)?;
         migrate_v7_to_v8(connection)?;
+        version = SCHEMA_V8_VERSION;
+    }
+
+    if version == SCHEMA_V8_VERSION {
+        validate_schema_v8(connection)?;
+        apply_schema_change(connection, SCHEMA_V9_VERSION, |tx| {
+            tx.execute_batch(collections::SCHEMA).map_err(|e| e.to_string())?;
+            collections::validate_schema(tx)
+        })?;
+        version = SCHEMA_V9_VERSION;
+    }
+
+    if version == SCHEMA_V9_VERSION {
+        validate_schema_v8(connection)?;
+        collections::validate_schema(connection)?;
+        apply_schema_change(connection, CURRENT_SCHEMA_VERSION, |tx| {
+            tx.execute_batch(collections::EVIDENCE_SCHEMA).map_err(|e| e.to_string())?;
+            collections::validate_evidence_schema(tx)
+        })?;
         version = CURRENT_SCHEMA_VERSION;
     }
 
@@ -509,6 +531,8 @@ fn ensure_schema(connection: &mut Connection) -> Result<()> {
     }
 
     validate_schema_v8(connection)?;
+    collections::validate_schema(connection)?;
+    collections::validate_evidence_schema(connection)?;
     validate_path_formats(connection)
 }
 
@@ -533,10 +557,13 @@ fn initialize_current_schema(connection: &mut Connection) -> Result<()> {
             .map_err(|error| format!("create CUE schema: {error}"))
             ?;
         add_cue_audio_identity_columns(transaction)?;
-        Ok(())
+        transaction.execute_batch(collections::SCHEMA).map_err(|e| e.to_string())?;
+        collections::validate_schema(transaction)?;
+        transaction.execute_batch(collections::EVIDENCE_SCHEMA).map_err(|e| e.to_string())?;
+        collections::validate_evidence_schema(transaction)
     })
     .map_err(|error| format!("sqlite schema initialization: {error}"))
-    .and_then(|()| validate_schema_v8(connection))
+    .and_then(|()| { validate_schema_v8(connection)?; collections::validate_schema(connection)?; collections::validate_evidence_schema(connection) })
 }
 
 #[cfg(target_os = "linux")]
@@ -817,7 +844,7 @@ fn migrate_v7_to_v8_with_hook<F>(connection: &mut Connection, after_ddl: F) -> R
 where
     F: FnOnce(&Transaction<'_>) -> Result<()>,
 {
-    apply_schema_change(connection, CURRENT_SCHEMA_VERSION, |transaction| {
+    apply_schema_change(connection, SCHEMA_V8_VERSION, |transaction| {
         validate_schema_v7(transaction)?;
         add_cue_audio_identity_columns(transaction)?;
         after_ddl(transaction)?;
@@ -1044,6 +1071,14 @@ fn validate_schema_base(
     if cue_count == cue_objects.len() as i64 {
         expected_objects.extend(cue_objects.iter().map(|(kind, name)| (kind.to_string(), name.to_string())));
     }
+    let collection_objects = [("table", "personal_collections"), ("table", "personal_collection_members")];
+    let found = collection_objects.iter().filter(|(kind, name)| objects.contains(&(kind.to_string(), name.to_string()))).count();
+    if found != 0 && found != collection_objects.len() { return Err("incomplete collections schema".into()); }
+    if found != 0 { expected_objects.extend(collection_objects.iter().map(|(kind,name)| (kind.to_string(),name.to_string()))); }
+    let evidence_objects = [("table", "collection_local_snapshots"), ("table", "collection_local_files"), ("table", "collection_cue_segments")];
+    let found = evidence_objects.iter().filter(|(kind, name)| objects.contains(&(kind.to_string(), name.to_string()))).count();
+    if found != 0 && found != evidence_objects.len() { return Err("incomplete collection evidence schema".into()); }
+    if found != 0 { expected_objects.extend(evidence_objects.iter().map(|(kind, name)| (kind.to_string(), name.to_string()))); }
     expected_objects.sort();
     if objects != expected_objects {
         return Err(format!(
@@ -1734,6 +1769,7 @@ fn is_audio(p: &Path) -> bool {
             | "opus"
             | "wav"
             | "wave"
+            | "wv"
             | "wma"
     )
 }
@@ -1888,9 +1924,10 @@ struct MetadataWork {
     metrics: Metrics,
 }
 
-// Version 3 resolves FILE relative to the sheet and skips non-audio tracks
-// when computing audio segment boundaries. Older catalog rows are refreshed.
-const CUE_PARSER_VERSION: i64 = 3;
+// Version 4 rebinds sheets whose FILE references became cataloged audio when
+// WavPack support was added. Version 5 accepts unknown valueless REM flags.
+// Previously rejected sheets are refreshed when this parser version changes.
+const CUE_PARSER_VERSION: i64 = 5;
 
 #[derive(Clone)]
 struct ExistingCueSheet {
@@ -2061,7 +2098,14 @@ fn prepare_cue_work(
         };
         let mut tracks = Vec::new();
         let status = match parsed {
-            Err(_) => CueSheetStatus::Rejected { error_code: "cue_parse_rejected".into() },
+            Err(error) => CueSheetStatus::Rejected {
+                error_code: if error == "CUE REM known directive is missing a value" {
+                    "cue_rem_value_missing"
+                } else {
+                    "cue_parse_rejected"
+                }
+                .into(),
+            },
             Ok(mut sheet) => {
                 for track in &mut sheet.tracks {
                     track.file = cue::resolve_file_from_sheet(&file.relative, &track.file)?;
@@ -2246,6 +2290,12 @@ fn is_dff(p: &Path) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("dff"))
 }
 
+fn is_wavpack(p: &Path) -> bool {
+    p.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("wv"))
+}
+
 fn prepare_metadata_with_progress<F>(
     root: &Path,
     files: &[DiskFile],
@@ -2341,6 +2391,8 @@ where
             Some(metadata::parse_dsf)
         } else if is_dff(&file.relative) {
             Some(metadata::parse_dff)
+        } else if is_wavpack(&file.relative) {
+            Some(metadata::parse_wavpack)
         } else {
             None
         };
@@ -5583,6 +5635,213 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn wavpack_tags_and_cue_image_recover_incrementally_and_persist() {
+        let fixture = Fixture::new();
+        let root = fixture.dir("WavPack/Café Album");
+        Fixture::file(&root.join("album.wv"), &metadata::synthetic_wavpack());
+        Fixture::file(&root.join("album.wvc"), &metadata::synthetic_wavpack());
+        Fixture::file(
+            &root.join("album.cue"),
+            "TITLE \"Fixture Album\"\nPERFORMER \"Fixture Album Artist\"\nFILE \"album.wv\" WAVE\nTRACK 01 AUDIO\nTITLE \"Opening\"\nPERFORMER \"Track Artist\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE \"Closing\"\nINDEX 01 00:01:00\n".as_bytes(),
+        );
+        let database = fixture.db();
+        let mut catalog = Catalog::open(&database).unwrap();
+        let source_id = catalog.add_source(&root, "WavPack CUE fixture").unwrap().source_id;
+        let metadata = catalog
+            .metadata_for_track(source_id, Path::new("album.wv"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.status, MetadataStatus::ParsedWithTags);
+        assert_eq!(metadata.parser_version, metadata::WAVPACK_PARSER_VERSION);
+        let values = metadata.last_success.unwrap();
+        assert_eq!(values.title.as_deref(), Some("Fixture Track"));
+        assert_eq!(values.album.as_deref(), Some("Fixture Album"));
+        assert_eq!(values.album_artists, ["Fixture Album Artist"]);
+        assert_eq!(values.track_artists, ["Fixture Artist"]);
+
+        let tracks = catalog.cue_tracks_for_source(source_id).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert!(tracks.iter().all(|track| track.audio_path == Path::new("album.wv")));
+        assert_eq!(tracks[0].title.as_deref(), Some("Opening"));
+        assert_eq!(tracks[0].performers, ["Track Artist"]);
+        assert_eq!(tracks[0].start_frame, 0);
+        assert_eq!(tracks[0].end_frame, Some(75));
+        assert_eq!(tracks[0].duration_ms, Some(1000));
+        assert_eq!(tracks[1].start_frame, 75);
+        assert_eq!(tracks[1].end_frame, None);
+        assert_eq!(catalog.track_count_for(source_id).unwrap(), 1);
+        drop(catalog);
+        let cue_parser_version: i64 = Connection::open(&database).unwrap().query_row(
+            "SELECT parser_version FROM cue_sheets WHERE source_id=?",
+            [source_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(cue_parser_version, CUE_PARSER_VERSION);
+
+        // Reproduce persisted unsupported rows from the previous parser and
+        // CUE parser versions; normal verification must selectively recover.
+        let connection = Connection::open(&database).unwrap();
+        connection.execute(
+            "UPDATE track_metadata SET attempt_status=3,attempt_parser_version=2 WHERE source_id=?",
+            [source_id],
+        ).unwrap();
+        connection.execute("DELETE FROM cue_track_artists WHERE source_id=?", [source_id]).unwrap();
+        connection.execute("DELETE FROM cue_tracks WHERE source_id=?", [source_id]).unwrap();
+        connection.execute(
+            "UPDATE cue_sheets SET parser_version=3,status=2,error_code='cue_file_reference_unavailable',track_count=0 WHERE source_id=?",
+            [source_id],
+        ).unwrap();
+        drop(connection);
+
+        let mut reopened = Catalog::open(&database).unwrap();
+        let report = reopened.verify_source(source_id).unwrap();
+        assert_eq!(report.metrics.files_processed_by_parser, 1);
+        let metadata = reopened.metadata_for_track(source_id, "album.wv").unwrap().unwrap();
+        assert_eq!(metadata.status, MetadataStatus::ParsedWithTags);
+        assert_eq!(metadata.parser_version, metadata::WAVPACK_PARSER_VERSION);
+        let sheets = reopened.cue_sheets_for_source(source_id).unwrap();
+        assert_eq!(sheets[0].status, CueSheetStatus::Indexed);
+        assert_eq!(sheets[0].track_count, 2);
+        assert_eq!(reopened.cue_tracks_for_source(source_id).unwrap().len(), 2);
+        drop(reopened);
+
+        let reopened = Catalog::open(&database).unwrap();
+        assert_eq!(reopened.cue_tracks_for_source(source_id).unwrap().len(), 2);
+        assert_eq!(reopened.track_count_for(source_id).unwrap(), 1);
+        assert_database_integrity(&database);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cue_can_bind_multiple_wavpack_files_with_unicode_and_spaces() {
+        let fixture = Fixture::new();
+        let root = fixture.dir("WavPack multi-file");
+        Fixture::file(&root.join("disc one.wv"), &metadata::synthetic_wavpack());
+        Fixture::file(&root.join("disc 二.wv"), &metadata::synthetic_wavpack());
+        Fixture::file(
+            &root.join("album.cue"),
+            "TITLE \"Two files\"\nFILE \"disc one.wv\" WAVE\nTRACK 01 AUDIO\nTITLE \"Part one\"\nINDEX 01 00:00:00\nFILE \"disc 二.wv\" WAVE\nTRACK 02 AUDIO\nTITLE \"Part two\"\nINDEX 01 00:00:00\n".as_bytes(),
+        );
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        let source_id = catalog.add_source(&root, "WavPack multi-file").unwrap().source_id;
+        let tracks = catalog.cue_tracks_for_source(source_id).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].audio_path, Path::new("disc one.wv"));
+        assert_eq!(tracks[1].audio_path, Path::new("disc 二.wv"));
+        assert_eq!(tracks[0].title.as_deref(), Some("Part one"));
+        assert_eq!(tracks[1].title.as_deref(), Some("Part two"));
+        assert_eq!(catalog.track_count_for(source_id).unwrap(), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cue_two_wavpack_files_with_twelve_tracks_and_unknown_rem_reindexes_and_persists() {
+        let fixture = Fixture::new();
+        let root = fixture.dir("Patricia Barber Cafe Blue 1STEP");
+        Fixture::file(
+            &root.join("Patricia Barber Cafe Blue 1LP.wv"),
+            &metadata::synthetic_wavpack(),
+        );
+        Fixture::file(
+            &root.join("Patricia Barber Cafe Blue 2LP.wv"),
+            &metadata::synthetic_wavpack(),
+        );
+
+        let mut cue = String::from(
+            "REM GENRE Jazz\nREM DATE 2020\nREM BAZAR_VinylRiP\nREM LABEL Impex Records - IMP 6035-1\nPERFORMER \"Patricia Barber\"\nTITLE \"Cafe Blue [1STEP  45rpm IMXLPO6035-45]\"\nFILE \"Patricia Barber Cafe Blue 1LP.wv\" WAVE\n",
+        );
+        let first = ["00:00:00", "05:24:00", "12:20:00", "17:00:00", "21:33:00", "26:42:00"];
+        let second = ["00:00:00", "05:23:00", "13:33:00", "18:06:00", "27:07:00", "28:07:00"];
+        for (offset, timestamps) in [(0_u32, first), (6_u32, second)] {
+            if offset == 6 {
+                cue.push_str("FILE \"Patricia Barber Cafe Blue 2LP.wv\" WAVE\n");
+            }
+            for (index, timestamp) in timestamps.into_iter().enumerate() {
+                let number = offset + index as u32 + 1;
+                cue.push_str(&format!(
+                    "TRACK {number:02} AUDIO\nTITLE \"Cafe Blue - {number:02}\"\nINDEX 01 {timestamp}\n"
+                ));
+            }
+        }
+        Fixture::file(&root.join("album.cue"), cue.as_bytes());
+
+        let database = fixture.db();
+        let mut catalog = Catalog::open(&database).unwrap();
+        let source_id = catalog.add_source(&root, "Patricia Barber fixture").unwrap().source_id;
+        let tracks = catalog.cue_tracks_for_source(source_id).unwrap();
+        assert_eq!(tracks.len(), 12);
+        assert_eq!(tracks.iter().map(|track| track.track_number).collect::<Vec<_>>(), (1..=12).collect::<Vec<_>>());
+        assert!(tracks[..6].iter().all(|track| track.audio_path == Path::new("Patricia Barber Cafe Blue 1LP.wv")));
+        assert!(tracks[6..].iter().all(|track| track.audio_path == Path::new("Patricia Barber Cafe Blue 2LP.wv")));
+        assert_eq!(tracks.iter().map(|track| track.start_frame).collect::<Vec<_>>(), [
+            0, 24_300, 55_500, 76_500, 96_975, 120_150,
+            0, 24_225, 60_975, 81_450, 122_025, 126_525,
+        ]);
+        assert_eq!(tracks.iter().map(|track| track.end_frame).collect::<Vec<_>>(), [
+            Some(24_300), Some(55_500), Some(76_500), Some(96_975), Some(120_150), None,
+            Some(24_225), Some(60_975), Some(81_450), Some(122_025), Some(126_525), None,
+        ]);
+        for track in &tracks {
+            assert_eq!(track.album.as_deref(), Some("Cafe Blue [1STEP  45rpm IMXLPO6035-45]"));
+            assert_eq!(track.album_performers, ["Patricia Barber"]);
+            assert_eq!(track.performers, ["Patricia Barber"]);
+            assert_eq!(track.genre.as_deref(), Some("Jazz"));
+            assert_eq!(track.date.as_deref(), Some("2020"));
+        }
+        assert_eq!(tracks[0].title.as_deref(), Some("Cafe Blue - 01"));
+        assert_eq!(catalog.track_count_for(source_id).unwrap(), 2, "physical files remain two catalog tracks; CUE rows are virtual");
+        assert_eq!(catalog.cue_sheets_for_source(source_id).unwrap()[0].status, CueSheetStatus::Indexed);
+
+        // Simulate a legacy row rejected by parser version 4. Version 5 must
+        // revisit it, restore the virtual tracks, and then remain incremental.
+        let connection = Connection::open(&database).unwrap();
+        connection.execute("DELETE FROM cue_tracks WHERE source_id=?", [source_id]).unwrap();
+        connection.execute(
+            "UPDATE cue_sheets SET parser_version=4,status=2,error_code='cue_parse_rejected',track_count=0 WHERE source_id=?",
+            [source_id],
+        ).unwrap();
+        drop(connection);
+        let old_generation = catalog.sources().unwrap()[0].generation;
+        assert_eq!(catalog.verify_source(source_id).unwrap().generation, old_generation + 1);
+        assert_eq!(catalog.cue_tracks_for_source(source_id).unwrap().len(), 12);
+        let version: i64 = Connection::open(&database).unwrap().query_row(
+            "SELECT parser_version FROM cue_sheets WHERE source_id=?", [source_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(version, CUE_PARSER_VERSION);
+
+        let restored = catalog.cue_tracks_for_source(source_id).unwrap();
+        drop(catalog);
+        let mut reopened = Catalog::open(&database).unwrap();
+        assert_eq!(reopened.cue_tracks_for_source(source_id).unwrap(), restored);
+        let generation = reopened.sources().unwrap()[0].generation;
+        assert_eq!(reopened.verify_source(source_id).unwrap().generation, generation);
+        assert_eq!(reopened.cue_tracks_for_source(source_id).unwrap().len(), 12);
+        assert_database_integrity(&database);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn malformed_known_cue_rem_is_diagnosed_without_virtual_tracks() {
+        let fixture = Fixture::new();
+        let root = fixture.dir("cue-known-rem-invalid");
+        Fixture::file(&root.join("disc one.wv"), &metadata::synthetic_wavpack());
+        Fixture::file(&root.join("disc two.wv"), &metadata::synthetic_wavpack());
+        Fixture::file(
+            &root.join("album.cue"),
+            b"REM GENRE\nTITLE \"Album\"\nFILE \"disc one.wv\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nFILE \"disc two.wv\" WAVE\nTRACK 02 AUDIO\nINDEX 01 00:00:00\n",
+        );
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        let source_id = catalog.add_source(&root, "Invalid CUE fixture").unwrap().source_id;
+        assert_eq!(catalog.track_count_for(source_id).unwrap(), 2);
+        assert!(catalog.cue_tracks_for_source(source_id).unwrap().is_empty());
+        assert!(matches!(
+            catalog.cue_sheets_for_source(source_id).unwrap()[0].status,
+            CueSheetStatus::Rejected { ref error_code } if error_code == "cue_rem_value_missing"
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn cue_segments_are_scanned_safely_persisted_and_restored_without_startup_scan() {
         let fixture = Fixture::new();
         let root = fixture.dir("cue-library");
@@ -5727,7 +5986,8 @@ mod tests {
 
         let connection = Connection::open(fixture.db()).unwrap();
         connection.execute_batch(
-            "ALTER TABLE cue_tracks DROP COLUMN audio_device;\
+            "DROP TABLE collection_cue_segments; DROP TABLE collection_local_files; DROP TABLE collection_local_snapshots; DROP TABLE personal_collection_members; DROP TABLE personal_collections;\
+             ALTER TABLE cue_tracks DROP COLUMN audio_device;\
              ALTER TABLE cue_tracks DROP COLUMN audio_inode;\
              ALTER TABLE cue_tracks DROP COLUMN audio_ctime_ns;\
              PRAGMA user_version=7;",
@@ -8217,7 +8477,7 @@ mod tests {
         let connection = Connection::open(path).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE cue_track_artists; DROP TABLE cue_tracks; DROP TABLE cue_sheets; DROP TABLE source_tag_edit_pending; DROP TABLE track_metadata_extra_artists; DROP TABLE track_metadata; ALTER TABLE tracks DROP COLUMN first_seen_ns; PRAGMA user_version=2;",
+                "DROP TABLE collection_cue_segments; DROP TABLE collection_local_files; DROP TABLE collection_local_snapshots; DROP TABLE personal_collection_members; DROP TABLE personal_collections; DROP TABLE cue_track_artists; DROP TABLE cue_tracks; DROP TABLE cue_sheets; DROP TABLE source_tag_edit_pending; DROP TABLE track_metadata_extra_artists; DROP TABLE track_metadata; ALTER TABLE tracks DROP COLUMN first_seen_ns; PRAGMA user_version=2;",
             )
             .unwrap();
     }
@@ -8225,8 +8485,100 @@ mod tests {
     fn downgrade_fixture_to_v3(path: &Path) {
         let connection = Connection::open(path).unwrap();
         connection
-            .execute_batch("DROP TABLE cue_track_artists; DROP TABLE cue_tracks; DROP TABLE cue_sheets; DROP TABLE source_tag_edit_pending; DROP TABLE track_metadata_extra_artists; ALTER TABLE tracks DROP COLUMN first_seen_ns; PRAGMA user_version=3;")
+            .execute_batch("DROP TABLE collection_cue_segments; DROP TABLE collection_local_files; DROP TABLE collection_local_snapshots; DROP TABLE personal_collection_members; DROP TABLE personal_collections; DROP TABLE cue_track_artists; DROP TABLE cue_tracks; DROP TABLE cue_sheets; DROP TABLE source_tag_edit_pending; DROP TABLE track_metadata_extra_artists; ALTER TABLE tracks DROP COLUMN first_seen_ns; PRAGMA user_version=3;")
             .unwrap();
+    }
+
+    #[test]
+    fn collections_migrate_v8_and_persist_crud_order_and_unique_members() {
+        use crate::collections::NewMember;
+        let fixture = Fixture::new();
+        drop(Catalog::open(fixture.db()).unwrap());
+        let db = Connection::open(fixture.db()).unwrap();
+        db.execute_batch("DROP TABLE collection_cue_segments; DROP TABLE collection_local_files; DROP TABLE collection_local_snapshots; DROP TABLE personal_collection_members; DROP TABLE personal_collections; PRAGMA user_version=8;").unwrap();
+        drop(db);
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        let first = catalog.collection_create("Favorites").unwrap();
+        let second = catalog.collection_create("Other").unwrap();
+        catalog.collection_rename(first, "Renamed").unwrap();
+        let member = |source: &str, reference: &str| NewMember { source:source.into(), scope:"server-library".into(), reference:reference.into(), title:"Title".into(), artist:Some("Artist".into()) };
+        let a = catalog.collection_add(first, member("local", "sqlite:1:abc")).unwrap();
+        catalog.collection_add(first, member("plex", "123")).unwrap();
+        catalog.collection_add(first, member("subsonic", "xyz")).unwrap();
+        assert_eq!(catalog.collection_add(first, member("plex", "123")).unwrap_err(), "COLLECTION_DUPLICATE_MEMBER");
+        catalog.collection_add(second, member("plex", "123")).unwrap();
+        assert!(catalog.collection_add(first, member("plex", "https://x/?token=secret")).is_err());
+        assert!(catalog.collection_members(9999).is_err());
+        drop(catalog);
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        assert_eq!(catalog.collections().unwrap()[0].name, "Renamed");
+        let members = catalog.collection_members(first).unwrap();
+        assert_eq!(catalog.collection_member(first, a).unwrap().id, a);
+        assert!(catalog.collection_member(second, a).is_err());
+        assert!(catalog.collection_member(first, i64::MAX).is_err());
+        assert_eq!(members.iter().map(|m|m.position).collect::<Vec<_>>(), vec![0,1,2]);
+        catalog.collection_remove(first, a).unwrap();
+        assert_eq!(catalog.collection_members(first).unwrap().len(),2);
+        catalog.collection_delete(first).unwrap();
+        assert_eq!(catalog.collection_members(second).unwrap().len(),1);
+        assert!(catalog.collection_delete(first).is_err());
+    }
+
+    #[test]
+    fn collections_v9_migration_preserves_members_and_300_file_evidence() {
+        use crate::collections::NewMember;
+        let fixture = Fixture::new();
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        let collection = catalog.collection_create("Migration").unwrap();
+        let member = catalog.collection_add(collection, NewMember {
+            source: "local".into(), scope: "local1:1".into(), reference: "local1:legacy".into(),
+            title: "Álbum".into(), artist: Some("Artist".into()),
+        }).unwrap();
+        catalog.collection_add(collection, NewMember {
+            source: "plex".into(), scope: "server".into(), reference: "album".into(),
+            title: "Plex".into(), artist: None,
+        }).unwrap();
+        drop(catalog);
+        let db = Connection::open(fixture.db()).unwrap();
+        db.execute_batch("DROP TABLE collection_cue_segments; DROP TABLE collection_local_files; DROP TABLE collection_local_snapshots; PRAGMA user_version=9;").unwrap();
+        drop(db);
+        let catalog = Catalog::open(fixture.db()).unwrap();
+        assert_eq!(catalog.collection_members(collection).unwrap().len(), 2);
+        assert_eq!(catalog.collection_member(collection, member).unwrap().reference, "local1:legacy");
+        drop(catalog);
+        let mut db = Connection::open(fixture.db()).unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        assert_eq!(schema_version(&db).unwrap(), 10);
+        let tx = db.transaction().unwrap();
+        tx.execute("INSERT INTO collection_local_snapshots VALUES(?1,2,'sqlite:fixture')", [member]).unwrap();
+        for n in 0..300_i64 {
+            let path = format!("música/{:04}-{}.wv", n, "long".repeat(30)).into_bytes();
+            tx.execute("INSERT INTO collection_local_files VALUES(?1,?2,?3,123,456,?4)", rusqlite::params![member,n,path,vec![7u8;32]]).unwrap();
+        }
+        let audio = format!("música/{:04}-{}.wv", 0, "long".repeat(30)).into_bytes();
+        tx.execute("INSERT INTO collection_cue_segments VALUES(?1,0,?2,?3,1,?4,NULL,20,21,?4,?4,22)", rusqlite::params![member,b"album.cue".as_slice(),audio,0u64.to_be_bytes().to_vec()]).unwrap();
+        tx.commit().unwrap();
+        assert!(db.execute("INSERT INTO collection_local_snapshots VALUES(999999,2,'bad')", []).is_err());
+        drop(db);
+        let mut catalog = Catalog::open(fixture.db()).unwrap();
+        let count: i64 = catalog.db.connection.query_row("SELECT count(*) FROM collection_local_files WHERE member_id=?1", [member], |r| r.get(0)).unwrap();
+        assert_eq!(count, 300);
+        for n in 0..300_i64 {
+            let (path, size, mtime, digest): (Vec<u8>, i64, i64, Vec<u8>) = catalog.db.connection.query_row(
+                "SELECT path,size,mtime_ns,sample_sha256 FROM collection_local_files WHERE member_id=?1 AND position=?2",
+                rusqlite::params![member,n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+            assert_eq!(path, format!("música/{:04}-{}.wv", n, "long".repeat(30)).into_bytes());
+            assert_eq!((size, mtime, digest), (123, 456, vec![7u8;32]));
+        }
+        let segments: i64 = catalog.db.connection.query_row("SELECT count(*) FROM collection_cue_segments WHERE member_id=?1", [member], |r| r.get(0)).unwrap();
+        assert_eq!(segments, 1);
+        catalog.collection_delete(collection).unwrap();
+        for table in ["collection_local_snapshots", "collection_local_files", "collection_cue_segments"] {
+            let remaining: i64 = catalog.db.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap();
+            assert_eq!(remaining, 0);
+        }
+        drop(catalog);
+        assert_eq!(schema_version(&Connection::open(fixture.db()).unwrap()).unwrap(), 10);
     }
 
     #[test]
@@ -8250,7 +8602,7 @@ mod tests {
         let before_tracks = Catalog::open(f.db()).unwrap().tracks(source_id).unwrap();
         {
             let connection = Connection::open(f.db()).unwrap();
-            connection.execute_batch("DROP TABLE cue_track_artists; DROP TABLE cue_tracks; DROP TABLE cue_sheets; PRAGMA user_version=6;").unwrap();
+            connection.execute_batch("DROP TABLE collection_cue_segments; DROP TABLE collection_local_files; DROP TABLE collection_local_snapshots; DROP TABLE personal_collection_members; DROP TABLE personal_collections; DROP TABLE cue_track_artists; DROP TABLE cue_tracks; DROP TABLE cue_sheets; PRAGMA user_version=6;").unwrap();
         }
         let before_schema = schema_signature(&Connection::open(f.db()).unwrap());
         let mut connection = Connection::open(f.db()).unwrap();
@@ -8277,7 +8629,7 @@ mod tests {
         assert!(before_tracks.iter().all(|track| track.first_seen_ns.is_some()));
 
         let connection = Connection::open(f.db()).unwrap();
-        connection.execute_batch("DROP TABLE cue_track_artists; DROP TABLE cue_tracks; DROP TABLE cue_sheets; ALTER TABLE tracks DROP COLUMN first_seen_ns; PRAGMA user_version=5;").unwrap();
+        connection.execute_batch("DROP TABLE collection_cue_segments; DROP TABLE collection_local_files; DROP TABLE collection_local_snapshots; DROP TABLE personal_collection_members; DROP TABLE personal_collections; DROP TABLE cue_track_artists; DROP TABLE cue_tracks; DROP TABLE cue_sheets; ALTER TABLE tracks DROP COLUMN first_seen_ns; PRAGMA user_version=5;").unwrap();
         drop(connection);
         let before_schema = schema_signature(&Connection::open(f.db()).unwrap());
         let mut connection = Connection::open(f.db()).unwrap();
@@ -8679,7 +9031,7 @@ mod tests {
         }
         Connection::open(f.db())
             .unwrap()
-            .execute_batch("DROP TABLE cue_track_artists; DROP TABLE cue_tracks; DROP TABLE cue_sheets; DROP TABLE source_tag_edit_pending; ALTER TABLE tracks DROP COLUMN first_seen_ns; PRAGMA user_version=4;")
+            .execute_batch("DROP TABLE collection_cue_segments; DROP TABLE collection_local_files; DROP TABLE collection_local_snapshots; DROP TABLE personal_collection_members; DROP TABLE personal_collections; DROP TABLE cue_track_artists; DROP TABLE cue_tracks; DROP TABLE cue_sheets; DROP TABLE source_tag_edit_pending; ALTER TABLE tracks DROP COLUMN first_seen_ns; PRAGMA user_version=4;")
             .unwrap();
         let before = schema_signature(&Connection::open(f.db()).unwrap());
 

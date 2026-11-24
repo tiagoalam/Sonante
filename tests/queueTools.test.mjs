@@ -77,20 +77,19 @@ test('search focus styling uses native focus, with an opaque highlight and outli
  const css=read('src/index.css');const rule=css.split('[data-unified-search] [data-search-result]:focus {')[1]?.split('}')[0];assert.ok(rule);assert.match(rule,/background-color: var\(--theme-surface-accent/);assert.match(rule,/outline: 2px solid var\(--theme-border-accent/);
 });
 
-test('shortcut help is bilingual, modal, keyboard-owned and returns focus without audio calls',()=>{
+test('keyboard shortcut help remains bilingual as presentation-only content inside About / Help',()=>{
  for(const lang of ['en','pt-BR']){
-  const t=dictionary(lang);let opened=false;const effect=[],calls=[];const trigger={isConnected:true,focus:()=>calls.push('focus')};const modal={open:false,showModal(){this.open=true;calls.push('open');},close(){this.open=false;calls.push('close');}};let refIndex=0;
-  const hooks={...React,useId:()=> 'help-owned',useState:()=>[opened,value=>opened=value],useRef:()=>({current:refIndex++===0?modal:trigger}),useEffect:fn=>effect.push(fn)};
-  const View=compile('src/components/KeyboardShortcutsHelp.tsx',{react:hooks,'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t})}}).KeyboardShortcutsHelp;
-  let tree=View();let stopped=0;const shortcutTrigger=nodes(tree,n=>n.type==='button')[0];
-  assert.match(shortcutTrigger.props.className,/text-\[13px\].*text-\[color:var\(--theme-fg-primary/);
-  assert.match(shortcutTrigger.props.className,/gap-2\.5.*px-3 py-2.*focus-visible:ring-1/);
-  assert.doesNotMatch(shortcutTrigger.props.className,/text-\[color:var\(--theme-fg-muted/);
-  shortcutTrigger.props.onClick({stopPropagation:()=>stopped++});assert.equal(opened,true);effect.length=0;refIndex=0;tree=View();
-  const cleanup=effect[0]();assert.deepEqual(calls,['open']);const dialog=nodes(tree,n=>n.type==='dialog')[0];assert.equal(dialog.props['aria-modal'],'true');dialog.props.onKeyDown({stopPropagation:()=>stopped++});dialog.props.onCancel({preventDefault(){}});assert.equal(opened,false);cleanup();assert.deepEqual(calls,['open','close','focus']);assert.equal(stopped,2);
-  assert.equal(nodes(tree,n=>n.type==='kbd').length,10);assert.ok(nodes(tree,n=>n.type==='h2').some(n=>n.props.children===t('shortcuts.title')));
+  const t=dictionary(lang);
+  const View=compile('src/components/KeyboardShortcutsHelp.tsx',{'react/jsx-runtime':jsx,'react-i18next':{useTranslation:()=>({t})}}).KeyboardShortcutsHelp;
+  const tree=View();
+  assert.equal(nodes(tree,n=>n.type==='kbd').length,10);
+  assert.equal(nodes(tree,n=>n.type==='section').length,3);
+  assert.ok(nodes(tree,n=>n.type==='h3').some(n=>n.props.children===t('shortcuts.title')));
+  assert.ok(nodes(tree,n=>n.type==='p').some(n=>n.props.children===t('shortcuts.contextHint')));
  }
- assert.match(read('src/App.tsx'),/<KeyboardShortcutsHelp \/>/);assert.doesNotMatch(read('src/components/KeyboardShortcutsHelp.tsx'),/audioService|invoke\(|fetch\(/);
+ assert.doesNotMatch(read('src/App.tsx'),/<KeyboardShortcutsHelp\s*\/>/);
+ assert.match(read('src/components/AboutModal.tsx'),/<KeyboardShortcutsHelp \/>/);
+ assert.doesNotMatch(read('src/components/KeyboardShortcutsHelp.tsx'),/audioService|invoke\(|fetch\(|<dialog/);
 });
 
 test('queue keyboard edits and filtered drag use exact full indices and a captured revision, with no transport or replacement', async()=>{

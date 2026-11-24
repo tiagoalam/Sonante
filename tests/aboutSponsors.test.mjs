@@ -12,17 +12,25 @@ const componentCode = ts.transpileModule(source, { compilerOptions: {
 let slots = [], cursor = 0, opened;
 const hooks = {
   ...React,
+  useId: () => "about-sponsors-test",
   useState(initial) {
     const index = cursor++;
     if (!(index in slots)) slots[index] = typeof initial === "function" ? initial() : initial;
     return [slots[index], value => { slots[index] = typeof value === "function" ? value(slots[index]) : value; }];
   },
+  useRef(initial) {
+    const index = cursor++;
+    if (!(index in slots)) slots[index] = { current: initial };
+    return slots[index];
+  },
+  useEffect() {},
 };
 const exports = {};
 new Function("require", "exports", componentCode)(name => {
   if (name === "react") return { ...hooks, default: hooks, __esModule: true };
   if (name === "react/jsx-runtime") return jsx;
   if (name === "./LocalDiagnostics") return { LocalDiagnostics: () => null };
+  if (name === "./KeyboardShortcutsHelp") return { KeyboardShortcutsHelp: () => null };
   if (name === "@tauri-apps/plugin-opener") return { openUrl: async url => { opened(url); } };
   if (name === "lucide-react") return new Proxy({}, { get: (_target, icon) => icon });
   if (name === "react-i18next") return { useTranslation: () => ({ t: key => key }) };

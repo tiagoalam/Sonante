@@ -18,12 +18,16 @@ use std::sync::{
 use tauri::{AppHandle, Manager};
 pub const INVALID: &str = "NAVIDROME_INVALID";
 pub const AUTH: &str = "NAVIDROME_AUTH";
+pub const AUTH_METHOD_UNSUPPORTED: &str = "NAVIDROME_AUTH_METHOD_UNSUPPORTED";
+pub const PERMISSION: &str = "NAVIDROME_PERMISSION";
 pub const PROTOCOL: &str = "NAVIDROME_PROTOCOL";
 pub const UNAVAILABLE: &str = "NAVIDROME_UNAVAILABLE";
 pub const STORAGE: &str = "NAVIDROME_STORAGE";
+const API_KEY_UNSUPPORTED: &str = "NAVIDROME_API_KEY_UNSUPPORTED";
 const CHANGED: &str = "NAVIDROME_CONTEXT_CHANGED";
 struct Connection {
     credentials: Credentials,
+    server_info: Option<api::ServerInfo>,
     client: reqwest::Client,
     port: u16,
     secret: String,
@@ -45,16 +49,24 @@ impl Connection {
         if !self.active() || !api::id(song) {
             return Err(CHANGED.into());
         }
+        let proxy_id = api::proxy_id(song).ok_or(INVALID)?;
         Ok(format!(
             "http://127.0.0.1:{}/nav/{}/{}",
-            self.port, self.secret, song
+            self.port, self.secret, proxy_id
         ))
     }
     fn open(credentials: Credentials) -> Result<Arc<Self>, String> {
+        Self::open_with_info(credentials, None)
+    }
+    fn open_with_info(
+        credentials: Credentials,
+        server_info: Option<api::ServerInfo>,
+    ) -> Result<Arc<Self>, String> {
         credentials.validate()?;
         let (listener, port) = proxy::bind()?;
         let connection = Arc::new(Self {
             credentials,
+            server_info,
             client: api::client()?,
             port,
             secret: api::random()?,
@@ -136,7 +148,20 @@ pub(crate) fn suspend() {
     state().loaded.store(false, Ordering::Release);
 }
 fn saved_status(credentials: Option<&Credentials>) -> Status {
-    Status { connection_id: None, account_id: None, server: credentials.map(|c| c.server.clone()), username: credentials.map(|c| c.username.clone()) }
+    Status {
+        connection_id: None,
+        account_id: None,
+        server: credentials.map(|c| c.server.clone()),
+        username: credentials.and_then(|c| {
+            (!c.username.is_empty()).then(|| c.username.clone())
+        }),
+        auth_method: credentials.map(|c| c.auth_method),
+        server_type: None,
+        server_version: None,
+        api_version: None,
+        open_subsonic: false,
+        extensions: Vec::new(),
+    }
 }
 fn path() -> std::path::PathBuf {
     crate::persistence::sonante_config_dir().join("navidrome.json")
@@ -161,14 +186,30 @@ pub(crate) struct Status {
     pub(crate) account_id: Option<String>,
     server: Option<String>,
     username: Option<String>,
+    auth_method: Option<api::AuthMethod>,
+    server_type: Option<String>,
+    server_version: Option<String>,
+    api_version: Option<String>,
+    open_subsonic: bool,
+    extensions: Vec<api::Extension>,
 }
 fn status() -> Result<Status, String> {
     let c = state().current.lock().map_err(|_| UNAVAILABLE)?;
+    let current = c.as_ref();
+    let info = current.and_then(|connection| connection.server_info.as_ref());
     Ok(Status {
-        connection_id: c.as_ref().map(|c| c.credentials.connection_id.clone()),
-        account_id: c.as_ref().map(|c| favorites::scope(&c.credentials)),
-        server: c.as_ref().map(|c| c.credentials.server.clone()),
-        username: c.as_ref().map(|c| c.credentials.username.clone()),
+        connection_id: current.map(|c| c.credentials.connection_id.clone()),
+        account_id: current.map(|c| favorites::scope(&c.credentials)),
+        server: current.map(|c| c.credentials.server.clone()),
+        username: current.and_then(|c| {
+            (!c.credentials.username.is_empty()).then(|| c.credentials.username.clone())
+        }),
+        auth_method: current.map(|c| c.credentials.auth_method),
+        server_type: info.and_then(|info| info.server_type.clone()),
+        server_version: info.and_then(|info| info.server_version.clone()),
+        api_version: info.and_then(|info| info.api_version.clone()),
+        open_subsonic: info.is_some_and(|info| info.open_subsonic),
+        extensions: info.map_or_else(Vec::new, |info| info.extensions.clone()),
     })
 }
 #[tauri::command]
@@ -199,20 +240,53 @@ pub(crate) async fn navidrome_connect(
     server: String,
     username: String,
     password: String,
+    auth_method: Option<String>,
 ) -> Result<Status, String> {
     let _serial = state().serial.lock().await;
     owner(&app)?;
+    let auth_method = match auth_method.as_deref().unwrap_or("password") {
+        "password" => api::AuthMethod::Password,
+        "api_key" => api::AuthMethod::ApiKey,
+        _ => return Err(INVALID.into()),
+    };
+    let client = api::client()?;
     let credentials = Credentials {
         connection_id: api::random()?,
         server: api::server(&server)?.to_string(),
         username: username.trim().into(),
         password,
+        auth_method,
+        api_version_index: Default::default(),
     };
     credentials.validate()?;
-    api::request(&api::client()?, &credentials, "ping", &[]).await?;
+    let extensions = if auth_method == api::AuthMethod::ApiKey {
+        let extensions = api::open_subsonic_extensions(&client, &credentials.server).await?;
+        if !api::api_key_auth_supported(&extensions) {
+            return Err(API_KEY_UNSUPPORTED.into());
+        }
+        extensions
+    } else {
+        Vec::new()
+    };
+    let ping = api::request(&client, &credentials, "ping", &[]).await?;
+    let extensions = if auth_method == api::AuthMethod::Password {
+        api::open_subsonic_extensions(&client, &credentials.server)
+            .await
+            .unwrap_or_default()
+    } else {
+        extensions
+    };
+    let server_info = api::server_info(&ping, extensions);
     owner(&app)?;
     let saved = saved_status(Some(&credentials));
-    let next = if crate::music_sources::navidrome() { Some(Connection::open(credentials.clone())?) } else { None };
+    let next = if crate::music_sources::navidrome() {
+        Some(Connection::open_with_info(
+            credentials.clone(),
+            Some(server_info),
+        )?)
+    } else {
+        None
+    };
     if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
         let _existing = store::load(&path())?;
         store::save(&path(), Some(credentials))
@@ -688,6 +762,8 @@ mod protocol_tests {
             server: format!("http://{addr}/"),
             username: "fixture-user".into(),
             password: "fixture-password".into(),
+            auth_method: api::AuthMethod::Password,
+            api_version_index: Default::default(),
         })
         .unwrap();
         c.request("ping", &[]).await.unwrap();
@@ -739,6 +815,90 @@ mod protocol_tests {
         assert!(c.stream("song-a").is_err());
         peer.join().unwrap();
         assert_eq!(observed.lock().unwrap().len(), 6);
+
+        let key_connection = Connection::open(Credentials {
+            connection_id: "api-key-proxy-fixture".into(),
+            server: format!("http://{addr}/"),
+            username: "local label".into(),
+            password: "PRIVATE_API_KEY".into(),
+            auth_method: api::AuthMethod::ApiKey,
+            api_version_index: Default::default(),
+        })
+        .unwrap();
+        let opaque_song = "../track/曲?part=2";
+        let local_uri = key_connection.stream(opaque_song).unwrap();
+        let local_url = reqwest::Url::parse(&local_uri).unwrap();
+        assert_eq!(local_url.host_str(), Some("127.0.0.1"));
+        assert_eq!(
+            local_url
+                .path_segments()
+                .and_then(Iterator::last)
+                .and_then(api::decode_proxy_id)
+                .as_deref(),
+            Some(opaque_song)
+        );
+        assert!(!local_uri.contains("PRIVATE_API_KEY"));
+        assert!(!local_uri.contains(&addr.to_string()));
+        let external_url = key_connection
+            .credentials
+            .url("stream", &[("id", opaque_song.into())])
+            .unwrap();
+        let external_params = external_url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(external_params["apiKey"], "PRIVATE_API_KEY");
+        assert_eq!(external_params["id"], opaque_song);
+        assert!(!external_params.contains_key("u"));
+        assert!(!external_params.contains_key("t"));
+        key_connection.retire();
+    }
+
+    #[tokio::test]
+    async fn interrupted_remote_stream_is_reported_as_a_failed_local_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            let target = request
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap();
+            let url = reqwest::Url::parse(&format!("http://fixture{target}")).unwrap();
+            assert!(url.path().ends_with("/stream.view"));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: 10\r\nConnection: close\r\n\r\n1234"
+            )
+            .unwrap();
+        });
+        let connection = Connection::open(Credentials {
+            connection_id: "interrupted-stream".into(),
+            server: format!("http://{address}/"),
+            username: "fixture-user".into(),
+            password: "fixture-password".into(),
+            auth_method: api::AuthMethod::Password,
+            api_version_index: Default::default(),
+        })
+        .unwrap();
+        let local = connection.stream("song/β").unwrap();
+        let response = connection.client.get(local).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(response.bytes().await.is_err());
+        connection.retire();
+        peer.join().unwrap();
     }
 }
 
@@ -751,6 +911,8 @@ mod lifetime_tests {
             server,
             username: "fixture-user".into(),
             password: "fixture-password".into(),
+            auth_method: api::AuthMethod::Password,
+            api_version_index: Default::default(),
         }
     }
     include!("player_navigation_tests.rs");
@@ -783,7 +945,7 @@ mod lifetime_tests {
         album.album.cover_id = Some("album-art".into());
         c.remember(&album).unwrap();
         assert_eq!(song_cover_id(&c,"song").await.unwrap().as_deref(),Some("album-art"));
-        assert_eq!(song_cover_id(&c,"../wrong").await.err().as_deref(),Some(INVALID));
+        assert_eq!(song_cover_id(&c,"bad\0id").await.err().as_deref(),Some(INVALID));
         c.retire();
         assert_eq!(song_cover_id(&c,"song").await.err().as_deref(),Some(CHANGED));
     }
@@ -904,3 +1066,249 @@ pub(crate) async fn navidrome_search(connection_id:String,query:String)->Result<
 pub(crate) async fn navidrome_artist(connection_id:String,id:String)->Result<discovery::ArtistDetail,String>{discovery::artist_detail(connection_id,id).await}
 #[tauri::command]
 pub(crate) async fn navidrome_explore(connection_id:String)->Result<discovery::Explore,String>{discovery::explore(connection_id).await}
+
+/// Capture a confirmed Subsonic album without storing server URLs or credentials.
+pub(crate) async fn collection_capture(
+    connection_id: &str,
+    account_id: &str,
+    album_id: &str,
+) -> Result<sonante_sqlite_catalog::collections::NewMember, String> {
+    let c = current(connection_id)?;
+    if !library::valid_account(account_id)
+        || favorites::scope(&c.credentials) != account_id
+        || !api::id(album_id)
+    {
+        return Err(CHANGED.into());
+    }
+    let album = detail(&c, album_id).await?.album;
+    let active = current(connection_id)?;
+    if !Arc::ptr_eq(&c, &active) || favorites::scope(&active.credentials) != account_id {
+        return Err(CHANGED.into());
+    }
+    collection_member(&c.credentials, account_id, album)
+}
+
+fn collection_member(
+    credentials: &Credentials,
+    account_id: &str,
+    album: Album,
+) -> Result<sonante_sqlite_catalog::collections::NewMember, String> {
+    let connection_id = credentials.connection_id.as_str();
+    let album_id = album.id.as_str();
+    if !library::valid_account(account_id)
+        || favorites::scope(credentials) != account_id
+        || !api::id(connection_id)
+        || !api::id(album_id)
+    {
+        return Err(INVALID.into());
+    }
+    let secret = &credentials.password;
+    if !secret.is_empty()
+        && [
+            connection_id,
+            account_id,
+            album_id,
+            album.title.as_str(),
+            album.artist.as_str(),
+        ]
+        .iter()
+        .any(|value| value.contains(secret.as_str()))
+    {
+        return Err(INVALID.into());
+    }
+    Ok(sonante_sqlite_catalog::collections::NewMember {
+        source: "subsonic".into(),
+        scope: format!(
+            "v1:{}:{}",
+            api::proxy_id(connection_id).ok_or(INVALID)?,
+            account_id
+        ),
+        reference: format!("v1:{}", api::proxy_id(album_id).ok_or(INVALID)?),
+        title: album.title,
+        artist: (!album.artist.trim().is_empty()).then_some(album.artist),
+    })
+}
+
+pub(crate) struct ResolvedCollectionAlbum {
+    pub account_id: String,
+    pub album_id: String,
+    pub connection_id: String,
+    pub cover_id: Option<String>,
+}
+
+/// Resolve only references produced by collection_capture against the active account.
+/// The identifiers are returned only after the exact account and album are confirmed.
+pub(crate) async fn collection_resolve_target(
+    scope: &str,
+    reference: &str,
+) -> Result<ResolvedCollectionAlbum, &'static str> {
+    let Some((encoded, account)) = scope.strip_prefix("v1:").and_then(|s| s.split_once(':')) else {
+        return Err("unresolved");
+    };
+    let Some(connection_id) = api::decode_proxy_id(encoded) else {
+        return Err("unresolved");
+    };
+    let Some(album_id) = reference.strip_prefix("v1:").and_then(api::decode_proxy_id) else {
+        return Err("unresolved");
+    };
+    if !library::valid_account(account) {
+        return Err("unresolved");
+    }
+    let Ok(c) = current(&connection_id) else {
+        return Err("unavailable");
+    };
+    if !c.active() || favorites::scope(&c.credentials) != account {
+        return Err("unavailable");
+    }
+    let result = detail(&c, &album_id).await;
+    if !current(&connection_id).is_ok_and(|active| {
+        Arc::ptr_eq(&c, &active) && favorites::scope(&active.credentials) == account
+    }) {
+        return Err("unavailable");
+    }
+    match result {
+        Ok(detail) => Ok(ResolvedCollectionAlbum {
+            account_id: account.to_owned(),
+            album_id,
+            connection_id,
+            cover_id: detail.album.cover_id.filter(|id| {
+                let secret = &c.credentials.password;
+                secret.is_empty() || (!id.contains(secret) && !urlencoding::decode(id).unwrap_or_default().contains(secret))
+            }),
+        }),
+        Err(error) if error == PROTOCOL || error == INVALID => Err("unresolved"),
+        Err(_) => Err("unavailable"),
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn collection_resolve(scope: &str, reference: &str) -> &'static str {
+    match collection_resolve_target(scope, reference).await {
+        Ok(_) => "available",
+        Err(status) => status,
+    }
+}
+
+#[cfg(test)]
+async fn collection_resolve_on(c: &Connection, account: &str, album_id: &str) -> &'static str {
+    if !c.active() || favorites::scope(&c.credentials) != account {
+        return "unavailable";
+    }
+    let result = detail(c, album_id).await;
+    if !c.active() {
+        return "unavailable";
+    }
+    match result {
+        Ok(_) => "available",
+        Err(error) if error == PROTOCOL || error == INVALID => "unresolved",
+        Err(_) => "unavailable",
+    }
+}
+
+#[cfg(test)]
+mod collection_reference_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn simulated_album_confirms_exact_identity_and_account() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut data = Vec::new();
+                while !data.ends_with(b"\r\n\r\n") {
+                    let mut b = [0];
+                    if socket.read(&mut b).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    data.push(b[0]);
+                }
+                let body = r#"{"subsonic-response":{"status":"ok","album":{"id":"known","name":"Album","artist":"Artist","song":[]}}}"#;
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            }
+        });
+        let credentials = Credentials {
+            connection_id: "fixture".into(),
+            server: format!("http://{address}/"),
+            username: "user".into(),
+            password: "secret".into(),
+            auth_method: api::AuthMethod::Password,
+            api_version_index: Default::default(),
+        };
+        let account = favorites::scope(&credentials);
+        let connection = Connection::open(credentials).unwrap();
+        assert_eq!(
+            collection_resolve_on(&connection, &account, "known").await,
+            "available"
+        );
+        assert_eq!(
+            collection_resolve_on(&connection, &account, "different").await,
+            "unresolved"
+        );
+        assert_eq!(
+            collection_resolve_on(&connection, &"a".repeat(64), "known").await,
+            "unavailable"
+        );
+        connection.retire();
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn reference_is_bound_to_account_and_rejects_secrets() {
+        let credentials = Credentials {
+            connection_id: "fixture".into(),
+            server: "http://localhost".into(),
+            username: "user".into(),
+            password: "s3cret-value".into(),
+            auth_method: api::AuthMethod::Password,
+            api_version_index: Default::default(),
+        };
+        let album = Album {
+            id: "album/?#β".into(),
+            title: "Album".into(),
+            artist: "Artist".into(),
+            year: None,
+            cover_id: None,
+            song_count: None,
+        };
+        let account = favorites::scope(&credentials);
+        let member = collection_member(&credentials, &account, album.clone()).unwrap();
+        assert!(
+            !format!("{}{}{}", member.scope, member.reference, member.title)
+                .contains("s3cret-value")
+        );
+        assert_eq!(
+            api::decode_proxy_id(member.reference.strip_prefix("v1:").unwrap()).unwrap(),
+            album.id
+        );
+        assert!(collection_member(&credentials, &"a".repeat(64), album.clone()).is_err());
+        let mut poisoned = album;
+        poisoned.title = "s3cret-value".into();
+        assert!(collection_member(&credentials, &account, poisoned).is_err());
+    }
+
+    #[tokio::test]
+    async fn malformed_legacy_and_offline_references_are_never_available() {
+        assert_eq!(collection_resolve("old", "opaque").await, "unresolved");
+        assert_eq!(
+            collection_resolve("v1:broken:bad", "v1:aa").await,
+            "unresolved"
+        );
+        let connection = api::proxy_id("missing-fixture-connection").unwrap();
+        let album = api::proxy_id("odd/album β?#").unwrap();
+        let scope = format!("v1:{}:{}", connection, "a".repeat(64));
+        assert_eq!(
+            collection_resolve(&scope, &format!("v1:{album}")).await,
+            "unavailable"
+        );
+        assert_eq!(
+            api::decode_proxy_id(&album).as_deref(),
+            Some("odd/album β?#")
+        );
+    }
+}

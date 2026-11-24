@@ -12,7 +12,8 @@ test("cover progress uses the reserved Local header slot and does not compete wi
   assert.match(view, /<div role="status" aria-label=\{t\("artwork\.progressLabel"\)\} aria-live=\{artworkProgressVisible \? "polite" : "off"\} aria-atomic="false"/);
   assert.match(view, /!sqliteBacked && \(windowsLibraryStatus === undefined \? artworkProgress/);
   assert.match(view, /windowsLibraryStatus !== undefined/);
-  assert.match(view, /grid h-\[84px\] min-h-\[84px\]/);
+  assert.match(view, /grid min-h-\[84px\] shrink-0 grid-cols-\[minmax\(0,1fr\)\]/);
+  assert.match(view, /sm:grid-cols-\[minmax\(220px,1fr\)_minmax\(0,1\.8fr\)_auto\]/);
   assert.match(view, /className=\{`ml-auto flex h-9 w-32 shrink-0 flex-col justify-center overflow-hidden sm:w-52\$\{artworkProgressVisible \? "" : " invisible"\}`\}/);
   assert.match(view, /artworkStatus\.total > 0[\s\S]*?artwork\.progressCount/);
   assert.match(view, /Math\.max\(0, artworkStatus\.total - 1\)/);

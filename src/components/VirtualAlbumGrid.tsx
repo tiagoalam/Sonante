@@ -18,6 +18,8 @@ const OVERSCAN_ROWS = 3;
 
 export interface VirtualAlbumGridProps<T> {
   minimumCardWidth?: number;
+  shelf?: boolean;
+  cardExtraHeight?: number;
   items: readonly T[];
   getItemKey: (item: T) => React.Key;
   renderItem: (item: T) => React.ReactNode;
@@ -38,6 +40,8 @@ interface ViewportMeasurement {
 function VirtualAlbumGridComponent<T>({
   items,
   minimumCardWidth = MINIMUM_CARD_WIDTH,
+  shelf = false,
+  cardExtraHeight = CARD_TEXT_HEIGHT,
   getItemKey,
   renderItem,
   scrollContainer,
@@ -117,7 +121,7 @@ function VirtualAlbumGridComponent<T>({
     containerWidth: viewport.width,
     minimumColumnWidth: minimumCardWidth,
     gap: GRID_GAP,
-    cardExtraHeight: CARD_TEXT_HEIGHT,
+    cardExtraHeight,
     scrollOffset: viewport.scrollOffset,
     viewportHeight: viewport.height,
     overscanRows: OVERSCAN_ROWS,
@@ -164,7 +168,7 @@ function VirtualAlbumGridComponent<T>({
     rows.push(
       <div
         key={rowIndex}
-        className="absolute left-0 grid w-full gap-6"
+        className={`absolute left-0 grid w-full gap-6 ${shelf ? "album-shelf-row" : ""}`}
         style={{
           top: rowIndex * metrics.rowStride,
           height: metrics.cardHeight,
@@ -172,7 +176,7 @@ function VirtualAlbumGridComponent<T>({
         }}
       >
         {rowItems.map((item) => (
-          <React.Fragment key={getItemKey(item)}>{renderItem(item)}</React.Fragment>
+          <React.Fragment key={getItemKey(item)}>{shelf ? <div className="album-shelf-item">{renderItem(item)}</div> : renderItem(item)}</React.Fragment>
         ))}
       </div>,
     );

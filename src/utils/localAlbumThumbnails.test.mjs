@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import React from "react";
+import * as icons from "lucide-react";
 import ts from "typescript";
 import { LocalAlbumThumbnails, thumbnailFromLoadedImage, LOCAL_ALBUM_THUMBNAILS_KEY,
   MAX_THUMBNAILS, MAX_THUMBNAIL_BYTES, MAX_THUMBNAILS_BYTES, THUMBNAIL_EDGE,
@@ -160,21 +161,22 @@ test("quota/access failures do not affect normal display or erase the last store
 const cardSource = readFileSync(new URL("../components/LocalBrowserView.tsx", import.meta.url), "utf8");
 const cardBody = ts.transpileModule(cardSource.slice(cardSource.indexOf("const LocalAlbumCard:"), cardSource.indexOf("export type LocalSubview")),
   { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2020 } }).outputText;
-function renderCard({ confirmed, resolved, thumbnail, layout = "grid", sqliteBacked = false, localCoverResult = null }) {
-  const a = album("a"), effects = [], stateUpdates = []; let currentResolved = resolved, reductions = 0, lookups = 0, reads = 0, captures = 0, forgotten = 0; const triggers = [];
+function renderCard({ confirmed, resolved, thumbnail, layout = "grid", sqliteBacked = false, localCoverResult = null, albumId = "a", collectionSelectionEnabled = false, preferFullArtwork = false }) {
+  const a = album(albumId), effects = [], stateUpdates = [], collectionAdds = []; let currentResolved = resolved, reductions = 0, lookups = 0, reads = 0, captures = 0, forgotten = 0; const triggers = [], coverRequests = [];
   const state = { albums: confirmed ? [a] : [], loaded: confirmed, loading: false, error: null, mpdBusy: false, saveBlocked: false };
   let stateIndex = 0;
-  const component = new Function("useMemo", "useQueueInsertion", "loadLocalAlbumQueue", "React", "useTranslation", "useState", "useRef", "useEffect", "localArtworkResolver", "localAlbumThumbnails", "localAlbumCatalog", "artworkReadBlocked", "getLocalAlbumCover", "logError", "AlbumArtworkPlaceholder", "Heart", "Play", "AlbumCatalogRow", cardBody + "return LocalAlbumCard;")(
+  const component = new Function("useMemo", "useQueueInsertion", "loadLocalAlbumQueue", "React", "useTranslation", "useState", "useRef", "useEffect", "usePersonalCollectionSelection", "localArtworkResolver", "localAlbumThumbnails", "localAlbumCatalog", "artworkReadBlocked", "getLocalAlbumCover", "logError", "AlbumArtworkPlaceholder", "Heart", "Play", "CheckCircle2", "ListPlus", "AlbumCatalogRow", cardBody + "return LocalAlbumCard;")(
     fn => fn(), () => ({ open() {}, trigger: () => null, menu: null, notice: null }), async () => { throw new Error("unexpected album load"); }, React, () => ({ t: key => key }), initial => { const index = stateIndex++; return [index === 2 ? true : typeof initial === "function" ? initial() : initial, next => stateUpdates.push({ index, next })]; }, () => ({ current: null }), task => effects.push(task),
+    () => ({ enabled: collectionSelectionEnabled, isSelected: () => false, toggle: item => collectionAdds.push(item) }),
     { get: () => { lookups++; return currentResolved; }, seedPersistedLocal: (_id, cover) => { currentResolved = cover; }, subscribe: () => () => {} },
     { get: () => thumbnail, capture: (_album, _image, current, trigger) => { captures++; triggers.push(trigger); if (current()) reductions++; }, observeInitialCard() {}, forget: (_album, current) => { if (current()) forgotten++; } },
-    { getSnapshot: () => state }, artworkReadBlocked, () => { reads++; return Promise.resolve(localCoverResult); }, () => {}, () => null, () => null, () => null, function AlbumCatalogRow(){});
+    { getSnapshot: () => state }, artworkReadBlocked, (...args) => { reads++; coverRequests.push(args); return Promise.resolve(localCoverResult); }, () => {}, () => null, icons.Heart, icons.Play, icons.CheckCircle2, icons.ListPlus, function AlbumCatalogRow() { return null; });
   const tree = component({ layout, album: a, isFavorite: false, readEnabled: confirmed, isPlaybackAvailable: confirmed,
-    isLibraryUpdating: false, onlineArtworkEnabled: false, sqliteBacked, onClick() {}, onPlayQuick() {}, onToggleFavorite() {} });
+    isLibraryUpdating: false, onlineArtworkEnabled: false, sqliteBacked, preferFullArtwork, onClick() {}, onPlayQuick() {}, onToggleFavorite() {} });
   const elements = [];
   function visit(node) { if (!React.isValidElement(node)) return; elements.push(node); React.Children.forEach(node.props.children, visit); }
   visit(tree);
-  return { tree, elements, effects, state, triggers, stateUpdates, get counts() { return { reductions, lookups, reads, captures, forgotten }; } };
+  return { tree, elements, effects, state, triggers, stateUpdates, collectionAdds, coverRequests, get counts() { return { reductions, lookups, reads, captures, forgotten }; } };
 }
 
 test("the actual saved card paints a thumbnail with all actions and artwork requests inert", () => {
@@ -331,4 +333,30 @@ test("detailed album rows never look up, subscribe to, observe or load artwork",
 test("list rows reuse the same admitted local artwork and actions as cards", () => {
   const row=renderCard({confirmed:true,resolved:"fixture-cover",thumbnail:null,layout:"list"});
   const content=row.elements.find(node=>node.type?.name==="AlbumCatalogRow");assert.ok(content);assert.equal(content.props.detailed,false);assert.equal(content.props.artwork.props.src,"fixture-cover");assert.equal(content.props.playable,true);
+});
+
+test("Local collection selection is limited to SQLite album identities and leaves ordinary card opening alone", () => {
+  const card=renderCard({confirmed:true,resolved:null,thumbnail:null,sqliteBacked:true,albumId:"sqlite:source:42",collectionSelectionEnabled:true});
+  const select=card.elements.find(node=>node.type==="button"&&node.props["aria-label"]==="collections.selectAlbum");assert.ok(select);let stopped=false;select.props.onClick({stopPropagation(){stopped=true;}});assert.equal(stopped,true);assert.deepEqual(card.collectionAdds,[{source:"local",albumId:"sqlite:source:42",title:"sqlite:source:42",artist:"Artist"}]);
+  const legacy=renderCard({confirmed:true,resolved:null,thumbnail:null,sqliteBacked:false,collectionSelectionEnabled:true});assert.equal(legacy.elements.some(node=>node.type==="button"&&node.props["aria-label"]==="collections.selectAlbum"),false);
+});
+
+
+test("focused carousel card upgrades a saved preview and neighbors do not request the original", async () => {
+  const focused = renderCard({ confirmed: true, resolved: jpeg(), thumbnail: jpeg(), sqliteBacked: true, preferFullArtwork: true, localCoverResult: "original" });
+  focused.effects[5]();
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(focused.counts.reads, 1);
+  assert.equal(focused.coverRequests[0][5], true);
+  assert.ok(focused.stateUpdates.some(update => update.next === "original"));
+  const neighbor = renderCard({ confirmed: true, resolved: jpeg(), thumbnail: jpeg(), sqliteBacked: true, preferFullArtwork: false });
+  neighbor.effects[5]();
+  assert.equal(neighbor.counts.reads, 0);
+});
+
+test("a focused original cover response is ignored after the card loses focus", async () => {
+  const card = renderCard({ confirmed: true, resolved: jpeg(), thumbnail: jpeg(), sqliteBacked: true, preferFullArtwork: true, localCoverResult: "original" });
+  const stop = card.effects[5](); stop();
+  await Promise.resolve(); await Promise.resolve();
+  assert.ok(!card.stateUpdates.some(update => update.next === "original"));
 });

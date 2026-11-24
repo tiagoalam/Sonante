@@ -178,8 +178,9 @@ mod tests {
             assert!(!safe.contains(secret));
         }
         let mut invalid = root.clone();
-        invalid["searchResult3"]["song"][0]["albumId"] = serde_json::json!("../wrong");
-        assert!(search_results("fixture-session", "a".repeat(64), &invalid).is_err());
+        invalid["searchResult3"]["song"][0]["albumId"] = serde_json::json!("folder/β?edition=2");
+        let opaque = search_results("fixture-session", "a".repeat(64), &invalid).unwrap();
+        assert_eq!(opaque.songs[0].album_id.as_deref(), Some("folder/β?edition=2"));
         invalid = root.clone();
         invalid["searchResult3"]["artist"] =
             serde_json::json!(vec![serde_json::json!({"id":"artist","name":"Artist"}); 22]);
@@ -193,7 +194,13 @@ mod tests {
     }
     #[test]
     fn discovery_parsers_bound_results_and_validate_artist_identity() {
-        assert!(artist(&serde_json::json!({"id":"../escape","name":"Artist"})).is_err());
+        assert_eq!(
+            artist(&serde_json::json!({"id":"artist/β?edition=2","name":"Artist"}))
+                .unwrap()
+                .id,
+            "artist/β?edition=2"
+        );
+        assert!(artist(&serde_json::json!({"id":"bad\0id","name":"Artist"})).is_err());
         assert!(artist(&serde_json::json!({"id":"artist","name":""})).is_err());
         assert_eq!(
             artist(&serde_json::json!({"id":"artist","name":"Artist","albumCount":4}))

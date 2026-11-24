@@ -76,6 +76,24 @@ export type LibraryView = {
   artists: Artist[];
 };
 
+export type PersonalCollection = { id: number; name: string; created_ns: number; updated_ns: number };
+export type PersonalCollectionMember = {
+  id: number; collection_id: number; source: "local" | "plex" | "subsonic";
+  scope: string; reference: string; title: string; artist: string | null; position: number;
+};
+export type PersonalCollectionTarget =
+  | { source: "local"; album_id: string }
+  | { source: "plex"; server_id: string; library_id: string; rating_key: string }
+  | { source: "subsonic"; account_id: string; album_id: string };
+export type PersonalCollectionArtwork =
+  | { source: "plex"; image: { server_id: string; path: string }; session: string }
+  | { source: "subsonic"; connection_id: string; cover_id: string };
+export type PersonalCollectionResolution = {
+  status: "available" | "unavailable" | "unresolved";
+  target: PersonalCollectionTarget | null;
+  artwork?: PersonalCollectionArtwork | null;
+};
+
 export type IndexResult = {
   source: Source;
   metrics: IndexMetrics;
@@ -137,4 +155,17 @@ export const sqliteLibrary = {
     if ((!trackLocator.startsWith("sqlite-track://") && !trackLocator.startsWith("sqlite-cue://")) || trackLocator.length > 16_384) return Promise.resolve(null);
     return invoke<string | null>("sqlite_library_album_for_track", { trackLocator });
   },
+  personalCollections: () => invoke<PersonalCollection[]>("personal_collections_list"),
+  personalCollectionCreate: (name: string) => invoke<number>("personal_collection_create", { name }),
+  personalCollectionRename: (id: number, name: string) => invoke<void>("personal_collection_rename", { id, name }),
+  personalCollectionDelete: (id: number) => invoke<void>("personal_collection_delete", { id }),
+  personalCollectionMembers: (id: number) => invoke<PersonalCollectionMember[]>("personal_collection_members", { id }),
+  personalCollectionRemove: (id: number, memberId: number) => invoke<void>("personal_collection_remove", { id, memberId }),
+  personalCollectionAddLocal: (id: number, albumId: string) => invoke<number>("personal_collection_add_local", { id, albumId }),
+  personalCollectionAddPlex: (id: number, serverId: string, libraryId: string, ratingKey: string) =>
+    invoke<number>("personal_collection_add_plex", { id, serverId, libraryId, ratingKey }),
+  personalCollectionAddSubsonic: (id: number, connectionId: string, accountId: string, albumId: string) =>
+    invoke<number>("personal_collection_add_subsonic", { id, connectionId, accountId, albumId }),
+  personalCollectionResolve: (id: number, memberId: number) =>
+    invoke<PersonalCollectionResolution>("personal_collection_resolve", { id, memberId }),
 };

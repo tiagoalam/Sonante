@@ -1,24 +1,32 @@
-# Sonante 0.7.1
+# Sonante 0.7.2
 
-Sonante 0.7.1 is a stable Linux release with a persistent local music catalog and complete installers for Ubuntu/Debian, Fedora and Arch.
+Sonante 0.7.2 is a stable Linux release for Ubuntu/Debian, Fedora and Arch Linux/Manjaro.
 
 ## What's new
 
-- Local folders and mounted shares can be registered in the persistent SQLite catalog. Importing folders saved by an earlier public version is a manual action; it does not move, rename or edit music files.
-- Existing favorites and settings are retained. A Local favorite without an exact safe match may need to be added again. The old queue is not automatically rebound to SQLite locators.
-- Lyrics can be read from a matching local `.lrc` sidecar or searched from the online lyrics service. You can choose a result for a track; remote lyrics are not bundled with the application.
-- ParametricEQ text files can be imported into a new local EQ preset. The optional OPRA browser displays catalog profiles with source and attribution details; those profiles remain read-only and are not converted or applied.
-- DSD64 mono and stereo samples can be compared after conversion to PCM. This is a comparison path, not native DSD playback.
-- Library navigation, metadata tools, artwork feedback and Now Playing controls have been refined.
+- **WavPack:** Local SQLite catalog support for WavPack audio and supported WavPack/CUE albums, including virtual tracks for single-image and multi-file CUE layouts.
+- **Subsonic/OpenSubsonic:** a generic Subsonic source that keeps existing Navidrome connections working. Manual scenarios were checked with Navidrome, Gonic 0.22.0 and Ampache 8.4. Compatibility depends on the endpoints and capabilities each server provides; this is not a certification of every implementation.
+- **Personal Collections:** save albums from Local, Plex and Subsonic together, with references retained when a source or album is temporarily unavailable.
+- **Discotheque Carousel:** browse album covers with keyboard, pointer and touch navigation. Opening an album does not start playback.
+- **About / Help:** the existing About dialog now includes a dedicated keyboard-shortcuts tab.
+- **Library and interface refinements:** improved source presentation, metadata handling, artwork loading and compatibility behavior.
 
 ## Linux packages
 
-The DEB, RPM and Arch packages passed their package integrity checks and installation/loader checks on Ubuntu 22.04, Fedora 44 and current Arch with its OpenSSL 3 compatibility runtime. These checks do not certify every derivative distribution or audio device.
+Download one package for your distribution and verify the package checksum before installation:
 
-The release includes SHA-256 checksums, application source archives and provenance receipts. Runtime source archives used by the bundled MPD engines are identified by filename, size and SHA-256 in the platform source-material manifests and remain available from the earlier public source release.
+- Ubuntu 22.04 or newer and compatible derivatives: DEB.
+- Fedora 44 or newer and compatible derivatives: RPM.
+- Current Arch Linux / Manjaro: Arch package requiring the declared GLIBC 2.43 baseline and OpenSSL 3 SONAMEs.
 
-Physical audio and hardware validation was not performed for this release. Sonante makes no bit-perfect output guarantee.
+The Ubuntu 22.04 DEB, Fedora 44 RPM and current Arch package passed the project's package and installation/loader checks. The release was also installed and exercised manually on Manjaro. These results cover the tested environments only; they do not guarantee compatibility with every derivative, driver or audio device.
 
-## Previous public release
+Run sha256sum -c SHA256SUMS.txt with the three downloaded packages beside the checksum file. The checksum file covers only those three package assets.
 
-The previous public release was Sonante 0.6.3. See the [0.6.3 release](https://github.com/tiagoalam/Sonante/releases/tag/v0.6.3) for its original notes.
+## Source and audio notes
+
+The public source tag contains the Sonante application and Linux package build inputs. The release's [source and provenance guide](docs/releases/0.7.2/README.md) links the platform build receipts and the corresponding public source archives for the bundled MPD and support-library runtimes. The same runtime profiles were retained for these packages.
+
+Shared and Direct output remain available. Sonante does not certify general bit-perfect output. The package CI performed ABI, installation and loader checks; those checks are not a measurement of audio at a DAC.
+
+Windows remains in development and is not included in this Linux release.

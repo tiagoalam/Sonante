@@ -1,6 +1,6 @@
 import { AlbumEditionsButton } from './AlbumEditionsButton';
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Disc3, Heart, LoaderCircle, ListPlus, Play, RefreshCw, Search, Server } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Disc3, Heart, LoaderCircle, ListPlus, Play, RefreshCw, Search, Server } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { navidromeService, navidromeError } from '../services/navidrome';
 import { navidromeAlbumCover as cover } from '../utils/navidromeArtwork';
@@ -17,8 +17,10 @@ import { AlbumCatalog } from './AlbumCatalog';
 import { AlbumCatalogRow } from './AlbumCatalogRow';
 import { AlbumViewControls } from './AlbumViewControls';
 import { ToolbarSelect } from './ToolbarSelect';
+import { SourceHeader } from './SourceHeader';
 import { readAlbumPresentation, saveAlbumPresentation, type AlbumPresentation } from '../utils/albumPresentation';
 import { NavidromeAlbumFeed, emptyNavidromeFeed } from '../utils/navidromeAlbumFeed';
+import { usePersonalCollectionSelection } from './PersonalCollectionSelection';
 
 const control = 'rounded-lg border border-[color:var(--theme-border-soft,#333)] bg-[var(--theme-surface-base,#121212)] px-3 py-1.5 text-xs disabled:opacity-40';
 export function Artwork({ connection, id }: { connection: string; id: string | null }) {
@@ -61,6 +63,7 @@ interface Props {
 }
 export function NavidromeView({ available, active = true, favoritesOnly = false, embedded = false, onFavoritesChange, onConfigure, onCatalogAvailability, initialAlbum, onAlbumBack, backLabel }: Props) {
     const { t } = useTranslation();
+    const collectionSelection = usePersonalCollectionSelection();
     const [connection, setConnection] = useState<NavidromeStatus | null>(null);
     const [artistTarget,setArtistTarget] = useState<{account_id:string;id:string}|null>(null);
     const [libraryTotal, setLibraryTotal] = useState<number | null>(null);
@@ -266,11 +269,27 @@ export function NavidromeView({ available, active = true, favoritesOnly = false,
     const busy = (!favoritesOnly && feed.loading) || (favoritesOnly && !favoritesReady && !favoriteError);
     const catalogError = !favoritesOnly && feed.error ? navidromeError(feed.error) : null;
     const countLabel = favoritesOnly ? t('favorites.count', { count: matchedFavorites.length }) : libraryTotal === null ? t('navidrome.subtitle') : t('navidrome.libraryCount', { count: libraryTotal });
+    const serverSummary = connection?.server_type
+        ? t('navidrome.serverInfo', { name: connection.server_type, version: connection.server_version ? ` (${connection.server_version})` : '' })
+        : null;
+    const extensionSummary = connection?.extensions?.length
+        ? t('navidrome.detectedExtensions', { names: connection.extensions.slice(0, 6).map(extension =>
+            `${extension.name}${extension.versions.length ? ` v${extension.versions.join('/')}` : ''}`,
+        ).join(', ') })
+        : null;
+    const sourceMeta = <>
+        {favoritesOnly || libraryTotal !== null ? <span>{countLabel}</span> : null}
+        {serverSummary && <span data-subsonic-server-info>{serverSummary}</span>}
+        {connection?.api_version && <span>{t('navidrome.apiVersion', { version: connection.api_version })}</span>}
+        {connection?.open_subsonic && <span>{t('navidrome.openSubsonic')}</span>}
+        {extensionSummary && <span>{extensionSummary}</span>}
+    </>;
     const failureNotice = detailError && <p role="alert" className="mb-4 text-sm text-[color:var(--theme-fg-error,#f99)]">{t(detailError.startsWith('play_') ? `player.requestError.${detailError.slice(5)}` : `navidrome.errors.${detailError}`)} {albumId && <button type="button" className={control} disabled={playing} onClick={() => void open(albumId)}>{t('navidrome.retry')}</button>}</p>;
     return <>{artistTarget && <NavidromeArtistView artist={artistTarget} available={available&&!starting&&!error} active={active&&!starting&&!error} revision={statusRetry} onBack={()=>setArtistTarget(null)} />}
     <section hidden={!!artistTarget} className={`${artistTarget ? 'hidden' : 'flex'} min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--theme-surface-base,#121212)]`}>
         {!embedded && <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[color:var(--theme-border-soft,#262626)] px-8 py-5">
-            <div><h1 className="flex items-center gap-2 text-2xl font-bold"><Server size={23} />{t('navidrome.albumsTitle')}</h1><p className="mt-1 text-sm font-semibold tabular-nums text-[color:var(--theme-fg-secondary,#aaa)]">{connectionId && !starting ? countLabel : t('navidrome.subtitle')}</p></div>
+            <SourceHeader icon={Server} title={t('sources.names.navidrome')} description={t('sourceHeaders.subsonicDescription')}
+                meta={sourceMeta} accentClassName="text-sky-400" />
 
         </header>}
         {(starting || (!!connectionId && !catalogCurrent)) && <p role="status" className="flex items-center gap-2 px-8 py-5"><LoaderCircle size={17} className="animate-spin" />{t('navidrome.loading')}</p>}
@@ -314,9 +333,12 @@ export function NavidromeView({ available, active = true, favoritesOnly = false,
                     {embedded && <p className="mb-5 text-sm font-semibold tabular-nums text-[color:var(--theme-fg-secondary,#aaa)]">{countLabel}</p>}
                     {busy && !visibleAlbums.length && <p role="status" className="flex items-center gap-2"><LoaderCircle size={17} className="animate-spin" />{t('navidrome.loading')}</p>}
                     {!busy && !visibleAlbums.length && !error && !catalogError && !favoriteError && (favoritesOnly ? favoritesReady : !feed.more) && <p className="py-10 text-center text-sm text-[color:var(--theme-fg-muted,#999)]">{t(query ? 'navidrome.noResults' : favoritesOnly ? 'navidrome.emptyFavorites' : 'navidrome.empty')}</p>}
-                    {!!visibleAlbums.length && <AlbumCatalog items={visibleAlbums} presentation={presentation}
-                        getItemKey={album => album.id} scrollContainer={scrollContainer}
-                        renderItem={album => presentation.layout !== 'grid' ? <AlbumCatalogRow
+                    {!!visibleAlbums.length && <AlbumCatalog sourceLabel={t("sources.names.navidrome")} items={visibleAlbums} presentation={presentation}
+                        getItemKey={album => album.id} scrollContainer={scrollContainer} resetKey={JSON.stringify([connectionId, connection?.account_id, query, sort, favoritesOnly])} onReachEnd={!favoritesOnly && feed.more && !feed.error ? () => void feedRef.current?.loadMore() : undefined}
+                        renderItem={album => {
+                            const collectionAlbum = connectionId && connection?.account_id ? { source: "subsonic" as const, connectionId, accountId: connection.account_id, albumId: album.id, title: album.title, artist: album.artist } : null;
+                            const selectedForCollection = collectionAlbum ? collectionSelection.isSelected(collectionAlbum) : false;
+                            return presentation.layout !== 'grid' && presentation.layout !== 'carousel' && presentation.layout !== 'shelf' ? <AlbumCatalogRow
                             title={album.title} artist={album.artist} year={album.year ? String(album.year) : undefined} trackCount={album.song_count}
                             detailed={presentation.layout === 'details'}
                             artistAction={<NavidromeArtistLink artist={album.artist} albumId={album.id} connectionId={connectionId} accountId={connection?.account_id??''} onOpen={setArtistTarget} disabled={!active||!!error||!!artistTarget} className="text-xs text-[color:var(--theme-fg-secondary,#aaa)]" />}
@@ -325,10 +347,10 @@ export function NavidromeView({ available, active = true, favoritesOnly = false,
                             playable={available && !error && !playing && (album.song_count ?? 0) <= 500}
                             onOpen={() => void open(album.id)} onPlay={() => void play(0, album.id, true)} onFavorite={() => void favorite(album)} queueAction={null}
                         /> : <div className="group relative flex min-w-0 flex-col">
-                            <div className="relative mb-2.5"><button type="button" className="block w-full cursor-pointer" disabled={!!error} aria-label={t('navidrome.openAlbum', { title: album.title })} onClick={() => void open(album.id)}><Artwork connection={connectionId} id={album.cover_id} /></button>{favoriteButton(album, true)}<div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg bg-black/40 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"><button type="button" title={t('navidrome.playAlbum')} aria-label={t('navidrome.quickPlay', { title: album.title })} disabled={!available || !!error || playing || (album.song_count ?? 0) > 500} className="pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#E5A00D] text-black shadow-lg disabled:opacity-50" onClick={() => void play(0, album.id, true)}><Play size={20} fill="currentColor" className="ml-1" /></button></div></div>
-                            <button type="button" className="truncate text-left text-sm font-semibold" disabled={!!error} title={album.title} onClick={() => void open(album.id)}>{album.title}</button><p className="mt-0.5 truncate text-xs text-[color:var(--theme-fg-secondary,#999)]" title={album.artist}><NavidromeArtistLink artist={album.artist} albumId={album.id} connectionId={connectionId} accountId={connection?.account_id??''} onOpen={setArtistTarget} disabled={!active||!!error||!!artistTarget} /></p><p className="mt-0.5 text-[11px] text-[color:var(--theme-fg-muted,#666)]">{album.year ? `${album.year} · ` : ''}{album.song_count != null ? t('navidrome.tracks', { count: album.song_count }) : ''}</p>
-                        </div>}
-                    />}
+                            <div className="relative mb-2.5"><button type="button" data-album-open className="block w-full cursor-pointer" disabled={!!error} aria-label={t('navidrome.openAlbum', { title: album.title })} onClick={() => void open(album.id)}><Artwork connection={connectionId} id={album.cover_id} /></button>{collectionSelection.enabled && collectionAlbum && <button type="button" aria-pressed={selectedForCollection} aria-label={t(selectedForCollection ? "collections.deselectAlbum" : "collections.selectAlbum", { title: album.title })} title={t(selectedForCollection ? "collections.deselectAlbum" : "collections.selectAlbum", { title: album.title })} onClick={event => { event.stopPropagation(); collectionSelection.toggle(collectionAlbum); }} className={`absolute left-2 top-2 z-20 rounded-full p-1.5 shadow backdrop-blur-xs ${selectedForCollection ? "bg-[var(--theme-control-accent,#E5A00D)] text-[color:var(--theme-control-on-accent,#000)]" : "bg-black/60 text-white/85 hover:text-white"}`}>{selectedForCollection ? <CheckCircle2 size={14} /> : <ListPlus size={14} />}</button>}{favoriteButton(album, true)}<div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg bg-black/40 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"><button type="button" title={t('navidrome.playAlbum')} aria-label={t('navidrome.quickPlay', { title: album.title })} disabled={!available || !!error || playing || (album.song_count ?? 0) > 500} className="pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#E5A00D] text-black shadow-lg disabled:opacity-50" onClick={() => void play(0, album.id, true)}><Play size={20} fill="currentColor" className="ml-1" /></button></div></div>
+                            <button type="button" className="album-card-caption truncate text-left text-sm font-semibold" disabled={!!error} title={album.title} onClick={() => void open(album.id)}>{album.title}</button><p className="album-card-caption mt-0.5 truncate text-xs text-[color:var(--theme-fg-secondary,#999)]" title={album.artist}><NavidromeArtistLink artist={album.artist} albumId={album.id} connectionId={connectionId} accountId={connection?.account_id??''} onOpen={setArtistTarget} disabled={!active||!!error||!!artistTarget} /></p><p className="album-card-caption album-card-detail mt-0.5 text-[11px] text-[color:var(--theme-fg-muted,#666)]">{album.year ? `${album.year} · ` : ''}{album.song_count != null ? t('navidrome.tracks', { count: album.song_count }) : ''}</p>
+                        </div>
+                        }} />}
                     {catalogError && <div role="alert" className="my-5 rounded-xl border border-[color:var(--theme-border-soft,#444)] p-4 text-sm"><p>{t(`navidrome.errors.${catalogError}`)}</p><button type="button" className={control + ' mt-3'} onClick={() => void feedRef.current?.loadMore()}>{t('navidrome.retry')}</button></div>}
                     {!favoritesOnly && !error && feed.more && !catalogError && (visibleAlbums.length > 0 || !feed.loading) && <div ref={moreMarker} className="flex min-h-16 items-center justify-center py-5">
                         {feed.loading ? <p role="status" className="flex items-center gap-2 text-xs text-[color:var(--theme-fg-muted,#999)]"><LoaderCircle size={15} className="animate-spin" />{t('navidrome.loading')}</p> : <button type="button" className={control} onClick={() => void feedRef.current?.loadMore()}>{t('navidrome.loadMore')}</button>}

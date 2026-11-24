@@ -687,10 +687,32 @@ impl SqliteLibraryState {
             }
             for cue_group in cue_album_groups(view.cue_tracks()) {
                 let mut cue_dto = cue_album_dto(&source, &cue_group);
-                let physical = view.albums().iter().find(|album| {
-                    album.directory_hint == cue_group.folder
-                        && album.title.trim().to_lowercase() == cue_group.normalized_title
-                });
+                let cue_audio_paths = cue_group
+                    .tracks
+                    .iter()
+                    .map(|track| track.audio_path.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                let physical_candidates = view
+                    .albums()
+                    .iter()
+                    .filter(|album| album.directory_hint == cue_group.folder)
+                    .collect::<Vec<_>>();
+                let physical = physical_candidates
+                    .iter()
+                    .copied()
+                    .find(|album| album.title.trim().to_lowercase() == cue_group.normalized_title)
+                    .or_else(|| {
+                        physical_candidates.iter().copied().find(|album| {
+                            view.tracks_for_album(&album.id)
+                                .map(|tracks| {
+                                    tracks
+                                        .map(|track| track.track.relative_path.clone())
+                                        .collect::<std::collections::BTreeSet<_>>()
+                                        .is_superset(&cue_audio_paths)
+                                })
+                                .unwrap_or(false)
+                        })
+                    });
                 let Some(physical) = physical else {
                     albums.push(cue_dto);
                     continue;
@@ -709,15 +731,41 @@ impl SqliteLibraryState {
                 }
                 let cue_sheet_count = cue_group.tracks.iter().map(|track| &track.cue_path)
                     .collect::<std::collections::BTreeSet<_>>().len();
+                let relevant_cue_sheets = view
+                    .cue_tracks()
+                    .iter()
+                    .filter(|track| {
+                        track.cue_path.parent() == Some(cue_group.folder.as_path())
+                            && cue_audio_paths.contains(&track.audio_path)
+                    })
+                    .map(|track| track.cue_path.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                let physical_audio_paths = view
+                    .tracks_for_album(&physical.id)
+                    .map(|tracks| {
+                        tracks
+                            .map(|track| track.track.relative_path.clone())
+                            .collect::<std::collections::BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let cue_matches_complete_physical_set = cue_audio_paths == physical_audio_paths;
                 let cue_replaces_single_physical = physical.track_count == 1
                     && cue_group.tracks.len() >= 2
-                    && cue_sheet_count == 1;
-                if cue_replaces_single_physical {
+                    && cue_sheet_count == 1
+                    && relevant_cue_sheets.len() == 1
+                    && cue_matches_complete_physical_set;
+                let cue_replaces_complete_multifile_album = cue_sheet_count == 1
+                    && relevant_cue_sheets.len() == 1
+                    && cue_group.tracks.len() >= 2
+                    && cue_matches_complete_physical_set;
+                if cue_replaces_single_physical || cue_replaces_complete_multifile_album {
                     albums[index] = cue_dto;
                 } else {
-                    // Match 0.6.3: the physical catalog entry remains canonical
-                    // except for a single-sheet image CUE replacing one long
-                    // physical track with two or more virtual segments.
+                    // Keep the physical catalog entry canonical when the CUE
+                    // is ambiguous, partial, or one of several competing sheets.
+                    // A complete single CUE may define many virtual tracks over
+                    // fewer physical files, so completeness is based on exact
+                    // file-set coverage rather than track/file count equality.
                     for genre in cue_dto.genres {
                         crate::catalog_genres::add_genre(&mut albums[index].genres, &genre);
                     }
@@ -2845,6 +2893,189 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn local_collection_relational_snapshots_reopen_and_detect_sample_changes() {
+        for count in [5, 20, 100, 300] {
+            let temp = tempdir().unwrap();
+            let root = temp.path().join("música com espaços").join("álbum longo");
+            fs::create_dir_all(&root).unwrap();
+            for n in 0..count {
+                fs::write(root.join(format!("{n:03} faixa com nome longo e unicode 漢字.wav")), synthetic_wav(&format!("Track {n}"), "Album", "Artist")).unwrap();
+            }
+            let db = temp.path().join("catalog.sqlite");
+            let mut catalog = Catalog::open(&db).unwrap();
+            let source = catalog.add_source(&root, "Music").unwrap().source_id;
+            let view = catalog.source_library_view(source).unwrap();
+            assert_eq!(view.albums().len(), 1);
+            let album = album_id_for_view(&view.albums()[0]);
+            let collection = catalog.collection_create("Test").unwrap();
+            let member = collection_local_add(&mut catalog, collection, &album).unwrap();
+            assert_eq!(collection_local_add(&mut catalog, collection, &album).unwrap_err(), "COLLECTION_DUPLICATE_MEMBER");
+            drop(catalog);
+            let mut catalog = Catalog::open(&db).unwrap();
+            let saved = catalog.collection_member(collection, member).unwrap();
+            assert!(saved.reference.starts_with("local2:"));
+            assert!(saved.reference.len() < 100);
+            assert_eq!(catalog.collection_local_evidence(collection, member).unwrap().files.len(), count);
+            assert_eq!(collection_local_resolve_member(&mut catalog, collection, member, &saved.scope, &saved.reference), Ok(album));
+            let path = root.join("000 faixa com nome longo e unicode 漢字.wav");
+            let modified = fs::metadata(&path).unwrap().modified().unwrap();
+            let mut bytes = fs::read(&path).unwrap();
+            let last = bytes.len()-1; bytes[last] ^= 1;
+            fs::write(&path, bytes).unwrap();
+            fs::OpenOptions::new().write(true).open(&path).unwrap().set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+            assert_eq!(collection_local_resolve_member(&mut catalog, collection, member, &saved.scope, &saved.reference), Err("unresolved"));
+            assert_eq!(catalog.collection_member(collection, member).unwrap(), saved);
+            fs::remove_file(&path).unwrap();
+            assert_eq!(collection_local_resolve_member(&mut catalog, collection, member, &saved.scope, &saved.reference), Err("unresolved"));
+            fs::rename(&root, temp.path().join("offline")).unwrap();
+            assert_eq!(collection_local_resolve_member(&mut catalog, collection, member, &saved.scope, &saved.reference), Err("unavailable"));
+            assert_eq!(catalog.collection_member(collection, member).unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn local_collection_relational_insert_rolls_back_on_bad_evidence() {
+        use sonante_sqlite_catalog::collections::{LocalEvidence, LocalEvidenceFile, NewMember};
+        let temp = tempdir().unwrap();
+        let mut catalog = Catalog::open(temp.path().join("catalog.sqlite")).unwrap();
+        let id = catalog.collection_create("Test").unwrap();
+        let item = NewMember { source:"local".into(), scope:"local1:1".into(), reference:"local2:fixture".into(), title:"Album".into(), artist:None };
+        let evidence = LocalEvidence { album_locator:"sqlite:1:00".into(), files:vec![
+            LocalEvidenceFile { path:b"one".to_vec(), size:1, mtime_ns:0, sample_sha256:vec![0;32] },
+            LocalEvidenceFile { path:b"two".to_vec(), size:1, mtime_ns:0, sample_sha256:vec![0;2] },
+        ], segments:vec![] };
+        assert!(catalog.collection_add_local_evidence(id, item, &evidence, None).is_err());
+        assert!(catalog.collection_members(id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_collection_distinguishes_homonyms_and_detects_group_changes() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("music");
+        for name in ["one", "two"] {
+            let directory = root.join(name);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join("track.wav"),
+                synthetic_wav("Track", "Same Album", "Same Artist"),
+            )
+            .unwrap();
+        }
+        let mut catalog = Catalog::open(temp.path().join("catalog.sqlite")).unwrap();
+        let source = catalog.add_source(&root, "Music").unwrap().source_id;
+        let view = catalog.source_library_view(source).unwrap();
+        assert_eq!(view.albums().len(), 2);
+        let first_album = view
+            .albums()
+            .iter()
+            .find(|a| a.directory_hint == Path::new("one"))
+            .unwrap();
+        let second_album = view
+            .albums()
+            .iter()
+            .find(|a| a.directory_hint == Path::new("two"))
+            .unwrap();
+        let first = collection_local_capture(&catalog, &album_id_for_view(first_album)).unwrap();
+        let second = collection_local_capture(&catalog, &album_id_for_view(second_album)).unwrap();
+        assert_ne!(first.reference, second.reference);
+        catalog.verify_source(source).unwrap();
+        assert_eq!(
+            collection_local_resolve(&catalog, &first.scope, &first.reference),
+            "available"
+        );
+        fs::write(
+            root.join("one").join("another.wav"),
+            synthetic_wav("Another", "Same Album", "Same Artist"),
+        )
+        .unwrap();
+        catalog.verify_source(source).unwrap();
+        assert_eq!(
+            collection_local_resolve(&catalog, &first.scope, &first.reference),
+            "unresolved"
+        );
+        assert_eq!(
+            collection_local_resolve(&catalog, &second.scope, &second.reference),
+            "available"
+        );
+    }
+
+    #[test]
+    fn local_collection_single_image_cue_detects_sheet_changes() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("music");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("image.wv"), synthetic_wavpack()).unwrap();
+        let cue=b"PERFORMER \"Artist\"\nTITLE \"Album\"\nFILE \"image.wv\" WAVE\nTRACK 01 AUDIO\nTITLE \"First\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE \"Second\"\nINDEX 01 00:00:01\n";
+        fs::write(root.join("album.cue"), cue).unwrap();
+        let mut catalog = Catalog::open(temp.path().join("catalog.sqlite")).unwrap();
+        let source = catalog.add_source(&root, "Music").unwrap().source_id;
+        let view = catalog.source_library_view(source).unwrap();
+        let groups = cue_album_groups(view.cue_tracks());
+        assert_eq!(groups.len(), 1);
+        let locator = cue_album_id(source, &groups[0]);
+        let item = collection_local_capture(&catalog, &locator).unwrap();
+        assert_eq!(collection_local_resolve(&catalog, &item.scope, &item.reference), "available");
+        let collection = catalog.collection_create("Cue").unwrap();
+        let member = collection_local_add(&mut catalog, collection, &locator).unwrap();
+        let saved = catalog.collection_member(collection, member).unwrap();
+        let evidence = catalog.collection_local_evidence(collection, member).unwrap();
+        assert_eq!(evidence.files.len(), 1);
+        assert_eq!(evidence.segments.len(), 2);
+        assert_eq!(collection_local_resolve_member(&mut catalog, collection, member, &saved.scope, &saved.reference), Ok(locator.clone()));
+        fs::write(root.join("other.cue"), b"TITLE \"Other\"\nFILE \"image.wv\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n").unwrap();
+        catalog.verify_source(source).unwrap();
+        assert_eq!(collection_local_resolve(&catalog, &item.scope, &item.reference), "unresolved");
+        assert_eq!(collection_local_resolve_member(&mut catalog, collection, member, &saved.scope, &saved.reference), Err("unresolved"));
+        fs::write(root.join("album.cue"), b"invalid").unwrap();
+        assert_eq!(collection_local_resolve(&catalog, &item.scope, &item.reference), "unresolved");
+    }
+
+    #[test]
+    fn local_collection_snapshot_persists_and_rejects_changed_members() {
+        let temp = tempdir().unwrap();
+        let root = fixture_root(temp.path());
+        let db = temp.path().join("catalog.sqlite");
+        let mut catalog = Catalog::open(&db).unwrap();
+        let source = catalog.add_source(&root, "Test").unwrap().source_id;
+        let view = catalog.source_library_view(source).unwrap();
+        let album = album_id_for_view(&view.albums()[0]);
+        let item = collection_local_capture(&catalog, &album).unwrap();
+        let collection = catalog.collection_create("Test").unwrap();
+        let member = catalog.collection_add(collection, item).unwrap();
+        assert_eq!(collection_local_add(&mut catalog, collection, &album).unwrap_err(), "COLLECTION_DUPLICATE_MEMBER");
+        drop(catalog);
+        let catalog = Catalog::open(&db).unwrap();
+        let saved = catalog.collection_member(collection, member).unwrap();
+        assert_eq!(
+            collection_local_resolve(&catalog, &saved.scope, &saved.reference),
+            "available"
+        );
+        let first_path = root.join("01-first.wav");
+        let modified = fs::metadata(&first_path).unwrap().modified().unwrap();
+        let mut bytes = fs::read(&first_path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        fs::write(&first_path, bytes).unwrap();
+        fs::OpenOptions::new().write(true).open(&first_path).unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+        assert_eq!(collection_local_resolve(&catalog, &saved.scope, &saved.reference), "unresolved");
+        fs::remove_file(root.join("01-first.wav")).unwrap();
+        assert_eq!(
+            collection_local_resolve(&catalog, &saved.scope, &saved.reference),
+            "unresolved"
+        );
+        assert_eq!(
+            catalog.collection_member(collection, member).unwrap(),
+            saved
+        );
+        fs::rename(&root, temp.path().join("offline")).unwrap();
+        assert_eq!(
+            collection_local_resolve(&catalog, &saved.scope, &saved.reference),
+            "unavailable"
+        );
+    }
+
+    #[test]
     fn cue_disc_number_allocation_is_finite_for_duplicate_maximum_values() {
         let mut used = std::collections::BTreeSet::new();
         assert_eq!(unique_cue_disc_number(u32::MAX, &mut used), u32::MAX);
@@ -2885,6 +3116,17 @@ mod tests {
         riff.extend((wave.len() as u32).to_le_bytes());
         riff.extend(wave);
         riff
+    }
+
+    fn synthetic_wavpack() -> Vec<u8> {
+        include_str!("../../experiments/sqlite-catalog/src/fixtures/synthetic-wavpack.wv.hex")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
     }
 
     fn fixture_root(parent: &Path) -> PathBuf {
@@ -3056,6 +3298,156 @@ mod tests {
     }
 
     #[test]
+    fn local_browser_uses_complete_multifile_wavpack_cue_without_duplicate_tracks() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("WavPack CUE Café");
+        fs::create_dir_all(&root).unwrap();
+        let wavpack = synthetic_wavpack();
+        fs::write(root.join("disc one.wv"), &wavpack).unwrap();
+        fs::write(root.join("disc 二.wv"), &wavpack).unwrap();
+        fs::write(
+            root.join("album.cue"),
+            "TITLE \"CUE Curated Release\"\nPERFORMER \"Fixture Album Artist\"\nFILE \"disc one.wv\" WAVE\nTRACK 01 AUDIO\nTITLE \"Part One\"\nPERFORMER \"Track One Artist\"\nINDEX 01 00:00:00\nFILE \"disc 二.wv\" WAVE\nTRACK 02 AUDIO\nTITLE \"Part Two\"\nPERFORMER \"Track Two Artist\"\nINDEX 01 00:00:30\n".as_bytes(),
+        ).unwrap();
+
+        let state = SqliteLibraryState::open(temp.path().join("catalog/catalog.sqlite3")).unwrap();
+        let indexed = state.add_and_index(&root).unwrap();
+        let albums = state.local_browser_albums().unwrap();
+        assert_eq!(albums.len(), 1, "the physical files and virtual CUE must form one album");
+        let album = &albums[0];
+        assert!(album.id.starts_with("sqlite-cue-album:"));
+        assert_eq!(album.track_count, 2);
+        assert_eq!(album.title, "CUE Curated Release");
+
+        let discs = state.local_browser_album_tracks(&album.id).unwrap();
+        let tracks = discs.into_iter().flat_map(|disc| disc.tracks).collect::<Vec<_>>();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].title.as_deref(), Some("Part One"));
+        assert_eq!(tracks[1].title.as_deref(), Some("Part Two"));
+        assert!(tracks.iter().all(|track| track.path.starts_with("sqlite-cue://")));
+
+        let resolved = state.resolve_playback_locator_with_roots(&tracks[1].path, &[]).unwrap();
+        let cue = SqliteLibraryState::parse_sqlite_cue_range_uri(&resolved).unwrap();
+        assert_eq!(cue.path, root.canonicalize().unwrap().join("disc 二.wv").to_string_lossy());
+        assert_eq!((cue.start_frame, cue.end_frame), (30, None));
+        let current_view = state.current_view(indexed.source.id).unwrap();
+        assert!(state
+            .catalog()
+            .unwrap()
+            .is_source_library_view_current(&current_view)
+            .unwrap());
+    }
+
+    #[test]
+    fn local_browser_shows_twelve_track_two_file_wavpack_cue_as_one_album() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("Patricia Barber Cafe Blue [1STEP]");
+        fs::create_dir_all(&root).unwrap();
+        let wavpack = synthetic_wavpack();
+        fs::write(root.join("Patricia Barber Cafe Blue [1LP].wv"), &wavpack).unwrap();
+        fs::write(root.join("Patricia Barber Cafe Blue [2LP].wv"), &wavpack).unwrap();
+        fs::write(root.join("folder.jpg"), [0xff, 0xd8, 0xff, 0x00]).unwrap();
+
+        let mut cue = String::from(
+            "REM GENRE Jazz\nREM DATE 2020\nREM BAZAR_VinylRiP\nREM LABEL Impex Records - IMP 6035-1\nPERFORMER \"Patricia Barber\"\nTITLE \"Cafe Blue [1STEP  45rpm IMXLPO6035-45]\"\nFILE \"Patricia Barber Cafe Blue [1LP].wv\" WAVE\n",
+        );
+        let first = ["00:00:00", "05:24:00", "12:20:00", "17:00:00", "21:33:00", "26:42:00"];
+        let second = ["00:00:00", "05:23:00", "13:33:00", "18:06:00", "27:07:00", "28:07:00"];
+        for (offset, timestamps) in [(0_u32, first), (6_u32, second)] {
+            if offset == 6 {
+                cue.push_str("FILE \"Patricia Barber Cafe Blue [2LP].wv\" WAVE\n");
+            }
+            for (index, timestamp) in timestamps.into_iter().enumerate() {
+                let number = offset + index as u32 + 1;
+                cue.push_str(&format!(
+                    "TRACK {number:02} AUDIO\nTITLE \"Cafe Blue - {number:02}\"\nINDEX 01 {timestamp}\n"
+                ));
+            }
+        }
+        fs::write(root.join("album.cue"), cue).unwrap();
+
+        let state = SqliteLibraryState::open(temp.path().join("catalog/catalog.sqlite3")).unwrap();
+        let indexed = state.add_and_index(&root).unwrap();
+        let albums = state.local_browser_albums().unwrap();
+        assert_eq!(albums.len(), 1, "two physical WavPack rows and one CUE album must not be duplicated");
+        let album = &albums[0];
+        assert!(album.id.starts_with("sqlite-cue-album:"));
+        assert_eq!(album.title, "Cafe Blue [1STEP  45rpm IMXLPO6035-45]");
+        assert_eq!(album.artist, "Patricia Barber");
+        assert_eq!(album.artist_names, ["Patricia Barber"]);
+        assert_eq!(album.year.as_deref(), Some("2020"));
+        assert_eq!(album.genres, ["Jazz"]);
+        assert_eq!(album.track_count, 12);
+        {
+            let mut catalog = state.catalog().unwrap();
+            let item = collection_local_capture(&catalog, &album.id).unwrap();
+            assert_eq!(collection_local_resolve(&catalog, &item.scope, &item.reference), "available");
+            let collection = catalog.collection_create("Cue").unwrap();
+            let member = collection_local_add(&mut catalog, collection, &album.id).unwrap();
+            let saved = catalog.collection_member(collection, member).unwrap();
+            let evidence = catalog.collection_local_evidence(collection, member).unwrap();
+            assert_eq!((evidence.files.len(), evidence.segments.len()), (2, 12));
+            assert_eq!(collection_local_resolve_member(&mut catalog, collection, member, &saved.scope, &saved.reference), Ok(album.id.clone()));
+        }
+        assert_eq!(state.catalog().unwrap().track_count_for(indexed.source.id).unwrap(), 2);
+
+        let tracks = state.local_browser_album_tracks(&album.id).unwrap().into_iter()
+            .flat_map(|disc| disc.tracks).collect::<Vec<_>>();
+        assert_eq!(tracks.len(), 12);
+        assert_eq!(tracks[0].title.as_deref(), Some("Cafe Blue - 01"));
+        assert_eq!(tracks[11].title.as_deref(), Some("Cafe Blue - 12"));
+        assert!(tracks.iter().all(|track| track.path.starts_with("sqlite-cue://")));
+        assert_eq!(state.album_for_track(&tracks[0].path).unwrap().as_deref(), Some(album.id.as_str()));
+        assert_eq!(state.album_for_track(&tracks[11].path).unwrap().as_deref(), Some(album.id.as_str()));
+        assert!(state.album_cover(&album.id).unwrap().unwrap().starts_with("data:image/jpeg;base64,"));
+
+        let expected = [
+            ("Patricia Barber Cafe Blue [1LP].wv", 0, Some(24_300)),
+            ("Patricia Barber Cafe Blue [1LP].wv", 120_150, None),
+            ("Patricia Barber Cafe Blue [2LP].wv", 0, Some(24_225)),
+            ("Patricia Barber Cafe Blue [2LP].wv", 126_525, None),
+        ];
+        for (index, (file, start, end)) in [0_usize, 5, 6, 11].into_iter().zip(expected) {
+            let resolved = state.resolve_playback_locator_with_roots(&tracks[index].path, &[]).unwrap();
+            let cue = SqliteLibraryState::parse_sqlite_cue_range_uri(&resolved).unwrap();
+            assert_eq!(cue.path, root.canonicalize().unwrap().join(file).to_string_lossy());
+            assert_eq!((cue.start_frame, cue.end_frame), (start, end));
+        }
+
+        let before_reindex = state.current_view(indexed.source.id).unwrap();
+        let generation = before_reindex.generation();
+        state.add_and_index(&root).unwrap();
+        let after_reindex = state.local_browser_albums().unwrap();
+        assert_eq!(after_reindex.len(), 1);
+        assert_eq!(after_reindex[0].id, album.id);
+        assert_eq!(after_reindex[0].track_count, 12);
+        assert_eq!(state.current_view(indexed.source.id).unwrap().generation(), generation);
+    }
+
+    #[test]
+    fn rejected_known_cue_metadata_keeps_the_physical_album_visible() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("invalid-wavpack-cue");
+        fs::create_dir_all(&root).unwrap();
+        let wavpack = synthetic_wavpack();
+        fs::write(root.join("disc one.wv"), &wavpack).unwrap();
+        fs::write(root.join("disc two.wv"), &wavpack).unwrap();
+        fs::write(
+            root.join("album.cue"),
+            b"REM GENRE\nTITLE \"Broken CUE Album\"\nFILE \"disc one.wv\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nFILE \"disc two.wv\" WAVE\nTRACK 02 AUDIO\nINDEX 01 00:00:00\n",
+        ).unwrap();
+        let state = SqliteLibraryState::open(temp.path().join("catalog/catalog.sqlite3")).unwrap();
+        let indexed = state.add_and_index(&root).unwrap();
+        let albums = state.local_browser_albums().unwrap();
+        assert_eq!(albums.len(), 1);
+        assert!(albums[0].id.starts_with("sqlite:"), "invalid CUE must not create a virtual album");
+        let sheets = state.catalog().unwrap().cue_sheets_for_source(indexed.source.id).unwrap();
+        assert!(matches!(sheets[0].status, sonante_sqlite_catalog::CueSheetStatus::Rejected { ref error_code }
+            if error_code == "cue_rem_value_missing"));
+        assert!(state.catalog().unwrap().cue_tracks_for_source(indexed.source.id).unwrap().is_empty());
+    }
+
+    #[test]
     fn sqlite_doctor_reports_cue_coverage_without_treating_virtual_locators_as_paths() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("cue-doctor-library");
@@ -3088,8 +3480,11 @@ mod tests {
         let root = temp.path().join("cue-multi-sheet");
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("image.wav"), synthetic_wav("Long image", "CUE Album", "CUE Artist")).unwrap();
-        for cue in ["one.cue", "two.cue"] {
-            fs::write(root.join(cue), b"TITLE \"CUE Album\"\nFILE image.wav WAVE\nTRACK 01 AUDIO\nTITLE \"Part One\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE \"Part Two\"\nINDEX 01 00:01:00\n").unwrap();
+        for (cue, title) in [("one.cue", "CUE Album"), ("two.cue", "Alternate Title")] {
+            fs::write(
+                root.join(cue),
+                format!("TITLE \"{title}\"\nFILE image.wav WAVE\nTRACK 01 AUDIO\nTITLE \"Part One\"\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE \"Part Two\"\nINDEX 01 00:01:00\n"),
+            ).unwrap();
         }
         let state = SqliteLibraryState::open(temp.path().join("catalog/catalog.sqlite3")).unwrap();
         let indexed = state.add_and_index(&root).unwrap();
@@ -4301,4 +4696,651 @@ mod tests {
         assert!(html.contains("/src/main.tsx"));
         assert!(!html.contains("sqlite-library-main.tsx"));
     }
+}
+
+// Collection references are opaque snapshots; these commands do not resolve albums.
+#[derive(Serialize)]
+pub struct PersonalCollectionDto {
+    id: i64,
+    name: String,
+    created_ns: i64,
+    updated_ns: i64,
+}
+#[derive(Serialize)]
+pub struct PersonalCollectionMemberDto {
+    id: i64,
+    collection_id: i64,
+    source: String,
+    scope: String,
+    reference: String,
+    title: String,
+    artist: Option<String>,
+    position: i64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonalCollectionMemberInput {
+    source: String,
+    scope: String,
+    reference: String,
+    title: String,
+    artist: Option<String>,
+}
+
+#[tauri::command]
+pub async fn personal_collection_create(
+    state: State<'_, SqliteLibraryState>,
+    name: String,
+) -> Result<i64, String> {
+    let path = state.inner.database_path.clone();
+    blocking(move || Catalog::open(path)?.collection_create(&name)).await
+}
+#[tauri::command]
+pub async fn personal_collection_rename(
+    state: State<'_, SqliteLibraryState>,
+    id: i64,
+    name: String,
+) -> Result<(), String> {
+    let path = state.inner.database_path.clone();
+    blocking(move || Catalog::open(path)?.collection_rename(id, &name)).await
+}
+#[tauri::command]
+pub async fn personal_collection_delete(
+    state: State<'_, SqliteLibraryState>,
+    id: i64,
+) -> Result<(), String> {
+    let path = state.inner.database_path.clone();
+    blocking(move || Catalog::open(path)?.collection_delete(id)).await
+}
+#[tauri::command]
+pub async fn personal_collections_list(
+    state: State<'_, SqliteLibraryState>,
+) -> Result<Vec<PersonalCollectionDto>, String> {
+    let path = state.inner.database_path.clone();
+    blocking(move || {
+        Ok(Catalog::open(path)?
+            .collections()?
+            .into_iter()
+            .map(|c| PersonalCollectionDto {
+                id: c.id,
+                name: c.name,
+                created_ns: c.created_ns,
+                updated_ns: c.updated_ns,
+            })
+            .collect())
+    })
+    .await
+}
+#[tauri::command]
+pub async fn personal_collection_add(
+    state: State<'_, SqliteLibraryState>,
+    id: i64,
+    member: PersonalCollectionMemberInput,
+) -> Result<i64, String> {
+    let path = state.inner.database_path.clone();
+    blocking(move || {
+        Catalog::open(path)?.collection_add(
+            id,
+            sonante_sqlite_catalog::collections::NewMember {
+                source: member.source,
+                scope: member.scope,
+                reference: member.reference,
+                title: member.title,
+                artist: member.artist,
+            },
+        )
+    })
+    .await
+}
+#[tauri::command]
+pub async fn personal_collection_remove(
+    state: State<'_, SqliteLibraryState>,
+    id: i64,
+    member_id: i64,
+) -> Result<(), String> {
+    let path = state.inner.database_path.clone();
+    blocking(move || Catalog::open(path)?.collection_remove(id, member_id)).await
+}
+#[tauri::command]
+pub async fn personal_collection_members(
+    state: State<'_, SqliteLibraryState>,
+    id: i64,
+) -> Result<Vec<PersonalCollectionMemberDto>, String> {
+    let path = state.inner.database_path.clone();
+    blocking(move || {
+        Ok(Catalog::open(path)?
+            .collection_members(id)?
+            .into_iter()
+            .map(|m| PersonalCollectionMemberDto {
+                id: m.id,
+                collection_id: m.collection_id,
+                source: m.source,
+                scope: m.scope,
+                reference: m.reference,
+                title: m.title,
+                artist: m.artist,
+                position: m.position,
+            })
+            .collect())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn personal_collection_add_subsonic(
+    state: State<'_, SqliteLibraryState>,
+    id: i64,
+    connection_id: String,
+    account_id: String,
+    album_id: String,
+) -> Result<i64, String> {
+    let member =
+        crate::navidrome::collection_capture(&connection_id, &account_id, &album_id).await?;
+    let path = state.inner.database_path.clone();
+    blocking(move || Catalog::open(path)?.collection_add(id, member)).await
+}
+
+#[derive(Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+enum PersonalCollectionTargetDto {
+    Local {
+        album_id: String,
+    },
+    Plex {
+        server_id: String,
+        library_id: String,
+        rating_key: String,
+    },
+    Subsonic {
+        account_id: String,
+        album_id: String,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+enum PersonalCollectionArtworkDto {
+    Plex { image: crate::plex::PlexImageRef, session: String },
+    Subsonic { connection_id: String, cover_id: String },
+}
+
+#[derive(Serialize)]
+pub struct PersonalCollectionResolutionDto {
+    status: String,
+    target: Option<PersonalCollectionTargetDto>,
+    artwork: Option<PersonalCollectionArtworkDto>,
+}
+
+#[cfg(test)]
+mod personal_collection_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn resolution_exposes_only_verified_source_navigation_ids() {
+        let value = serde_json::to_value(PersonalCollectionResolutionDto {
+            status: "available".into(),
+            artwork: None,
+            target: Some(PersonalCollectionTargetDto::Plex {
+                server_id: "server-fixture".into(),
+                library_id: "7".into(),
+                rating_key: "42".into(),
+            }),
+        })
+        .unwrap();
+        assert_eq!(value["status"], "available");
+        assert_eq!(value["target"]["source"], "plex");
+        assert_eq!(value["target"]["server_id"], "server-fixture");
+        assert!(value.get("scope").is_none());
+        assert!(value.get("reference").is_none());
+    }
+}
+
+#[tauri::command]
+pub async fn personal_collection_resolve(
+    state: State<'_, SqliteLibraryState>,
+    id: i64,
+    member_id: i64,
+    plex: State<'_, crate::PlexState>,
+) -> Result<PersonalCollectionResolutionDto, String> {
+    let path = state.inner.database_path.clone();
+    let lookup_path = path.clone();
+    let member = blocking(move || Catalog::open(lookup_path)?.collection_member(id, member_id)).await?;
+    if member.source == "local" {
+        return blocking(move || {
+            let mut catalog = Catalog::open(path)?;
+            let resolved = collection_local_resolve_member(&mut catalog, id, member_id, &member.scope, &member.reference);
+            let result = match resolved {
+                Ok(album_id) => PersonalCollectionResolutionDto {
+                    status: "available".into(),
+                    artwork: None,
+                    target: Some(PersonalCollectionTargetDto::Local { album_id }),
+                },
+                Err(status) => PersonalCollectionResolutionDto {
+                    status: status.into(),
+                    artwork: None,
+                    target: None,
+                },
+            };
+            Ok(result)
+        })
+        .await;
+    }
+    let (status, target, artwork) = match member.source.as_str() {
+        "subsonic" => {
+            match crate::navidrome::collection_resolve_target(&member.scope, &member.reference).await {
+                Ok(album) => (
+                    "available",
+                    Some(PersonalCollectionTargetDto::Subsonic {
+                        account_id: album.account_id,
+                        album_id: album.album_id,
+                    }),
+                    album.cover_id.map(|cover_id| PersonalCollectionArtworkDto::Subsonic { connection_id: album.connection_id, cover_id }),
+                ),
+                Err(status) => (status, None, None),
+            }
+        }
+        "plex" => {
+            let parts = member
+                .scope
+                .strip_prefix("v1:")
+                .and_then(|s| s.split_once(':'))
+                .zip(member.reference.strip_prefix("v1:"));
+            if let Some(((server, library), rating)) = parts {
+                let client = plex
+                    .0
+                    .lock()
+                    .map_err(|_| "COLLECTION_SOURCE_UNAVAILABLE")?
+                    .clone();
+                match client.collection_album_with_artwork(server, library, rating).await {
+                    Ok((_, image, session)) => (
+                        "available",
+                        Some(PersonalCollectionTargetDto::Plex {
+                            server_id: server.to_owned(),
+                            library_id: library.to_owned(),
+                            rating_key: rating.to_owned(),
+                        }),
+                        image.map(|image| PersonalCollectionArtworkDto::Plex { image, session }),
+                    ),
+                    Err(status) => (status, None, None),
+                }
+            } else {
+                ("unresolved", None, None)
+            }
+        }
+        _ => ("unresolved", None, None),
+    };
+    Ok(PersonalCollectionResolutionDto { status: status.into(), target, artwork })
+}
+
+#[tauri::command]
+pub async fn personal_collection_add_plex(
+    state: State<'_, SqliteLibraryState>,
+    plex: State<'_, crate::PlexState>,
+    id: i64,
+    server_id: String,
+    library_id: String,
+    rating_key: String,
+) -> Result<i64, String> {
+    let client = plex
+        .0
+        .lock()
+        .map_err(|_| "COLLECTION_SOURCE_UNAVAILABLE")?
+        .clone();
+    let member = client
+        .collection_album(&server_id, &library_id, &rating_key)
+        .await
+        .map_err(|s| format!("COLLECTION_{s}"))?;
+    let path = state.inner.database_path.clone();
+    blocking(move || Catalog::open(path)?.collection_add(id, member)).await
+}
+
+// Hash the first and last 16 KiB of each selected file, plus its length.
+// This bounded evidence cannot detect all changes outside those samples.
+// Group membership is taken from the last committed source index.
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CollectionLocalFile {
+    #[serde(rename = "p")]
+    path: String,
+    #[serde(rename = "s")]
+    size: i64,
+    #[serde(rename = "m")]
+    mtime_ns: i64,
+    #[serde(rename = "h")]
+    sample_sha256: String,
+}
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CollectionCueSegment {
+    #[serde(rename = "c")]
+    cue: String,
+    #[serde(rename = "a")]
+    audio: String,
+    #[serde(rename = "t")]
+    track: u32,
+    #[serde(rename = "s")]
+    start: u64,
+    #[serde(rename = "e")]
+    end: Option<u64>,
+    #[serde(rename = "z")]
+    cue_size: i64,
+    #[serde(rename = "m")]
+    cue_mtime_ns: i64,
+    #[serde(rename = "d")]
+    cue_device: u64,
+    #[serde(rename = "i")]
+    cue_inode: u64,
+    #[serde(rename = "n")]
+    cue_ctime_ns: i64,
+}
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CollectionLocalSnapshot {
+    version: u8,
+    album_locator: String,
+    files: Vec<CollectionLocalFile>,
+    segments: Vec<CollectionCueSegment>,
+}
+fn collection_local_path(path: &Path) -> String {
+    URL_SAFE_NO_PAD.encode(path.as_os_str().as_encoded_bytes())
+}
+
+fn collection_local_snapshot(
+    catalog: &Catalog,
+    album_locator: &str,
+) -> Result<(CollectionLocalSnapshot, String, Option<String>), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let is_cue = album_locator.starts_with("sqlite-cue-album:");
+    let (source_id, identity) = if is_cue {
+        parse_sqlite_cue_album_id(album_locator)?
+    } else {
+        parse_sqlite_album_id(album_locator)?
+    };
+    let source = catalog
+        .sources()?
+        .into_iter()
+        .find(|s| s.id == source_id)
+        .ok_or("COLLECTION_LOCAL_SOURCE_MISSING")?;
+    if !std::fs::metadata(&source.canonical_path).is_ok_and(|m| m.is_dir())
+        || std::fs::read_dir(&source.canonical_path).is_err()
+    {
+        return Err("COLLECTION_LOCAL_UNAVAILABLE".into());
+    }
+    let view = catalog.source_library_view(source_id)?;
+    let mut segments = Vec::new();
+    let (selected, title, artist) = if is_cue {
+        let groups = cue_album_groups(view.cue_tracks());
+        let group = groups.iter().find(|g| cue_album_id(source_id, g) == album_locator)
+            .ok_or("COLLECTION_LOCAL_ALBUM_MISSING")?;
+        let audio_paths = group.tracks.iter().map(|t| &t.audio_path).collect::<BTreeSet<_>>();
+        if groups.iter().filter(|other| cue_album_id(source_id, other) != album_locator)
+            .any(|other| other.tracks.iter().any(|track| audio_paths.contains(&track.audio_path))) {
+            return Err("COLLECTION_LOCAL_AMBIGUOUS".into());
+        }
+        let dto = cue_album_dto(&source, group);
+        let mut paths = BTreeSet::new();
+        for t in &group.tracks {
+            view.verified_cue_track(&t.cue_path, t.track_number)?
+                .ok_or("COLLECTION_LOCAL_CUE_CHANGED")?;
+            paths.insert(t.audio_path.clone());
+            segments.push(CollectionCueSegment {
+                cue: collection_local_path(&t.cue_path),
+                audio: collection_local_path(&t.audio_path),
+                track: t.track_number,
+                start: t.start_frame,
+                end: t.end_frame,
+                cue_size: t.cue_size,
+                cue_mtime_ns: t.cue_mtime_ns,
+                cue_device: t.cue_device,
+                cue_inode: t.cue_inode,
+                cue_ctime_ns: t.cue_ctime_ns,
+            });
+        }
+        let selected = catalog
+            .tracks(source_id)?
+            .into_iter()
+            .filter(|t| paths.contains(&t.relative_path))
+            .collect::<Vec<_>>();
+        if selected.len() != paths.len() {
+            return Err("COLLECTION_LOCAL_CUE_CHANGED".into());
+        }
+        (selected, dto.title, dto.artist)
+    } else {
+        let album_id = AlbumId {
+            source_id,
+            identity,
+        };
+        let album = view
+            .albums()
+            .iter()
+            .find(|a| a.id == album_id)
+            .ok_or("COLLECTION_LOCAL_ALBUM_MISSING")?;
+        let tracks = view
+            .tracks_for_album(&album_id)
+            .ok_or("COLLECTION_LOCAL_ALBUM_MISSING")?
+            .collect::<Vec<_>>();
+        if view.cue_tracks().iter().any(|cue| tracks.iter().any(|track| track.track.relative_path == cue.audio_path)) {
+            return Err("COLLECTION_LOCAL_AMBIGUOUS".into());
+        }
+        let dto = local_browser_album_dto(&source, album, &tracks);
+        (
+            tracks
+                .into_iter()
+                .map(|item| item.track.clone())
+                .collect::<Vec<_>>(),
+            dto.title,
+            dto.artist,
+        )
+    };
+    if selected.is_empty() || selected.len() > 100_000 || segments.len() > 100_000 {
+        return Err("COLLECTION_LOCAL_MEMBER_LIMIT".into());
+    }
+    let mut files = Vec::with_capacity(selected.len());
+    for track in selected {
+        let digest = catalog
+            .with_verified_source_track_file(
+                source_id,
+                view.generation(),
+                &track.relative_path,
+                |mut reader, length| -> std::io::Result<String> {
+                    let mut hash = Sha256::new();
+                    hash.update(length.to_le_bytes());
+                    let mut bytes = vec![0u8; (length.min(16 * 1024)) as usize];
+                    reader.read_exact(&mut bytes)?;
+                    hash.update(&bytes);
+                    if length > 16 * 1024 {
+                        reader.seek(SeekFrom::Start(length - 16 * 1024))?;
+                        let mut tail = vec![0u8; 16 * 1024];
+                        reader.read_exact(&mut tail)?;
+                        hash.update(&tail);
+                    }
+                    Ok(format!("{:x}", hash.finalize()))
+                },
+            )?
+            .map_err(|_| "COLLECTION_LOCAL_READ_FAILED")?;
+        files.push(CollectionLocalFile {
+            path: collection_local_path(&track.relative_path),
+            size: track.size,
+            mtime_ns: track.mtime_ns,
+            sample_sha256: digest,
+        });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    if files.windows(2).any(|w| w[0].path == w[1].path)
+        || !catalog.is_source_library_view_current(&view)?
+    {
+        return Err("COLLECTION_LOCAL_AMBIGUOUS".into());
+    }
+    Ok((
+        CollectionLocalSnapshot {
+            version: 1,
+            album_locator: album_locator.to_owned(),
+            files,
+            segments,
+        },
+        title,
+        (!artist.trim().is_empty()).then_some(artist),
+    ))
+}
+
+fn collection_snapshot_reference(scope: &str, snapshot: &CollectionLocalSnapshot) -> Result<String, String> {
+    let bytes = serde_json::to_vec(snapshot).map_err(|_| "COLLECTION_LOCAL_INVALID")?;
+    let mut hash = Sha256::new();
+    hash.update(b"sonante-local-collection-v2\0");
+    hash.update((scope.len() as u64).to_be_bytes());
+    hash.update(scope.as_bytes());
+    hash.update(bytes);
+    Ok(format!("local2:{:x}", hash.finalize()))
+}
+
+fn collection_evidence_from_snapshot(snapshot: &CollectionLocalSnapshot) -> Result<sonante_sqlite_catalog::collections::LocalEvidence, String> {
+    use sonante_sqlite_catalog::collections::{LocalEvidence, LocalEvidenceFile, LocalEvidenceSegment};
+    let decode = |s: &str| URL_SAFE_NO_PAD.decode(s).map_err(|_| "COLLECTION_LOCAL_INVALID".to_owned());
+    let files = snapshot.files.iter().map(|f| Ok(LocalEvidenceFile {
+        path: decode(&f.path)?, size: f.size, mtime_ns: f.mtime_ns, sample_sha256: decode_hex(&f.sample_sha256)?,
+    })).collect::<Result<Vec<_>, String>>()?;
+    let segments = snapshot.segments.iter().map(|c| Ok(LocalEvidenceSegment {
+        cue_path: decode(&c.cue)?, audio_path: decode(&c.audio)?, track: c.track,
+        start_frame: c.start, end_frame: c.end, cue_size: c.cue_size, cue_mtime_ns: c.cue_mtime_ns,
+        cue_device: c.cue_device, cue_inode: c.cue_inode, cue_ctime_ns: c.cue_ctime_ns,
+    })).collect::<Result<Vec<_>, String>>()?;
+    Ok(LocalEvidence { album_locator: snapshot.album_locator.clone(), files, segments })
+}
+
+fn collection_snapshot_from_evidence(evidence: sonante_sqlite_catalog::collections::LocalEvidence) -> CollectionLocalSnapshot {
+    CollectionLocalSnapshot {
+        version: 1, album_locator: evidence.album_locator,
+        files: evidence.files.into_iter().map(|f| CollectionLocalFile {
+            path: URL_SAFE_NO_PAD.encode(f.path), size: f.size, mtime_ns: f.mtime_ns,
+            sample_sha256: f.sample_sha256.iter().map(|b| format!("{b:02x}")).collect(),
+        }).collect(),
+        segments: evidence.segments.into_iter().map(|c| CollectionCueSegment {
+            cue: URL_SAFE_NO_PAD.encode(c.cue_path), audio: URL_SAFE_NO_PAD.encode(c.audio_path), track: c.track,
+            start: c.start_frame, end: c.end_frame, cue_size: c.cue_size, cue_mtime_ns: c.cue_mtime_ns,
+            cue_device: c.cue_device, cue_inode: c.cue_inode, cue_ctime_ns: c.cue_ctime_ns,
+        }).collect(),
+    }
+}
+
+fn collection_local_add(catalog: &mut Catalog, id: i64, album_locator: &str) -> Result<i64, String> {
+    if !crate::music_sources::local() { return Err("COLLECTION_LOCAL_UNAVAILABLE".into()); }
+    let (source_id, _) = if album_locator.starts_with("sqlite-cue-album:") {
+        parse_sqlite_cue_album_id(album_locator)?
+    } else { parse_sqlite_album_id(album_locator)? };
+    let (snapshot, title, artist) = collection_local_snapshot(catalog, album_locator)?;
+    let scope = format!("local1:{source_id}");
+    let reference = collection_snapshot_reference(&scope, &snapshot)?;
+    let evidence = collection_evidence_from_snapshot(&snapshot)?;
+    let member = sonante_sqlite_catalog::collections::NewMember { source: "local".into(), scope, reference, title, artist };
+    let legacy = format!("local1:{}", URL_SAFE_NO_PAD.encode(serde_json::to_vec(&snapshot).map_err(|_| "COLLECTION_LOCAL_INVALID")?));
+    let legacy = (legacy.len() <= 4096).then_some(legacy.as_str());
+    catalog.collection_add_local_evidence(id, member, &evidence, legacy)
+}
+
+fn collection_local_resolve_member(catalog: &mut Catalog, collection: i64, member: i64, scope: &str, reference: &str) -> Result<String, &'static str> {
+    if !reference.starts_with("local2:") { return collection_local_resolve_target(catalog, scope, reference); }
+    if !crate::music_sources::local() { return Err("unavailable"); }
+    let saved = collection_snapshot_from_evidence(catalog.collection_local_evidence(collection, member).map_err(|_| "unresolved")?);
+    if collection_snapshot_reference(scope, &saved).ok().as_deref() != Some(reference) { return Err("unresolved"); }
+    let source_id = scope.strip_prefix("local1:").and_then(|v| v.parse::<i64>().ok()).filter(|v| *v > 0).ok_or("unresolved")?;
+    let parsed = if saved.album_locator.starts_with("sqlite-cue-album:") { parse_sqlite_cue_album_id(&saved.album_locator) } else { parse_sqlite_album_id(&saved.album_locator) };
+    if !parsed.is_ok_and(|(source, _)| source == source_id) { return Err("unresolved"); }
+    match collection_local_snapshot(catalog, &saved.album_locator) {
+        Ok((actual, _, _)) if actual == saved => Ok(saved.album_locator),
+        Err(error) if error == "COLLECTION_LOCAL_UNAVAILABLE" => Err("unavailable"),
+        _ => Err("unresolved"),
+    }
+}
+
+#[cfg(test)]
+fn collection_local_capture(
+    catalog: &Catalog,
+    album_locator: &str,
+) -> Result<sonante_sqlite_catalog::collections::NewMember, String> {
+    if !crate::music_sources::local() {
+        return Err("COLLECTION_LOCAL_UNAVAILABLE".into());
+    }
+    let (source_id, _) = if album_locator.starts_with("sqlite-cue-album:") {
+        parse_sqlite_cue_album_id(album_locator)?
+    } else {
+        parse_sqlite_album_id(album_locator)?
+    };
+    let (snapshot, title, artist) = collection_local_snapshot(catalog, album_locator)?;
+    let bytes = serde_json::to_vec(&snapshot).map_err(|_| "COLLECTION_LOCAL_INVALID")?;
+    let reference = format!("local1:{}", URL_SAFE_NO_PAD.encode(bytes));
+    if reference.len() > 4096 {
+        return Err("COLLECTION_LOCAL_SNAPSHOT_TOO_LARGE".into());
+    }
+    Ok(sonante_sqlite_catalog::collections::NewMember {
+        source: "local".into(),
+        scope: format!("local1:{source_id}"),
+        reference,
+        title,
+        artist,
+    })
+}
+
+fn collection_local_resolve_target(
+    catalog: &Catalog,
+    scope: &str,
+    reference: &str,
+) -> Result<String, &'static str> {
+    if !crate::music_sources::local() {
+        return Err("unavailable");
+    }
+    let Some(id) = scope
+        .strip_prefix("local1:")
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|id| *id > 0)
+    else {
+        return Err("unresolved");
+    };
+    let Some(bytes) = reference
+        .strip_prefix("local1:")
+        .and_then(|s| URL_SAFE_NO_PAD.decode(s).ok())
+    else {
+        return Err("unresolved");
+    };
+    let Ok(saved) = serde_json::from_slice::<CollectionLocalSnapshot>(&bytes) else {
+        return Err("unresolved");
+    };
+    if saved.version != 1
+        || saved.files.is_empty()
+        || saved.files.len() > 256
+        || !(if saved.album_locator.starts_with("sqlite-cue-album:") {
+            parse_sqlite_cue_album_id(&saved.album_locator)
+        } else {
+            parse_sqlite_album_id(&saved.album_locator)
+        })
+        .is_ok_and(|(source, _)| source == id)
+    {
+        return Err("unresolved");
+    }
+    match collection_local_snapshot(catalog, &saved.album_locator) {
+        Ok((actual, _, _)) if actual == saved => Ok(saved.album_locator),
+        Err(error) if error == "COLLECTION_LOCAL_UNAVAILABLE" => Err("unavailable"),
+        _ => Err("unresolved"),
+    }
+}
+
+#[cfg(test)]
+fn collection_local_resolve(catalog: &Catalog, scope: &str, reference: &str) -> &'static str {
+    match collection_local_resolve_target(catalog, scope, reference) {
+        Ok(_) => "available",
+        Err(status) => status,
+    }
+}
+
+#[tauri::command]
+pub async fn personal_collection_add_local(
+    state: State<'_, SqliteLibraryState>,
+    id: i64,
+    album_id: String,
+) -> Result<i64, String> {
+    let path = state.inner.database_path.clone();
+    blocking(move || {
+        let mut catalog = Catalog::open(path)?;
+        collection_local_add(&mut catalog, id, &album_id)
+    })
+    .await
 }

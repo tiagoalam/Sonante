@@ -1,5 +1,5 @@
 /** Presentation only: never changes catalog identity, sorting or playback. */
-export const ALBUM_LAYOUTS = ['grid', 'list', 'details'] as const;
+export const ALBUM_LAYOUTS = ['grid', 'list', 'details', 'carousel', 'shelf'] as const;
 export const ALBUM_COVER_SIZES = ['small', 'medium', 'large'] as const;
 export type AlbumLayout = typeof ALBUM_LAYOUTS[number];
 export type AlbumCoverSize = typeof ALBUM_COVER_SIZES[number];
@@ -12,12 +12,15 @@ export function albumPresentation(value: unknown): AlbumPresentation {
   return { layout: ALBUM_LAYOUTS.includes(v.layout as AlbumLayout) ? v.layout! : 'grid',
     coverSize: ALBUM_COVER_SIZES.includes(v.coverSize as AlbumCoverSize) ? v.coverSize! : 'medium' };
 }
-export function albumPresentationKey(source: 'local' | 'plex' | 'navidrome') { return `sonante.album-presentation.v1.${source}`; }
-export function readAlbumPresentation(source: 'local' | 'plex' | 'navidrome'): AlbumPresentation {
-  try { return albumPresentation(JSON.parse(globalThis.localStorage?.getItem(albumPresentationKey(source)) ?? 'null')); }
+export function albumPresentationKey(source: 'local' | 'plex' | 'navidrome' | 'collections') { return `sonante.album-presentation.v1.${source}`; }
+export function readAlbumPresentation(source: 'local' | 'plex' | 'navidrome' | 'collections'): AlbumPresentation {
+  try {
+    const saved = albumPresentation(JSON.parse(globalThis.localStorage?.getItem(albumPresentationKey(source)) ?? 'null'));
+    return saved.layout === 'shelf' ? { ...saved, layout: 'grid' } : saved;
+  }
   catch { return { ...DEFAULT_ALBUM_PRESENTATION }; }
 }
-export function saveAlbumPresentation(source: 'local' | 'plex' | 'navidrome', value: AlbumPresentation): void {
+export function saveAlbumPresentation(source: 'local' | 'plex' | 'navidrome' | 'collections', value: AlbumPresentation): void {
   try { globalThis.localStorage?.setItem(albumPresentationKey(source), JSON.stringify(albumPresentation(value))); }
   catch { /* A blocked/full store must not prevent changing the current view. */ }
 }

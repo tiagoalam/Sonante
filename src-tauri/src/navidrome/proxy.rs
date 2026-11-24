@@ -54,7 +54,7 @@ fn range(value: &str) -> bool {
         && start.bytes().all(|b| b.is_ascii_digit())
         && end.bytes().all(|b| b.is_ascii_digit())
 }
-fn parse<'a>(request: &'a str, secret: &str) -> Option<(&'a str, Option<&'a str>, bool)> {
+fn parse<'a>(request: &'a str, secret: &str) -> Option<(String, Option<&'a str>, bool)> {
     let mut lines = request.split("\r\n");
     let mut first = lines.next()?.split_whitespace();
     let method = first.next()?;
@@ -70,9 +70,7 @@ fn parse<'a>(request: &'a str, secret: &str) -> Option<(&'a str, Option<&'a str>
         .strip_prefix("/nav/")?
         .strip_prefix(secret)?
         .strip_prefix('/')?;
-    if !api::id(song) {
-        return None;
-    }
+    let song = api::decode_proxy_id(song)?;
     let mut selected = None;
     for line in lines {
         if line.is_empty() {
@@ -206,17 +204,18 @@ mod tests {
     use super::*;
     #[test]
     fn bridge_accepts_only_its_capability_and_one_bounded_range() {
+        let encoded = api::proxy_id("song-1").unwrap();
         assert_eq!(
             parse(
-                "GET /nav/secret/song-1 HTTP/1.1\r\nRange: bytes=0-100\r\n\r\n",
+                &format!("GET /nav/secret/{encoded} HTTP/1.1\r\nRange: bytes=0-100\r\n\r\n"),
                 "secret"
             ),
-            Some(("song-1", Some("bytes=0-100"), false))
+            Some(("song-1".into(), Some("bytes=0-100"), false))
         );
         for r in [
             "GET /nav/wrong/song HTTP/1.1\r\n\r\n",
             "POST /nav/secret/song HTTP/1.1\r\n\r\n",
-            "GET /nav/secret/../song HTTP/1.1\r\n\r\n",
+            "GET /nav/secret/626164006964 HTTP/1.1\r\n\r\n",
             "GET /nav/secret/song HTTP/1.1\r\nRange: bytes=1-2,4-5\r\n\r\n",
             "GET /nav/secret/song HTTP/1.1\r\nRange: bytes=1-2\r\nRange: bytes=3-4\r\n\r\n",
         ] {
@@ -225,5 +224,21 @@ mod tests {
         assert!(range("bytes=10-"));
         assert!(range("bytes=-10"));
         assert!(!range("bytes=-"));
+    }
+
+    #[test]
+    fn opaque_remote_ids_are_encoded_for_the_local_proxy_path() {
+        for id in ["song-1", "track/β?part=1", "曲目#2"] {
+            let encoded = api::proxy_id(id).unwrap();
+            assert!(encoded.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(api::decode_proxy_id(&encoded).as_deref(), Some(id));
+            let request = format!("GET /nav/secret/{encoded} HTTP/1.1\r\n\r\n");
+            assert_eq!(parse(&request, "secret").unwrap().0, id);
+        }
+        for encoded in ["", "0", "../", "zz"] {
+            assert!(api::decode_proxy_id(encoded).is_none());
+        }
+        assert_eq!(api::decode_proxy_id("2e2e2f").as_deref(), Some("../"));
+        assert_eq!(api::decode_proxy_id("2e2e").as_deref(), Some(".."));
     }
 }

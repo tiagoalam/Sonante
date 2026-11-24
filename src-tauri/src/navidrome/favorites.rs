@@ -12,7 +12,21 @@ struct Store {
     accounts: BTreeMap<String, Vec<Album>>,
 }
 pub(super) fn scope(c: &Credentials) -> String {
-    let identity = serde_json::to_vec(&[c.server.as_str(), c.username.as_str()]).expect("string array");
+    let identity = match c.auth_method {
+        api::AuthMethod::Password => {
+            serde_json::to_vec(&[c.server.as_str(), c.username.as_str()]).expect("string array")
+        }
+        api::AuthMethod::ApiKey => {
+            let key_fingerprint = format!("{:x}", Sha256::digest(c.password.as_bytes()));
+            serde_json::to_vec(&[
+                c.server.as_str(),
+                "api_key",
+                c.username.as_str(),
+                key_fingerprint.as_str(),
+            ])
+            .expect("string array")
+        }
+    };
     format!("{:x}", Sha256::digest(identity))
 }
 fn load(path: &Path) -> Result<Store, String> {
@@ -61,7 +75,14 @@ pub(super) fn set(path: &Path, scope: &str, id: &str, album: Option<Album>) -> R
 mod tests {
     use super::*;
     fn account(server: &str, username: &str, connection_id: &str) -> Credentials {
-        Credentials { server: server.into(), username: username.into(), connection_id: connection_id.into(), password: "not-saved-in-favorites".into() }
+        Credentials {
+            server: server.into(),
+            username: username.into(),
+            connection_id: connection_id.into(),
+            password: "not-saved-in-favorites".into(),
+            auth_method: api::AuthMethod::Password,
+            api_version_index: Default::default(),
+        }
     }
     #[test]
     fn reconnect_keeps_favorites_and_accounts_with_same_album_ids_stay_isolated() {
@@ -73,6 +94,13 @@ mod tests {
         let b = scope(&account("http://fixture/", "two", "old"));
         let c = scope(&account("http://other/", "one", "old"));
         assert_ne!(a,b); assert_ne!(a,c);
+        let mut key_account = account("http://fixture/", "same-label", "old");
+        key_account.auth_method = api::AuthMethod::ApiKey;
+        key_account.password = "PRIVATE_API_KEY_ONE".into();
+        let key_scope = scope(&key_account);
+        assert!(!key_scope.contains("PRIVATE_API_KEY_ONE"));
+        key_account.password = "PRIVATE_API_KEY_TWO".into();
+        assert_ne!(key_scope, scope(&key_account));
         let album = api::album(&serde_json::json!({"id":"same-id","name":"One","artist":"Artist"})).unwrap();
         assert!(read(&path,&a).unwrap().is_empty());
         set(&path,&a,&album.id,Some(album.clone())).unwrap();

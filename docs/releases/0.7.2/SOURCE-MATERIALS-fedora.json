@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "delivery": "Pinned public release download; SHA256 and byte length verified during assembly.",
+  "sources": [
+    {
+      "filename": "runtime-source-materials-consumer-clock.tar.zst",
+      "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/runtime-source-materials-consumer-clock.tar.zst",
+      "sha256": "0b0f8a91f965711398a36b912b7ae8d193c1230622fd14d67f8c3a8c5e503af6",
+      "bytes": 272635700
+    },
+    {
+      "filename": "fedora-compat-source-materials-20261020.3.tar.zst",
+      "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/fedora-compat-source-materials-20261020.3.tar.zst",
+      "sha256": "b6ed25e1c11614ab5e07c3112710f9309a1ad211a321d05220dc18c187880533",
+      "bytes": 1071301
+    }
+  ]
+}

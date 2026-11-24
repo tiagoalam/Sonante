@@ -369,14 +369,14 @@ test("Navidrome search is lazy, source-filtered and keeps typed album/artist des
  nodes(host.tree,n=>n.type==="button"&&n.props.children===t("explore.sources.navidrome"))[0].props.onClick();host.paint();let tree=await host.tick();
  assert.deepEqual(calls.map(c=>c[0]),["nav-status","nav-search"]);
  for(const [label,View]of [["Live Nav",AlbumView],["Nav Artist",ArtistView]]){
-  nodes(tree,n=>n.type==="button"&&n.props["aria-label"]===`Open: ${label} · Navidrome`)[0].props.onClick({currentTarget:{}});
+  nodes(tree,n=>n.type==="button"&&n.props["aria-label"]===`Open: ${label} · Subsonic`)[0].props.onClick({currentTarget:{}});
   const detail=nodes(host.paint(),n=>n.type===View)[0];assert.ok(detail);
   assert.equal((detail.props.initialAlbum??detail.props.artist).account_id,navConnection.account_id);
   assert.equal(detail.props.backLabel,t("unifiedSearch.back"));
   (detail.props.onAlbumBack??detail.props.onBack)();tree=host.paint();assert.equal(nodes(tree,n=>n.type==="input")[0].props.value,"Live");
  }
  assert.equal(calls.some(c=>c[0]==="play"),false);
- nodes(tree,n=>n.type==="button"&&n.props["aria-label"]==="Play track: Live Nav Song · Navidrome")[0].props.onClick({currentTarget:{}});await flush();
+ nodes(tree,n=>n.type==="button"&&n.props["aria-label"]==="Play track: Live Nav Song · Subsonic")[0].props.onClick({currentTarget:{}});await flush();
  assert.deepEqual(calls.find(c=>c[0]==="play")[1][0].media_locator,{kind:"navidrome",...navConnection,song_id:"nav-song"});host.close();
 });
 test("a Navidrome failure preserves other source results, while disabled or unconfigured Navidrome never reads",async()=>{
@@ -390,8 +390,8 @@ test("Navidrome account revision invalidates pending and opened results without 
  const old=deferred();let reads=0;
  const f=fixture("en",{props:{navidromeConfigured:true},readNav:async()=>++reads===1?old.promise:{...navResults,albums:[{...navResults.albums[0],title:"Live new account"}]}});
  f.host.type("Live");await f.host.tick();f.host.paint({...f.host.props,navidromeRevision:1});await f.host.tick();assert.equal(reads,1);
- old.resolve(navResults);await flush();let tree=f.host.paint();assert.equal(reads,2);assert.doesNotMatch(renderToStaticMarkup(tree),/Open: Live Nav · Navidrome/);assert.match(renderToStaticMarkup(tree),/Live new account/);
- nodes(tree,n=>n.type==="button"&&n.props["aria-label"]==="Open: Live new account · Navidrome")[0].props.onClick({currentTarget:{}});assert.ok(nodes(f.host.paint(),n=>n.type===f.AlbumView).length);
+ old.resolve(navResults);await flush();let tree=f.host.paint();assert.equal(reads,2);assert.doesNotMatch(renderToStaticMarkup(tree),/Open: Live Nav · Subsonic/);assert.match(renderToStaticMarkup(tree),/Live new account/);
+ nodes(tree,n=>n.type==="button"&&n.props["aria-label"]==="Open: Live new account · Subsonic")[0].props.onClick({currentTarget:{}});assert.ok(nodes(f.host.paint(),n=>n.type===f.AlbumView).length);
  f.host.paint({...f.host.props,navidromeRevision:2});assert.equal(nodes(f.host.tree,n=>n.type===f.AlbumView).length,0);
  f.host.paint({...f.host.props,config:{...f.host.props.config,sources:{local:true,plex:true,navidrome:false}}});assert.doesNotMatch(renderToStaticMarkup(f.host.tree),/Live new account/);f.host.close();
 });

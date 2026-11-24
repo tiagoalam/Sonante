@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "release_tag": "v0.7.2",
+  "public_source_snapshot": {
+    "repository": "tiagoalam/Sonante",
+    "base_branch": "main",
+    "base_commit": "7d312212fbef5dfddd39202e59592aea08cb8542",
+    "source_tag": "v0.7.2",
+    "source_archive": "https://github.com/tiagoalam/Sonante/archive/refs/tags/v0.7.2.tar.gz"
+  },
+  "approved_linux_build_source": {
+    "commit": "ee3eca800cac5bf2bb0773ed933bbfcbe9d36b0a",
+    "tree": "722f4a67b87d2c5c9f604b94c4360c5212e60050",
+    "private_ci_run_id": "45475585333"
+  },
+  "source_relationship": {
+    "linux_application_and_package_inputs_from_approved_candidate": true,
+    "public_history_preserved_from_main": true,
+    "linux_binaries_rebuilt_for_publication": false,
+    "bundled_runtime_pins_unchanged": true,
+    "windows_binary_included": false,
+    "windows_only_catalog_difference_not_applied_to_linux_snapshot": true,
+    "private_workflow_and_draft_transport_helpers_omitted": true,
+    "license_and_third_party_notices_retained": true,
+    "public_source_location": "The v0.7.2 tag and generated source archive contain the public application and Linux package build inputs.",
+    "intentional_exclusions": [
+      ".github/workflows/private-test-packages.yml",
+      "scripts/ci-private-release-smoke.py",
+      "scripts/ci-private-release.py",
+      "docs/sonante-0.7.2-qualification.md",
+      "packaging/PRIVATE_TEST_PACKAGES.md",
+      "tests/arch_ci_outputs_test.py",
+      "tests/private_release_assets_test.py",
+      "tests/private_release_smoke_test.py"
+    ]
+  },
+  "package_assets": [
+    {
+      "filename": "sonante_0.7.2-1_amd64.deb",
+      "bytes": 86415032,
+      "sha256": "aaf33c33f321834ee3b10b82bb60f2a750c1ed6296377f54f893a6b587ba7b87"
+    },
+    {
+      "filename": "sonante-0.7.2-1.x86_64.rpm",
+      "bytes": 86099873,
+      "sha256": "bd6334ccba85c8c8baf3866e9dab7ac41519d1ad04561107ab29cb26198d1f6e"
+    },
+    {
+      "filename": "sonante-0.7.2-1-x86_64.pkg.tar.zst",
+      "bytes": 106366120,
+      "sha256": "85ae8c36968c0b90c2d67631a902c62f41c6ae3524d2b3d9a93d43f2a5ff24ef"
+    }
+  ],
+  "bundled_runtime_source_release": {
+    "tag": "v0.5.5",
+    "url": "https://github.com/tiagoalam/Sonante/releases/tag/v0.5.5",
+    "ubuntu_and_arch": {
+      "filename": "runtime-source-materials-consumer-clock.tar.zst",
+      "bytes": 272635700,
+      "sha256": "0b0f8a91f965711398a36b912b7ae8d193c1230622fd14d67f8c3a8c5e503af6",
+      "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/runtime-source-materials-consumer-clock.tar.zst"
+    },
+    "fedora_additional": {
+      "filename": "fedora-compat-source-materials-20261020.3.tar.zst",
+      "bytes": 1071301,
+      "sha256": "b6ed25e1c11614ab5e07c3112710f9309a1ad211a321d05220dc18c187880533",
+      "url": "https://github.com/tiagoalam/Sonante/releases/download/v0.5.5/fedora-compat-source-materials-20261020.3.tar.zst"
+    }
+  },
+  "bundled_runtime_binary_sha256": {
+    "mpd-direct": "7bf2a6c96fad672ee6a056335c1b8054a71107975c637b76f549751b43d0d4b1",
+    "mpd-eq": "6b9cb9820c1704175af312377fae6f20ad80486f69ee17cd190bc6390bc1d5ff"
+  },
+  "runtime_manifest_sha256": {
+    "ubuntu-arch": "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769",
+    "fedora": "c93f1ac2dc06a8dcee5101858381efc265c3907e50dc2a334a11d293a21cf02f",
+    "ubuntu": "13368d6e4e114964f9a80e481ae02e6a2fb1289747ded6232c7562bf675872a4"
+  }
+}

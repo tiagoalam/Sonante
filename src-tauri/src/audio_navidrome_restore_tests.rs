@@ -201,7 +201,7 @@ fn malformed_or_session_only_navidrome_entries_never_infer_an_account_or_shift_r
         elapsed: 33.,
         state: PlaybackState::Paused,
     };
-    for malformed in [invalid.clone(), nav("session", "../escape"), {
+    for malformed in [invalid.clone(), nav("session", "bad\nid"), {
         let mut wrong = nav("session", "song-a");
         if let Some(MediaLocator::Navidrome { account_id, .. }) = &mut wrong.media_locator {
             *account_id = Some("not-an-account".into());
@@ -230,6 +230,29 @@ fn malformed_or_session_only_navidrome_entries_never_infer_an_account_or_shift_r
         );
     }
     assert!(engine(vec![invalid]).durable_queue_tracks().is_empty());
+}
+
+#[test]
+fn opaque_navidrome_ids_with_path_characters_survive_queue_cache_safely() {
+    let queue = vec![nav("PRIVATE_SESSION", "../escape/曲目")];
+    let encoded = AudioEngine::encode_queue_cache_with_resume(&queue, None).unwrap();
+    let (loaded, resume, changed) =
+        AudioEngine::decode_queue_cache_with_resume(encoded.as_slice()).unwrap();
+
+    assert!(resume.is_none());
+    assert!(!changed);
+    assert_eq!(loaded.len(), 1);
+    let Some(MediaLocator::Navidrome {
+        connection_id,
+        account_id: Some(account_id),
+        song_id,
+    }) = loaded[0].media_locator.as_ref()
+    else {
+        panic!("opaque Subsonic locator was not preserved");
+    };
+    assert!(connection_id.is_empty());
+    assert_eq!(account_id, &"a".repeat(64));
+    assert_eq!(song_id, "../escape/曲目");
 }
 
 #[test]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require package jobs to build one clean, immutable Sonante 0.7.1 commit."""
+"""Require package jobs to build one clean, immutable Sonante 0.7.2 commit."""
 import argparse
 import json
 from pathlib import Path
@@ -23,7 +23,7 @@ def verify(root: Path, candidate_sha: str, event_sha: str) -> None:
     if git(root, "status", "--porcelain=v1", "--untracked-files=normal"):
         raise ValueError("candidate checkout is dirty; refusing incomplete source")
     version = json.loads((root / "package.json").read_text())["version"]
-    if version != "0.7.1":
+    if version != "0.7.2":
         raise ValueError(f"candidate commit has unexpected product version: {version}")
 
 
@@ -38,7 +38,7 @@ def main() -> int:
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"Candidate source rejected: {error}", file=sys.stderr)
         return 1
-    print(f"Verified clean Sonante 0.7.1 source commit: {args.candidate_sha}")
+    print(f"Verified clean Sonante 0.7.2 source commit: {args.candidate_sha}")
     return 0
 
 

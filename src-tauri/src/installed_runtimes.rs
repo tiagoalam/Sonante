@@ -6,6 +6,18 @@ use std::{fs::{self, File, OpenOptions}, io::Read,
 
 const ROOT: &str = "/usr/lib/sonante/runtimes/v1";
 const MANIFEST: &[u8] = include_bytes!("../../packaging/private-runtimes.json");
+#[cfg(debug_assertions)]
+const ARCH_DEV_MANIFEST: &[u8] =
+    include_bytes!("../../packaging/qualified-0.5.4/ubuntu-arch.runtime.json");
+#[cfg(debug_assertions)]
+const FEDORA_DEV_MANIFEST: &[u8] =
+    include_bytes!("../../packaging/qualified-0.5.4/fedora.runtime.json");
+#[cfg(debug_assertions)]
+const ARCH_DEV_MANIFEST_SHA256: &str =
+    "ad27855332a39f0433cd038813fd5c71ced64cf22fb293e22dd7f24281d94769";
+#[cfg(debug_assertions)]
+const FEDORA_DEV_MANIFEST_SHA256: &str =
+    "c93f1ac2dc06a8dcee5101858381efc265c3907e50dc2a334a11d293a21cf02f";
 const LIMIT: u64 = 256 * 1024 * 1024;
 const MISSING: &str = "SONANTE_RUNTIME_MISSING";
 const UNTRUSTED: &str = "SONANTE_RUNTIME_UNTRUSTED";
@@ -33,12 +45,50 @@ fn open(path: &Path, owner: u32, executable: bool) -> Result<File, String> {
     Ok(file)
 }
 
+fn trusted_manifests() -> Result<&'static [&'static [u8]], String> {
+    #[cfg(debug_assertions)]
+    {
+        // Development may use the exact runtime profile installed by the
+        // developer's distribution. Pin these extra profiles independently
+        // so a changed checkout descriptor cannot silently expand trust.
+        if format!("{:x}", Sha256::digest(ARCH_DEV_MANIFEST)) != ARCH_DEV_MANIFEST_SHA256
+            || format!("{:x}", Sha256::digest(FEDORA_DEV_MANIFEST)) != FEDORA_DEV_MANIFEST_SHA256
+        {
+            return Err(UNTRUSTED.into());
+        }
+        return Ok(&[MANIFEST, ARCH_DEV_MANIFEST, FEDORA_DEV_MANIFEST]);
+    }
+    #[cfg(not(debug_assertions))]
+    Ok(&[MANIFEST])
+}
+
 fn verify_at(root: &Path, kind: Kind, owner: u32) -> Result<PathBuf, String> {
+    verify_at_with_manifests(root, kind, owner, trusted_manifests()?)
+}
+
+fn verify_at_with_manifests(
+    root: &Path,
+    kind: Kind,
+    owner: u32,
+    allowed_manifests: &[&[u8]],
+) -> Result<PathBuf, String> {
+    let max_manifest_size = allowed_manifests
+        .iter()
+        .map(|manifest| manifest.len())
+        .max()
+        .ok_or(UNTRUSTED)?;
     let mut manifest = Vec::new();
-    open(&root.join("manifest.json"), owner, false)?.take(MANIFEST.len() as u64 + 1)
-        .read_to_end(&mut manifest).map_err(|_| UNTRUSTED)?;
-    if manifest != MANIFEST { return Err(UNTRUSTED.into()); }
-    let parsed: serde_json::Value = serde_json::from_slice(MANIFEST).map_err(|_| UNTRUSTED)?;
+    open(&root.join("manifest.json"), owner, false)?
+        .take(max_manifest_size as u64 + 1)
+        .read_to_end(&mut manifest)
+        .map_err(|_| UNTRUSTED)?;
+    let trusted_manifest = allowed_manifests
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == manifest.as_slice())
+        .ok_or(UNTRUSTED)?;
+    let parsed: serde_json::Value =
+        serde_json::from_slice(trusted_manifest).map_err(|_| UNTRUSTED)?;
     let expected = parsed["binaries"][kind.name()].as_str().ok_or(UNTRUSTED)?;
     let path = root.join(kind.name());
     verify_file(&path, expected, owner, true)?;
@@ -148,6 +198,168 @@ pub(crate) fn configure_camilla(command: &mut std::process::Command, runtime_roo
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    fn sha256(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn test_manifest(binary: &[u8], resources: &[(&str, &[u8])]) -> Vec<u8> {
+        let resources = resources
+            .iter()
+            .map(|(path, contents)| ((*path).to_owned(), serde_json::json!(sha256(contents))))
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::json!({
+            "schema": 2,
+            "target": "x86_64-unknown-linux-gnu",
+            "install_root": ROOT,
+            "binaries": { "mpd-direct": sha256(binary) },
+            "resources": { "mpd-direct": resources },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn write_test_runtime(
+        root: &Path,
+        manifest: &[u8],
+        binary: &[u8],
+        resources: &[(&str, &[u8], u32)],
+    ) {
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::write(root.join("manifest.json"), manifest).unwrap();
+        fs::write(root.join("mpd-direct"), binary).unwrap();
+        fs::set_permissions(root.join("mpd-direct"), fs::Permissions::from_mode(0o755)).unwrap();
+        for (path, contents, mode) in resources {
+            let file = root.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, contents).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(*mode)).unwrap();
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn development_allowlist_contains_hash_pinned_qualified_arch_and_fedora_profiles() {
+        let allowed = trusted_manifests().unwrap();
+        assert!(allowed.contains(&MANIFEST));
+        assert!(allowed.contains(&ARCH_DEV_MANIFEST));
+        assert!(allowed.contains(&FEDORA_DEV_MANIFEST));
+        assert_ne!(ARCH_DEV_MANIFEST, FEDORA_DEV_MANIFEST);
+        assert_eq!(sha256(ARCH_DEV_MANIFEST), ARCH_DEV_MANIFEST_SHA256);
+        assert_eq!(sha256(FEDORA_DEV_MANIFEST), FEDORA_DEV_MANIFEST_SHA256);
+        let mut altered_arch_manifest = ARCH_DEV_MANIFEST.to_vec();
+        altered_arch_manifest.push(b' ');
+        assert!(!allowed.contains(&altered_arch_manifest.as_slice()));
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_allowlist_contains_only_the_selected_package_manifest() {
+        assert_eq!(trusted_manifests().unwrap(), &[MANIFEST]);
+    }
+
+    #[test]
+    fn accepts_exact_allowlisted_arch_like_profile_and_verifies_its_extra_resource() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime");
+        let binary = b"qualified mpd";
+        let normal_library = b"qualified codec";
+        let nettle = b"qualified nettle";
+        let debian = test_manifest(binary, &[("lib/libcodec.so", normal_library)]);
+        let arch = test_manifest(
+            binary,
+            &[
+                ("lib/libcodec.so", normal_library),
+                ("lib/libnettle.so.8", nettle),
+            ],
+        );
+        assert_ne!(debian, arch);
+        write_test_runtime(
+            &root,
+            &arch,
+            binary,
+            &[
+                ("lib/libcodec.so", normal_library, 0o644),
+                ("lib/libnettle.so.8", nettle, 0o644),
+            ],
+        );
+
+        assert_eq!(
+            verify_at_with_manifests(&root, Kind::Direct, unsafe { libc::getuid() }, &[&debian]),
+            Err(UNTRUSTED.into()),
+            "the default package profile must reject an unlisted Arch manifest"
+        );
+        assert_eq!(
+            verify_at_with_manifests(
+                &root,
+                Kind::Direct,
+                unsafe { libc::getuid() },
+                &[&debian, &arch]
+            )
+            .unwrap(),
+            root.join("mpd-direct"),
+            "an exact qualified Arch profile is accepted and each listed resource is still hashed"
+        );
+    }
+
+    #[test]
+    fn rejects_hash_mismatch_missing_resource_unsafe_path_and_insecure_permissions() {
+        let uid = unsafe { libc::getuid() };
+        let binary = b"qualified mpd";
+        let good_library = b"qualified library";
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("tampered-hash");
+        let manifest = test_manifest(binary, &[("lib/libfixture.so", good_library)]);
+        write_test_runtime(
+            &root,
+            &manifest,
+            binary,
+            &[("lib/libfixture.so", b"tampered", 0o644)],
+        );
+        assert_eq!(
+            verify_at_with_manifests(&root, Kind::Direct, uid, &[&manifest]),
+            Err(UNTRUSTED.into())
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("missing-resource");
+        let manifest = test_manifest(binary, &[("lib/libfixture.so", good_library)]);
+        write_test_runtime(&root, &manifest, binary, &[]);
+        assert_eq!(
+            verify_at_with_manifests(&root, Kind::Direct, uid, &[&manifest]),
+            Err(MISSING.into())
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("unsafe-path");
+        let unsafe_manifest = serde_json::json!({
+            "binaries": { "mpd-direct": sha256(binary) },
+            "resources": { "mpd-direct": { "../outside.so": sha256(good_library) } },
+        })
+        .to_string()
+        .into_bytes();
+        write_test_runtime(&root, &unsafe_manifest, binary, &[]);
+        assert_eq!(
+            verify_at_with_manifests(&root, Kind::Direct, uid, &[&unsafe_manifest]),
+            Err(UNTRUSTED.into())
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("unsafe-permissions");
+        let manifest = test_manifest(binary, &[("lib/libfixture.so", good_library)]);
+        write_test_runtime(
+            &root,
+            &manifest,
+            binary,
+            &[("lib/libfixture.so", good_library, 0o666)],
+        );
+        assert_eq!(
+            verify_at_with_manifests(&root, Kind::Direct, uid, &[&manifest]),
+            Err(UNTRUSTED.into())
+        );
+    }
+
     #[test]
     fn pinned_manifest_and_fixed_location() {
         let m:serde_json::Value=serde_json::from_slice(MANIFEST).unwrap();

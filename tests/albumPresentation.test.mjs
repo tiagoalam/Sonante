@@ -29,21 +29,21 @@ test('all three cover sizes remain virtualized for a ten-thousand-album collecti
  assert.equal(sizes[1].columnCount,6);assert.equal(sizes[1].cardWidth,180);
 });
 test('catalog uses the existing virtual grid or list, preserves album objects and forwards alphabetical jumps after layout changes',()=>{
- let cursor=0;const slots=[],effects=[];let handle;const Grid=()=>null,List=()=>null;
+ let cursor=0;const slots=[],effects=[];let handle;const Grid=()=>null,List=()=>null,Carousel=()=>null;
  const hooks={...React,forwardRef:fn=>fn,useRef:value=>slots[cursor++]??={current:value},useImperativeHandle:(_ref,create)=>{handle=create()},useLayoutEffect:fn=>effects.push(fn)};
- const Catalog=compile('AlbumCatalog',{react:hooks,'react/jsx-runtime':jsx,'./VirtualAlbumGrid':{VirtualAlbumGrid:Grid},'./VirtualList':{VirtualList:List},'../utils/albumPresentation':model});
+ const Catalog=compile('AlbumCatalog',{react:hooks,'react/jsx-runtime':jsx,'./VirtualAlbumGrid':{VirtualAlbumGrid:Grid},'./VirtualList':{VirtualList:List},'./AlbumCarousel':{AlbumCarousel:Carousel},'../utils/albumPresentation':model});
  const items=[{id:'opaque-source/album'}],props={items,getItemKey:album=>album.id,renderItem:()=>null,scrollContainer:{},resetKey:'same'};
  const paint=(layout,coverSize='medium')=>{cursor=0;const tree=Catalog({...props,presentation:{layout,coverSize}},null);effects.splice(0).forEach(fn=>fn());return tree};
  let tree=paint('grid');assert.equal(tree.type,Grid);assert.equal(tree.props.minimumCardWidth,170);assert.equal(tree.props.items,items);
  const scroll=[];slots[0].current={scrollToIndex:index=>scroll.push(index)};tree=paint('list');assert.equal(tree.type,List);assert.equal(tree.props.rowHeight,80);assert.equal(tree.props.items[0],items[0]);handle.scrollToIndex(9);assert.deepEqual(scroll,[0,9]);
- tree=paint('details');assert.equal(tree.type,List);assert.equal(tree.props.rowHeight,96);tree=paint('grid','large');assert.equal(tree.props.minimumCardWidth,230);
+ tree=paint('details');assert.equal(tree.type,List);assert.equal(tree.props.rowHeight,96);tree=paint('carousel');assert.equal(tree.type,Carousel);tree=paint('shelf');assert.equal(tree.type,Grid);assert.equal(tree.props.shelf,true);tree=paint('grid','large');assert.equal(tree.props.minimumCardWidth,230);
 });
 for(const language of ['pt-BR','en'])test(`view controls and detailed rows preserve explicit actions and never render cover images (${language})`,async()=>{
  const i18n=i18next.createInstance();await i18n.init({lng:language,resources:{[language]:{translation:JSON.parse(readFileSync(new URL(`../src/locales/${language}.json`,import.meta.url),'utf8'))}}});
  const deps={react:React,'react/jsx-runtime':jsx,'lucide-react':icons,'react-i18next':{useTranslation:()=>({t:i18n.t.bind(i18n),i18n})},'../utils/albumPresentation':model};
  const Controls=compile('AlbumViewControls',deps),Row=compile('AlbumCatalogRow',deps),changed=[];
  let tree=Controls({value:{layout:'grid',coverSize:'medium'},onChange:value=>changed.push(value)});
- const controls=nodes(tree).filter(node=>node.type==='button');assert.equal(controls.length,3);controls[2].props.onClick();assert.deepEqual(changed,[{layout:'details',coverSize:'medium'}]);
+ const controls=nodes(tree).filter(node=>node.type==='button');assert.equal(controls.length,4);controls[3].props.onClick();assert.deepEqual(changed,[{layout:'details',coverSize:'medium'}]);
  nodes(tree).find(node=>node.type==='select').props.onChange({target:{value:'small'}});assert.deepEqual(changed[1],{layout:'grid',coverSize:'small'});
  tree=Controls({value:changed[0],onChange(){}});assert.equal(nodes(tree).filter(node=>node.type==='select').length,0);
  const calls=[];const props={title:'Synthetic album',artist:'Synthetic artist',trackCount:12,discCount:2,year:'2001',genres:['Jazz','Fusion'],library:'Local fixture',addedAt:'2026-10-30T12:00:00Z',detailed:true,artwork:React.createElement('img',{src:'data:image/png;base64,fixture',alt:''}),favorite:false,readable:true,playable:true,onOpen:()=>calls.push('open'),onPlay:()=>calls.push('play'),onFavorite:()=>calls.push('favorite'),queueAction:React.createElement('button',null,'queue')};

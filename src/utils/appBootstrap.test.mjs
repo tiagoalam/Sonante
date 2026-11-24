@@ -29,7 +29,7 @@ test("App gates LocalBrowserEntry behind admitted initial config", () => {
 });
 
 test("each whitelisted section restores only after config bootstrap without writing", () => {
-  for (const section of ["search", "local", "plex", "favorites", "playlists", "explore", "autoeq"]) {
+  for (const section of ["search", "local", "plex", "favorites", "playlists", "collections", "explore", "autoeq"]) {
     const state = preference(section);
     assert.deepEqual(state.published, []);
     assert.equal(state.reads(), 0);
@@ -81,7 +81,7 @@ test("legacy Equalizer preference restores the independent Equalizer page and re
 });
 
 test("first run ignores storage and wizard completion keeps its existing initial choice", () => {
-  for (const saved of ["search", "local", "plex", "favorites", "playlists", "explore"]) {
+  for (const saved of ["search", "local", "plex", "favorites", "playlists", "collections", "explore"]) {
     for (const plex_token of ["", "fixture-token"]) {
       const state = preference(saved);
       state.controller.navigate("favorites"); // No effective navigation before bootstrap.
@@ -122,7 +122,7 @@ test("saved Plex falls back to Local without a token or if discovery fails", () 
 test("explicit navigation stores only section names and prevents late restore fallback", () => {
   const state = preference("plex");
   state.controller.restore(config);
-  for (const section of ["search", "local", "plex", "favorites", "playlists", "explore"]) {
+  for (const section of ["search", "local", "plex", "favorites", "playlists", "collections", "explore"]) {
     state.controller.navigate(section);
     assert.equal(state.published.at(-1), section);
     assert.deepEqual(state.writes.at(-1), [MAIN_SECTION_STORAGE_KEY, section === "explore" ? "local" : section]);
@@ -172,7 +172,7 @@ test("App restores the saved experimental section without replacing it during bo
   assert.match(source, /saveSqlitePlexLibraryPreference\(config\?\.plex_server_id, library\.key\)/);
   assert.match(source, /if \(config && config\.first_run\)[\s\S]*?onFinish=[\s\S]*?mainSectionPreference\.finishSetup\(newConfig\)/);
   const sidebar = source.slice(source.indexOf("{/* Barra Lateral */}"), source.indexOf("{/* Painel Central */}"));
-  for (const section of ["search", "local", "plex", "favorites", "playlists", "explore"]) assert.ok(sidebar.includes(section === "local" ? 'navigateLocalSubview("browser")' : section === "explore" ? "navigateExplore()" : `mainSectionPreference.navigate("${section}")`));
+  for (const section of ["search", "local", "plex", "favorites", "playlists", "collections", "explore"]) assert.ok(sidebar.includes(section === "local" ? 'navigateLocalSubview("browser")' : section === "explore" ? "navigateExplore()" : `mainSectionPreference.navigate("${section}")`));
   assert.ok(sidebar.includes('label={t("equalizer.title")}'));
   assert.doesNotMatch(sidebar, /label=\{t\("settings\.pages\.audio"\)\}/);
   const player = source.slice(source.indexOf("<PlayerBar"), source.indexOf("{(configSavePhase || configSaveNotice)"));

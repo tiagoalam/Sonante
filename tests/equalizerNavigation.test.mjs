@@ -19,9 +19,10 @@ test('sidebar utilities put Equalizer before Preferences without changing route 
  const end=source.indexOf('</nav>',start);
  assert.ok(start>=0&&end>start);
  const utilities=source.slice(start,end);
- assert.ok(utilities.indexOf('equalizer.title')<utilities.indexOf('<KeyboardShortcutsHelp />'));
  assert.equal(utilities.includes('autoeq.title'),false,'AutoEQ is an internal Equalizer tab, not a sidebar entry');
- assert.ok(utilities.indexOf('<KeyboardShortcutsHelp />')<utilities.indexOf('sidebar.preferences'));
+ assert.ok(utilities.indexOf('equalizer.title')<utilities.indexOf('sidebar.preferences'));
+ assert.ok(utilities.indexOf('sidebar.preferences')<utilities.indexOf('sidebar.about'));
+ assert.doesNotMatch(utilities,/<KeyboardShortcutsHelp\s*\/>/);
  const item=navItem('equalizer.title');assert.ok(item);
  assert.match(item.attributes.properties.map(p=>p.getText(ast)).join(' '),/sourceEnabled=\{equalizerActive\}/);
 });

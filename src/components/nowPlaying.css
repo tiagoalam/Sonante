@@ -100,6 +100,7 @@
 .np-signal-path .np-signal-format dd { font-size: 13px; line-height: 1.25; overflow-wrap: anywhere; }
 .np-signal-path .np-signal-format-volume { overflow-wrap: anywhere; }
 .np-signal-path [data-shared-dsp] { grid-column: 1 / -1; width: 100%; min-width: 0; }
+.np-signal-path .np-signal-observation { grid-column: 1 / -1; min-width: 0; border-top: 1px solid var(--theme-border-soft,#ffffff18); padding: 7px 2px 0; overflow-wrap: anywhere; }
 .np-signal-dsp { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px 20px; border: 1px solid var(--theme-border-soft,#ffffff18); border-radius: 9px; background: var(--theme-surface-subtle,#ffffff06); padding: 7px 11px; }
 .np-signal-dsp-summary { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 16px; }
 .np-signal-dsp-summary p { min-width: 0; overflow-wrap: anywhere; }
@@ -118,6 +119,7 @@
  .np-signal-path .np-signal-stages { grid-column: 1; grid-row: 2; }
  .np-signal-path .np-signal-metadata { grid-column: 1; grid-row: 3; justify-self: start; width: min(100%,300px); }
  .np-signal-path [data-shared-dsp] { grid-column: 1; }
+ .np-signal-path .np-signal-observation { grid-column: 1; }
  .np-signal-dsp { grid-template-columns: minmax(0,1fr); gap: 5px; }
  .np-signal-dsp-details { justify-self: start; }
 }

@@ -104,9 +104,9 @@ test('Navidrome favorites tab exists only for a configured connection and leaves
  navidromeStatus={connection_id:'configured'};
  try{
   const h=new Host();let tree=h.render(Favorites,props);await flush();tree=h.render(Favorites,props);
-  const tabs=nodes(tree,n=>n.type===SourceTabs)[0];assert.deepEqual(tabs.props.sources,['local','plex','navidrome']);assert.equal(tabs.props.labels.navidrome,'Navidrome');
+  const tabs=nodes(tree,n=>n.type===SourceTabs)[0];assert.deepEqual(tabs.props.sources,['local','plex','navidrome']);assert.equal(tabs.props.labels.navidrome,'Subsonic');
   tabs.props.onChange('navidrome');tree=h.render(Favorites,props);
-  const content=nodes(tree,n=>n.props.favoritesOnly&&n.props.embedded)[0];assert.ok(content);assert.equal(content.props.available,true);content.props.onFavoritesChange(3);tree=h.render(Favorites,props);assert.equal(nodes(tree,n=>n.type===SourceTabs)[0].props.labels.navidrome,'Navidrome (3)');
+  const content=nodes(tree,n=>n.props.favoritesOnly&&n.props.embedded)[0];assert.ok(content);assert.equal(content.props.available,true);content.props.onFavoritesChange(3);tree=h.render(Favorites,props);assert.equal(nodes(tree,n=>n.type===SourceTabs)[0].props.labels.navidrome,'Subsonic (3)');
   nodes(tree,n=>n.type===SourceTabs)[0].props.onChange('local');tree=h.render(Favorites,props);assert.equal(nodes(tree,n=>n.props.favoritesOnly).length,0);h.unmount();
  }finally{navidromeStatus={connection_id:null};}
 });
